@@ -456,8 +456,10 @@ impl<
 
     /// Selects the best certificate to serve for `view`.
     ///
-    /// A notarization is served only after successful certification. Pending
-    /// and failed notarizations are never served.
+    /// Finalization is strongest, followed by a certified notarization, then a
+    /// covering nullification. A notarization is served only after successful
+    /// certification. Pending notarizations and notarizations that fail
+    /// certification are never served.
     fn produce_certificate(&self, view: View) -> Option<Bytes> {
         // A finalization settles either kind, so weaker evidence would only
         // delay the requester.
