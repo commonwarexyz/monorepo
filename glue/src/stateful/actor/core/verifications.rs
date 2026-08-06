@@ -15,10 +15,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use rand_core::Rng;
-use std::{
-    collections::{BTreeMap, VecDeque},
-    future::Future,
-};
+use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
 /// A verification request that can be deferred or retried.
@@ -76,7 +73,6 @@ where
 {
     marshal: MarshalMailbox<S, V>,
     jobs: Pool<JobResult<E, A>>,
-    completed: VecDeque<JobResult<E, A>>,
     controls: BTreeMap<u64, JobControl<PendingDigest<A, E>>>,
     next_id: u64,
 }
@@ -93,7 +89,6 @@ where
         Self {
             marshal,
             jobs: Pool::default(),
-            completed: VecDeque::new(),
             controls: BTreeMap::new(),
             next_id: 0,
         }
@@ -141,16 +136,13 @@ where
     }
 
     pub(super) fn complete_ready(&mut self) {
-        while let Some(result) = self.completed.pop_front() {
-            self.handle(result);
-        }
         while let Some(result) = self.jobs.next_completed().now_or_never() {
             self.handle(result);
         }
     }
 
     pub(super) async fn next_completed(&mut self) {
-        let result = self.next_result().await;
+        let result = self.jobs.next_completed().await;
         self.handle(result);
     }
 
@@ -164,12 +156,10 @@ where
         }
     }
 
-    /// Cancels active attempts and waits for all verification work to stop.
+    /// Cancels every active attempt and waits for verification work to stop.
     ///
-    /// Finalization and pruning must call this before mutating the databases so
-    /// verification-owned replays cannot race those mutations. Requests whose
-    /// callers still need a verdict are returned for rescheduling after the
-    /// mutation completes.
+    /// Pruning uses this full barrier because it can remove history needed by
+    /// every branch. Live requests are returned for rescheduling afterward.
     pub(super) async fn quiesce(&mut self) -> Vec<Request<E, A>> {
         let (retry, reject) = self.quiesce_where(|_| Disposition::Retry).await;
         assert!(reject.is_empty());
@@ -192,13 +182,11 @@ where
 
         let mut retry = Vec::with_capacity(pending.len());
         let mut reject = Vec::with_capacity(pending.len());
-        // Retained completions remain unpublished until every selected job stops.
-        let mut retained = VecDeque::new();
         while !pending.is_empty() {
-            let result = self.next_result().await;
+            let result = self.jobs.next_completed().await;
             let id = result.id();
             let Some(disposition) = pending.remove(&id) else {
-                retained.push_back(result);
+                self.handle(result);
                 continue;
             };
             let control = self
@@ -223,15 +211,7 @@ where
                 Disposition::Reject => reject.push(request.verification),
             }
         }
-        self.completed.extend(retained);
         (retry, reject)
-    }
-
-    async fn next_result(&mut self) -> JobResult<E, A> {
-        match self.completed.pop_front() {
-            Some(result) => result,
-            None => self.jobs.next_completed().await,
-        }
     }
 
     fn handle(&mut self, result: JobResult<E, A>) {

@@ -169,6 +169,17 @@ where
         .collect()
 }
 
+/// Advance the inherited DB boundary past applied ancestors no longer reachable
+/// through the weak parent chain.
+pub(crate) fn effective_db_boundary<F: Family, D: Digest>(
+    inherited: Commitment<F, D>,
+    oldest_live_base: Option<Commitment<F, D>>,
+) -> Commitment<F, D> {
+    oldest_live_base
+        .filter(|base| base.size > inherited.size)
+        .unwrap_or(inherited)
+}
+
 /// Validate that a batch can be applied to the database at the given [`Commitment`].
 ///
 /// A batch is applicable if the database has not advanced since the batch was created, if all

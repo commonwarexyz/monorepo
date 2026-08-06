@@ -305,7 +305,7 @@ where
         })
     }
 
-    /// Executes application verification and publishes commitment-matching state.
+    /// Executes application verification and caches commitment-matching state.
     async fn verify(
         &mut self,
         context: &E,
@@ -376,7 +376,7 @@ where
             warn!(
                 parent_digest = ?parent.digest,
                 ?block_digest,
-                "verification result became incompatible before publication"
+                "verification result became incompatible before caching"
             );
             return Some(false);
         }

@@ -26,7 +26,7 @@ use futures::{
     future::{Either, ready},
 };
 use rand_core::Rng;
-use std::{collections::BTreeSet, future::Future, sync::mpsc::TryRecvError};
+use std::{collections::BTreeSet, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: either a mailbox message to
@@ -70,48 +70,6 @@ fn requeue_verifications<E, A>(
             ancestry,
             verification,
         });
-    }
-}
-
-async fn drive_finalization<E, A, S, V, T>(
-    mailbox: &mut actor_mailbox::Receiver<Message<E, A>>,
-    verifications: &mut Verifications<E, A, S, V>,
-    deferred_message: &mut Option<Message<E, A>>,
-    operation: impl Future<Output = T>,
-) -> (T, Vec<VerificationRequest<E, A>>)
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-{
-    futures::pin_mut!(operation);
-    loop {
-        select! {
-            output = &mut operation => return (output, Vec::new()),
-            message = mailbox.recv() => match message {
-                Some(message) => {
-                    let finalization_fenced = matches!(message, Message::Finalized { .. });
-                    assert!(
-                        deferred_message.replace(message).is_none(),
-                        "finalization must have at most one deferred message",
-                    );
-                    if finalization_fenced {
-                        // The next finalization can invalidate retained work. Stop it before
-                        // allowing a verdict to publish, then finish the current mutation so
-                        // the requests can be retried against the new finalized state.
-                        let retry = verifications.quiesce().await;
-                        return (operation.await, retry);
-                    }
-                    // Preserve mailbox order. Only finalization fences active
-                    // verification, so other work waits while it keeps progressing.
-                    return (verifications.drive(operation).await, Vec::new());
-                }
-                None => return (verifications.drive(operation).await, Vec::new()),
-            },
-            _ = verifications.next_completed() => {},
-        }
     }
 }
 
@@ -178,18 +136,16 @@ where
                     }
                 }
 
+                // Publish completed verdicts before admitting another message.
+                // A later finalization cannot retroactively invalidate them.
+                verifications.complete_ready();
+
+                // A message deferred by an active proposal is the FIFO barrier
+                // for subsequent mailbox work, so handle it before later arrivals.
                 let message = match deferred_message.take() {
                     Some(message) => Ok(message),
                     None => self.mailbox.try_recv(),
                 };
-
-                // Verification results must not overtake finalization work
-                // that may invalidate them.
-                let finalization_deferred =
-                    matches!(message.as_ref(), Ok(Message::Finalized { .. }));
-                if !finalization_deferred {
-                    verifications.complete_ready();
-                }
 
                 // Pruning is non-critical work. We only run it when the mailbox is idle, and
                 // it is never raced against the mailbox due to its internal lock acquisition.
@@ -268,7 +224,6 @@ where
                         .instrument(process);
                     futures::pin_mut!(proposal);
                     let mut receive_messages = true;
-                    let mut verification_fenced = false;
                     loop {
                         if receive_messages {
                             select! {
@@ -290,12 +245,8 @@ where
                                     ),
                                     Some(message) => {
                                         // Only verification may overtake an active proposal. The
-                                        // first other message becomes a FIFO barrier, with
-                                        // finalization also fencing active verification results.
-                                        verification_fenced = matches!(
-                                            message,
-                                            Message::Finalized { .. },
-                                        );
+                                        // first other message becomes a FIFO barrier for later
+                                        // mailbox work.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }
@@ -303,9 +254,6 @@ where
                                 },
                                 _ = verifications.next_completed() => {},
                             }
-                        } else if verification_fenced {
-                            (&mut proposal).await;
-                            break;
                         } else {
                             select! {
                                 _ = &mut proposal => break,
@@ -338,43 +286,33 @@ where
                 }) => {
                     let process = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        let retry = async {
-                            let (_, retry) = drive_finalization(
-                                &mut self.mailbox,
-                                &mut verifications,
-                                &mut deferred_message,
-                                self.processor.notify_finalized(
+                        async {
+                            verifications
+                                .drive(self.processor.notify_finalized(
                                     self.context.as_present(),
                                     block.as_ref(),
-                                ),
-                            )
-                            .await;
+                                ))
+                                .await;
                             acknowledgement.acknowledge();
-                            retry
                         }
                         .instrument(process)
                         .await;
-                        requeue_verifications(retry_mailbox.as_ref(), retry);
                     } else {
                         let boundary = self.processor.finalization_boundary(block.as_ref());
                         let (retry, reject) = verifications
                             .quiesce_where(|progress| boundary.disposition(progress))
                             .await;
                         drop(boundary);
-                        let fenced_retry = async {
-                            let (applied, fenced_retry) = drive_finalization(
-                                &mut self.mailbox,
-                                &mut verifications,
-                                &mut deferred_message,
-                                self.processor.finalize(&self.context, block.as_ref()),
-                            )
-                            .await;
+                        async {
+                            let applied = verifications
+                                .drive(self.processor.finalize(&self.context, block.as_ref()))
+                                .await;
                             let Some(Applied { barrier, prune }) = applied else {
                                 // Duplicate report: marshal redelivers a processed
                                 // height only after a restart, where startup aligned
                                 // the databases to durable state.
                                 acknowledgement.acknowledge();
-                                return fenced_retry;
+                                return;
                             };
                             debug!(
                                 height = block.height().get(),
@@ -403,14 +341,12 @@ where
                             if let Some(prune) = prune {
                                 pending_prune = Some((prune, retry_mailbox.clone()));
                             }
-                            fenced_retry
                         }
                         .instrument(process)
                         .await;
                         for verification in reject {
                             verification.respond(false);
                         }
-                        requeue_verifications(retry_mailbox.as_ref(), fenced_retry);
                         requeue_verifications(retry_mailbox.as_ref(), retry);
                     }
                 }
@@ -419,7 +355,8 @@ where
                 }
                 Step::Prune((prune, retry_mailbox)) => {
                     // The prune target must be durable, but later blocks remain available in
-                    // marshal for replay and do not delay maintenance.
+                    // marshal for replay and do not delay maintenance. Verification may complete
+                    // during this wait; later mailbox work remains ordered behind the prune.
                     while pending_syncs
                         .first()
                         .is_some_and(|height| *height <= prune.barrier_height)
@@ -1179,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_finalization_fences_proposal_time_verification() {
+    fn deferred_finalization_does_not_block_completed_verification() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (parent_gate, parent_started, parent_release) = application_gate();
             let (child_gate, child_started, child_release) = application_gate();
@@ -1242,11 +1179,14 @@ mod tests {
             child_release
                 .send(())
                 .expect("losing child verification should remain active");
-            context.sleep(Duration::from_millis(10)).await;
-            assert!(
-                poll!(&mut verify_child).is_pending(),
-                "verification must not publish after observing finalization",
-            );
+            select! {
+                valid = &mut verify_child => {
+                    assert!(valid, "completed branch-relative verification must remain valid");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("deferred finalization blocked completed verification");
+                },
+            }
 
             proposal_release
                 .send(())
@@ -1255,7 +1195,6 @@ mod tests {
             waiter
                 .await
                 .expect("conflicting finalized block should be acknowledged");
-            assert!(!verify_child.await);
             actor.abort();
         });
     }
@@ -1827,15 +1766,18 @@ mod tests {
             );
 
             let (acknowledgement, waiter) = Exact::handle();
+            let mut waiter = Box::pin(waiter);
             let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
-            waiter
-                .await
-                .expect("cached winner should finalize without the replay");
-            assert!(poll!(&mut verify_child).is_pending());
-
+            assert!(
+                poll!(&mut waiter).is_pending(),
+                "finalization must wait for the existing winner computation",
+            );
             replay_release
                 .send(())
                 .expect("winner replay should remain active");
+            waiter
+                .await
+                .expect("cached winner should finalize after replay completes");
             let valid = verify_child.await;
             actor.abort();
             drop(marshal.guards);
@@ -1846,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn next_finalization_retries_replay_of_previous_anchor() {
+    fn consecutive_finalizations_preserve_descendant_replay() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -1866,11 +1808,12 @@ mod tests {
             )
             .await;
             let (replay_gate, replay_started, replay_release) = application_gate();
+            let verify_gate = Arc::new(Mutex::new(None));
             let apply_calls = Arc::new(AtomicUsize::new(0));
             let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
                 gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
-                verify_gate: Arc::new(Mutex::new(None)),
+                verify_gate: verify_gate.clone(),
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: first.height(),
                 apply_calls: apply_calls.clone(),
@@ -1916,12 +1859,20 @@ mod tests {
                     .await,
                 "independent verification should cache the first finalized block",
             );
+            let (gate, verify_started, verify_release) = application_gate();
+            assert!(verify_gate.lock().replace(gate).is_none());
 
             let (acknowledgement, first_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(first), acknowledgement));
+            replay_release
+                .send(())
+                .expect("first-block replay should remain active");
             first_waiter
                 .await
                 .expect("first finalized block should be acknowledged");
+            verify_started
+                .await
+                .expect("descendant verification should start");
             assert!(poll!(&mut verify_child).is_pending());
 
             let (acknowledgement, second_waiter) = Exact::handle();
@@ -1929,13 +1880,15 @@ mod tests {
             second_waiter
                 .await
                 .expect("second finalized block should be acknowledged");
+            verify_release
+                .send(())
+                .expect("descendant verification should remain active");
             let valid = verify_child.await;
             actor.abort();
             drop(marshal.guards);
-            drop(replay_release);
             assert!(
                 valid,
-                "replay of the previous anchor must retry across the next finalization",
+                "descendant replay must remain valid across consecutive finalizations",
             );
             assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
             assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
@@ -1943,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn active_verifications_wait_for_queued_finalization() {
+    fn retained_verification_can_finish_before_queued_finalization() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -2025,23 +1978,25 @@ mod tests {
                 .await
                 .expect("first finalization hook should start");
 
-            select! {
+            let valid = select! {
                 valid = &mut first_attempt => {
-                    panic!("retained verification bypassed queued finalization: {valid}");
+                    valid
                 },
-                _ = context.sleep(Duration::from_millis(100)) => {},
-            }
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("queued finalization blocked retained verification");
+                },
+            };
+            assert!(
+                valid,
+                "retained branch-relative verification must remain valid"
+            );
             finalized_release
                 .send(())
                 .expect("first finalization hook should remain active");
 
             assert!(
-                !first_attempt.await,
-                "retained verification must observe the queued finalization",
-            );
-            assert!(
-                !retried.await,
-                "finalization retry must observe the queued finalization",
+                retried.await,
+                "completed branch-relative verdict must remain valid"
             );
             first_waiter
                 .await

@@ -239,6 +239,9 @@ where
     /// still change as additional information becomes available, continue
     /// waiting instead of returning [`None`].
     ///
+    /// Validity is relative to those inputs: finalizing a competing branch
+    /// later does not retroactively change a completed verdict.
+    ///
     /// In other words, to abstain from voting, do not resolve this future yet.
     /// Keep it pending until the implementation can either prove the block
     /// valid, prove it invalid, or the consensus engine cancels the request.

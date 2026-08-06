@@ -977,19 +977,18 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-        let result = <MultiApp as Application<deterministic::Context>>::verify(
-            &mut self.inner,
-            context,
-            ancestry,
-            batches,
-        )
-        .await;
         let gate = self.verify_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
         }
-        result
+        <MultiApp as Application<deterministic::Context>>::verify(
+            &mut self.inner,
+            context,
+            ancestry,
+            batches,
+        )
+        .await
     }
 
     async fn apply(
@@ -1426,8 +1425,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             "the first finalization should retain descendant verifications",
         );
 
-        // The next finalization must quiesce compatible verification before
-        // the active finalization callback is allowed to return.
+        // A queued finalization is not active until the current one completes.
         for block in &blocks[1..3] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
@@ -1436,16 +1434,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             ));
             finalizations.push(waiter);
         }
-
-        select! {
-            _ = futures::future::join_all(
-                verify_releases.iter_mut().map(|release| release.closed()),
-            ) => {},
-            _ = context.sleep(Duration::from_secs(1)) => {
-                panic!("queued finalization did not quiesce retained multi-QMDB verifications");
-            },
-        }
-        drop(verify_releases);
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(
+            verify_releases.iter().all(|release| !release.is_closed()),
+            "queued finalization quiesced work before the current finalization completed",
+        );
         finalize_release
             .send(())
             .expect("first multi-QMDB finalization should remain active");
@@ -1460,6 +1453,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 panic!("multi-QMDB finalizations did not become durable");
             },
         }
+        for release in verify_releases {
+            release
+                .send(())
+                .expect("compatible verification should remain active across finalization");
+        }
         for (index, certification) in certifications {
             select! {
                 result = certification => {
@@ -1471,12 +1469,32 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             }
         }
 
+        let mut descendant_finalizations = Vec::new();
+        for block in &blocks[3..] {
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = reporter.report(marshal::Update::Block(
+                Arc::new(block.clone()),
+                acknowledgement,
+            ));
+            descendant_finalizations.push(waiter);
+        }
+        select! {
+            acknowledgements = futures::future::join_all(descendant_finalizations) => {
+                for acknowledgement in acknowledgements {
+                    acknowledgement.expect("descendant block should be durable");
+                }
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("descendant batches did not finalize from their original ancestry");
+            },
+        }
+
         let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
             deterministic::Context,
         >>::committed_targets(&databases)
         .await;
         let expected =
-            <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[2]);
+            <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
         assert_eq!(committed.1, expected.1, "compact QMDB target diverged");
 
