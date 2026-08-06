@@ -264,7 +264,7 @@ mod tests {
             let stream_cfg = StreamConfig {
                 signing_key: PrivateKey::from_seed(1),
                 namespace: b"test-rate-limit".to_vec(),
-                max_message_size: 1024,
+                max_message_size: 1024.try_into().unwrap(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),
@@ -410,7 +410,7 @@ mod tests {
             let stream_cfg = StreamConfig {
                 signing_key: PrivateKey::from_seed(1),
                 namespace: b"test-private-ips".to_vec(),
-                max_message_size: 1024,
+                max_message_size: 1024.try_into().unwrap(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),

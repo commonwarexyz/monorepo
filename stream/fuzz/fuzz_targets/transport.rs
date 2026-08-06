@@ -21,7 +21,7 @@ fn fuzz(data: &[u8]) {
         let dialer_config = Config {
             signing_key: dialer_crypto.clone(),
             namespace: NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
+            max_message_size: MAX_MESSAGE_SIZE.try_into().unwrap(),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
@@ -30,7 +30,7 @@ fn fuzz(data: &[u8]) {
         let listener_config = Config {
             signing_key: listener_crypto.clone(),
             namespace: NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
+            max_message_size: MAX_MESSAGE_SIZE.try_into().unwrap(),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),

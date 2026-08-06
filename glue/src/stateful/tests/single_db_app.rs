@@ -278,7 +278,7 @@ impl SingleDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: NZU64!(16),
+                fetch_batch_size: 16.try_into().unwrap(),
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: 8,
                 update_channel_size: NZUsize!(256),
@@ -298,7 +298,7 @@ impl SingleDbEngine {
     /// Forces state sync to progress in the smallest possible batches.
     pub(crate) fn with_slow_state_sync(mut self) -> Self {
         self.sync_config = SyncEngineConfig {
-            fetch_batch_size: NZU64!(1),
+            fetch_batch_size: 1.try_into().unwrap(),
             apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(4),
@@ -494,7 +494,7 @@ impl EngineDefinition for SingleDbEngine {
                     initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    max_serve_ops: 16.try_into().unwrap(),
                     priority_requests: false,
                     priority_responses: false,
                 },

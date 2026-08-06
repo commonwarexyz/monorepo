@@ -727,7 +727,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: (1024 * 1024u32).try_into().unwrap(),
+                max_size: (1024 * 1024).try_into().unwrap(),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -751,7 +751,7 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: (1024 * 1024u32).try_into().unwrap(),
+                max_size: (1024 * 1024).try_into().unwrap(),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -6171,8 +6171,13 @@ mod tests {
         let cases = twins::cases(
             rng,
             twins::Framework {
-                participants: n as usize,
-                faults,
+                participants: usize::try_from(n)
+                    .expect("participant count should fit usize")
+                    .try_into()
+                    .expect("twins campaigns support 1..=64 participants"),
+                faults: faults
+                    .try_into()
+                    .expect("twins campaigns support 1..=63 faults"),
                 rounds: campaign.rounds,
                 mode: campaign.mode,
                 max_cases: campaign.max_cases,

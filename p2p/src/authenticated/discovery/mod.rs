@@ -204,7 +204,7 @@
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
 //!     bootstrappers,
-//!     1_024u32.try_into().unwrap(), // 1KB
+//!     1_024.try_into().unwrap(), // 1KB
 //! );
 //!
 //! // Start context
@@ -247,7 +247,7 @@ mod network;
 mod types;
 
 pub use crate::authenticated::{
-    MAX_SIZE, MaxSize,
+    AtMost, MAX_SIZE,
     channels::{Error, Receiver, Sender},
 };
 pub use actors::tracker::Oracle;
@@ -289,11 +289,7 @@ mod tests {
         One,
     }
 
-    const MAX_MESSAGE_SIZE: MaxSize<NonZeroU32, MAX_SIZE> =
-        MaxSize::<NonZeroU32, MAX_SIZE>::new(
-            NonZeroU32::new(1_024 * 1_024).unwrap(),
-        )
-        .unwrap(); // 1MB
+    const MAX_MESSAGE_SIZE: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(NZU32!(1_024 * 1_024)); // 1MB
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
     /// Ensure no message rate limiting occurred.
@@ -317,7 +313,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
+        max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
         base_port: u16,
         n: usize,
         mode: Mode,
@@ -1522,7 +1518,8 @@ mod tests {
                         port: base_port + 1,
                     },
                 )];
-                let config0 = Config::test(peer0.clone(), socket0, bootstrappers0, MAX_MESSAGE_SIZE);
+                let config0 =
+                    Config::test(peer0.clone(), socket0, bootstrappers0, MAX_MESSAGE_SIZE);
                 let (mut network0, mut oracle0) =
                     Network::new(context.child("peer").with_attribute("index", 0), config0);
                 oracle0.track(0, Set::try_from(addresses.clone()).unwrap());
@@ -1538,7 +1535,8 @@ mod tests {
                         port: base_port,
                     },
                 )];
-                let config1 = Config::test(peer1.clone(), socket1, bootstrappers1, MAX_MESSAGE_SIZE);
+                let config1 =
+                    Config::test(peer1.clone(), socket1, bootstrappers1, MAX_MESSAGE_SIZE);
                 let (mut network1, mut oracle1) =
                     Network::new(context.child("peer").with_attribute("index", 1), config1);
                 oracle1.track(0, Set::try_from(addresses.clone()).unwrap());
@@ -2390,8 +2388,7 @@ mod tests {
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
 
             // Create channels for the router
-            let channels =
-                channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE.get().get());
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE.get());
             let _handle = router.start(channels);
 
             // Register peer 1 with a small relay buffer and keep the receivers

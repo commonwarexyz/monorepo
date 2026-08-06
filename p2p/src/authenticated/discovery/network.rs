@@ -19,9 +19,10 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::encrypted::Config as StreamConfig;
-use commonware_utils::union;
+use commonware_stream::encrypted::{Config as StreamConfig, MAX_SIZE as STREAM_MAX_SIZE};
+use commonware_utils::{AtMost, union};
 use rand_core::CryptoRng;
+use std::num::NonZeroU32;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.
@@ -37,7 +38,7 @@ pub struct Network<
 > {
     context: ContextCell<E>,
     cfg: Config<C>,
-    max_frame_size: u32,
+    max_frame_size: AtMost<NonZeroU32, STREAM_MAX_SIZE>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
@@ -62,8 +63,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///   can be used by a developer to configure which peers are authorized.
     ///
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let max_message_size = cfg.max_message_size.get().get();
-        let max_frame_size = max_message_size + MAX_PAYLOAD_OVERHEAD;
+        let max_message_size = cfg.max_message_size.get();
+        let max_frame_size: AtMost<NonZeroU32, STREAM_MAX_SIZE> = (max_message_size
+            + MAX_PAYLOAD_OVERHEAD)
+            .try_into()
+            .expect("authenticated frame size must fit encrypted stream");
         let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {

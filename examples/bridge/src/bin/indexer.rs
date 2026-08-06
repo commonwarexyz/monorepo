@@ -240,7 +240,7 @@ fn main() {
         let config = StreamConfig {
             signing_key: signer,
             namespace: INDEXER_NAMESPACE.to_vec(),
-            max_message_size: 1024 * 1024,
+            max_message_size: (1024 * 1024).try_into().unwrap(),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(5),

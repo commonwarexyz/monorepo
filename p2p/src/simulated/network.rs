@@ -25,7 +25,7 @@ use commonware_runtime::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    MaxSize, NZUsize, TryCollect,
+    AtMost, NZUsize, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
 };
@@ -123,7 +123,7 @@ struct PeerRefCounts {
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size allowed for an application payload provided to a sender.
-    pub max_size: MaxSize<NonZeroU32, MAX_SIZE>,
+    pub max_size: AtMost<NonZeroU32, MAX_SIZE>,
 
     /// True if peers should disconnect upon being blocked. While production networking would
     /// typically disconnect, for testing purposes it may be useful to keep peers connected,
@@ -203,7 +203,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
-        let max_size = cfg.max_size.get().get();
+        let max_size = cfg.max_size.get();
         let max_frame_size = max_size + MAX_PAYLOAD_OVERHEAD;
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
@@ -1480,9 +1480,7 @@ mod tests {
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
-    const MAX_MESSAGE_SIZE: MaxSize<NonZeroU32, MAX_SIZE> =
-        MaxSize::<NonZeroU32, MAX_SIZE>::new(NonZeroU32::new(1024 * 1024).unwrap())
-            .unwrap();
+    const MAX_MESSAGE_SIZE: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(NZU32!(1024 * 1024));
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -1557,21 +1555,21 @@ mod tests {
     #[test]
     fn test_max_size_bounds() {
         assert_eq!(MAX_SIZE, u32::MAX - MAX_PAYLOAD_OVERHEAD);
-        let maximum: MaxSize<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
-        assert_eq!(maximum.get().get(), MAX_SIZE);
-        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(0u32).is_err());
-        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
+        let maximum: AtMost<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
+        assert_eq!(maximum.get(), MAX_SIZE);
+        assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(0).is_err());
+        assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
     }
 
     /// [`Config::max_size`] limits the payload without counting the internal channel identifier.
     #[test]
     fn test_max_size_applies_to_payload() {
-        const MAX_PAYLOAD_SIZE: usize = 64;
+        const MAX_PAYLOAD_SIZE: u32 = 64;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: (MAX_PAYLOAD_SIZE as u32).try_into().unwrap(),
+                max_size: MAX_PAYLOAD_SIZE.try_into().unwrap(),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             };
@@ -1611,7 +1609,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let message = vec![42; MAX_PAYLOAD_SIZE];
+            let message = vec![42; MAX_PAYLOAD_SIZE as _];
             send_when_ready(
                 &context,
                 &mut sender,
@@ -2361,7 +2359,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: 1024u32.try_into().unwrap(),
+                max_size: 1024.try_into().unwrap(),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };

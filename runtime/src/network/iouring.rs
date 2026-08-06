@@ -27,6 +27,7 @@ use crate::{
     telemetry::metrics::Register,
     utils,
 };
+use commonware_utils::AtMost;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
@@ -68,8 +69,10 @@ pub struct Config {
     /// Size of the read buffer for batching network reads.
     ///
     /// A larger buffer reduces syscall overhead by reading more data per call,
-    /// but uses more memory per connection. Defaults to 64 KB.
-    pub read_buffer_size: usize,
+    /// but uses more memory per connection. The size cannot exceed `u32::MAX`,
+    /// the largest length accepted by a Linux recv SQE. A size of zero disables
+    /// buffering. Defaults to 64 KB.
+    pub read_buffer_size: AtMost<usize, { u32::MAX }>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated send and receive io_uring threads.
@@ -85,7 +88,7 @@ impl Default for Config {
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
-            read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            read_buffer_size: DEFAULT_READ_BUFFER_SIZE.try_into().unwrap(),
             thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
@@ -156,7 +159,7 @@ impl Network {
             recv_handle,
             connect_timeout: cfg.connect_timeout,
             read_write_timeout: cfg.read_write_timeout,
-            read_buffer_size: cfg.read_buffer_size,
+            read_buffer_size: cfg.read_buffer_size.get(),
             pool,
         })
     }
@@ -611,6 +614,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_read_buffer_size_bounds() {
+        type ReadBufferSize = AtMost<usize, { u32::MAX }>;
+
+        let zero = ReadBufferSize::try_from(0).unwrap();
+        let maximum = ReadBufferSize::try_from(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
+            .unwrap();
+
+        if let Ok(too_large) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert!(ReadBufferSize::try_from(too_large).is_err());
+        }
+
+        for read_buffer_size in [zero, maximum] {
+            let config = Config {
+                read_buffer_size,
+                ..Default::default()
+            };
+            assert_eq!(config.read_buffer_size, read_buffer_size);
+        }
+    }
+
     #[tokio::test]
     async fn test_trait() {
         // Verify the io_uring backend satisfies the shared network trait suite.
@@ -643,7 +667,7 @@ mod tests {
         tests::stress_test_network_trait(|| {
             test_network(Config {
                 iouring_config: iouring::Config {
-                    size: 256,
+                    size: 256.try_into().unwrap(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -727,7 +751,7 @@ mod tests {
         // Verify disabling the internal read buffer preserves direct recv behavior.
         // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
         let network = test_network(Config {
-            read_buffer_size: 0,
+            read_buffer_size: 0.try_into().unwrap(),
             ..Default::default()
         })
         .expect("Failed to start io_uring");
@@ -951,7 +975,7 @@ mod tests {
         // Verify reads that are at least as large as the internal buffer go
         // straight into the caller-owned output buffer.
         let network = test_network(Config {
-            read_buffer_size: 8,
+            read_buffer_size: 8.try_into().unwrap(),
             ..Default::default()
         })
         .expect("Failed to start io_uring");

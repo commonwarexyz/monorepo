@@ -16,7 +16,10 @@ use commonware_storage::{
     merkle::Family,
     qmdb::sync::{Request, Response, Source},
 };
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use commonware_utils::{
+    AtMost,
+    channel::{fallible::OneshotExt, oneshot},
+};
 use futures::future;
 use rand_core::Rng;
 use std::{
@@ -64,8 +67,9 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Maximum number of operations to serve in a single response.
-    pub max_serve_ops: NonZeroU64,
+    /// Maximum number of operations to serve in a single response, bounded by the response's
+    /// encoded vector length.
+    pub max_serve_ops: AtMost<NonZeroU64, { u32::MAX }>,
 
     /// Send fetch requests with network priority.
     pub priority_requests: bool,
@@ -287,7 +291,17 @@ where
         };
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
-        let cfg = (key.max_ops().get() as usize, ());
+        let Ok(max_ops) = u32::try_from(key.max_ops().get()) else {
+            self.metrics.deliveries.inc(status::Status::Invalid);
+            feedback_tx.send_lossy(false);
+            return;
+        };
+        let Ok(max_ops) = usize::try_from(max_ops) else {
+            self.metrics.deliveries.inc(status::Status::Invalid);
+            feedback_tx.send_lossy(false);
+            return;
+        };
+        let cfg = (max_ops, ());
         let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
             Ok(response)
                 if matches!(
@@ -352,7 +366,7 @@ where
             return;
         };
         if let Request::Operations { max_ops, .. } = key
-            && max_ops > self.config.max_serve_ops
+            && max_ops.get() > self.config.max_serve_ops.get()
         {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -385,7 +399,7 @@ mod tests {
         qmdb::any::{FixedConfig, unordered::fixed},
         translator::TwoCap,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot};
+    use commonware_utils::{AtMost, NZU16, NZU64, NZUsize, channel::oneshot};
     use std::time::Duration;
 
     #[derive(Clone, Debug)]
@@ -447,10 +461,23 @@ mod tests {
             initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
-            max_serve_ops: NZU64!(16),
+            max_serve_ops: 16.try_into().unwrap(),
             priority_requests: false,
             priority_responses: false,
         }
+    }
+
+    #[test]
+    fn max_serve_ops_is_bounded_by_wire_length() {
+        assert!(AtMost::<NonZeroU64, { u32::MAX }>::try_from(0).is_err());
+        assert!(AtMost::<NonZeroU64, { u32::MAX }>::try_from(u64::from(u32::MAX) + 1).is_err());
+
+        let maximum = AtMost::<NonZeroU64, { u32::MAX }>::try_from(u64::from(u32::MAX)).unwrap();
+        let config = Config {
+            max_serve_ops: maximum,
+            ..test_config(None)
+        };
+        assert_eq!(config.max_serve_ops.get(), u64::from(u32::MAX));
     }
 
     fn test_request_at(size: Location) -> Request<mmr::Family> {
@@ -711,6 +738,38 @@ mod tests {
             assert!(!validity_rx.await.unwrap());
             assert!(actor.pending.contains_key(&request));
             assert!(sub_rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn deliver_rejects_pending_request_above_wire_limit() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let request = Request::Operations {
+                size: Location::new(1),
+                start: Location::new(0),
+                max_ops: NonZeroU64::new(u64::from(u32::MAX) + 1).unwrap(),
+            };
+            let (subscriber_tx, subscriber_rx) = test_subscriber();
+            actor.pending.insert(request, vec![subscriber_tx]);
+
+            let (feedback_tx, validity_rx) = oneshot::channel();
+            let ((), forwarded) = futures::join!(
+                actor.handle_deliver(request, encoded_fetch_payload(), feedback_tx),
+                async {
+                    let Ok((_response, feedback_tx)) = subscriber_rx.await else {
+                        return false;
+                    };
+                    feedback_tx
+                        .expect("deliveries should include feedback")
+                        .send(true)
+                        .unwrap();
+                    true
+                }
+            );
+
+            assert!(!forwarded);
+            assert!(!validity_rx.await.unwrap());
         });
     }
 

@@ -5,9 +5,9 @@ use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use commonware_utils::sys_rng;
+use commonware_utils::{AtMost, sys_rng};
 use rand::seq::IteratorRandom;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::info;
 use uuid::Uuid;
 
@@ -155,6 +155,18 @@ fn main() {
     let storage_throughput = matches.get_one::<i32>("storage_throughput").copied();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
     let message_size = *matches.get_one::<u32>("message-size").unwrap();
+    assert!(
+        message_size >= size_of::<u64>() as _,
+        "message-size must be at least {} bytes",
+        size_of::<u64>()
+    );
+    let message_size: AtMost<NonZeroU32, { commonware_p2p::authenticated::MAX_SIZE }> =
+        message_size.try_into().unwrap_or_else(|message_size| {
+            panic!(
+                "message-size must not exceed {} bytes (received {message_size})",
+                commonware_p2p::authenticated::MAX_SIZE
+            )
+        });
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
     let mailbox_size = *matches.get_one::<NonZeroUsize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();

@@ -154,7 +154,7 @@
 //!     my_sk.clone(),
 //!     application_namespace,
 //!     my_addr,
-//!     1_024u32.try_into().unwrap(), // 1KB
+//!     1_024.try_into().unwrap(), // 1KB
 //! );
 //!
 //! // Start context
@@ -200,7 +200,7 @@ mod network;
 mod types;
 
 pub use crate::authenticated::{
-    MAX_SIZE, MaxSize,
+    AtMost, MAX_SIZE,
     channels::{Error, Receiver, Sender},
 };
 pub use actors::tracker::Oracle;
@@ -247,11 +247,7 @@ mod tests {
         One,
     }
 
-    const MAX_MESSAGE_SIZE: MaxSize<NonZeroU32, MAX_SIZE> =
-        MaxSize::<NonZeroU32, MAX_SIZE>::new(
-            NonZeroU32::new(1_024 * 1_024).unwrap(),
-        )
-        .unwrap(); // 1MB
+    const MAX_MESSAGE_SIZE: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(NZU32!(1_024 * 1_024)); // 1MB
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
     /// Ensure no message rate limiting occurred.
@@ -275,7 +271,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: MaxSize<NonZeroU32, MAX_SIZE>,
+        max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
         base_port: u16,
         n: usize,
         mode: Mode,
@@ -2128,8 +2124,7 @@ mod tests {
             let (router, mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
 
-            let channels =
-                channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE.get().get());
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE.get());
             let _handle = router.start(channels);
 
             let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();

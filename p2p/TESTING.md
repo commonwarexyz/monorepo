@@ -6,7 +6,7 @@ Use `p2p/src/simulated` to test authenticated links and adverse conditions. Star
 let (network, mut oracle) = Network::new(
     context.child("network"),
     Config {
-        max_size: (1024 * 1024u32).try_into().unwrap(),
+        max_size: (1024 * 1024).try_into().unwrap(),
         disconnect_on_block: true,
         tracked_peer_sets: NZUsize!(1),
     },

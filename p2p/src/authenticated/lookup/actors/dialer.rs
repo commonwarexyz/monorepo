@@ -231,7 +231,7 @@ mod tests {
         StreamConfig {
             signing_key,
             namespace: b"test".to_vec(),
-            max_message_size: 1024,
+            max_message_size: 1024.try_into().unwrap(),
             handshake_timeout: Duration::from_secs(5),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),

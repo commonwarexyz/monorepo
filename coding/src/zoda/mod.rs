@@ -189,7 +189,7 @@ fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
 }
 
 mod topology;
-use topology::Topology;
+use topology::{EncodedRows, Topology};
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone, Debug)]
@@ -336,14 +336,8 @@ pub struct CheckedShard {
 /// Take indices up to `total`, and shuffle them.
 ///
 /// The shuffle depends, deterministically, on the transcript.
-///
-/// # Panics
-///
-/// Panics if `total` exceeds `u32::MAX`.
-fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
-    let total: u32 = total
-        .try_into()
-        .expect("encoded_rows exceeds u32::MAX; data too large for ZODA");
+fn shuffle_indices(transcript: &Transcript, total: EncodedRows) -> Vec<u32> {
+    let total = u32::try_from(total.get()).expect("encoded row bound should fit u32");
     let mut out = (0..total).collect::<Vec<_>>();
     transcript.shuffle(b"shuffle", &mut out);
     out
@@ -390,7 +384,7 @@ impl<D: Digest> CheckingData<D> {
         root: D,
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
@@ -413,7 +407,7 @@ impl<D: Digest> CheckingData<D> {
         // that we do Reed-Solomon encoding of the checksum ourselves.
         transcript.commit(checksum.encode());
         let encoded_checksum = checksum
-            .as_polynomials(topology.encoded_rows)
+            .as_polynomials(topology.encoded_rows.get())
             .expect("checksum has too many rows")
             .evaluate()
             .data();
@@ -494,6 +488,12 @@ pub enum Error {
     InsufficientUniqueRows(usize, usize),
     #[error("failed to create inclusion proof: {0}")]
     FailedToCreateInclusionProof(BmtError),
+    #[error("ZODA topology arithmetic overflowed")]
+    TopologyOverflow,
+    #[error("encoded row count exceeds the ZODA maximum of 2^31")]
+    TooManyEncodedRows,
+    #[error("total shard count {0} exceeds the ZODA maximum of 65536")]
+    TooManyTotalShards(u32),
 }
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
@@ -532,7 +532,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
@@ -541,7 +541,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
 
         // Step 2: Encode the data.
         let encoded_data = data
-            .as_polynomials(topology.encoded_rows)
+            .as_polynomials(topology.encoded_rows.get())
             .expect("data has too many rows")
             .evaluate()
             .data();
@@ -573,10 +573,10 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         // because followers have to encode the checksum itself to prevent the leader from
         // cheating.
         transcript.commit(checksum.encode());
-        let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
+        let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
 
         // Step 6: Produce the shards in parallel.
-        let shards = strategy.try_map_collect_vec(0..topology.total_shards, |shard_idx| {
+        let shards = strategy.try_map_collect_vec(0..topology.total_shards.get(), |shard_idx| {
             let indices =
                 &shuffled_indices[shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
             let rows = Matrix::init(
@@ -653,6 +653,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             min_shards,
             ..
         } = checking_data.topology;
+        let encoded_rows = encoded_rows.get();
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         let mut shard_count = 0usize;
         for shard in shards {
@@ -788,7 +789,7 @@ mod tests {
             let samples = checking_data.topology.samples;
             let a_indices =
                 checking_data.shuffled_indices[a_i * samples..(a_i + 1) * samples].to_vec();
-            let lg_rows = checking_data.topology.encoded_rows.ilog2() as usize;
+            let lg_rows = checking_data.topology.encoded_rows.get().ilog2() as usize;
             let shift = vanishing(lg_rows as u8, &a_indices);
             let mut checksum = (*shards[1].checksum).clone();
             for (i, shift_i) in shift.coefficients_up_to(checksum.rows()).enumerate() {

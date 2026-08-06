@@ -29,7 +29,7 @@ thread_local! {
             let dialer_config = Config {
                 signing_key: dialer_crypto.clone(),
                 namespace: NAMESPACE.to_vec(),
-                max_message_size: MAX_MESSAGE_SIZE,
+                max_message_size: MAX_MESSAGE_SIZE.try_into().unwrap(),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),
@@ -38,7 +38,7 @@ thread_local! {
             let listener_config = Config {
                 signing_key: listener_crypto.clone(),
                 namespace: NAMESPACE.to_vec(),
-                max_message_size: MAX_MESSAGE_SIZE,
+                max_message_size: MAX_MESSAGE_SIZE.try_into().unwrap(),
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),

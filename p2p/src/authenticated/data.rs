@@ -50,7 +50,9 @@ pub(crate) const DATA_PREFIX: u8 = 0;
 pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
 
 /// Maximum supported application payload size.
-pub const MAX_SIZE: u32 = u32::MAX - MAX_PAYLOAD_OVERHEAD;
+///
+/// This leaves room for authenticated framing before encryption.
+pub const MAX_SIZE: u32 = commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD;
 
 /// Pre-encoded data ready for transmission.
 ///
@@ -117,14 +119,19 @@ mod tests {
 
     #[test]
     fn test_max_size_bounds() {
-        use commonware_utils::MaxSize;
+        use commonware_utils::AtMost;
         use std::num::NonZeroU32;
 
-        assert_eq!(MAX_SIZE, u32::MAX - MAX_PAYLOAD_OVERHEAD);
-        let maximum: MaxSize<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
-        assert_eq!(maximum.get().get(), MAX_SIZE);
-        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(0u32).is_err());
-        assert!(MaxSize::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
+        let tag_size = u32::try_from(commonware_cryptography::handshake::TAG_SIZE).unwrap();
+        assert_eq!(
+            MAX_SIZE,
+            commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD
+        );
+        assert_eq!(MAX_SIZE + MAX_PAYLOAD_OVERHEAD + tag_size, u32::MAX);
+        let maximum: AtMost<NonZeroU32, MAX_SIZE> = MAX_SIZE.try_into().unwrap();
+        assert_eq!(maximum.get(), MAX_SIZE);
+        assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(0).is_err());
+        assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
     }
 
     #[test]

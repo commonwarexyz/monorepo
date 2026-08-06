@@ -75,7 +75,7 @@
 //!
 //! // Configure network
 //! let p2p_cfg = Config {
-//!     max_size: (1024 * 1024u32).try_into().unwrap(), // 1MB
+//!     max_size: (1024 * 1024).try_into().unwrap(), // 1MB
 //!     disconnect_on_block: true,
 //!     tracked_peer_sets: NZUsize!(3),
 //! };
@@ -173,11 +173,11 @@ pub enum Error {
     PeerMissing,
 }
 
+pub use commonware_utils::AtMost;
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
-pub use commonware_utils::MaxSize;
 pub use network::{
-    Config, ConnectedPeerProvider, MAX_PAYLOAD_OVERHEAD, MAX_SIZE, Network, Receiver,
-    Sender, SplitForwarder, SplitOrigin, SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
+    Config, ConnectedPeerProvider, MAX_PAYLOAD_OVERHEAD, MAX_SIZE, Network, Receiver, Sender,
+    SplitForwarder, SplitOrigin, SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
 };
 
 #[cfg(test)]
@@ -212,11 +212,7 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-    const MAX_MESSAGE_SIZE: MaxSize<NonZeroU32, MAX_SIZE> =
-        MaxSize::<NonZeroU32, MAX_SIZE>::new(
-            NonZeroU32::new(1024 * 1024).unwrap(),
-        )
-        .unwrap();
+    const MAX_MESSAGE_SIZE: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(NZU32!(1024 * 1024));
 
     async fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, peers: I)
     where
@@ -571,21 +567,23 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Attempt to link with invalid success rate
-            let result = oracle
-                .add_link(
-                    pk1,
-                    pk2,
-                    Link {
-                        latency: Duration::from_millis(5),
-                        jitter: Duration::from_millis(2),
-                        success_rate: 1.5,
-                    },
-                )
-                .await;
+            // Attempt to link with invalid success rates
+            for success_rate in [f64::NAN, -0.1, 1.5] {
+                let result = oracle
+                    .add_link(
+                        pk1.clone(),
+                        pk2.clone(),
+                        Link {
+                            latency: Duration::from_millis(5),
+                            jitter: Duration::from_millis(2),
+                            success_rate,
+                        },
+                    )
+                    .await;
 
-            // Confirm error is correct
-            assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
+                // Confirm error is correct
+                assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
+            }
         });
     }
 

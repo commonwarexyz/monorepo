@@ -202,35 +202,40 @@ commonware_macros::stability_scope!(BETA {
     /// An integer value no greater than `MAX`.
     ///
     /// The wrapped type can provide additional invariants. For example,
-    /// `MaxSize<NonZeroU32, 1024>` represents values in `1..=1024`.
+    /// `AtMost<NonZeroU32, 1024>` represents values in `1..=1024`.
     ///
     /// # Examples
     ///
     /// ```
-    /// use commonware_utils::MaxSize;
+    /// use commonware_utils::AtMost;
     /// use core::num::NonZeroU32;
     ///
-    /// type MessageSize = MaxSize<NonZeroU32, 1024>;
+    /// type MessageSize = AtMost<NonZeroU32, 1024>;
     ///
-    /// let size: MessageSize = 512u32.try_into().unwrap();
-    /// assert_eq!(size.get().get(), 512);
-    /// assert!(MessageSize::try_from(0u32).is_err());
-    /// assert!(MessageSize::try_from(1025u32).is_err());
+    /// let size: MessageSize = 512.try_into().unwrap();
+    /// assert_eq!(size.get(), 512);
+    /// assert!(MessageSize::try_from(0).is_err());
+    /// assert!(MessageSize::try_from(1025).is_err());
     /// ```
     #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    pub struct MaxSize<T, const MAX: u32>(T);
+    pub struct AtMost<T, const MAX: u32>(T);
 
-    impl<T: Copy, const MAX: u32> MaxSize<T, MAX> {
+    impl<T: Copy, const MAX: u32> AtMost<T, MAX> {
         /// Returns the wrapped value.
-        pub const fn get(self) -> T {
+        pub const fn into_inner(self) -> T {
             self.0
         }
     }
 
-    macro_rules! impl_max_size {
+    macro_rules! impl_at_most {
         (primitive: $($ty:ty),+ $(,)?) => {
             $(
-                impl<const MAX: u32> MaxSize<$ty, MAX> {
+                impl<const MAX: u32> AtMost<$ty, MAX> {
+                    /// Returns the value.
+                    pub const fn get(self) -> $ty {
+                        self.0
+                    }
+
                     /// Creates a value if it does not exceed `MAX`.
                     pub const fn new(value: $ty) -> Option<Self> {
                         if MAX as u128 >= <$ty>::MAX as u128 || value <= MAX as $ty {
@@ -241,7 +246,7 @@ commonware_macros::stability_scope!(BETA {
                     }
                 }
 
-                impl<const MAX: u32> TryFrom<$ty> for MaxSize<$ty, MAX> {
+                impl<const MAX: u32> TryFrom<$ty> for AtMost<$ty, MAX> {
                     type Error = $ty;
 
                     fn try_from(value: $ty) -> Result<Self, Self::Error> {
@@ -252,7 +257,12 @@ commonware_macros::stability_scope!(BETA {
         };
         (nonzero: $(($ty:ty, $inner:ty)),+ $(,)?) => {
             $(
-                impl<const MAX: u32> MaxSize<$ty, MAX> {
+                impl<const MAX: u32> AtMost<$ty, MAX> {
+                    /// Returns the value.
+                    pub const fn get(self) -> $inner {
+                        self.0.get()
+                    }
+
                     /// Creates a value if it does not exceed `MAX`.
                     pub const fn new(value: $ty) -> Option<Self> {
                         let value_inner = value.get();
@@ -264,7 +274,7 @@ commonware_macros::stability_scope!(BETA {
                     }
                 }
 
-                impl<const MAX: u32> TryFrom<$ty> for MaxSize<$ty, MAX> {
+                impl<const MAX: u32> TryFrom<$ty> for AtMost<$ty, MAX> {
                     type Error = $ty;
 
                     fn try_from(value: $ty) -> Result<Self, Self::Error> {
@@ -272,7 +282,7 @@ commonware_macros::stability_scope!(BETA {
                     }
                 }
 
-                impl<const MAX: u32> TryFrom<$inner> for MaxSize<$ty, MAX> {
+                impl<const MAX: u32> TryFrom<$inner> for AtMost<$ty, MAX> {
                     type Error = $inner;
 
                     fn try_from(value: $inner) -> Result<Self, Self::Error> {
@@ -283,8 +293,8 @@ commonware_macros::stability_scope!(BETA {
         };
     }
 
-    impl_max_size!(primitive: u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
-    impl_max_size!(nonzero:
+    impl_at_most!(primitive: u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+    impl_at_most!(nonzero:
         (core::num::NonZeroU8, u8),
         (core::num::NonZeroU16, u16),
         (core::num::NonZeroU32, u32),
@@ -326,6 +336,92 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod thread_local;
     pub use thread_local::Cached;
 });
+
+/// Creates an [`AtMost`] value, panicking if the value exceeds its maximum.
+///
+/// For literal values, validation occurs at compile time. For expressions, validation occurs at
+/// runtime.
+///
+/// # Panics
+///
+/// Panics if the value exceeds the maximum encoded in the result type.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_utils::{AtMost, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = AtMost<NonZeroU32, 1024>;
+/// const MESSAGE_SIZE: MessageSize = AtMost!(NZU32!(512));
+/// assert_eq!(MESSAGE_SIZE.get(), 512);
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! AtMost {
+    (NZUsize!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroUsize, _>::new($crate::NZUsize!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZUsize!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroUsize, _>::new($crate::NZUsize!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU8!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU8, _>::new($crate::NZU8!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU8!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU8, _>::new($crate::NZU8!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU16!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU16, _>::new($crate::NZU16!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU16!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU16, _>::new($crate::NZU16!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU32!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU32, _>::new($crate::NZU32!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU32!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU32, _>::new($crate::NZU32!($val))
+            .expect("value exceeds maximum")
+    };
+    (NZU64!($val:literal)) => {
+        const {
+            $crate::AtMost::<::core::num::NonZeroU64, _>::new($crate::NZU64!($val))
+                .expect("value exceeds maximum")
+        }
+    };
+    (NZU64!($val:expr)) => {
+        $crate::AtMost::<::core::num::NonZeroU64, _>::new($crate::NZU64!($val))
+            .expect("value exceeds maximum")
+    };
+    ($ty:ty, $val:literal) => {
+        const { $crate::AtMost::<$ty, _>::new($val).expect("value exceeds maximum") }
+    };
+    ($ty:ty, $val:expr) => {
+        $crate::AtMost::<$ty, _>::new($val).expect("value exceeds maximum")
+    };
+}
+
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
@@ -601,19 +697,39 @@ mod tests {
     }
 
     #[test]
-    fn test_max_size_bounds() {
-        type MessageSize = MaxSize<core::num::NonZeroU32, 1024>;
+    fn test_at_most_bounds() {
+        type MessageSize = AtMost<core::num::NonZeroU32, 1024>;
+        type OptionalSize = AtMost<u32, 1024>;
 
-        const MAXIMUM: MessageSize = MessageSize::new(NZU32!(1024)).unwrap();
+        const MAXIMUM: MessageSize = AtMost!(NZU32!(1024));
+        const MAXIMUM_VALUE: u32 = MAXIMUM.get();
+        const MAXIMUM_INNER: core::num::NonZeroU32 = MAXIMUM.into_inner();
+        const ZERO: OptionalSize = AtMost!(u32, 0);
 
-        assert_eq!(MAXIMUM.get(), NZU32!(1024));
-        assert_eq!(MessageSize::new(NZU32!(1)).unwrap().get(), NZU32!(1));
+        assert_eq!(MAXIMUM_VALUE, 1024);
+        assert_eq!(MAXIMUM_INNER, NZU32!(1024));
+        assert_eq!(ZERO.get(), 0);
+        assert_eq!(MessageSize::new(NZU32!(1)).unwrap().get(), 1);
         assert_eq!(MessageSize::new(NZU32!(1025)), None);
 
-        let wrapped: MessageSize = 512u32.try_into().unwrap();
-        assert_eq!(wrapped.get(), NZU32!(512));
-        assert!(MessageSize::try_from(0u32).is_err());
-        assert!(MessageSize::try_from(1025u32).is_err());
+        let wrapped: MessageSize = 512.try_into().unwrap();
+        assert_eq!(wrapped.get(), 512);
+        assert!(MessageSize::try_from(0).is_err());
+        assert!(MessageSize::try_from(1025).is_err());
+
+        let too_large = 1025;
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _: OptionalSize = AtMost!(u32, too_large);
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _: MessageSize = AtMost!(NZU32!(too_large));
+            })
+            .is_err()
+        );
     }
 
     #[test]

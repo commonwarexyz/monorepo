@@ -6683,7 +6683,7 @@ mod tests {
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 simulated::Config {
-                    max_size: (1024 * 1024u32).try_into().unwrap(),
+                    max_size: (1024 * 1024).try_into().unwrap(),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

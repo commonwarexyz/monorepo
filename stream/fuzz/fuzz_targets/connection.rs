@@ -96,7 +96,7 @@ fn fuzz(input: FuzzInput) {
         let dialer_config = Config {
             signing_key: dialer_crypto.clone(),
             namespace: input.namespace.clone(),
-            max_message_size,
+            max_message_size: max_message_size.try_into().unwrap(),
             synchrony_bound,
             max_handshake_age,
             handshake_timeout,
@@ -105,7 +105,7 @@ fn fuzz(input: FuzzInput) {
         let listener_config = Config {
             signing_key: listener_crypto.clone(),
             namespace: input.namespace.clone(),
-            max_message_size,
+            max_message_size: max_message_size.try_into().unwrap(),
             synchrony_bound,
             max_handshake_age,
             handshake_timeout,

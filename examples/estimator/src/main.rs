@@ -13,12 +13,13 @@ use commonware_runtime::{
     deterministic,
 };
 use commonware_utils::{
-    NZUsize,
+    AtMost, NZUsize,
     channel::{mpsc, oneshot},
 };
 use estimator::{
-    Command, Distribution, Latencies, RegionConfig, calculate_proposer_region, calculate_threshold,
-    count_peers, crate_version, get_latency_data, mean, median, parse_task, std_dev,
+    Command, Distribution, Latencies, MAX_COMMAND_MESSAGE_SIZE, RegionConfig,
+    calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
+    mean, median, parse_task, std_dev,
 };
 use futures::future::try_join_all;
 use rand_core::Rng;
@@ -52,10 +53,14 @@ type Message = Vec<u8>;
 
 /// Create a message containing the ID encoded as a big-endian u32,
 /// padded to the given size.
-fn create_message(id: u32, target_size: Option<usize>) -> Message {
+fn create_message(
+    id: u32,
+    target_size: Option<AtMost<usize, MAX_COMMAND_MESSAGE_SIZE>>,
+) -> Message {
     target_size.map_or_else(
         || id.to_be_bytes().to_vec(),
         |size| {
+            let size = size.get();
             let mut message = Vec::with_capacity(size);
             message.extend_from_slice(&id.to_be_bytes());
             if size > 4 {

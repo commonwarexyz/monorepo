@@ -77,7 +77,7 @@ mod tests {
         StreamConfig {
             signing_key: key,
             namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
+            max_message_size: MAX_MESSAGE_SIZE.try_into().unwrap(),
             synchrony_bound: Duration::from_secs(10),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),

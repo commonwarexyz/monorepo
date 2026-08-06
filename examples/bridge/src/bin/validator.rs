@@ -161,7 +161,7 @@ fn main() {
     let indexer_cfg = StreamConfig {
         signing_key: signer.clone(),
         namespace: INDEXER_NAMESPACE.to_vec(),
-        max_message_size: 1024 * 1024,
+        max_message_size: (1024 * 1024).try_into().unwrap(),
         synchrony_bound: Duration::from_secs(1),
         max_handshake_age: Duration::from_secs(60),
         handshake_timeout: Duration::from_secs(5),
@@ -174,7 +174,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        (1024 * 1024u32).try_into().unwrap(), // 1MB
+        (1024 * 1024).try_into().unwrap(), // 1MB
     );
 
     // Start context
