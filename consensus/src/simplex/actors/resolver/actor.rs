@@ -456,13 +456,14 @@ impl<
 
     /// Selects the best certificate to serve for `view`.
     ///
-    /// Finalization is strongest, followed by a certified notarization, then a
-    /// covering nullification. A notarization is served only after successful
-    /// certification. Pending notarizations and notarizations that fail
-    /// certification are never served.
+    /// An active finalization floor settles every ask at or below it. Otherwise
+    /// an exact certified notarization is preferred to a covering
+    /// nullification, matching proposal construction. If neither is retained,
+    /// the current floor is served. Pending notarizations and notarizations
+    /// that fail certification are never served.
     fn produce_certificate(&self, view: View) -> Option<Bytes> {
-        // A finalization settles either kind, so weaker evidence would only
-        // delay the requester.
+        // A current finalization floor settles either kind, so retained
+        // ancestry cannot improve the answer.
         if let Some(certificate @ Certificate::Finalization(_)) = self.state.get(view) {
             return Some(certificate.encode());
         }
@@ -476,8 +477,8 @@ impl<
             return Some(nullification.clone());
         }
 
-        // Cached ancestry also serves ordinary backfill. Only fall back to the
-        // resolver floor when no retained ancestry is available.
+        // The floor advances by view, so this can serve a higher certified
+        // notarization after it supersedes an older finalization.
         self.state.get(view).map(|certificate| certificate.encode())
     }
 
@@ -1383,7 +1384,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn certified_notarization_is_preferred_over_covering_nullification() {
+    async fn exact_certified_notarization_is_preferred_over_covering_nullification_and_floor() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1420,12 +1421,47 @@ mod tests {
                 Some(&expected_parent)
             );
 
-            // A certified notarization is the preferred proposal parent, so it
-            // is the best certificate while both remain available.
+            // The exact certified parent is preferred to both the covering
+            // nullification and a nonmatching higher floor.
             assert_eq!(
                 responder.produce_certificate(requested),
                 Some(expected_parent)
             );
+        });
+    }
+
+    #[test_async]
+    async fn higher_certified_floor_is_served_over_older_finalization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let requested = View::new(3);
+            let finalization = Certificate::Finalization(build_finalization(
+                &schemes, &verifier, EPOCH, requested,
+            ));
+            let expected_finalization = finalization.encode();
+            actor.updated(&mut resolver, finalization);
+            assert_eq!(
+                actor.produce_certificate(requested),
+                Some(expected_finalization)
+            );
+
+            let floor = View::new(6);
+            let notarization = Certificate::Notarization(build_notarization(
+                &schemes, &verifier, EPOCH, floor,
+            ));
+            let expected = notarization.encode();
+            actor.updated(&mut resolver, notarization);
+            actor.certified(&mut resolver, floor, true);
+
+            // The floor advances by view, so the higher certified
+            // notarization supersedes the older finalization.
+            assert_eq!(actor.produce_certificate(requested), Some(expected));
         });
     }
 
