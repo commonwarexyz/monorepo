@@ -87,7 +87,7 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// Publication slot for serving snapshots. The synced state installs as
+    /// Publisher for serving snapshots. The synced state installs as
     /// generation zero during the transition to processing.
     pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 
@@ -238,24 +238,20 @@ where
 
     /// Record `block` as the live sync target.
     async fn update_target(mut self, block: &Arc<A::Block>) -> (Self, bool) {
-        let artifact = select! {
+        let completed = select! {
             _ = self.context.stopped() => return (self, false),
-            artifact = self.syncer.update_targets(
+            completed = self.syncer.update_targets(
                 Anchor::from(block.as_ref()),
                 A::sync_targets(block.as_ref()),
-            ) => artifact,
+            ) => completed,
         };
-        match artifact {
-            Some(syncer::Artifact::Delivered(artifact)) => self.artifact = Some(artifact),
-            Some(syncer::Artifact::Announced) => {
-                // The syncer already published on the completion channel; collect it so
-                // the pending window can hand off against the newest recorded target.
-                let artifact = (&mut self.sync_completed)
-                    .await
-                    .expect("announced sync artifact must arrive on the completion channel");
-                self.artifact = Some(artifact);
-            }
-            None => {}
+        if completed {
+            // The syncer sent the artifact on the completion channel; collect it here
+            // so the pending finalizations hand off against the newest recorded target.
+            let artifact = (&mut self.sync_completed)
+                .await
+                .expect("completed sync must deliver its artifact");
+            self.artifact = Some(artifact);
         }
         (self, true)
     }
@@ -373,10 +369,16 @@ where
         }
 
         // Every applied handoff is durable, so completion can advance through the last one before
-        // pruning or exposing the databases to other actors.
+        // pruning.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             processor = processor.prune_databases(prune, &self.marshal).await;
+            // The published snapshot was captured before this prune; recapture so
+            // serving stops pinning the pruned state. Every handoff barrier was
+            // awaited above, so the capture is already durable.
+            let (returned, snapshot) = processor.snapshot().await;
+            processor = returned;
+            publisher.install_durable(snapshot);
         }
 
         for request in self.held_verify_requests.drain(..) {
@@ -419,7 +421,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, Publisher, Single},
+        db::{Anchor, Publisher, SetSource, Single},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -458,6 +460,13 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
+        source: SetSource<()>,
+    }
+
+    /// The generation served by `source`, or `None` before the first install and
+    /// after the publisher drops.
+    fn served_generation(source: &SetSource<()>) -> Option<u64> {
+        source.latest().map(|snapshot| snapshot.generation())
     }
 
     impl TestHarness<deterministic::Context> {
@@ -505,6 +514,7 @@ mod tests {
             }
 
             let (acknowledgement, mut newest_waiter) = Exact::handle();
+            let source = self.source.clone();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
                     .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement.into())
@@ -518,7 +528,7 @@ mod tests {
                 assert!(poll!(waiter).is_pending());
             }
             assert!(poll!(&mut newest_waiter).is_pending());
-            assert!(response.send(None).is_ok());
+            assert!(response.send(false).is_ok());
             for waiter in &mut waiters {
                 assert!(poll!(waiter).is_pending());
             }
@@ -535,7 +545,7 @@ mod tests {
             }
             assert!(newest_waiter.await.is_ok());
             assert!(syncing.pending_finalizations.is_empty());
-            Self { syncing }
+            Self { syncing, source }
         }
     }
 
@@ -558,6 +568,7 @@ mod tests {
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
+            let (publisher, source) = Publisher::new(&syncing_context);
 
             let harness = Self {
                 syncing: Syncing {
@@ -570,12 +581,13 @@ mod tests {
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
                     artifact: None,
-                    publisher: Publisher::new(&syncing_context).0,
+                    publisher,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
+                source,
             };
             (
                 harness,
@@ -611,6 +623,7 @@ mod tests {
             let (syncer_sender, _syncer_receiver) =
                 actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
             let (_sync_complete, sync_completed) = oneshot::channel();
+            let (publisher, source) = Publisher::new(&syncing_context);
 
             Self {
                 syncing: Syncing {
@@ -626,12 +639,13 @@ mod tests {
                         databases: test_databases(),
                         anchor,
                     }),
-                    publisher: Publisher::new(&syncing_context).0,
+                    publisher,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
+                source,
             }
         }
     }
@@ -743,6 +757,7 @@ mod tests {
             let (reflected_acknowledgement, mut reflected_waiter) = Exact::handle();
             let (first_acknowledgement, mut first_waiter) = Exact::handle();
             let (second_acknowledgement, mut second_waiter) = Exact::handle();
+            let source = harness.source.clone();
             let transition = context.child("transition").spawn(move |_| {
                 harness.syncing.transition([
                     FinalizedHandoff::Reflected(
@@ -771,6 +786,11 @@ mod tests {
                 0,
                 "completion metadata must not be written before the handoff is durable",
             );
+            assert_eq!(
+                served_generation(&source),
+                Some(0),
+                "the synced state must serve as generation zero before any handoff flush",
+            );
             let first_flush = control.flushes.lock().remove(0);
             first_flush
                 .send(Ok(()))
@@ -780,6 +800,11 @@ mod tests {
             }
             assert!(poll!(&mut first_waiter).is_ready());
             assert!(poll!(&mut second_waiter).is_pending());
+            assert_eq!(
+                served_generation(&source),
+                Some(1),
+                "each handoff generation must serve once its flush is durable",
+            );
             let second_flush = control.flushes.lock().remove(0);
             second_flush
                 .send(Ok(()))
@@ -833,6 +858,11 @@ mod tests {
                 poll!(&mut waiter).is_pending(),
                 "an aborted handoff must leave marshal's acknowledgement pending",
             );
+            assert!(
+                served_generation(&harness.source).is_none(),
+                "the aborted generation must never serve, and the source must decline \
+                 once the writer is gone",
+            );
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
@@ -859,7 +889,7 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, _mailbox, mut syncer_receiver, _sync_complete) =
+            let (harness, _mailbox, mut syncer_receiver, sync_complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -875,12 +905,16 @@ mod tests {
             };
             assert!(poll!(&mut waiter).is_pending());
             assert!(
-                response
-                    .send(Some(syncer::Artifact::Delivered(SyncResult {
+                sync_complete
+                    .send(SyncResult {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
-                    })))
+                    })
                     .is_ok(),
+                "completion receiver must be alive",
+            );
+            assert!(
+                response.send(true).is_ok(),
                 "target update must still await its response",
             );
             drop(update);

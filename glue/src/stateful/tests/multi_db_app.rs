@@ -9,7 +9,7 @@ use crate::{
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotOf, SyncEngineConfig,
-            SyncTargetsOf, Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -52,10 +52,9 @@ use commonware_storage::{
     },
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        self,
         any::{FixedConfig, unordered::fixed},
         immutable,
-        sync::{CompactTarget, Request, Response, Source as SyncSource, Target},
+        sync::{CompactTarget, Target},
     },
     translator::TwoCap,
 };
@@ -313,7 +312,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
             Target::new(block.root_a, block.range_a.clone()),
             CompactTarget {
@@ -523,7 +522,7 @@ impl EngineDefinition for MultiDbEngine {
         .expect("failed to initialize blocks archive");
 
         let (initial_a, initial_b) =
-            MultiDatabaseSet::<deterministic::Context>::initial_sync_targets();
+            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
         let genesis_block = Block::genesis(
             initial_a.root,
             initial_a.range,
@@ -656,46 +655,6 @@ impl EngineDefinition for MultiDbEngine {
             })
         });
 
-        // Observe both committed storage roots, to assert cross-validator agreement.
-        let root_observer = (
-            qmdb_sync_resolver_a.source.clone(),
-            qmdb_sync_resolver_b.source.clone(),
-        );
-        let storage_roots: StorageRoots = Arc::new(move || {
-            let sources = root_observer.clone();
-            Box::pin(async move {
-                // The two member reads are separate serve() calls, so an installation can
-                // land between them; a torn profile only reduces the agreement check's
-                // overlap, never fabricates a disagreement.
-                let source_a = sources.0.lock().clone().expect("source must be attached");
-                let source_b = sources.1.lock().clone().expect("source must be attached");
-                let a = crate::stateful::db::ServeSource::serve(&source_a)
-                    .expect("a published generation must exist");
-                let b = crate::stateful::db::ServeSource::serve(&source_b)
-                    .expect("a published generation must exist");
-                // Learn A's root the way a syncing peer does: serve its tip commit and
-                // reconstruct the root from the returned proof.
-                let a_size = Location::new(a.bounds().end);
-                let (response, _) = SyncSource::serve(
-                    &a,
-                    Request::Boundary {
-                        size: a_size,
-                        start: a_size - 1,
-                    },
-                )
-                .await
-                .expect("published tip must be servable");
-                let Response::Boundary { proof, op, .. } = response else {
-                    panic!("expected a boundary response");
-                };
-                let a_root = proof
-                    .reconstruct_root(&qmdb::hasher::<Sha256>(), &[op.encode()], a_size - 1)
-                    .expect("served proof must reconstruct");
-                let b_target = b.target();
-                vec![(*a_size, a_root), (*b_target.size, b_target.root)]
-            })
-        });
-
         // Deferred wrapper
         let deferred = Deferred::new(
             context.child("deferred"),
@@ -776,7 +735,6 @@ impl EngineDefinition for MultiDbEngine {
                     .unwrap_or(0),
                 state_sync_height,
                 oldest_retained,
-                storage_roots,
             },
         )
     }

@@ -1,5 +1,5 @@
 //! Journaled [`ManagedDb`] implementation for QMDB
-//! [`immutable`] databases.
+//! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
 //! deletions. Keyed batch reads borrow the owning database because the

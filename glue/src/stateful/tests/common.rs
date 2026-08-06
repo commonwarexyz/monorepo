@@ -30,15 +30,6 @@ use std::{
 pub(crate) type OldestRetained =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;
 
-/// Type-erased accessor returning `(committed op count, root)` for every
-/// database in a validator's set, in set order.
-///
-/// Used by the root-agreement property: the root is a pure function of the
-/// committed operation history, so validators whose databases committed the
-/// same number of operations must report identical roots.
-pub(crate) type StorageRoots =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<(u64, sha256::Digest)>> + Send>> + Send + Sync>;
-
 /// Wraps one sync resolver and captures the serving source the stateful actor attaches,
 /// so tests can observe published durable snapshots without a production read API.
 #[derive(Clone)]
@@ -139,7 +130,6 @@ pub(crate) struct MockValidatorState<V: Variant> {
     pub(super) state_sync_entries: u64,
     pub(super) state_sync_height: Option<u64>,
     pub(super) oldest_retained: OldestRetained,
-    pub(super) storage_roots: StorageRoots,
 }
 
 impl<V: Variant> PartialEq for MockValidatorState<V> {
@@ -171,10 +161,6 @@ where
 
     pub(crate) async fn oldest_retained(&self) -> u64 {
         (self.oldest_retained)().await
-    }
-
-    pub(crate) async fn storage_roots(&self) -> Vec<(u64, sha256::Digest)> {
-        (self.storage_roots)().await
     }
 }
 

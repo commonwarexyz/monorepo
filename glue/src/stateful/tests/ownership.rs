@@ -1,11 +1,9 @@
 //! Causal ownership tests for the by-value database set.
 //!
-//! These tests assert the ownership invariants at the public seams, proving
-//! the baseline convoys are gone rather than merely faster.
+//! The old shared-lock design let a slow reader block the writer and a parked
+//! flush block serving. These tests pin that the ownership design has no such
+//! coupling at the public seams:
 //!
-//! - a finalize whose flush is still parked hands the set back immediately,
-//!   so the writer keeps committing while durability resolves off the hot
-//!   path ([`parked_flush_never_blocks_the_next_finalize`])
 //! - a generation whose flush is still parked is never published, so no
 //!   subscriber can observe state a crash could roll back, while the writer
 //!   proceeds ([`unpublished_generation_stays_invisible`])
@@ -19,7 +17,7 @@
 //! completes proves nothing was ever in its way. Generation ordering under
 //! pipelining is covered by the publication and processing tests.
 
-use super::mocks::{FlushControl, GatedFlushDb, TestMerkleized};
+use super::mocks::{FlushControl, TestDb, TestMerkleized};
 use crate::stateful::db::{Barrier, DatabaseSet, Publisher, Single};
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
@@ -33,12 +31,15 @@ use std::time::Duration;
 const BLOCKED: Duration = Duration::from_secs(1);
 
 /// A parked single-member set plus the flush controls driving it.
-fn parked_set() -> (Single<GatedFlushDb>, FlushControl) {
+fn parked_set() -> (Single<TestDb>, FlushControl) {
     let control = FlushControl::default();
-    let db = GatedFlushDb {
-        control: control.clone(),
-    };
-    (db.into(), control)
+    (Single::from(TestDb::gated(control.clone())), control)
+}
+
+/// Finalize an empty batch, pinning the set's environment to the
+/// deterministic runtime ([`TestDb`] works in any environment).
+async fn finalize(set: Single<TestDb>) -> (Single<TestDb>, (), Barrier) {
+    DatabaseSet::<deterministic::Context>::finalize(set, TestMerkleized::new()).await
 }
 
 /// Await `future` against a deterministic timeout, `Ok` if it completed and
@@ -63,34 +64,10 @@ async fn release(control: &FlushControl, barrier: Barrier) {
     );
 }
 
-/// A finalize whose flush is parked hands the set back immediately, so the
-/// writer keeps committing while durability resolves off the hot path.
-#[test_traced]
-fn parked_flush_never_blocks_the_next_finalize() {
-    let executor = deterministic::Runner::default();
-    executor.start(|context| async move {
-        let (set, control) = parked_set();
-        let (set, _, first) = set.finalize(TestMerkleized::new()).await;
-        assert_eq!(control.flushes.lock().len(), 1, "the first flush is parked");
-
-        // With the set owned by value, the next finalize proceeds immediately.
-        let next = context
-            .child("finalize")
-            .spawn(move |_| async move { set.finalize(TestMerkleized::new()).await });
-        let (_, _, second) = blocked_on(&context, Box::pin(next))
-            .await
-            .unwrap_or_else(|_| panic!("a parked flush blocked the next finalize"))
-            .unwrap();
-
-        release(&control, first).await;
-        release(&control, second).await;
-    });
-}
-
-/// Staging alone publishes nothing — a staged generation stays invisible until
-/// installed — and an unpublished generation does not hold the writer back.
-/// The actor discipline that installs only after durability is pinned by the
-/// processing-loop and publication tests.
+/// Staging alone publishes nothing: a staged generation stays invisible until
+/// installed, and an unpublished generation does not hold the writer back.
+/// The actor installs only after durability, which the processing-loop and
+/// publication tests pin.
 #[test_traced]
 fn unpublished_generation_stays_invisible() {
     let executor = deterministic::Runner::default();
@@ -100,17 +77,15 @@ fn unpublished_generation_stays_invisible() {
 
         // The first generation applies but its flush is parked, so it stays
         // staged and no subscriber can see it.
-        let (set, snapshot, first) = set.finalize(TestMerkleized::new()).await;
+        let (set, snapshot, first) = finalize(set).await;
         let staged = publisher.stage(snapshot);
         assert!(
             source.latest().is_none(),
-            "an applied but non durable generation must not be visible"
+            "an applied but non-durable generation must not be visible"
         );
 
         // The unpublished generation does not hold the writer back.
-        let next = context
-            .child("finalize")
-            .spawn(move |_| async move { set.finalize(TestMerkleized::new()).await });
+        let next = context.child("finalize").spawn(move |_| finalize(set));
         let (_, snapshot, second) = blocked_on(&context, Box::pin(next))
             .await
             .unwrap_or_else(|_| panic!("an unpublished generation delayed the writer"))
@@ -135,12 +110,12 @@ fn parked_serve_never_delays_the_writer() {
     executor.start(|context| async move {
         let (set, control) = parked_set();
         let (mut publisher, source) = Publisher::new(&context);
-        let (set, snapshot, barrier) = set.finalize(TestMerkleized::new()).await;
+        let (set, snapshot, barrier) = finalize(set).await;
         let staged = publisher.stage(snapshot);
         release(&control, barrier).await;
         staged.install();
 
-        // A serve clones the published generation and parks mid assembly.
+        // A serve clones the published generation and parks mid-assembly.
         let served = source.latest().unwrap();
         let (io_done, io_gate) = oneshot::channel();
         let serve = context.child("serve").spawn(move |_| async move {
@@ -151,9 +126,7 @@ fn parked_serve_never_delays_the_writer() {
 
         // The parked serve shares nothing with the writer, so the next
         // finalize and publication proceed without delay.
-        let next = context
-            .child("finalize")
-            .spawn(move |_| async move { set.finalize(TestMerkleized::new()).await });
+        let next = context.child("finalize").spawn(move |_| finalize(set));
         let (_, snapshot, barrier) = blocked_on(&context, Box::pin(next))
             .await
             .unwrap_or_else(|_| panic!("a parked serve delayed the writer"))

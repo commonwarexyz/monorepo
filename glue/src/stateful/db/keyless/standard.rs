@@ -1,5 +1,5 @@
 //! Journaled [`ManagedDb`] implementation for QMDB
-//! [`keyless`] databases.
+//! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key. Positional batch reads borrow the
@@ -37,8 +37,8 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
-/// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// Wraps a keyless [`UnmerkleizedBatch`], implementing the
+/// [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -125,8 +125,8 @@ where
     }
 }
 
-/// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// Wraps a keyless [`MerkleizedBatch`], implementing the
+/// [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -509,8 +509,10 @@ mod tests {
         BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
+        journal::contiguous::{Contiguous as _, fixed::Config as FixedJournalConfig},
+        merkle::full::Config as MerkleConfig,
+        mmr,
+        qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -572,7 +574,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+            let (db, snapshot, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
                 .await
                 .unwrap();
             durability.await.expect("finalize flush failed");
@@ -587,6 +589,11 @@ mod tests {
             assert_eq!(target.root, db.root());
             assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));
+            assert_eq!(
+                mmr::Location::new(snapshot.bounds().end),
+                *target.range.end(),
+                "captured snapshot must cover the applied batch",
+            );
         });
     }
 

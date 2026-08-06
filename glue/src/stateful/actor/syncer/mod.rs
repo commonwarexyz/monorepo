@@ -25,7 +25,7 @@ mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::{Artifact, Mailbox};
+pub(crate) use mailbox::Mailbox;
 
 mod plan;
 pub use plan::SyncPlan;

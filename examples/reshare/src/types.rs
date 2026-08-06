@@ -59,7 +59,7 @@ use tracing::info;
 pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
 /// QMDB holding the application state.
 pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequential>;
-/// The application database set, the QMDB alone.
+/// Database set containing a single QMDB.
 pub type Database<E> = Single<Qmdb<E>>;
 /// Globally unique namespace for every message signed by this example.
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";

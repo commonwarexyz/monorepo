@@ -163,7 +163,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .await
     .expect("blocks archive");
 
-    let genesis_target = types::Database::<tokio::Context>::initial_sync_targets();
+    let genesis_target =
+        <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
     let genesis = Block::genesis(
         network.participants[0].clone(),
         genesis_info.clone(),

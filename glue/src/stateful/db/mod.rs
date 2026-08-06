@@ -376,11 +376,11 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     type Merkleized: Send + Sync;
 
     /// One [`ManagedDb::Snapshot`] per database: one published generation's members.
-    type Snapshot: Clone + Send + Sync + 'static;
+    type Snapshot: Send + Sync + 'static;
 
     /// One [`publication::MemberSource`] per database over [`Self::Snapshot`], each
     /// reading its member out of the latest published generation.
-    type Sources: Clone + Send + Sync + 'static;
+    type Sources: Send + Sync + 'static;
 
     /// Project `source` into one serving source per member.
     fn member_sources(source: publication::SetSource<Self::Snapshot>) -> Self::Sources;
@@ -411,10 +411,11 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// Return true if merkleized batches match the committed sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
-    /// Return sync targets for the set's current committed state.
+    /// Return sync targets for the set's currently applied state.
     ///
-    /// Callers must be quiescent (startup alignment or post-sync verification), where
-    /// committed state is durable by construction.
+    /// Applied state may be ahead of durable state while a flush is pending. Callers
+    /// must be quiescent (startup alignment or post-sync verification), where applied
+    /// state is durable by construction.
     fn applied_targets(&self) -> Self::SyncTargets;
 
     /// Apply each merkleized batch's changeset to its underlying database, capture the
@@ -714,31 +715,32 @@ where
 {
     type Error = T::SyncError;
 
+    #[allow(clippy::too_many_arguments)]
     async fn sync(
         context: E,
         config: Self::Config,
         source: R,
         anchor: Anchor<D>,
-        targets: Self::SyncTargets,
+        target: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
     ) -> Result<(Self, Anchor<D>), Self::Error> {
         let (target_tx, target_rx) = mpsc::channel(sync_config.update_channel_size.get());
         let (finish_tx, finish_rx) = mpsc::channel(1);
         let (reached_tx, mut reached_rx) = mpsc::channel(1);
-        let mut current_target = targets.clone();
+        let mut current_target = target.clone();
         let sync = T::sync_db(
             context,
             config,
             source,
-            targets,
+            target,
             target_rx,
             Some(finish_rx),
             Some(reached_tx),
             sync_config,
         );
 
-        let coordinator = async move {
+        let coordinator = async {
             let mut current_anchor = anchor;
             let mut tip_updates = Some(tip_updates);
             loop {
@@ -3797,7 +3799,7 @@ mod tests {
     fn single_state_sync_preserves_db_error_when_target_channel_closes() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let _ = tip_tx.send(TipUpdate::new(anchor(1), 1)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
 
             let result = <Single<FailingStateSyncDb> as StateSyncSet<
                 deterministic::Context,

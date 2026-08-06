@@ -13,8 +13,7 @@ use crate::stateful::{
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{
-        AttachableResolverSet, ConfigOf, DatabaseSet, Publisher, SnapshotOf, StateSyncSet,
-        SyncEngineConfig,
+        AttachableResolverSet, DatabaseSet, Publisher, SnapshotOf, StateSyncSet, SyncEngineConfig,
     },
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
@@ -115,7 +114,7 @@ where
     pub application: A,
 
     /// Configuration used to construct the database set.
-    pub db_config: ConfigOf<A::Databases, E>,
+    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
 
     /// Provider cloned into each proposal.
     pub provider: A::Provider,
@@ -171,7 +170,7 @@ where
     marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Configuration used to initialize the database set at startup.
-    db_config: ConfigOf<A::Databases, E>,
+    db_config: <A::Databases as DatabaseSet<E>>::Config,
 
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
@@ -232,8 +231,8 @@ where
     }
 
     async fn run(self) {
-        // One publication slot spans the actor's whole life: its member sources attach to
-        // the resolvers here, once, and serve nothing until the first installation. Both
+        // One publisher spans the actor's whole life: its member sources attach to the
+        // resolvers here, once, and serve nothing until the first installation. Both
         // startup paths install their initial durable snapshot into this publisher.
         let (publisher, set_source) = Publisher::new(self.context.as_present());
         self.resolvers

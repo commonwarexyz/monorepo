@@ -63,14 +63,18 @@ impl<S> Slot<S> {
     fn install(&self, snapshot: Arc<SetSnapshot<S>>) {
         let generation = snapshot.generation();
         // Metrics update under the lock so the gauge can never trail a newer install.
+        // The replaced snapshot is dropped only after the guard: its destructor may
+        // free a whole generation and must not stall serving.
         let mut state = self.state.lock();
-        match &*state {
+        let replaced = match &*state {
             State::Detached => return,
             State::Live(live) if live.generation() > generation => return,
-            State::Empty | State::Live(_) => *state = State::Live(snapshot),
-        }
+            State::Empty | State::Live(_) => std::mem::replace(&mut *state, State::Live(snapshot)),
+        };
         self.metrics.generation.set(generation as i64);
         self.metrics.installed.inc();
+        drop(state);
+        drop(replaced);
     }
 }
 
@@ -148,8 +152,12 @@ impl<S> Publisher<S> {
 
 impl<S> Drop for Publisher<S> {
     fn drop(&mut self) {
-        // Detach serving so new requests decline while held snapshots drain.
-        *self.slot.state.lock() = State::Detached;
+        // Detach serving so new requests decline while held snapshots drain. Drop
+        // the displaced snapshot outside the lock.
+        let mut state = self.slot.state.lock();
+        let replaced = std::mem::replace(&mut *state, State::Detached);
+        drop(state);
+        drop(replaced);
     }
 }
 
@@ -232,7 +240,7 @@ impl<S, M: Clone> MemberSource<S, M> {
 /// snapshot, so serving never touches the live database.
 pub trait ServeSource: Clone + Send + Sync + 'static {
     /// The per-request serving handle.
-    type Serve: Clone + Send + Sync + 'static;
+    type Serve: Send + Sync + 'static;
 
     /// The serving handle for the latest installed generation, or `None` when there is
     /// nothing to serve (before the node finishes starting, or after writer shutdown).

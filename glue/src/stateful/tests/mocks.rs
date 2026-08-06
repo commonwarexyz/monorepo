@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{ManagedDb, Merkleized, MerkleizedOf, SyncTargetsOf, Unmerkleized, UnmerkleizedOf},
+    db::{DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Unmerkleized, UnmerkleizedOf},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{convert::Infallible, marker::PhantomData, sync::Arc};
 
@@ -80,6 +80,17 @@ impl<D: Send + Sync, T: Clone + PartialEq + Send + Sync> Merkleized for TestMerk
     fn matches(&self, _target: &Self::SyncTarget) -> bool {
         true
     }
+}
+
+/// Completes one parked flush when released by the test.
+pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
+
+/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
+/// prune targets.
+#[derive(Clone, Default)]
+pub(crate) struct FlushControl {
+    pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
+    pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
 }
 
 #[derive(Default)]
@@ -261,7 +272,7 @@ impl<
     type Provider = ();
     type Input = ();
 
-    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         block.height().get()
     }
 
@@ -310,75 +321,5 @@ pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Ancho
         height: Height::new(height),
         round: commonware_consensus::types::Round::new(Epoch::zero(), View::new(height)),
         digest: Sha256Digest::from([digest_byte; 32]),
-    }
-}
-
-/// Completes one parked flush when released by the test.
-pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
-
-/// Shared observer for [`GatedFlushDb`]: parked flush releases and
-/// recorded prune targets.
-#[derive(Clone, Default)]
-pub(crate) struct FlushControl {
-    pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
-    pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
-}
-
-/// Database whose finalize flush completes only when the test releases it.
-///
-/// Its `prune` records immediately, eliding the impl-side barrier real
-/// databases provide (pruning waits for pending flushes, pinned in
-/// `stateful::db::any` tests), so the actor's own scheduling is exposed.
-pub(crate) struct GatedFlushDb {
-    pub(crate) control: FlushControl,
-}
-
-impl ManagedDb<deterministic::Context> for GatedFlushDb {
-    type Unmerkleized = TestUnmerkleized<Self>;
-    type Merkleized = TestMerkleized<Self>;
-    type Error = Infallible;
-    type Config = ();
-    type SyncTarget = u64;
-    type Snapshot = ();
-
-    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
-        Ok((self, ()))
-    }
-
-    fn initial_sync_target() -> Self::SyncTarget {
-        unreachable!("GatedFlushDb is constructed directly in tests")
-    }
-
-    async fn init(
-        _context: deterministic::Context,
-        _config: Self::Config,
-    ) -> Result<Self, Self::Error> {
-        unreachable!("GatedFlushDb is constructed directly in tests")
-    }
-
-    fn new_batch(&self) -> Self::Unmerkleized {
-        TestUnmerkleized::new()
-    }
-
-    async fn finalize(
-        self,
-        _batch: Self::Merkleized,
-    ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
-        let (release, released) = oneshot::channel();
-        self.control.flushes.lock().push(release);
-        Ok((self, (), Handle::from_receiver(released)))
-    }
-
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
-        self.control.pruned.lock().push(*target);
-        Ok(self)
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {
-        0
-    }
-
-    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-        Ok(self)
     }
 }

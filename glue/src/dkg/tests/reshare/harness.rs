@@ -20,7 +20,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            Merkleized as _, MerkleizedOf, SyncEngineConfig, SyncTargetsOf, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, MerkleizedOf, SyncEngineConfig, Unmerkleized as _,
             UnmerkleizedOf, p2p as qmdb_resolver,
         },
     },
@@ -230,12 +230,11 @@ impl App {
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
         databases: &Database<E>,
-        batches: UnmerkleizedOf<Database<E>, E>,
+        mut batches: UnmerkleizedOf<Database<E>, E>,
     ) -> MerkleizedOf<Database<E>, E> {
-        let mut batch = batches;
         let key = Sha256::hash(&[b"height"]);
-        batch = batch.write(key, Some(u64_to_digest(height.get())));
-        batch.merkleize(databases.as_ref()).await.unwrap()
+        batches = batches.write(key, Some(u64_to_digest(height.get())));
+        batches.merkleize(databases.as_ref()).await.unwrap()
     }
 }
 
@@ -318,7 +317,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         }
     }
 
-    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.range.clone())
     }
 }

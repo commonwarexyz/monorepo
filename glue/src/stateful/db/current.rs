@@ -52,8 +52,8 @@ use std::{
     sync::Arc,
 };
 
-/// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
+/// Wraps a QMDB [`UnmerkleizedBatch`], implementing the
+/// [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -70,10 +70,9 @@ where
     _phantom: PhantomData<fn(E, C, I)>,
 }
 
-/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
-/// reference to the parent database.
+/// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
+/// Like any speculative batch, this handle is a branch-scoped view of the owning database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
 /// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
@@ -157,8 +156,8 @@ where
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](super::Merkleized) trait.
+/// Wraps a QMDB [`MerkleizedBatch`], implementing the
+/// [`Merkleized`](super::Merkleized) trait.
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -1351,10 +1350,19 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let db = finalize::<OrderedFixedDb>(db, merkleized).await;
+            let (db, snapshot, durability) =
+                <OrderedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                    .await
+                    .unwrap();
+            durability.await.expect("finalize flush failed");
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            assert_eq!(
+                mmr::Location::new(snapshot.bounds().end),
+                db.bounds().end,
+                "captured snapshot must cover the applied batch",
+            );
 
             let proof = db.exclusion_proof(&missing).await.unwrap();
             assert!(OrderedFixedDb::verify_exclusion_proof(
@@ -1369,7 +1377,7 @@ mod tests {
     /// `CurrentStaged::merkleize`) must return the same values and root as an explicit `get_many` +
     /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
     /// on the staged handle via `with_metadata` and carried from before staging). This guards
-    /// metadata flow and db-handle pairing through the wrapper.
+    /// metadata flow through the wrapper.
     #[test]
     fn ordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {

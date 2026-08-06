@@ -9,7 +9,7 @@ use crate::{
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotOf, SyncEngineConfig,
-            SyncTargetsOf, Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -49,9 +49,8 @@ use commonware_storage::{
     journal::contiguous::{Contiguous as _, fixed::Config as FixedLogConfig},
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        self,
         any::{FixedConfig, unordered::fixed},
-        sync::{Request, Response, Source as SyncSource, Target},
+        sync::Target,
     },
     translator::TwoCap,
 };
@@ -177,21 +176,20 @@ impl App {
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         databases: &SingleDatabaseSet<E>,
-        batches: UnmerkleizedOf<SingleDatabaseSet<E>, E>,
+        mut batches: UnmerkleizedOf<SingleDatabaseSet<E>, E>,
     ) -> MerkleizedOf<SingleDatabaseSet<E>, E> {
-        let mut batch = batches;
         let counter = Sha256::hash(&[b"counter"]);
-        let current: u64 = batch
+        let current: u64 = batches
             .get(&counter, databases.as_ref())
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
-        batch = batch.write(counter, Some(u64_to_digest(current + 1)));
-        batch = batch.write(
+        batches = batches.write(counter, Some(u64_to_digest(current + 1)));
+        batches = batches.write(
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        batch.merkleize(databases.as_ref()).await.unwrap()
+        batches.merkleize(databases.as_ref()).await.unwrap()
     }
 }
 
@@ -259,7 +257,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E> {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.range.clone())
     }
 }
@@ -437,7 +435,8 @@ impl EngineDefinition for SingleDbEngine {
         .await
         .expect("failed to initialize blocks archive");
 
-        let initial_target = SingleDatabaseSet::<deterministic::Context>::initial_sync_targets();
+        let initial_target =
+            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
         let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
@@ -545,36 +544,6 @@ impl EngineDefinition for SingleDbEngine {
             })
         });
 
-        // Observe the committed storage root, to assert cross-validator agreement.
-        let root_observer = qmdb_sync_resolver.source.clone();
-        let storage_roots: StorageRoots = Arc::new(move || {
-            let sources = root_observer.clone();
-            Box::pin(async move {
-                let source = sources.lock().clone().expect("source must be attached");
-                let member = crate::stateful::db::ServeSource::serve(&source)
-                    .expect("a published generation must exist");
-                // Learn the root the way a syncing peer does: serve the tip commit and
-                // reconstruct the root from the returned proof.
-                let size = Location::new(member.bounds().end);
-                let (response, _) = SyncSource::serve(
-                    &member,
-                    Request::Boundary {
-                        size,
-                        start: size - 1,
-                    },
-                )
-                .await
-                .expect("published tip must be servable");
-                let Response::Boundary { proof, op, .. } = response else {
-                    panic!("expected a boundary response");
-                };
-                let root = proof
-                    .reconstruct_root(&qmdb::hasher::<Sha256>(), &[op.encode()], size - 1)
-                    .expect("served proof must reconstruct");
-                vec![(*size, root)]
-            })
-        });
-
         // Deferred wrapper
         let deferred = Deferred::new(
             context.child("deferred"),
@@ -655,7 +624,6 @@ impl EngineDefinition for SingleDbEngine {
                     .unwrap_or(0),
                 state_sync_height,
                 oldest_retained,
-                storage_roots,
             },
         )
     }

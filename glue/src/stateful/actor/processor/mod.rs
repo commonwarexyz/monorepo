@@ -26,7 +26,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, Barrier, DatabaseSet, MerkleizedOf, SnapshotOf, SyncTargetsOf, UnmerkleizedOf},
+    db::{Anchor, Barrier, DatabaseSet, SnapshotOf, UnmerkleizedOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -54,9 +54,10 @@ use std::{
 use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
-type PendingBatches<A, E> = MerkleizedOf<<A as Application<E>>::Databases, E>;
+type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
-pub(super) type PendingSyncTargets<A, E> = SyncTargetsOf<<A as Application<E>>::Databases, E>;
+pub(super) type PendingSyncTargets<A, E> =
+    <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -252,6 +253,16 @@ where
         self.databases = self.databases.prune(&prune.qmdb_target).await;
         marshal.prune(prune.marshal_height);
         self
+    }
+
+    /// Capture a snapshot of the set's applied state.
+    ///
+    /// Callers must prove the applied state durable before installing the
+    /// capture for serving.
+    pub(super) async fn snapshot(mut self) -> (Self, SnapshotOf<A::Databases, E>) {
+        let (databases, snapshot) = self.databases.snapshot().await;
+        self.databases = databases;
+        (self, snapshot)
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -1156,17 +1167,16 @@ mod tests {
             height: Height,
             view: View,
             databases: &DbSet<deterministic::Context>,
-            batches: UnmerkleizedOf<DbSet<deterministic::Context>, deterministic::Context>,
+            mut batches: UnmerkleizedOf<DbSet<deterministic::Context>, deterministic::Context>,
         ) -> MerkleizedOf<DbSet<deterministic::Context>, deterministic::Context> {
-            let mut batch = batches;
-            let current_counter = batch
+            let current_counter = batches
                 .get(&counter_key(), databases)
                 .await
                 .expect("counter read should succeed")
                 .map_or(0, |digest| digest_to_u64(&digest));
-            batch = batch.write(counter_key(), Some(u64_to_digest(current_counter + 1)));
-            batch = batch.write(height_key(height), Some(u64_to_digest(view.get())));
-            crate::stateful::db::Unmerkleized::merkleize(batch, databases)
+            batches = batches.write(counter_key(), Some(u64_to_digest(current_counter + 1)));
+            batches = batches.write(height_key(height), Some(u64_to_digest(view.get())));
+            crate::stateful::db::Unmerkleized::merkleize(batches, databases)
                 .await
                 .expect("merkleize should succeed")
         }

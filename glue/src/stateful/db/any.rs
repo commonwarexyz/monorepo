@@ -52,8 +52,8 @@ use std::{
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
 
-/// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
+/// Wraps a QMDB [`UnmerkleizedBatch`], implementing the
+/// [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -70,10 +70,9 @@ where
     _phantom: PhantomData<fn(E, C, I)>,
 }
 
-/// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
-/// reference to the parent database.
+/// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
+/// Like any speculative batch, this handle is a branch-scoped view of the owning database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
 /// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct AnyStaged<F, E, C, I, H, U, S>
@@ -157,8 +156,8 @@ where
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](super::Merkleized) trait.
+/// Wraps a QMDB [`MerkleizedBatch`], implementing the
+/// [`Merkleized`](super::Merkleized) trait.
 pub struct AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -463,9 +462,6 @@ where
 }
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
-///
-/// `finalize` applies the merkleized batch's changeset and starts
-/// persisting it, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -788,6 +784,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -798,8 +795,12 @@ mod tests {
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::any::unordered::fixed,
+        merkle::{Location, full::Config as MerkleConfig, mmr},
+        qmdb::{
+            self,
+            any::unordered::fixed,
+            sync::{Request, Response, Source as SyncSource},
+        },
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -839,7 +840,7 @@ mod tests {
     /// `AnyStaged::merkleize`) must return the same values and root as an explicit `get_many` +
     /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
     /// on the staged handle via `with_metadata` and carried from before staging). This guards
-    /// metadata flow and db-handle pairing through the wrapper.
+    /// metadata flow through the wrapper.
     #[test]
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
@@ -931,33 +932,25 @@ mod tests {
         Sequential,
     >;
 
-    /// A database whose syncs park until released, with the control that releases them.
-    async fn delayed_db(
-        context: deterministic::Context,
-        partition: &str,
-    ) -> (PendingSyncs, DelayedFixedDb) {
-        let pending = PendingSyncs::default();
-        let delayed = DelayedSyncContext {
-            inner: context,
-            pending: pending.clone(),
-        };
-        let config = fixed_config(partition, &delayed);
-        let db = drive_pending_syncs(
-            &pending,
-            <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
-        )
-        .await
-        .unwrap();
-        (pending, db)
-    }
-
-    /// `finalize` must return, with the batch readable through the shared
-    /// handle, while its flush is still parked at the storage layer.
-    /// Durability is reported only on the returned handle.
+    /// `finalize` must return, with the batch readable on the returned
+    /// database, while its flush is still parked at the storage layer.
+    /// Durability is reported only on the returned handle, and the captured
+    /// snapshot must already prove the post-apply state.
     #[test]
     fn finalize_defers_flush_to_returned_handle() {
         deterministic::Runner::default().start(|context| async move {
-            let (pending, db) = delayed_db(context, "unordered-fixed-deferred").await;
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let config = fixed_config("unordered-fixed-deferred", &delayed);
+            let db = drive_pending_syncs(
+                &pending,
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+            )
+            .await
+            .unwrap();
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
@@ -965,7 +958,7 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
                 .await
                 .unwrap();
-            let (db, _, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
+            let (db, snapshot, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
                 .await
                 .unwrap();
 
@@ -975,6 +968,31 @@ mod tests {
                 "finalize must leave its flush parked",
             );
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
+
+            // The snapshot freezes at the post-apply boundary and proves the
+            // just-applied state, independent of durability.
+            let size = Location::new(snapshot.bounds().end);
+            assert_eq!(
+                size,
+                db.bounds().end,
+                "snapshot must cover the applied batch"
+            );
+            let (response, _) = SyncSource::serve(
+                &*snapshot,
+                Request::Boundary {
+                    size,
+                    start: size - 1,
+                },
+            )
+            .await
+            .expect("captured snapshot must serve its tip");
+            let Response::Boundary { proof, op, .. } = response else {
+                panic!("expected a boundary response");
+            };
+            let root = proof
+                .reconstruct_root(&qmdb::hasher::<Sha256>(), &[op.encode()], size - 1)
+                .expect("served proof must reconstruct");
+            assert_eq!(root, db.root(), "snapshot must prove the post-apply root");
 
             release_pending_syncs(&pending);
             drive_pending_syncs(&pending, sync)

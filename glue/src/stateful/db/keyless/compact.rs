@@ -560,7 +560,7 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+            let (db, snapshot, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
                 .await
                 .unwrap();
             durability.await.expect("finalize flush failed");
@@ -571,6 +571,12 @@ mod tests {
             let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_eq!(target.root, db.root());
             assert_eq!(target.size, mmr::Location::new(3));
+            assert_eq!(
+                snapshot.root(),
+                expected_root,
+                "captured snapshot must carry the applied root",
+            );
+            assert_eq!(snapshot.size(), mmr::Location::new(3));
         });
     }
 

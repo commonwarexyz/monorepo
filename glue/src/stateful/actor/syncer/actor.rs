@@ -1,6 +1,6 @@
 use super::{
     BlockDigest, SyncResult,
-    mailbox::{Artifact, Mailbox, Message},
+    mailbox::{Mailbox, Message},
     resolve_state_sync_floor,
 };
 use crate::stateful::{
@@ -70,9 +70,6 @@ where
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
 
-    /// Set once the completed artifact has been handed to the stateful actor.
-    delivered: bool,
-
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
 
@@ -108,7 +105,6 @@ where
             Self {
                 context: ContextCell::new(config.context),
                 mailbox: receiver,
-                delivered: false,
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
@@ -148,7 +144,6 @@ where
             },
             result = &mut state_sync_task => match result {
                 Ok((databases, anchor)) => {
-                    self.delivered = true;
                     if let Some(sync_complete) = self.sync_complete.take() {
                         sync_complete.send_lossy(SyncResult { databases, anchor });
                     }
@@ -169,15 +164,15 @@ where
                 break;
             } => match message {
                 Message::UpdateTargets { update, response } => {
-                    if self.delivered {
-                        // The artifact already went out on the completion channel or with
-                        // an earlier response; the caller collects it from there.
-                        response.send_lossy(Some(Artifact::Announced));
+                    if self.sync_complete.is_none() {
+                        // Sync already completed; the artifact went out on the
+                        // completion channel.
+                        response.send_lossy(true);
                         continue;
                     }
 
                     // If sync had already completed, the state-sync branch above would
-                    // have marked delivery before this mailbox branch ran.
+                    // have consumed the completion sender before this mailbox branch ran.
                     let tip_updates = tip_updates_tx
                         .as_mut()
                         .expect("ring sender lives until the artifact is published");
@@ -188,17 +183,13 @@ where
                         // publish its artifact", not as a hard failure.
                         match (&mut state_sync_task).await {
                             Ok((databases, anchor)) => {
-                                self.delivered = true;
                                 state_sync_task = None.into();
-                                // The artifact travels with this response, so the completion
-                                // channel must never fire: drop its sender so any protocol
-                                // violation surfaces as the caller's loud expect instead of
-                                // an Announced reply that hangs awaiting a silent channel.
-                                self.sync_complete = None;
-                                response.send_lossy(Some(Artifact::Delivered(SyncResult {
-                                    databases,
-                                    anchor,
-                                })));
+                                let sync_complete = self
+                                    .sync_complete
+                                    .take()
+                                    .expect("completion sender present until sync completes");
+                                sync_complete.send_lossy(SyncResult { databases, anchor });
+                                response.send_lossy(true);
                             }
                             Err(err) => {
                                 panic!("state sync task failed: {err:?}");
@@ -207,7 +198,7 @@ where
                         tip_updates_tx = None;
                         continue;
                     }
-                    response.send_lossy(None);
+                    response.send_lossy(false);
                 }
             },
         }
@@ -216,7 +207,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Artifact, Config, Syncer, resolve_state_sync_floor};
+    use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
         actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
@@ -764,19 +755,13 @@ mod tests {
 
             // The update is forwarded into the ring buffer and its observation parks before
             // the sync task completes (the task's clock only advances at quiescence). The
-            // stranded observation must resolve through a retry that returns the artifact.
+            // stranded observation must resolve through a retry that reports completion,
+            // with the artifact arriving on the completion channel.
             let update = context
                 .child("update")
                 .spawn(move |_| async move { mailbox.update_targets(anchor(1, 1), 1).await });
-            let result = update.await.expect("update task failed");
-            assert!(
-                matches!(
-                    &result,
-                    Some(Artifact::Delivered(artifact))
-                        if artifact.anchor.height == Height::zero()
-                ),
-                "stranded update must resolve to the completed artifact",
-            );
+            let completed = update.await.expect("update task failed");
+            assert!(completed, "stranded update must report the completed sync");
 
             let artifact = sync_completed.await.expect("artifact must publish");
             assert_eq!(artifact.anchor.height, Height::zero());
