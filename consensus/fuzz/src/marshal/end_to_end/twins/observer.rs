@@ -1,14 +1,17 @@
 //! Passive observation of Marshal automaton verdicts.
 
-use super::{Ctx, VERIFY_PROBE};
 use crate::{
     marshal::end_to_end::{
         app::FaultyConfig,
-        invariants::{CertificationAgreementInvariant, HeaderMismatchInvariant},
+        invariants::{
+            CertificationAgreementInvariant, ConsensusParentDigest, HeaderMismatchInvariant,
+        },
     },
     simplex::Simplex,
 };
-use commonware_consensus::{Automaton, CertifiableAutomaton, types::Round};
+use commonware_consensus::{
+    Automaton, CertifiableAutomaton, simplex::types::Context as SimplexContext, types::Round,
+};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_runtime::{Spawner as _, Supervisor as _, deterministic};
@@ -18,21 +21,26 @@ use commonware_utils::{
 };
 use std::sync::Arc;
 
+type Ctx<P, D> = SimplexContext<
+    D,
+    <<P as Simplex>::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey,
+>;
+
 /// Passively observes the real marshal automaton calls made by Simplex.
 ///
 /// Completed certification verdicts are compared with other correct replicas
 /// and checked against any verification context that differs from the block's
 /// embedded context.
-pub(super) struct ObservedMarshal<P: Simplex, M> {
-    pub(super) validator: usize,
-    pub(super) probe_input: Arc<str>,
-    pub(super) context: Arc<Mutex<deterministic::Context>>,
-    pub(super) inner: M,
-    pub(super) certification_agreement: CertificationAgreementInvariant,
-    pub(super) header_mismatch: HeaderMismatchInvariant<P, FaultyConfig>,
+pub(crate) struct ObservedMarshal<P: Simplex, M, D: ConsensusParentDigest = Sha256Digest> {
+    pub(crate) validator: usize,
+    pub(crate) probe_input: Arc<str>,
+    pub(crate) context: Arc<Mutex<deterministic::Context>>,
+    pub(crate) inner: M,
+    pub(crate) certification_agreement: CertificationAgreementInvariant<D>,
+    pub(crate) header_mismatch: HeaderMismatchInvariant<P, FaultyConfig, D>,
 }
 
-impl<P: Simplex, M: Clone> Clone for ObservedMarshal<P, M> {
+impl<P: Simplex, M: Clone, D: ConsensusParentDigest> Clone for ObservedMarshal<P, M, D> {
     fn clone(&self) -> Self {
         Self {
             validator: self.validator,
@@ -45,16 +53,36 @@ impl<P: Simplex, M: Clone> Clone for ObservedMarshal<P, M> {
     }
 }
 
-impl<P, M> Automaton for ObservedMarshal<P, M>
+impl<P, M, D> Automaton for ObservedMarshal<P, M, D>
 where
     P: Simplex,
-    M: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
+    D: ConsensusParentDigest,
+    M: CertifiableAutomaton<Context = Ctx<P, D>, Digest = D>,
 {
-    type Context = Ctx<P>;
-    type Digest = Sha256Digest;
+    type Context = Ctx<P, D>;
+    type Digest = D;
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
-        self.inner.propose(context).await
+        let round = context.round;
+        let mut result = self.inner.propose(context).await;
+        let (mut tx, rx) = oneshot::channel();
+        let certification_agreement = self.certification_agreement.clone();
+        let runtime = self.context.lock().child("propose");
+        let validator = self.validator;
+        runtime.spawn(move |_| async move {
+            let digest = select! {
+                result = &mut result => result.ok(),
+                _ = tx.closed() => result.try_recv().ok(),
+            };
+            let Some(digest) = digest else {
+                return;
+            };
+            // FaultyConfig is shared and view-indexed across honest nodes. If it
+            // becomes per-node, this self-proposal clause must be scoped with it.
+            certification_agreement.record_proposal(validator, round, digest);
+            tx.send_lossy(digest);
+        });
+        rx
     }
 
     async fn verify(
@@ -78,15 +106,17 @@ where
                 return;
             };
             tx.send_lossy(value);
-            if *VERIFY_PROBE
-                && !value
-                && let Some(block_context) = header_mismatch.block_context(&digest)
-                && block_context != context
-            {
-                eprintln!(
-                    "[marshal-twins] mismatch-branch rejection: validator={} round={} \
-                     digest={digest} input={}",
-                    validator, context.round, probe_input
+            if let Some(block_context) = header_mismatch.block_context(&digest) {
+                let mismatched =
+                    header_mismatch.verification_mismatch(&context, &block_context, digest);
+                assert!(
+                    !mismatched || !value,
+                    "marshal verified a payload under a header that is not the block's embedded \
+                     header: validator={validator} digest={digest} context={context:?} \
+                     embedded_context={block_context:?} marshal={} stack={} input={}",
+                    header_mismatch.marshal(),
+                    header_mismatch.stack(),
+                    probe_input,
                 );
             }
         });
@@ -94,10 +124,11 @@ where
     }
 }
 
-impl<P, M> CertifiableAutomaton for ObservedMarshal<P, M>
+impl<P, M, D> CertifiableAutomaton for ObservedMarshal<P, M, D>
 where
     P: Simplex,
-    M: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
+    D: ConsensusParentDigest,
+    M: CertifiableAutomaton<Context = Ctx<P, D>, Digest = D>,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         let mut result = self.inner.certify(round, digest).await;
@@ -119,5 +150,52 @@ where
             tx.send_lossy(value);
         });
         rx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        id_mock,
+        marshal::end_to_end::{
+            app::{ApplicationChoice, BlockContextRegistry},
+            twins::stack::MarshalChoice,
+        },
+        simplex::SimplexId,
+    };
+    use commonware_consensus::{
+        simplex::types::Context,
+        types::{Epoch, Round, View},
+    };
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    fn digest(byte: u8) -> Sha256Digest {
+        Sha256Digest([byte; 32])
+    }
+
+    fn context(view: u64, parent: Sha256Digest) -> Ctx<SimplexId, Sha256Digest> {
+        Context {
+            round: Round::new(Epoch::zero(), View::new(view)),
+            leader: id_mock::PublicKey::from_index(0),
+            parent: (View::new(view.saturating_sub(1)), parent),
+        }
+    }
+
+    #[test]
+    fn parent_digest_reproposal_is_not_a_header_mismatch() {
+        let parent = digest(0xA);
+        let requested = context(2, parent);
+        let embedded = context(1, digest(0xB));
+        let invariant = HeaderMismatchInvariant::<SimplexId, (), Sha256Digest>::new(
+            ApplicationChoice::AlwaysAccept,
+            (),
+            |_, _, _| false,
+            BlockContextRegistry::default(),
+            MarshalChoice::Deferred,
+            "test".into(),
+        );
+
+        assert!(!invariant.verification_mismatch(&requested, &embedded, parent,));
     }
 }

@@ -87,13 +87,13 @@ impl Arbitrary<'_> for MarshalDisrupterInput {
     }
 }
 
-/// Input for the end-to-end standard-marshal Twins mutator.
+/// Input for the end-to-end marshal Twins mutators.
 #[derive(Debug, Clone)]
 pub struct MarshalTwinsInput {
     /// Byte tape used by the deterministic runtime and scenario sampler.
     ///
-    /// The general Twins target reserves the final byte as its application and
-    /// wrapper selector. Focused regression targets use the complete tape.
+    /// General Twins targets reserve the final byte for stack selection.
+    /// Focused regression targets use the complete tape.
     pub raw_bytes: Vec<u8>,
     /// Number of adversarial Twins rounds before the synchronous suffix.
     pub rounds: u8,

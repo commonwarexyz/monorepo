@@ -19,7 +19,8 @@
 //! - GST: the network heals (`apply_partition(None)`); the `Disrupter` stays
 //!   active (its faults are not gated by GST).
 //! - Phase 2 (post-GST): each honest marshal must reach its target (`required`,
-//!   or baseline + 1 unless already at `MAX_REQUIRED`) within [`POST_GST_WINDOW`];
+//!   or baseline + 1 unless already at `MAX_REQUIRED`) within the marshal
+//!   runner's post-GST budget;
 //!   failure to make progress panics with a per-node diagnostic.
 //!
 //! Safety invariants then assert in-order delivery and cross-node agreement.
@@ -33,14 +34,14 @@
 //! The marshal-backed honest engines run at `Epoch::zero()`: marshal's epoch
 //! check ties the consensus epoch to `epocher.containing(height)`, and the
 //! harness `FixedEpocher(20)` maps the low test heights to epoch 0. So the
-//! byzantine `Disrupter` is started via [`start_disrupter_with_epoch`] with
-//! `Epoch::zero()` (the consensus-wide `crate::EPOCH` is left unchanged) so it
-//! emits messages in the same epoch the honest engines run in.
+//! standard Byzantine actor is started via [`start_disrupter_with_epoch`] with
+//! `Epoch::zero()` (the consensus-wide `crate::EPOCH` is left unchanged).
+//! Coding uses the Commitment-typed [`coding_disrupter`] actor, which also emits
+//! messages at epoch 0.
 //!
-//! The disrupter's `Sha256Digest` votes share both the epoch and the payload
-//! type with the honest engines, so it is a fully in-epoch equivocating and
-//! mutating adversary. The three honest validators must still deliver the
-//! target number of ordered blocks.
+//! Each actor's votes share both the epoch and payload type with its honest
+//! engines, so both are fully in-epoch equivocating adversaries. The three
+//! honest validators must still deliver the target number of ordered blocks.
 
 use super::{
     MAX_REQUIRED,
@@ -48,11 +49,15 @@ use super::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
         FaultyConfig,
     },
-    coding_stack::{CodingB, coding_genesis, setup_validator_coding, start_engine_coding},
+    coding_disrupter,
+    coding_stack::{
+        CodingB, CodingCtx, coding_genesis, coding_marshaled, setup_validator_coding,
+        start_engine_coding_with_networks,
+    },
     input::MarshalDisrupterInput,
-    invariants,
+    invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
     twins::{
-        B, Ctx, PublicKeyOf, SchemeOf,
+        B, Ctx, ObservedMarshal, PublicKeyOf, SchemeOf,
         stack::{
             DeferredMarshal, MarshalChoice, TwinsBlockBuilder, TwinsMarshal, genesis_block,
             register_engine_networks, setup_network, setup_network_links, setup_validator,
@@ -61,7 +66,7 @@ use super::{
     },
 };
 use crate::{
-    BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW, SimplexCertificateMock,
+    BYZANTINE_IDX, FAULT_PHASE,
     simplex::Simplex,
     start_disrupter_with_epoch,
     utils::{SetPartition, apply_partition},
@@ -72,20 +77,50 @@ use commonware_consensus::{
         application::Application,
         harness::{LINK, NUM_VALIDATORS},
     },
-    types::{Epoch, TermLength, View},
+    simplex::scheme::Scheme as SimplexScheme,
+    types::{Epoch, TermLength, View, coding::Commitment},
 };
 use commonware_cryptography::{Committable as _, Digestible as _, certificate::ConstantProvider};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::{FuzzRng, NZUsize};
-use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
+use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
+use std::{
+    fmt::{self, Write as _},
+    num::NonZeroUsize,
+    sync::Arc,
+    time::Duration,
+};
 
-/// Generous backlog so marshal never blocks on ack pressure; the downstream
-/// application auto-acks.
+/// Marshal backlog for the disrupter and coding configurations.
+///
+/// Pending-ack invariant coverage uses the Twins target's reachable windows.
 const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
+/// Marshal's post-GST recovery budget on its ordinary simulated links.
+const MARSHAL_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
+
+struct MarshalDisrupterInputDebug<'a>(&'a MarshalDisrupterInput);
+
+impl fmt::Debug for MarshalDisrupterInputDebug<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let input = self.0;
+        formatter
+            .debug_struct("MarshalDisrupterInput")
+            .field("raw_bytes_len", &input.raw_bytes.len())
+            .field("required_containers", &input.required_containers)
+            .field("degraded_network", &input.degraded_network)
+            .field("partition", &input.partition)
+            .field("strategy", &input.strategy)
+            .field("forwarding", &input.forwarding)
+            .finish()
+    }
+}
+
+fn always_accepts<C>(_choice: ApplicationChoice, _config: FaultyConfig, _context: &C) -> bool {
+    false
+}
 
 async fn apply_degraded_network<P: Simplex>(
     oracle: &mut commonware_p2p::simulated::Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -206,8 +241,13 @@ async fn run_liveness_phases<BL, KEY>(
             .iter()
             .map(|(idx, _, target)| (*idx, *target))
             .collect();
-        let phase2_complete =
-            wait_for_targets(context, honest_apps, &phase2_targets, POST_GST_WINDOW).await;
+        let phase2_complete = wait_for_targets(
+            context,
+            honest_apps,
+            &phase2_targets,
+            MARSHAL_LIVENESS_WINDOW,
+        )
+        .await;
 
         if !phase2_complete {
             let mut diag = String::new();
@@ -221,7 +261,7 @@ async fn run_liveness_phases<BL, KEY>(
                     " node{idx}={{baseline={baseline} target={target} current={current}}}"
                 );
             }
-            panic!("marshal: no post-GST progress within {POST_GST_WINDOW:?};{diag}");
+            panic!("marshal: no post-GST progress within {MARSHAL_LIVENESS_WINDOW:?};{diag}");
         }
     }
 }
@@ -267,6 +307,11 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
         // marshal progress rather than application-induced rejection.
         let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
         let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
+        let stack_label: Arc<str> =
+            "application=always-accept marshal=deferred max_pending_acks=64".into();
+        let probe_input: Arc<str> = format!("{:?}", MarshalDisrupterInputDebug(&input)).into();
+        let certification_agreement =
+            CertificationAgreementInvariant::new(stack_label.clone(), MarshalChoice::Deferred);
 
         // Spawned marshal actors run until the root future completes; their
         // handles detach on drop (they do not abort), so we don't retain them.
@@ -316,12 +361,7 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
                     faulty_config,
                     None,
                     block_contexts.clone(),
-                    DeliveryReporter::new(
-                        idx,
-                        node.application.clone(),
-                        None,
-                        "marshal-liveness".into(),
-                    ),
+                    DeliveryReporter::new(idx, node.application.clone(), None, stack_label.clone()),
                 );
             let builder = <DeferredMarshal as TwinsMarshal<P, _>>::create(
                 MarshalChoice::Deferred,
@@ -330,6 +370,21 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
                 node.mailbox.clone(),
             );
             node.start(builder.clone());
+            let observed = ObservedMarshal {
+                validator: idx,
+                probe_input: probe_input.clone(),
+                context: Arc::new(Mutex::new(validator_ctx.child("automaton_invariants"))),
+                inner: builder.clone(),
+                certification_agreement: certification_agreement.clone(),
+                header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig>::new(
+                    ApplicationChoice::AlwaysAccept,
+                    faulty_config,
+                    always_accepts::<Ctx<P>>,
+                    block_contexts.clone(),
+                    MarshalChoice::Deferred,
+                    stack_label.clone(),
+                ),
+            };
 
             start_engine::<P, _, _, _>(
                 validator_ctx,
@@ -337,7 +392,7 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
                 validator.clone(),
                 scheme,
                 P::elector(TermLength::ONE),
-                builder.clone(),
+                observed,
                 builder,
                 node.mailbox.clone(),
                 genesis_commitment,
@@ -351,18 +406,21 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
 
         run_liveness_phases(&context, &oracle, &participants, &honest_apps, required).await;
 
-        invariants::check_all_blocks(&honest_apps, None);
+        invariants::check_all_blocks(&honest_apps, genesis_commitment, None);
     });
 }
 
-/// Crypto: `SimplexCertificateMock`. Marshal: coding. Cluster: `N4F1C3`,
+/// Crypto: `P`. Marshal: coding. Cluster: `N4F1C3`,
 /// disrupter only (no Twins). Liveness: checked. App: fixed always-accept.
 ///
-/// The disrupter signs `Sha256Digest`, but coding's payload is `Commitment`, so
-/// its notarize/finalize votes degrade to withholding; nullify stays effective.
-pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
-    type P = SimplexCertificateMock;
-
+/// The Commitment-typed disrupter signs conflicting coding proposals with the
+/// Byzantine identity's key, so notarize and finalize equivocations reach the
+/// honest engines instead of being discarded during decoding.
+pub fn fuzz_marshal_coding_disrupter<P>(input: MarshalDisrupterInput)
+where
+    P: Simplex,
+    SchemeOf<P>: SimplexScheme<Commitment>,
+{
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -383,26 +441,34 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
             apply_partition(&oracle, &participants, Some(partition), &LINK).await;
         }
 
-        let genesis = coding_genesis();
+        let genesis = coding_genesis::<P>(participants[0].clone());
+        let genesis_digest = genesis.inner().digest();
         let genesis_commitment = genesis.commitment();
+        let block_contexts = BlockContextRegistry::<CodingCtx<P>>::default();
+        block_contexts.record(genesis_digest, genesis.inner().context.clone());
+        let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
+        let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
+        let stack_label: Arc<str> =
+            "application=always-accept marshal=coding max_pending_acks=64".into();
+        let probe_input: Arc<str> = format!("{:?}", MarshalDisrupterInputDebug(&input)).into();
+        let certification_agreement = CertificationAgreementInvariant::coding(stack_label.clone());
 
-        let mut honest_apps: Vec<(usize, Application<CodingB>)> = Vec::new();
+        let mut honest_apps: Vec<(usize, Application<CodingB<P>>)> = Vec::new();
 
         for (idx, validator) in participants.iter().enumerate() {
             let scheme = schemes[idx].clone();
+            let (vote, certificate, resolver) =
+                register_engine_networks::<P>(&oracle, validator.clone()).await;
 
             if idx == BYZANTINE_IDX {
-                let (vote, certificate, resolver) =
-                    register_engine_networks::<P>(&oracle, validator.clone()).await;
-                start_disrupter_with_epoch::<P>(
+                coding_disrupter::start::<P>(
                     context
                         .child("validator")
                         .with_attribute("public_key", validator)
                         .child("disrupter"),
                     scheme,
-                    &input.strategy,
+                    input.strategy,
                     required,
-                    Epoch::zero(),
                     vote,
                     certificate,
                     resolver,
@@ -414,34 +480,83 @@ pub fn fuzz_marshal_coding_disrupter(input: MarshalDisrupterInput) {
                 .child("validator")
                 .with_attribute("public_key", validator);
             let provider = ConstantProvider::new(scheme.clone());
-            let node = setup_validator_coding(
+            let node = setup_validator_coding::<P>(
                 validator_ctx.child("marshal"),
                 &mut oracle,
                 validator.clone(),
                 provider.clone(),
                 genesis.clone(),
                 MAX_PENDING_ACKS,
+                None,
+                idx,
+                stack_label.clone(),
             )
             .await;
             honest_apps.push((idx, node.application.clone()));
 
-            start_engine_coding::<_>(
+            let marshaled = coding_marshaled::<P, _>(
+                &validator_ctx,
+                provider,
+                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>>::default()
+                    .with_block_contexts(block_contexts.clone()),
+                node.mailbox.clone(),
+                node.shards,
+            );
+            let observed = ObservedMarshal {
+                validator: idx,
+                probe_input: probe_input.clone(),
+                context: Arc::new(Mutex::new(validator_ctx.child("automaton_invariants"))),
+                inner: marshaled.clone(),
+                certification_agreement: certification_agreement.clone(),
+                header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig, Commitment>::coding(
+                    ApplicationChoice::AlwaysAccept,
+                    faulty_config,
+                    always_accepts::<CodingCtx<P>>,
+                    block_contexts.clone(),
+                    stack_label.clone(),
+                ),
+            };
+            start_engine_coding_with_networks::<P, _, _, _>(
                 validator_ctx,
                 &oracle,
                 validator.clone(),
                 scheme,
                 P::elector(TermLength::ONE),
-                provider,
+                observed,
+                marshaled,
                 node.mailbox,
-                node.shards,
                 genesis_commitment,
                 input.forwarding,
-            )
-            .await;
+                vote,
+                certificate,
+                resolver,
+            );
         }
 
         run_liveness_phases(&context, &oracle, &participants, &honest_apps, required).await;
 
-        invariants::check_all_blocks(&honest_apps, None);
+        invariants::check_all_blocks(&honest_apps, genesis_digest, None);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SimplexId, strategy::StrategyChoice, utils::Partition};
+    use commonware_consensus::simplex::ForwardingPolicy;
+
+    #[test]
+    fn coding_disrupter_runs_under_strict_id_certificates() {
+        fuzz_marshal_coding_disrupter::<SimplexId>(MarshalDisrupterInput {
+            raw_bytes: vec![0],
+            required_containers: 1,
+            degraded_network: false,
+            partition: Partition::Connected,
+            strategy: StrategyChoice::SmallScope {
+                fault_rounds: 1,
+                fault_rounds_bound: 1,
+            },
+            forwarding: ForwardingPolicy::Disabled,
+        });
+    }
 }

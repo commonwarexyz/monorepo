@@ -13,10 +13,10 @@
 //! faults and a finishing phase drains every pending heal through the same
 //! paced, safety-checked path, so a recovery the last drawn fault scheduled
 //! (whose due step the budget cut short) still exercises restart / journal
-//! replay / reconnection safety. A final fixed-window settle then lets any
-//! still-runnable recovery work emit before a last safety check, since a paced
-//! step returns on the first post-heal finalization and can beat replay /
-//! backfill. Chaos asserts no liveness.
+//! replay / reconnection safety. Once every node is healthy, a bounded terminal
+//! gate requires every reporter to observe a fresh finalization. A final
+//! fixed-window settle then lets any still-runnable recovery work emit before a
+//! last safety check.
 //!
 //! Kill is `mallory::lifecycle::crash_stop`; Start/Reload are durable restarts
 //! (same partition, retained reporter, journal replay); Disconnect/Reconnect
@@ -34,7 +34,7 @@ use crate::{
     invariants,
     mallory::{
         lifecycle,
-        runner::{FinalizationClock, StepBoundary, wait_for_step_boundary},
+        runner::{FinalizationClock, StepBoundary, liveness_target, wait_for_step_boundary},
     },
     simplex::Simplex,
     simplex_audit::{RecordingReporter, summaries},
@@ -52,7 +52,7 @@ use commonware_p2p::simulated::{Error as SimError, Link, Oracle};
 use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
 use commonware_utils::{FuzzRng, channel::mpsc::Receiver as ViewReceiver};
 use rand::RngExt as _;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 
 /// Base episode step count; the hard cap is `max(CHAOS_EPISODE_STEPS,
 /// required_containers)` so the episode can attempt its finalization budget.
@@ -68,15 +68,18 @@ const CHAOS_RESTART_DOWNTIME: Duration = Duration::from_secs(2);
 /// Upper bound of the RNG-drawn jitter before each enactment, roughly one view
 /// time: the fuzzer controls the protocol phase a fault lands in.
 const CHAOS_JITTER_MS: u64 = 2_000;
+/// Bounded wait for every node to observe a fresh finalization after the
+/// finishing phase has restored a fully healthy cluster.
+const CHAOS_LIVENESS_WINDOW: Duration = Duration::from_secs(120);
 /// Deterministic window run after the last heal, before the final safety
-/// check, so recovery work still runnable after a benign post-heal
-/// finalization gets to emit any conflicting or invalid activity before the
-/// root future returns. Journal replay is local and finishing-phase restarts
-/// use zero downtime, so that activity emerges early; one step timeout is
-/// enough, and a larger window would simulate whole extra views of consensus
-/// per fuzz iteration for no added coverage. An ordinary observation boundary,
-/// never a liveness assertion.
+/// check, so recovery work still runnable after the terminal liveness boundary
+/// gets to emit any conflicting or invalid activity before the root future
+/// returns.
 const CHAOS_FINISH_SETTLE: Duration = CHAOS_STEP_TIMEOUT;
+
+pub(super) fn all_nodes_reached(latest: &[u64], nodes: &HashSet<usize>, target: u64) -> bool {
+    nodes.iter().all(|node| latest[*node] >= target)
+}
 
 /// The recording reporter the runner snapshots for the safety checker.
 type ChaosReporter<P> = RecordingReporter<
@@ -573,12 +576,86 @@ where
             .await;
         }
 
-        // Terminal settle: a paced step returns on the FIRST post-heal
-        // finalization, which can beat the just-restarted node's replay and
-        // backfill. Run a fixed deterministic window so all still-runnable
-        // recovery work executes, then check safety once more, so a conflicting
-        // or invalid activity emitted during that catch-up is not missed by the
-        // root future returning first. Not a liveness assertion.
+        let conditions = schedule.conditions();
+        assert!(
+            conditions
+                .iter()
+                .all(|condition| *condition == Condition::Healthy),
+            "chaos harness: finishing phase left unhealthy nodes: {conditions:?}",
+        );
+
+        // Terminal liveness is sound only after every scheduled heal has
+        // restored the all-honest, fully connected committee. Demand one fresh
+        // finalization above the highest post-heal frontier from every node, so
+        // a single healthy reporter cannot hide another node wedged by its last
+        // trigger or restart.
+        clock.drain();
+        let live: HashSet<usize> = (0..n).collect();
+        let max_baseline = clock.baseline(&live);
+        let target = liveness_target(required_containers, max_baseline);
+        let deadline = context.current() + CHAOS_LIVENESS_WINDOW;
+        loop {
+            clock.drain();
+            if all_nodes_reached(&clock.latest, &live, target) {
+                break;
+            }
+            let lagging: HashSet<usize> = live
+                .iter()
+                .copied()
+                .filter(|node| clock.latest[*node] < target)
+                .collect();
+            if matches!(
+                wait_for_step_boundary(
+                    &mut context,
+                    &mut clock,
+                    &lagging,
+                    target.saturating_sub(1),
+                    deadline,
+                )
+                .await,
+                StepBoundary::Timeout
+            ) {
+                clock.drain();
+                let mut diag = String::new();
+                for (node, reporter) in reporters.iter().enumerate() {
+                    let reporter = reporter.inner();
+                    let finalization = reporter
+                        .finalizations
+                        .lock()
+                        .keys()
+                        .copied()
+                        .max()
+                        .unwrap_or_else(View::zero);
+                    let notarization = reporter
+                        .notarizations
+                        .lock()
+                        .keys()
+                        .copied()
+                        .max()
+                        .unwrap_or_else(View::zero);
+                    let nullification = reporter
+                        .nullifications
+                        .lock()
+                        .keys()
+                        .copied()
+                        .max()
+                        .unwrap_or_else(View::zero);
+                    let _ = write!(
+                        diag,
+                        " node{node}={{finalization={finalization} \
+                         notarization={notarization} nullification={nullification}}}"
+                    );
+                }
+                panic!(
+                    "chaos: no post-heal progress from every node within \
+                     {CHAOS_LIVENESS_WINDOW:?} (target={target} \
+                     max_baseline={max_baseline});{diag}"
+                );
+            }
+        }
+
+        // All reporters crossed the terminal frontier. Keep a short fixed
+        // window so any still-runnable work emits before the final safety check.
         context.sleep(CHAOS_FINISH_SETTLE).await;
         clock.drain();
         check_safety::<P>(&mut checker, &reporters, term_length);
@@ -617,6 +694,13 @@ mod tests {
             certify: CertifyChoice::Always,
             reporting: ReporterWiring::Solo,
         }
+    }
+
+    #[test]
+    fn terminal_liveness_requires_every_live_node() {
+        let live = HashSet::from([0, 1, 2]);
+        assert!(!all_nodes_reached(&[7, 7, 6], &live, 7));
+        assert!(all_nodes_reached(&[7, 8, 7], &live, 7));
     }
 
     /// Full deterministic episodes across several seeds, then a byte-exact

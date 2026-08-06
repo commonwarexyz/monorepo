@@ -10,7 +10,10 @@
 //!   `Disrupter`.
 //!   Targets: `marshal_e2e_standard_deferred_cert_mock_disrupter`,
 //!   `marshal_e2e_coding_cert_mock_disrupter`,
+//!   `marshal_e2e_coding_id_disrupter`,
 //!   `marshal_e2e_standard_app_cert_mock_twins`,
+//!   `marshal_e2e_coding_app_cert_mock_twins`,
+//!   `marshal_e2e_coding_app_id_twins`,
 //!   `marshal_e2e_standard_deferred_id_twins_split_header`,
 //!   `marshal_e2e_standard_inline_id_twins_split_header`.
 //! - [`runner`]: drives the standard inline and deferred block paths, including
@@ -33,8 +36,9 @@ pub mod store;
 
 pub use end_to_end::{
     MarshalDisrupterInput, MarshalTwinsInput, fuzz_marshal_coding_disrupter,
-    fuzz_marshal_standard_deferred_id_twins_split_header, fuzz_marshal_standard_disrupter,
-    fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_twins,
+    fuzz_marshal_coding_twins, fuzz_marshal_standard_deferred_id_twins_split_header,
+    fuzz_marshal_standard_disrupter, fuzz_marshal_standard_inline_id_twins_split_header,
+    fuzz_marshal_standard_twins,
 };
 pub use runner::{
     MarshalActorStandardInput, fuzz_marshal_actor_deferred, fuzz_marshal_actor_inline,

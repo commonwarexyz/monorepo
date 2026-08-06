@@ -18,16 +18,15 @@
 //! costs liveness (two honest < quorum during the outage), never safety.
 //!
 //! Recovery is checked by an actual oracle, not "did not panic on restart".
-//! After the node restarts, the oracle requires the recovered node to OBSERVE a
-//! finalization strictly above the cluster's tip at recovery (the byzzfuzz
-//! liveness-checker shape). The target sits above the cluster max, so it cannot
-//! be met by the node merely backfilling to an existing view; it demands one
-//! genuinely new container that the recovered node sees. Each wait is reactive
+//! After the node restarts, the oracle requires every honest reporter to
+//! OBSERVE a finalization strictly above the cluster's tip at recovery (the
+//! byzzfuzz liveness-checker shape). The target sits above the cluster max, so
+//! it cannot be met by merely backfilling to an existing view; it demands one
+//! genuinely new container that every honest node sees. Each wait is reactive
 //! (returns on the first finalization; the step timeout is only the no-progress
-//! fallback) and the oracle stops the instant the target is reached, never on a
-//! fixed schedule. A restart that rejoins but never catches up, or a cluster
-//! that wedges, leaves the node below target and is a finding. This is the only
-//! liveness assertion chaos-twins makes.
+//! fallback) and the oracle stops once every honest node reaches the target. A
+//! restart that rejoins but never catches up, or any honest node that wedges,
+//! is a finding. This is the only liveness assertion chaos-twins makes.
 //!
 //! Wiring reuses the twins split model (one registered identity driven as two
 //! partition-scoped engines via `split_with`), the twins-aware elector with
@@ -49,7 +48,7 @@
 //! that never reaches that gate within a bounded cap is skipped, never crashed
 //! in the wrong term.
 
-use super::log;
+use super::{log, runner::all_nodes_reached};
 use crate::{
     ManagedValidator, N4F1C3, PublicKeyOf, build_validator_with_reporter, invariants,
     mallory::{
@@ -111,7 +110,7 @@ const CHAOS_TWINS_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 const CHAOS_TWINS_JITTER_MS: u64 = 2_000;
 /// Bounded wait for post-recovery liveness, mirroring byzzfuzz's post-GST
 /// window: once the prefix has ended and the node has recovered, three honest
-/// engines must finalize `required_containers` fresh views within this horizon.
+/// engines must all observe a fresh finalization within this horizon.
 const CHAOS_TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(120);
 
 /// The honest managed reporter type: the recording reporter over the twins
@@ -270,7 +269,7 @@ where
         let participants = participants.clone();
         let scenario = scenario.clone();
         move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-            let view = crate::twins_resolver_view::<P>(message, &codec)?;
+            let view = crate::twins_resolver_view::<P, Sha256Digest>(message, &codec)?;
             let (primary, secondary) =
                 scenario.partitions(view, term_length, participants.as_ref());
             match origin {
@@ -284,7 +283,7 @@ where
         let participants = participants.clone();
         let scenario = scenario.clone();
         move |(sender, message): &(_, IoBuf)| {
-            let Some(view) = crate::twins_resolver_view::<P>(message, &codec) else {
+            let Some(view) = crate::twins_resolver_view::<P, Sha256Digest>(message, &codec) else {
                 return SplitTarget::None;
             };
             scenario.route(view, term_length, sender, participants.as_ref())
@@ -531,13 +530,9 @@ fn check_safety<P: Simplex>(
     // `notarization_history` keep every certificate per round and compare the
     // whole signed proposal, unlike the overwrite-per-view summary certificate
     // maps and the payload-keyed vote maps) PLUS the certificate-graph basic
-    // suite. Sound across the durable restart because the run skips any input
-    // where the crash node cast an own nullify pre-crash (see `run`): the genesis
-    // floor replays the whole journal and re-emits journaled votes, so a pre-crash
-    // notarize-then-nullify would re-appear as a notarize after the nullify and
-    // trip the ordering-sensitive own-vote invariants on a replayed duplicate.
-    // With no pre-crash nullify, the replay re-emits only notarizations with no
-    // preceding nullify, so those invariants never false-positive.
+    // suite. The retained audit log stamps each durable incarnation, so
+    // replay-order-sensitive checks remain incarnation-local while
+    // order-independent safety and healing evidence survives journal pruning.
     invariants::check::<P>(term_length, honest);
 
     let honest_summaries = summaries(honest);
@@ -743,23 +738,9 @@ where
             .lock()
             .get(&target_view)
             .is_some_and(|leader| leader == &participants[byz]);
-        // Skip if the crash node cast ANY own nullify pre-crash. A warm-up view
-        // can legally go Notarize -> timeout -> Nullify on this node while the
-        // other quorum identities still finalize it (which this node observes as
-        // `warmup_tip`). Restart uses a genesis floor and replays the whole
-        // journal, re-emitting that notarize AFTER the nullify in the append-only
-        // audit log, which would trip `own_nullify_is_terminal` on a replayed
-        // duplicate, not a real double-vote. Excluding this uncommon path keeps
-        // the audit suite a sound oracle here.
-        let crash_own_nullified = honest[crash_slot]
-            .inner()
-            .nullifies
-            .lock()
-            .values()
-            .any(|signers| signers.contains(&participants[crash]));
-        if !reached || !byz_leads_next || crash_own_nullified {
+        if !reached || !byz_leads_next {
             log::push(format!(
-                "chaos-twins: skipping input (reached={reached} byz_leads_next={byz_leads_next} crash_own_nullified={crash_own_nullified} byz={byz} crash={crash} warmup_tip={warmup_tip} crash_tip={})",
+                "chaos-twins: skipping input (reached={reached} byz_leads_next={byz_leads_next} byz={byz} crash={crash} warmup_tip={warmup_tip} crash_tip={})",
                 clock.latest[crash],
             ));
             return;
@@ -800,16 +781,13 @@ where
 
         // Recovery oracle (byzzfuzz liveness-checker shape). The crashed node has
         // restarted; the target is one finalization above the cluster's tip at
-        // recovery. The baseline is the cluster MAX (not the recovered node's own
-        // tip), so the target sits above where the whole cluster stood and cannot
-        // be met by that node merely backfilling to an existing view: it demands
-        // one NEW container that the recovered node OBSERVES. A restart that
-        // rejoins but never catches up, or a cluster that wedges, leaves the node
-        // below the target and is a finding, not a silent "did not panic" pass.
-        // Each wait is reactive (returns on the first finalization; the step
-        // timeout is only the no-progress fallback), and the loop stops the
-        // instant the target is reached, never on a fixed schedule. This is the
-        // only place chaos-twins asserts liveness.
+        // recovery. The baseline is the cluster MAX, so the target cannot be met
+        // by merely backfilling to an existing view: it demands one NEW container
+        // that every honest node observes. A restarted node that never catches
+        // up, a cluster wedge, or a different honest node wedged by its final
+        // trigger all remain below the target and are findings. Each wait is
+        // reactive, and the loop stops once every honest node reaches the target.
+        // This is the only place chaos-twins asserts liveness.
         let live = live_honest::<P>(&managed);
         assert_eq!(
             live.len(),
@@ -821,14 +799,20 @@ where
         let deadline = context.current() + CHAOS_TWINS_LIVENESS_WINDOW;
         loop {
             clock.drain();
-            if clock.latest[crash] >= target {
+            if all_nodes_reached(&clock.latest, &live, target) {
                 break;
             }
             assert!(
                 context.current() < deadline,
-                "chaos-twins: recovered node {crash} finalized no new container above the crash: tip {} < target {} within {:?}",
-                clock.latest[crash],
-                target,
+                "chaos-twins: not every honest node finalized a new container after recovery: target {target}, honest tips {:?}, recovered node {crash}, window {:?}",
+                {
+                    let mut tips: Vec<_> = live
+                        .iter()
+                        .map(|node| (*node, clock.latest[*node]))
+                        .collect();
+                    tips.sort_unstable();
+                    tips
+                },
                 CHAOS_TWINS_LIVENESS_WINDOW,
             );
             paced_step::<P>(

@@ -10,7 +10,10 @@
 use super::end_to_end::invariants::CertificationAgreementInvariant;
 use crate::{
     SimplexCertificateMock,
-    marshal::end_to_end::twins::{SchemeOf, stack::setup_validator},
+    marshal::end_to_end::twins::{
+        SchemeOf,
+        stack::{MarshalChoice, setup_validator},
+    },
     simplex::Simplex as _,
 };
 use arbitrary::Arbitrary;
@@ -45,7 +48,7 @@ use std::time::Duration;
 type CertScheme = SchemeOf<SimplexCertificateMock>;
 
 const NUM_BLOCKS: u64 = 24;
-const MIN_EVENTS: usize = 1;
+const FORCED_EVENTS: usize = 16;
 const MAX_EVENTS: usize = 64;
 const EVENT_SETTLE: Duration = Duration::from_millis(20);
 
@@ -62,6 +65,12 @@ fn parent_view(height: Height) -> View {
         .previous()
         .map(|h| View::new(h.get()))
         .unwrap_or(View::zero())
+}
+
+fn proposal_matches_epoch(round: Round, height: Height) -> bool {
+    FixedEpocher::new(BLOCKS_PER_EPOCH)
+        .containing(height)
+        .is_some_and(|info| info.epoch() == round.epoch())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -185,7 +194,7 @@ pub struct MarshalActorStandardInput {
 
 impl Arbitrary<'_> for MarshalActorStandardInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
+        let extra_events = u.int_in_range(0..=MAX_EVENTS - FORCED_EVENTS)?;
         let app_propose_idx = if u.arbitrary()? {
             Some(block_idx(u)?)
         } else {
@@ -193,9 +202,9 @@ impl Arbitrary<'_> for MarshalActorStandardInput {
         };
         let app_verify_result = u.arbitrary()?;
 
-        let mut events = Vec::with_capacity(event_count);
+        let mut events = Vec::with_capacity(FORCED_EVENTS + extra_events);
         let boundary_idx = (BLOCKS_PER_EPOCH.get() - 2) as u8;
-        events.extend([
+        let forced_events: [InlineEvent; FORCED_EVENTS] = [
             // Exercise split-header equivocation before the general event
             // stream. The fields around this sequence remain fuzz-controlled,
             // including the application verdict, runtime byte tape, and all
@@ -261,8 +270,9 @@ impl Arbitrary<'_> for MarshalActorStandardInput {
             },
             InlineEvent::ReportTip { block_idx: 1 },
             InlineEvent::CloneWrapper,
-        ]);
-        for _ in events.len()..event_count {
+        ];
+        events.extend(forced_events);
+        for _ in 0..extra_events {
             events.push(InlineEvent::arbitrary(u)?);
         }
 
@@ -531,6 +541,10 @@ fn fuzz_marshal_actor_standard(input: MarshalActorStandardInput, kind: WrapperKi
         let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
         let certification_invariant = CertificationAgreementInvariant::new(
             format!("application=inline-app wrapper={kind:?}").into(),
+            match kind {
+                WrapperKind::Inline => MarshalChoice::Inline,
+                WrapperKind::Deferred => MarshalChoice::Deferred,
+            },
         );
         let mut available = std::collections::HashSet::new();
         let mut poisoned = std::collections::HashSet::new();
@@ -585,12 +599,14 @@ fn fuzz_marshal_actor_standard(input: MarshalActorStandardInput, kind: WrapperKi
                             _ = context.sleep(EVENT_SETTLE) => None,
                         };
                         if let Some(digest) = result {
-                            certification_invariant.record_proposal(0, round, digest);
                             let _ = wrapper.broadcast(digest, Plan::Propose { round });
-                            assert!(
-                                marshal.get_block(&digest).await.is_some(),
-                                "inline proposal is unavailable after relay"
-                            );
+                            let block = marshal
+                                .get_block(&digest)
+                                .await
+                                .expect("inline proposal is unavailable after relay");
+                            if proposal_matches_epoch(round, block.height()) {
+                                certification_invariant.record_proposal(0, round, digest);
+                            }
                             available.insert(digest);
                         }
                     }
@@ -723,6 +739,41 @@ pub fn fuzz_marshal_actor_deferred(input: MarshalActorStandardInput) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forced_script_allows_zero_extra_events() {
+        let bytes = [0u8; 64];
+        let mut unstructured = arbitrary::Unstructured::new(&bytes);
+        let input = MarshalActorStandardInput::arbitrary(&mut unstructured).unwrap();
+        assert_eq!(input.events.len(), FORCED_EVENTS);
+    }
+
+    #[test]
+    fn out_of_epoch_proposal_does_not_arm_self_rejection() {
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
+        let round = Round::new(Epoch::zero(), View::new(20));
+        let digest = Sha256::hash(&[b"proposal"]);
+
+        if proposal_matches_epoch(round, Height::new(20)) {
+            invariant.record_proposal(0, round, digest);
+        }
+        invariant.check_certify_agreement(0, round, digest, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "certified its own proposal as false")]
+    fn in_epoch_proposal_arms_self_rejection() {
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
+        let round = Round::new(Epoch::zero(), View::new(19));
+        let digest = Sha256::hash(&[b"proposal"]);
+
+        if proposal_matches_epoch(round, Height::new(19)) {
+            invariant.record_proposal(0, round, digest);
+        }
+        invariant.check_certify_agreement(0, round, digest, false);
+    }
 
     #[test]
     fn deferred_out_of_epoch_split_header_does_not_arm_recovery() {
