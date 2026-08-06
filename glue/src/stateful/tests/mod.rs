@@ -1049,6 +1049,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
+
     // QMDB descendants retain uncommitted ancestry by weak reference after
     // merkleization, so keep the complete speculative chain alive here.
     let mut speculative = Vec::with_capacity(blocks as usize);
@@ -1358,6 +1359,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
         );
+
         // Cache the batches that will be finalized so the held descendant
         // verification does not own their replay.
         for block in &blocks[..3] {
@@ -1617,6 +1619,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
         );
+
         // Keep the first four batches available so block 5 reaches application
         // verification without owning ancestor replay.
         for block in &blocks[..4] {
@@ -1686,6 +1689,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             !first_release.is_closed(),
             "same-branch finalization should retain verification",
         );
+
         // Hold the full QMDB reader after finalization applies block 4. Pruning
         // can quiesce verification, but cannot delete history or requeue it
         // until this guard is released.

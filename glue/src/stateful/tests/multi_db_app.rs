@@ -107,6 +107,7 @@ pub(super) fn qmdb_config(
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     };
+
     // One witness entry per section so periodic pruning drops entries.
     let db_b = immutable::fixed::CompactConfig {
         strategy: Sequential,

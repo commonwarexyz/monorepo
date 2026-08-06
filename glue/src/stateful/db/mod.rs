@@ -501,7 +501,7 @@ impl Barrier {
 /// Each database is wrapped in [`Shared`], so the set is cheap to
 /// clone and each database can be shared without a global lock.
 /// Multi-database mutations must not hold one member's writer while waiting
-/// to acquire another; readers may span members in the opposite order.
+/// to acquire another. Readers may span members in the opposite order.
 ///
 /// `E` is a trait generic (not an associated type), so one set type can work
 /// across runtimes that satisfy the bounds.

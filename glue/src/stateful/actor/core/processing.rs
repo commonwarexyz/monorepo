@@ -356,7 +356,7 @@ where
                 Step::Prune((prune, retry_mailbox)) => {
                     // The prune target must be durable, but later blocks remain available in
                     // marshal for replay and do not delay maintenance. Verification may complete
-                    // during this wait; later mailbox work remains ordered behind the prune.
+                    // during this wait. Later mailbox work remains ordered behind the prune.
                     while pending_syncs
                         .first()
                         .is_some_and(|height| *height <= prune.barrier_height)
