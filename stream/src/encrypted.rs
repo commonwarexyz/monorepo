@@ -82,8 +82,8 @@ const TAG_SIZE: u32 = {
 
 /// Maximum supported plaintext message size.
 ///
-/// This leaves room for the AEAD tag in the ciphertext's `u32` length prefix.
-pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
+/// This leaves room for the AEAD tag and the ciphertext's `u32` length prefix.
+pub const MAX_SIZE: u32 = crate::utils::codec::MAX_SIZE - TAG_SIZE;
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
@@ -564,7 +564,7 @@ mod test {
     fn test_max_message_size_bounds() {
         type MessageSize = AtMost<NonZeroU32, MAX_SIZE>;
 
-        assert_eq!(MAX_SIZE, u32::MAX - TAG_SIZE);
+        assert_eq!(MAX_SIZE + TAG_SIZE, crate::utils::codec::MAX_SIZE);
 
         let maximum: MessageSize = AtMost!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);

@@ -3,7 +3,7 @@ use crate::Config;
 use commonware_math::fields::goldilocks::F;
 use commonware_utils::{AtMost, BigRationalExt as _};
 use num_rational::BigRational;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 const SECURITY_BITS: usize = 126;
 // Fractional precision for log2 calculations when computing required samples.
@@ -21,32 +21,35 @@ type TotalShards = AtMost<NonZeroUsize, MAX_TOTAL_SHARDS>;
 /// Contains the sizes of various objects in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Topology {
-    /// How many bytes the data has.
+    /// Size of the data, in bytes.
     pub data_bytes: usize,
-    /// How many columns the data has.
+    /// Non-zero number of columns in the data matrix.
     pub data_cols: usize,
-    /// How many rows the data has.
+    /// Non-zero number of rows in the data matrix.
     pub data_rows: usize,
-    /// How many rows the encoded data has.
+    /// Non-zero number of rows in the encoded data.
     pub encoded_rows: usize,
-    /// How many samples each shard has.
+    /// Non-zero number of samples in each shard.
     pub samples: usize,
     /// How many column samples we need.
     pub column_samples: usize,
-    /// How many shards we need to recover.
+    /// Non-zero number of shards needed for recovery.
     pub min_shards: usize,
-    /// How many shards there are in total (each shard containing multiple rows).
+    /// Non-zero total shard count (each shard contains multiple rows).
     pub total_shards: usize,
 }
 
 impl Topology {
     fn with_cols(
-        data_bytes: usize,
-        min_shards: usize,
+        data_bytes: NonZeroUsize,
+        min_shards: NonZeroU16,
         total_shards: TotalShards,
-        data_cols: usize,
+        data_cols: NonZeroUsize,
     ) -> Result<Self, Error> {
+        let data_bytes = data_bytes.get();
+        let min_shards = usize::from(min_shards.get());
         let total_shards = total_shards.get();
+        let data_cols = data_cols.get();
         let data_bits = data_bytes.checked_mul(8).ok_or(Error::TopologyOverflow)?;
         let data_els = F::bits_to_elements(data_bits);
         let data_rows = data_els.div_ceil(data_cols);
@@ -101,19 +104,19 @@ impl Topology {
         Ok(())
     }
 
-    /// Figure out what size different values will have, based on the config and the data.
-    pub fn reckon(config: &Config, data_bytes: usize) -> Result<Self, Error> {
-        let min_shards = usize::from(config.minimum_shards.get());
+    /// Computes protocol dimensions for the data.
+    ///
+    /// Empty data occupies one zero-padded field element so matrix dimensions remain non-zero.
+    pub(super) fn reckon(config: &Config, data_bytes: usize) -> Result<Self, Error> {
+        let matrix_data_bytes = NonZeroUsize::new(data_bytes).unwrap_or(NonZeroUsize::MIN);
+        let minimum_shards = config.minimum_shards;
+        let min_shards = usize::from(minimum_shards.get());
         let extra_shards = usize::from(config.extra_shards.get());
         let total_shards = min_shards
             .checked_add(extra_shards)
             .ok_or(Error::TopologyOverflow)?;
         let total_shards = TotalShards::try_from(total_shards)
             .map_err(|_| Error::TooManyTotalShards(config.total_shards()))?;
-        // The following calculations don't tolerate data_bytes = 0, so we
-        // temporarily correct that to be at least 1, then make sure to adjust
-        // it back again to 0.
-        let corrected_data_bytes = data_bytes.max(1);
         // The goal here is to try and maximize the number of columns in the
         // data. ZODA is more efficient the more columns there are. However,
         // we need to make sure that every shard has enough samples to guarantee
@@ -132,21 +135,20 @@ impl Topology {
         // It's possible that the first configuration, with one column, is not good.
         // To correct for that, we need to add extra checksum columns to guarantee
         // security.
-        let data_bits = corrected_data_bytes
+        let data_bits = matrix_data_bytes
+            .get()
             .checked_mul(8)
             .ok_or(Error::TopologyOverflow)?;
         let max_samples = (MAX_ENCODED_ROWS as usize) / total_shards.get();
         let first_cols = F::bits_to_elements(data_bits)
             .div_ceil(min_shards)
             .div_ceil(max_samples);
-        let mut out = Self::with_cols(corrected_data_bytes, min_shards, total_shards, first_cols)?;
+        let mut data_cols = NonZeroUsize::new(first_cols).ok_or(Error::TopologyOverflow)?;
+        let mut out = Self::with_cols(matrix_data_bytes, minimum_shards, total_shards, data_cols)?;
         loop {
-            let data_cols = out
-                .data_cols
-                .checked_add(1)
-                .ok_or(Error::TopologyOverflow)?;
+            data_cols = data_cols.checked_add(1).ok_or(Error::TopologyOverflow)?;
             let attempt =
-                Self::with_cols(corrected_data_bytes, min_shards, total_shards, data_cols)?;
+                Self::with_cols(matrix_data_bytes, minimum_shards, total_shards, data_cols)?;
             let required_samples = attempt.required_samples();
             if required_samples <= attempt.encoded_rows / total_shards.get() {
                 out = Self {
@@ -173,7 +175,21 @@ impl Topology {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZU16;
+    use commonware_utils::{NZU16, NZUsize};
+
+    #[test]
+    fn reckon_defines_empty_data() {
+        let config = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(1),
+        };
+        let topology = Topology::reckon(&config, 0).unwrap();
+
+        assert_eq!(topology.data_bytes, 0);
+        assert_eq!(topology.data_cols, 1);
+        assert_eq!(topology.data_rows, 1);
+        assert_eq!(topology.samples, 1);
+    }
 
     #[test]
     fn reckon_handles_small_extra_shards() {
@@ -200,7 +216,7 @@ mod tests {
     #[test]
     fn with_cols_rejects_unshufflable_encoded_rows() {
         let total_shards = TotalShards::try_from(usize::from(u16::MAX) + 1).unwrap();
-        let result = Topology::with_cols(258_049, 1, total_shards, 1);
+        let result = Topology::with_cols(NZUsize!(258_049), NZU16!(1), total_shards, NZUsize!(1));
 
         // A power-of-two row count larger than 2^31 cannot be represented by
         // the u32 indices used to shuffle encoded rows.

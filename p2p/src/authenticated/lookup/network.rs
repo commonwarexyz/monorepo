@@ -7,7 +7,6 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
-        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         router,
     },
@@ -18,10 +17,9 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::encrypted::{Config as StreamConfig, MAX_SIZE as STREAM_MAX_SIZE};
-use commonware_utils::{AtMost, union};
+use commonware_stream::encrypted::Config as StreamConfig;
+use commonware_utils::union;
 use rand_core::CryptoRng;
-use std::num::NonZeroU32;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
@@ -31,7 +29,6 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
-    max_frame_size: AtMost<NonZeroU32, STREAM_MAX_SIZE>,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
@@ -56,10 +53,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let max_message_size = cfg.max_message_size.get();
-        let max_frame_size: AtMost<NonZeroU32, STREAM_MAX_SIZE> = (max_message_size
-            + MAX_PAYLOAD_OVERHEAD)
-            .try_into()
-            .expect("authenticated frame size must fit encrypted stream");
         let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
@@ -87,7 +80,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             Self {
                 context: ContextCell::new(context),
                 cfg,
-                max_frame_size,
 
                 channels,
                 tracker,
@@ -175,10 +167,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
 
         // Start listener
+        let max_frame_size = self.cfg.max_frame_size();
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.max_frame_size,
+            max_message_size: max_frame_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

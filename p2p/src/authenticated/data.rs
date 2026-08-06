@@ -122,12 +122,10 @@ mod tests {
         use commonware_utils::AtMost;
         use std::num::NonZeroU32;
 
-        let tag_size = u32::try_from(commonware_cryptography::handshake::TAG_SIZE).unwrap();
         assert_eq!(
             MAX_SIZE,
             commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD
         );
-        assert_eq!(MAX_SIZE + MAX_PAYLOAD_OVERHEAD + tag_size, u32::MAX);
         let maximum: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
         assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(0).is_err());

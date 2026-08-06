@@ -57,7 +57,7 @@ type Task<P> = (Channel, P, Recipients<P>, IoBuf);
 pub const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
 
 /// Maximum supported application payload size.
-pub const MAX_SIZE: u32 = u32::MAX - MAX_PAYLOAD_OVERHEAD;
+pub const MAX_SIZE: u32 = commonware_stream::utils::codec::MAX_SIZE - MAX_PAYLOAD_OVERHEAD;
 
 struct RegistrationGuard {
     active: Arc<AtomicBool>,
@@ -1554,7 +1554,10 @@ mod tests {
 
     #[test]
     fn test_max_size_bounds() {
-        assert_eq!(MAX_SIZE, u32::MAX - MAX_PAYLOAD_OVERHEAD);
+        assert_eq!(
+            MAX_SIZE + MAX_PAYLOAD_OVERHEAD,
+            commonware_stream::utils::codec::MAX_SIZE
+        );
         let maximum: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
         assert!(AtMost::<NonZeroU32, MAX_SIZE>::try_from(0).is_err());

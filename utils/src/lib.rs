@@ -222,7 +222,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// Literal construction support for [`AtMost!`].
     #[doc(hidden)]
-    pub trait __AtMostLiteral<const VALUE: u128>: Sized {
+    pub trait __AtMostLiteral<const VALUE: i128>: Sized {
         /// Primitive type accepted by the literal constructor.
         type Input: Copy;
 
@@ -264,7 +264,7 @@ commonware_macros::stability_scope!(BETA {
                     }
                 }
 
-                impl<const MAX: u32, const VALUE: u128> __AtMostLiteral<VALUE>
+                impl<const MAX: u32, const VALUE: i128> __AtMostLiteral<VALUE>
                     for AtMost<$ty, MAX>
                 {
                     type Input = $ty;
@@ -310,7 +310,7 @@ commonware_macros::stability_scope!(BETA {
                     }
                 }
 
-                impl<const MAX: u32, const VALUE: u128> __AtMostLiteral<VALUE>
+                impl<const MAX: u32, const VALUE: i128> __AtMostLiteral<VALUE>
                     for AtMost<$ty, MAX>
                 {
                     type Input = $inner;
@@ -515,7 +515,7 @@ macro_rules! AtMost {
     };
     ($val:literal) => {
         const {
-            const fn infer_at_most_literal<const VALUE: u128, T, const MAX: u32>(
+            const fn infer_at_most_literal<const VALUE: i128, T, const MAX: u32>(
                 value: $crate::AtMost<T, MAX>,
                 _: <$crate::AtMost<T, MAX> as $crate::__AtMostLiteral<VALUE>>::Input,
             ) -> $crate::AtMost<T, MAX>
@@ -525,8 +525,8 @@ macro_rules! AtMost {
                 value
             }
 
-            infer_at_most_literal::<{ $val as u128 }, _, _>(
-                <_ as $crate::__AtMostLiteral<{ $val as u128 }>>::OUTPUT,
+            infer_at_most_literal::<{ $val as i128 }, _, _>(
+                <_ as $crate::__AtMostLiteral<{ $val as i128 }>>::OUTPUT,
                 $val,
             )
         }
@@ -870,18 +870,24 @@ mod tests {
 
     #[test]
     fn test_at_most_const_literal_inference() {
-        const VALUE: AtMost<u32, 21> = AtMost!(1u32);
+        const VALUE: AtMost<u32, 21> = AtMost!(1);
+        const MAXIMUM: AtMost<u32, { u32::MAX }> = AtMost!(4_294_967_295);
 
         assert_eq!(VALUE.get(), 1);
+        assert_eq!(MAXIMUM.get(), u32::MAX);
     }
 
     #[test]
     fn test_at_most_const_negative_literal_inference() {
-        const PRIMITIVE: AtMost<i32, 21> = AtMost!(-1i32);
-        const NON_ZERO: AtMost<core::num::NonZeroI32, 21> = AtMost!(-1i32);
+        const PRIMITIVE: AtMost<i32, 21> = AtMost!(-1);
+        const NON_ZERO: AtMost<core::num::NonZeroI32, 21> = AtMost!(-1);
+        const LARGE: AtMost<i64, 21> = AtMost!(-2_147_483_649);
+        const MINIMUM: AtMost<i8, 21> = AtMost!(-128i8);
 
         assert_eq!(PRIMITIVE.get(), -1);
         assert_eq!(NON_ZERO.get(), -1);
+        assert_eq!(LARGE.get(), -2_147_483_649);
+        assert_eq!(MINIMUM.get(), i8::MIN);
     }
 
     #[test]

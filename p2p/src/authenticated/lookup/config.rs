@@ -1,6 +1,7 @@
-use crate::authenticated::{AtMost, MAX_SIZE};
+use crate::authenticated::{AtMost, MAX_PAYLOAD_OVERHEAD, MAX_SIZE};
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
+use commonware_stream::encrypted::MAX_SIZE as STREAM_MAX_SIZE;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -121,6 +122,11 @@ pub struct Config<C: Signer> {
 }
 
 impl<C: Signer> Config<C> {
+    /// Returns the encrypted-stream payload limit for this configuration.
+    pub(super) fn max_frame_size(&self) -> AtMost<NonZeroU32, STREAM_MAX_SIZE> {
+        AtMost!(self.max_message_size.get() + MAX_PAYLOAD_OVERHEAD)
+    }
+
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,
@@ -222,5 +228,25 @@ impl<C: Signer> Config<C> {
             tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_mins(1),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::ed25519::PrivateKey;
+    use commonware_utils::AtMost;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn test_max_message_size_config_is_compatible() {
+        let config = Config::test(
+            PrivateKey::from_seed(0),
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+            AtMost!(MAX_SIZE),
+        );
+
+        assert_eq!(config.max_message_size.get(), MAX_SIZE);
+        assert_eq!(config.max_frame_size().get(), STREAM_MAX_SIZE);
     }
 }

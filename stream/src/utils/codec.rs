@@ -5,6 +5,12 @@ use commonware_codec::{
 };
 use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
 
+// A complete frame reserves the largest possible `u32` varint prefix.
+const MAX_PAYLOAD_OVERHEAD: u32 = MAX_U32_VARINT_SIZE as u32;
+
+/// Maximum payload size whose length-prefixed frame fits in a `u32`.
+pub const MAX_SIZE: u32 = u32::MAX - MAX_PAYLOAD_OVERHEAD;
+
 /// Validates the frame size and assembles the frame via the caller's closure.
 ///
 /// The `assemble` closure receives the varint prefix and must combine it with
@@ -134,6 +140,11 @@ mod tests {
     use rand::RngExt as _;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
+
+    #[test]
+    fn test_max_size_bounds() {
+        assert_eq!(MAX_SIZE + MAX_PAYLOAD_OVERHEAD, u32::MAX);
+    }
 
     #[test]
     fn test_send_recv_at_max_message_size() {
