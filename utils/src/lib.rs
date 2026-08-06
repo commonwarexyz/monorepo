@@ -308,6 +308,64 @@ commonware_macros::stability_scope!(BETA {
         (core::num::NonZeroI128, i128),
         (core::num::NonZeroIsize, isize),
     );
+
+    /// An integer value within the inclusive range `MIN..=MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::Within;
+    ///
+    /// type Participants = Within<usize, 2, 64>;
+    ///
+    /// let participants: Participants = Within!(5);
+    /// assert_eq!(participants.get(), 5);
+    /// assert!(Participants::try_from(1).is_err());
+    /// assert!(Participants::try_from(65).is_err());
+    /// ```
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub struct Within<T, const MIN: u32, const MAX: u32>(T);
+
+    impl<T: Copy, const MIN: u32, const MAX: u32> Within<T, MIN, MAX> {
+        /// Returns the wrapped value.
+        pub const fn into_inner(self) -> T {
+            self.0
+        }
+    }
+
+    macro_rules! impl_within {
+        ($wide:ty; $($ty:ty),+ $(,)?) => {
+            $(
+                impl<const MIN: u32, const MAX: u32> Within<$ty, MIN, MAX> {
+                    /// Returns the value.
+                    pub const fn get(self) -> $ty {
+                        self.0
+                    }
+
+                    /// Creates a value if it is within `MIN..=MAX`.
+                    pub const fn new(value: $ty) -> Option<Self> {
+                        let value_wide = value as $wide;
+                        if value_wide >= MIN as $wide && value_wide <= MAX as $wide {
+                            Some(Self(value))
+                        } else {
+                            None
+                        }
+                    }
+                }
+
+                impl<const MIN: u32, const MAX: u32> TryFrom<$ty> for Within<$ty, MIN, MAX> {
+                    type Error = $ty;
+
+                    fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                        Self::new(value).ok_or(value)
+                    }
+                }
+            )+
+        };
+    }
+
+    impl_within!(u128; u8, u16, u32, u64, u128, usize);
+    impl_within!(i128; i8, i16, i32, i64, i128, isize);
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod rng;
@@ -337,7 +395,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub use thread_local::Cached;
 });
 
-/// Creates an [`AtMost`] value, panicking if the value exceeds its maximum.
+/// Creates an [`AtMost`](struct@AtMost) value, panicking if the value exceeds its maximum.
 ///
 /// Typed literals and `NZU*` literals can be used in const contexts. The one-argument primitive
 /// form infers the result type and validates at runtime.
@@ -431,6 +489,55 @@ macro_rules! AtMost {
         }
 
         infer_at_most(match ::core::convert::TryInto::try_into($val) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(_) => panic!("value is outside allowed range"),
+        })
+    }};
+}
+
+/// Creates a [`Within`](struct@Within) value, panicking unless it is within the inclusive range.
+///
+/// Typed literals can be used in const contexts. The one-argument form infers the result type and
+/// validates at runtime.
+///
+/// # Panics
+///
+/// Panics if the value is outside the inclusive range.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_utils::Within;
+///
+/// type Participants = Within<usize, 2, 64>;
+/// const PARTICIPANTS: Participants = Within!(usize, 4);
+/// assert_eq!(PARTICIPANTS.get(), 4);
+///
+/// let inferred: Participants = Within!(8);
+/// assert_eq!(inferred.get(), 8);
+/// ```
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+#[macro_export]
+macro_rules! Within {
+    ($ty:ty, $val:literal) => {
+        const { $crate::Within::<$ty, _, _>::new($val).expect("value is outside allowed range") }
+    };
+    ($ty:ty, $val:expr) => {
+        $crate::Within::<$ty, _, _>::new($val).expect("value is outside allowed range")
+    };
+    ($val:expr) => {{
+        fn infer_within<T, const MIN: u32, const MAX: u32>(
+            value: $crate::Within<T, MIN, MAX>,
+        ) -> $crate::Within<T, MIN, MAX> {
+            value
+        }
+
+        infer_within(match ::core::convert::TryInto::try_into($val) {
             ::core::result::Result::Ok(value) => value,
             ::core::result::Result::Err(_) => panic!("value is outside allowed range"),
         })
@@ -754,6 +861,38 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_within_bounds() {
+        type Participants = Within<usize, 2, 64>;
+        type SignedRange = Within<i16, 2, 64>;
+
+        const MINIMUM: Participants = Within!(usize, 2);
+        const MAXIMUM: Participants = Within!(usize, 64);
+        const MINIMUM_INNER: usize = MINIMUM.into_inner();
+
+        assert_eq!(MINIMUM.get(), 2);
+        assert_eq!(MAXIMUM.get(), 64);
+        assert_eq!(MINIMUM_INNER, 2);
+
+        let inferred: Participants = Within!(8);
+        assert_eq!(inferred.get(), 8);
+        assert!(Participants::try_from(1).is_err());
+        assert!(Participants::try_from(65).is_err());
+        assert!(SignedRange::try_from(-1).is_err());
+        assert_eq!(SignedRange::try_from(2).unwrap().get(), 2);
+        assert!(Within::<u32, 5, 4>::try_from(5).is_err());
+        assert!(Within::<u8, 256, 300>::try_from(u8::MAX).is_err());
+
+        for outside in [1, 65] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    let _: Participants = Within!(outside);
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

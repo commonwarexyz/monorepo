@@ -575,7 +575,8 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        AtMost, Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng,
+        AtMost, Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, Within, ordered::Set, sync::Mutex,
+        test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -6168,21 +6169,15 @@ mod tests {
     {
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
-        let cases = twins::cases(
-            rng,
-            twins::Framework {
-                participants: usize::try_from(n)
-                    .expect("participant count should fit usize")
-                    .try_into()
-                    .expect("twins campaigns support 1..=64 participants"),
-                faults: faults
-                    .try_into()
-                    .expect("twins campaigns support 1..=63 faults"),
-                rounds: campaign.rounds,
-                mode: campaign.mode,
-                max_cases: campaign.max_cases,
-            },
-        );
+        let framework = twins::Framework::new(
+            Within!(usize::try_from(n).expect("participant count should fit usize")),
+            NZUsize!(faults),
+            NZUsize!(campaign.rounds),
+            campaign.mode,
+            NZUsize!(campaign.max_cases),
+        )
+        .expect("faults must be less than participants");
+        let cases = twins::cases(rng, framework);
         assert!(
             !cases.is_empty(),
             "twins campaign should generate at least one case"

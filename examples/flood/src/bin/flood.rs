@@ -13,7 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{NZU32, TryCollect, ordered::Set, union};
+use commonware_utils::{AtMost, NZU32, TryCollect, ordered::Set, union};
 use futures::future::try_join_all;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
@@ -128,7 +128,7 @@ fn main() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
-            config.message_size,
+            AtMost!(config.message_size.get()),
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 

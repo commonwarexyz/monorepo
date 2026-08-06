@@ -76,7 +76,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::{AtMost, ordered::Set};
+use commonware_utils::{Within, ordered::Set};
 use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet},
@@ -374,19 +374,62 @@ pub enum Mode {
 /// `u128`, overflowing configurations panic.
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
-    /// Number of participants in the network.
+    participants: usize,
+    faults: usize,
+    rounds: usize,
+    mode: Mode,
+    max_cases: usize,
+}
+
+impl Framework {
+    /// Creates a valid Twins framework configuration.
     ///
-    /// Campaigns require at least 2 participants.
-    pub participants: AtMost<NonZeroUsize, 64>,
-    /// Number of compromised participants.
-    pub faults: AtMost<NonZeroUsize, 63>,
-    /// Number of adversarial rounds before synchronous suffix.
-    pub rounds: usize,
-    /// How multi-round scenarios are constructed.
-    pub mode: Mode,
-    /// Upper bound on emitted cases. This also caps the number of canonical
-    /// scenarios selected before compromised assignments are expanded.
-    pub max_cases: usize,
+    /// Returns `None` if `faults` is greater than or equal to `participants`.
+    pub const fn new(
+        participants: Within<usize, 2, 64>,
+        faults: NonZeroUsize,
+        rounds: NonZeroUsize,
+        mode: Mode,
+        max_cases: NonZeroUsize,
+    ) -> Option<Self> {
+        let participants = participants.get();
+        let faults = faults.get();
+        if faults >= participants {
+            return None;
+        }
+        Some(Self {
+            participants,
+            faults,
+            rounds: rounds.get(),
+            mode,
+            max_cases: max_cases.get(),
+        })
+    }
+
+    /// Returns the number of participants in the network.
+    pub const fn participants(&self) -> usize {
+        self.participants
+    }
+
+    /// Returns the number of compromised participants.
+    pub const fn faults(&self) -> usize {
+        self.faults
+    }
+
+    /// Returns the number of adversarial rounds before the synchronous suffix.
+    pub const fn rounds(&self) -> usize {
+        self.rounds
+    }
+
+    /// Returns how multi-round scenarios are constructed.
+    pub const fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Returns the maximum number of emitted cases.
+    pub const fn max_cases(&self) -> usize {
+        self.max_cases
+    }
 }
 
 /// Executable case from the Twins framework.
@@ -409,34 +452,30 @@ pub struct Case {
 ///
 /// # Panics
 ///
-/// Panics if `framework` has fewer than 2 participants, faults greater than or
-/// equal to participants, zero rounds, or zero max cases.
 /// Panics if the canonical scenario count overflows `u128`.
 pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
-    let participants = framework.participants.get();
-    let faults = framework.faults.get();
-    assert!(participants > 1, "participants must be > 1");
-    assert!(
-        faults < participants,
-        "faults must be less than participants"
-    );
-    assert!(framework.rounds > 0, "rounds must be > 0");
-    assert!(framework.max_cases > 0, "max_cases must be > 0");
+    let Framework {
+        participants,
+        faults,
+        rounds,
+        mode,
+        max_cases,
+    } = framework;
 
     let mut generator = ScenarioGenerator::new(participants);
-    let scenarios = match framework.mode {
-        Mode::Sampled => generator.generate(rng, framework.rounds, framework.max_cases),
+    let scenarios = match mode {
+        Mode::Sampled => generator.generate(rng, rounds, max_cases),
         Mode::Sustained => {
             // Generate 1-round scenarios and repeat across all rounds.
             // The 1-round residual cells are valid here because applying
             // the same recipient-set pattern repeatedly never distinguishes
             // participants that were indistinguishable after the first round.
-            let single_round = generator.generate(rng, 1, framework.max_cases);
+            let single_round = generator.generate(rng, 1, max_cases);
             single_round
                 .into_iter()
                 .map(|(s, cells)| {
                     let scenario = Scenario {
-                        rounds: vec![s.rounds[0]; framework.rounds],
+                        rounds: vec![s.rounds[0]; rounds],
                     };
                     (scenario, cells)
                 })
@@ -456,7 +495,7 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
         })
         .collect();
     result.shuffle(rng);
-    result.truncate(framework.max_cases);
+    result.truncate(max_cases);
     result
 }
 
@@ -1264,8 +1303,25 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{AtMost, NZU32, TestRng, ordered::Set, test_rng};
-    use std::{collections::HashSet, num::NonZeroUsize, time::Duration};
+    use commonware_utils::{NZU32, NZUsize, TestRng, Within, ordered::Set, test_rng};
+    use std::{collections::HashSet, time::Duration};
+
+    fn framework(
+        participants: usize,
+        faults: usize,
+        rounds: usize,
+        mode: Mode,
+        max_cases: usize,
+    ) -> Framework {
+        Framework::new(
+            Within!(participants),
+            NZUsize!(faults),
+            NZUsize!(rounds),
+            mode,
+            NZUsize!(max_cases),
+        )
+        .expect("faults must be less than participants")
+    }
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
         RoundScenario {
@@ -1630,13 +1686,7 @@ mod tests {
 
     #[test]
     fn generated_cases_are_deterministic() {
-        let framework = Framework {
-            participants: AtMost!(5),
-            faults: AtMost!(1),
-            rounds: 3,
-            mode: Mode::Sampled,
-            max_cases: 50,
-        };
+        let framework = framework(5, 1, 3, Mode::Sampled, 50);
         let first = cases(&mut test_rng(), framework);
         let second = cases(&mut test_rng(), framework);
         assert_eq!(first.len(), second.len());
@@ -1648,15 +1698,9 @@ mod tests {
 
     #[test]
     fn sampled_cases_are_unique() {
-        let framework = Framework {
-            participants: AtMost!(7),
-            faults: AtMost!(2),
-            rounds: 3,
-            mode: Mode::Sampled,
-            max_cases: 64,
-        };
+        let framework = framework(7, 2, 3, Mode::Sampled, 64);
         let generated = cases(&mut test_rng(), framework);
-        assert_eq!(generated.len(), framework.max_cases);
+        assert_eq!(generated.len(), framework.max_cases());
 
         let mut seen = HashSet::new();
         for case in generated {
@@ -2004,13 +2048,7 @@ mod tests {
 
     #[test]
     fn sustained_cases_repeat_single_round() {
-        let framework = Framework {
-            participants: AtMost!(5),
-            faults: AtMost!(1),
-            rounds: 3,
-            mode: Mode::Sustained,
-            max_cases: 50,
-        };
+        let framework = framework(5, 1, 3, Mode::Sustained, 50);
         let all = cases(&mut test_rng(), framework);
         assert!(!all.is_empty());
         for case in &all {
@@ -2024,16 +2062,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "scenario space overflows u128")]
     fn cases_panic_on_scenario_overflow() {
-        let _ = cases(
-            &mut test_rng(),
-            Framework {
-                participants: AtMost!(4),
-                faults: AtMost!(1),
-                rounds: 40,
-                mode: Mode::Sampled,
-                max_cases: 1,
-            },
-        );
+        let _ = cases(&mut test_rng(), framework(4, 1, 40, Mode::Sampled, 1));
     }
 
     #[test]
@@ -2079,13 +2108,7 @@ mod tests {
 
     #[test]
     fn cases_fewer_than_naive_cross_product() {
-        let framework = Framework {
-            participants: AtMost!(5),
-            faults: AtMost!(1),
-            rounds: 1,
-            mode: Mode::Sampled,
-            max_cases: usize::MAX,
-        };
+        let framework = framework(5, 1, 1, Mode::Sampled, usize::MAX);
         let all_cases = cases(&mut test_rng(), framework);
         let mut generator = ScenarioGenerator::new(5);
         let scenarios = generator.generate(&mut test_rng(), 1, usize::MAX);
@@ -2101,68 +2124,39 @@ mod tests {
 
     #[test]
     fn framework_participants_enforce_construction_bounds() {
-        let minimum: AtMost<NonZeroUsize, 64> = AtMost!(1);
-        let maximum: AtMost<NonZeroUsize, 64> = AtMost!(MAX_PARTICIPANTS);
-        let framework = Framework {
-            participants: maximum,
-            faults: AtMost!(1),
-            rounds: 1,
-            mode: Mode::Sampled,
-            max_cases: 1,
-        };
+        let minimum: Within<usize, 2, 64> = Within!(2);
+        let maximum: Within<usize, 2, 64> = Within!(MAX_PARTICIPANTS);
+        let framework = Framework::new(
+            maximum,
+            NZUsize!(1),
+            NZUsize!(1),
+            Mode::Sampled,
+            NZUsize!(1),
+        )
+        .unwrap();
 
-        assert_eq!(minimum.get(), 1);
-        assert_eq!(framework.participants.get(), MAX_PARTICIPANTS);
-        assert!(AtMost::<NonZeroUsize, 64>::try_from(0).is_err());
-        assert!(AtMost::<NonZeroUsize, 64>::try_from(MAX_PARTICIPANTS + 1).is_err());
+        assert_eq!(minimum.get(), 2);
+        assert_eq!(framework.participants(), MAX_PARTICIPANTS);
+        assert!(Within::<usize, 2, 64>::try_from(1).is_err());
+        assert!(Within::<usize, 2, 64>::try_from(MAX_PARTICIPANTS + 1).is_err());
     }
 
     #[test]
-    fn framework_fault_count_enforces_construction_bounds() {
-        let minimum: AtMost<NonZeroUsize, 63> = AtMost!(1);
-        let maximum: AtMost<NonZeroUsize, 63> = AtMost!(63);
-        let framework = Framework {
-            participants: AtMost!(MAX_PARTICIPANTS),
-            faults: maximum,
-            rounds: 1,
-            mode: Mode::Sampled,
-            max_cases: 1,
-        };
-
-        assert_eq!(minimum.get(), 1);
-        assert_eq!(framework.faults.get(), 63);
-        assert!(AtMost::<NonZeroUsize, 63>::try_from(0).is_err());
-        assert!(AtMost::<NonZeroUsize, 63>::try_from(64).is_err());
+    fn framework_accepts_faults_below_participants() {
+        let framework = framework(MAX_PARTICIPANTS, 63, 1, Mode::Sampled, 1);
+        assert_eq!(framework.faults(), 63);
     }
 
     #[test]
-    #[should_panic(expected = "participants must be > 1")]
-    fn cases_reject_single_participant() {
-        let _ = cases(
-            &mut test_rng(),
-            Framework {
-                participants: AtMost!(1),
-                faults: AtMost!(1),
-                rounds: 1,
-                mode: Mode::Sampled,
-                max_cases: 1,
-            },
+    fn framework_rejects_faults_not_less_than_participants() {
+        let framework = Framework::new(
+            Within!(2),
+            NZUsize!(2),
+            NZUsize!(1),
+            Mode::Sampled,
+            NZUsize!(1),
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "faults must be less than participants")]
-    fn cases_reject_faults_equal_to_participants() {
-        let _ = cases(
-            &mut test_rng(),
-            Framework {
-                participants: AtMost!(2),
-                faults: AtMost!(2),
-                rounds: 1,
-                mode: Mode::Sampled,
-                max_cases: 1,
-            },
-        );
+        assert!(framework.is_none());
     }
 
     #[test]
@@ -2222,13 +2216,7 @@ mod tests {
     fn cases_support_64_participants() {
         let generated = cases(
             &mut test_rng(),
-            Framework {
-                participants: AtMost!(MAX_PARTICIPANTS),
-                faults: AtMost!(1),
-                rounds: 1,
-                mode: Mode::Sampled,
-                max_cases: 1,
-            },
+            framework(MAX_PARTICIPANTS, 1, 1, Mode::Sampled, 1),
         );
         assert_eq!(generated.len(), 1);
     }
@@ -2257,18 +2245,12 @@ mod tests {
 
     #[test]
     fn twins_elector_uses_scenario_leaders_then_fallback_suffix() {
-        let framework = Framework {
-            participants: AtMost!(5),
-            faults: AtMost!(1),
-            rounds: 3,
-            mode: Mode::Sampled,
-            max_cases: 1,
-        };
+        let framework = framework(5, 1, 3, Mode::Sampled, 1);
         let case = cases(&mut test_rng(), framework)
             .into_iter()
             .next()
             .expect("expected at least one generated twins case");
-        let participant_count = framework.participants.get();
+        let participant_count = framework.participants();
         let participants: Vec<_> = (0..participant_count as u64)
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
@@ -2295,7 +2277,7 @@ mod tests {
             );
         }
 
-        for view in (framework.rounds as u64 + 1)..=20 {
+        for view in (framework.rounds() as u64 + 1)..=20 {
             let round = Round::new(Epoch::new(333), View::new(view));
             assert_eq!(twins.elect(round, None), fallback.elect(round, None));
         }
