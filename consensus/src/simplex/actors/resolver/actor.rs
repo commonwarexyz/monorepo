@@ -188,17 +188,17 @@ impl<
                     MailboxMessage::Certificate { certificate, .. } => {
                         self.updated(&mut resolver, certificate);
                     }
-                    MailboxMessage::Certified { round, success, .. } => {
-                        self.certified(&mut resolver, round.view(), success);
+                    MailboxMessage::Certified { view, success, .. } => {
+                        self.certified(&mut resolver, view, success);
                     }
                     MailboxMessage::Resolve {
-                        proposal_view,
+                        proposal,
                         view,
                         kind,
                         target,
                         ..
                     } => {
-                        self.resolve(&mut resolver, proposal_view, view, kind, target);
+                        self.resolve(&mut resolver, proposal, view, kind, target);
                     }
                 }
             },
@@ -385,21 +385,21 @@ impl<
     fn resolve<R>(
         &self,
         resolver: &mut R,
-        proposal_view: View,
+        proposal: View,
         view: View,
         kind: Kind,
         target: S::PublicKey,
     ) where
         R: TargetedResolver<Key = U64, Subscriber = Ask, PublicKey = S::PublicKey>,
     {
-        if view >= proposal_view || self.settled(view, kind) {
+        if view >= proposal || self.settled(view, kind) {
             return;
         }
         let ask = Ask::ancestry(kind);
         let span = info_span!(
             "simplex.resolver.fetch",
             epoch = self.epoch.traced(),
-            cause = proposal_view.traced(),
+            cause = proposal.traced(),
             view = view.traced(),
             reason = "proposal_ancestry",
             kind = ask.kind.as_str()
@@ -1095,7 +1095,7 @@ mod tests {
             first_responder_mailbox.updated(Certificate::Notarization(notarization.clone()));
             // Certifying the notarization makes it the responder's floor, so
             // the responder answers a lower-view request with it.
-            first_responder_mailbox.certified(notarization.round(), true);
+            first_responder_mailbox.certified(notarization.view(), true);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, requested);
             nullification_holder_mailbox.updated(Certificate::Nullification(nullification.clone()));
             context.sleep(Duration::from_millis(10)).await;

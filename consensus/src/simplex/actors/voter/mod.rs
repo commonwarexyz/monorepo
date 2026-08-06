@@ -6409,8 +6409,8 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == view5 =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == view5 =>
                         {
                             break Some(success);
                         }
@@ -6524,8 +6524,8 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             break Some(success);
                         }
@@ -7464,7 +7464,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
@@ -8801,8 +8801,8 @@ mod tests {
 
             let mut certified_before_sync = false;
             while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
-                if let MailboxMessage::Certified { round, success, .. } = msg
-                    && round.view() == target_view {
+                if let MailboxMessage::Certified { view, success, .. } = msg
+                    && view == target_view {
                         assert!(success, "expected successful certification");
                         certified_before_sync = true;
                     }
@@ -8879,8 +8879,8 @@ mod tests {
             while !certified {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             assert!(success, "expected successful certification");
                             certified = true;
@@ -8993,7 +8993,7 @@ mod tests {
             while !(replayed_certified && advanced) {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
                             assert!(success, "replayed certification should be successful");
                             replayed_certified = true;
                         }
@@ -9167,8 +9167,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             assert!(!success, "expected failed certification");
                             break;
@@ -9253,8 +9253,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;

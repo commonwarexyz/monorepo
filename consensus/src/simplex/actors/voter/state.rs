@@ -86,7 +86,7 @@ impl ParentPayloadError {
 pub enum Verify<S: Scheme<D>, D: Digest> {
     Ready(Context<D, S::PublicKey>, Proposal<D>),
     Resolve {
-        proposal_view: View,
+        proposal: View,
         view: View,
         kind: Kind,
         target: S::PublicKey,
@@ -779,7 +779,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     return Verify::Wait;
                 }
                 return Verify::Resolve {
-                    proposal_view: proposal.view(),
+                    proposal: proposal.view(),
                     view: missing,
                     kind,
                     target: leader.key,
@@ -3698,12 +3698,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Nullification,
                     target,
                 }
-                    if proposal_view == child_view
+                    if proposal == child_view
                         && view == skipped_view
                         && target == expected_leader
             ));
@@ -3746,12 +3746,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Notarization,
                     ..
                 }
-                    if proposal_view == child_view
+                    if proposal == child_view
                         && view == parent_view
             ));
 
@@ -3836,12 +3836,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Nullification,
                     ..
                 }
-                    if proposal_view == child_view
+                    if proposal == child_view
                         && view == View::new(2)
             ));
         });
@@ -3903,12 +3903,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Nullification,
                     ..
                 }
-                    if proposal_view == retry_view
+                    if proposal == retry_view
                         && view == skipped_view
             ));
         });
@@ -3946,12 +3946,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Nullification,
                     ..
                 }
-                    if proposal_view == child_view
+                    if proposal == child_view
                         && view == skipped_view
             ));
 
@@ -3990,12 +3990,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Notarization,
                     ..
                 }
-                    if proposal_view == child_view
+                    if proposal == child_view
                         && view == View::new(2)
             ));
         });
@@ -4034,12 +4034,12 @@ mod tests {
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
-                    proposal_view,
+                    proposal,
                     view,
                     kind: Kind::Nullification,
                     ..
                 }
-                    if proposal_view == child_view
+                    if proposal == child_view
                         && view == View::new(2)
             ));
         });

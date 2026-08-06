@@ -4,7 +4,7 @@ use crate::{
         actors::{Ask, Kind},
         types::Certificate,
     },
-    types::{Round as Rnd, View},
+    types::View,
 };
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -24,12 +24,12 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// The certificate.
         certificate: Certificate<S, D>,
     },
-    /// Certification result for a round.
+    /// Certification result for a view.
     Certified {
         /// The span carried with this message.
         span: Span,
-        /// The certified round.
-        round: Rnd,
+        /// The certified view.
+        view: View,
         /// Whether certification succeeded.
         success: bool,
     },
@@ -37,8 +37,8 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
     Resolve {
         /// The span carried with this message.
         span: Span,
-        /// Proposal that exposed the missing ancestry.
-        proposal_view: View,
+        /// View of the proposal that exposed the missing ancestry.
+        proposal: View,
         /// View whose certificate is needed.
         view: View,
         /// The certificate that is needed.
@@ -53,7 +53,7 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Certificate { certificate, .. } => certificate.view(),
-            Self::Certified { round, .. } => round.view(),
+            Self::Certified { view, .. } => *view,
             Self::Resolve { view, .. } => *view,
         }
     }
@@ -172,20 +172,20 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 }
                 (
                     Self::Certified {
-                        round: new_round, ..
+                        view: new_view, ..
                     },
                     Self::Certified {
-                        round: old_round, ..
+                        view: old_view, ..
                     },
-                ) => new_round.view() == old_round.view(),
+                ) => new_view == old_view,
                 (
                     Self::Resolve {
-                        proposal_view: new_proposal,
+                        proposal: new_proposal,
                         view: new_view,
                         ..
                     },
                     Self::Resolve {
-                        proposal_view: old_proposal,
+                        proposal: old_proposal,
                         view: old_view,
                         ..
                     },
@@ -223,15 +223,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, round: Rnd, success: bool) {
+    pub fn certified(&mut self, view: View, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
             span: info_span!(
                 "simplex.resolver.mailbox.certified",
-                epoch = round.epoch().traced(),
-                view = round.view().traced(),
+                view = view.traced(),
                 success
             ),
-            round,
+            view,
             success,
         });
     }
@@ -239,7 +238,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Request proposal ancestry from its leader.
     pub(crate) fn resolve(
         &mut self,
-        proposal_view: View,
+        proposal: View,
         view: View,
         kind: Kind,
         target: S::PublicKey,
@@ -247,11 +246,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         let _ = self.sender.enqueue(MailboxMessage::Resolve {
             span: info_span!(
                 "simplex.resolver.mailbox.resolve",
-                proposal_view = proposal_view.traced(),
+                proposal = proposal.traced(),
                 view = view.traced(),
                 kind = kind.as_str()
             ),
-            proposal_view,
+            proposal,
             view,
             kind,
             target,
@@ -452,13 +451,13 @@ mod tests {
     fn certified_msg(view: View, success: bool) -> MailboxMessage<TestScheme, Sha256Digest> {
         MailboxMessage::Certified {
             span: Span::none(),
-            round: Round::new(EPOCH, view),
+            view,
             success,
         }
     }
 
     fn resolve_msg(
-        proposal_view: View,
+        proposal: View,
         view: View,
         kind: Kind,
     ) -> MailboxMessage<TestScheme, Sha256Digest> {
@@ -466,7 +465,7 @@ mod tests {
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, b"resolver-policy-target", 5);
         MailboxMessage::Resolve {
             span: Span::none(),
-            proposal_view,
+            proposal,
             view,
             kind,
             target: participants[0].clone(),
@@ -533,10 +532,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                round,
+                view,
                 success: false,
                 ..
-            }) if round.view() == View::new(5)
+            }) if view == View::new(5)
         ));
     }
 
@@ -563,11 +562,11 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Resolve {
-                proposal_view,
+                proposal,
                 view,
                 kind: Kind::Notarization,
                 ..
-            }) if proposal_view == View::new(10) && view == View::new(5)
+            }) if proposal == View::new(10) && view == View::new(5)
         ));
     }
 
@@ -603,10 +602,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                round,
+                view,
                 success: false,
                 ..
-            }) if round.view() == View::new(4)
+            }) if view == View::new(4)
         ));
     }
 
@@ -699,10 +698,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                round,
+                view,
                 success: true,
                 ..
-            }) if round.view() == View::new(4)
+            }) if view == View::new(4)
         ));
     }
 }
