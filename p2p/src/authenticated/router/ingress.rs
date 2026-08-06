@@ -146,14 +146,6 @@ impl<P: PublicKey> fmt::Debug for Messenger<P> {
 }
 
 impl<P: PublicKey> Messenger<P> {
-    /// Returns a new [Messenger] with the given sender.
-    /// (The router has the corresponding receiver.)
-    pub fn new(pool: BufferPool, sender: Mailbox<P>) -> Self {
-        let messenger = Self::unbound(pool);
-        messenger.bind(sender);
-        messenger
-    }
-
     pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Self {
         Self {
             pool,
@@ -274,10 +266,8 @@ mod tests {
                 NZUsize!(1),
             );
             let mailbox = Mailbox::new(control_sender.clone());
-            let messenger = Messenger::new(
-                context.network_buffer_pool().clone(),
-                Mailbox::new(control_sender),
-            );
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            messenger.bind(Mailbox::new(control_sender));
             let peer = PrivateKey::from_seed(1).public_key();
 
             assert_eq!(

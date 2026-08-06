@@ -258,7 +258,7 @@ mod tests {
         authenticated::{
             channels,
             relay::Relay,
-            router::{Actor as RouterActor, Config as RouterConfig},
+            router::{Actor as RouterActor, Config as RouterConfig, Messenger as RouterMessenger},
         },
     };
     use commonware_actor::{Feedback, Unreliable};
@@ -2389,8 +2389,10 @@ mod tests {
             let cfg = RouterConfig {
                 mailbox_size: NZUsize!(1),
             };
-            let (router, mailbox, messenger) =
+            let (router, mailbox) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
+            let messenger = RouterMessenger::unbound(context.network_buffer_pool().clone());
+            messenger.bind(mailbox.clone());
 
             // Create channels for the router
             let channels =

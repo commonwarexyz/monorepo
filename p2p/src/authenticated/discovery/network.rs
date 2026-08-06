@@ -162,7 +162,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
-        let (router, router_mailbox, _) = router::Actor::new(
+        let (router, router_mailbox) = router::Actor::new(
             self.context.child("router"),
             router::Config {
                 mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),

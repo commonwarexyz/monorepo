@@ -458,10 +458,8 @@ mod tests {
         >(
             context.child("router_mailbox"), NZUsize!(10)
         );
-        let messenger = router::Messenger::new(
-            context.network_buffer_pool().clone(),
-            router::Mailbox::new(router_sender),
-        );
+        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        messenger.bind(router::Mailbox::new(router_sender));
         Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
     }
 
