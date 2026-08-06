@@ -27,35 +27,28 @@ use commonware_storage::{
     },
 };
 use commonware_utils::channel::mpsc;
-use std::{marker::PhantomData, ops::Deref, sync::Arc};
+use std::{ops::Deref, sync::Arc};
 
 /// Wraps an unjournaled keyless batch before merkleization.
-pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
+pub struct KeylessUnjournaledUnmerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
-    _phantom: PhantomData<fn(E, C)>,
 }
 
-impl<F, E, V, H, S, C> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
+impl<F, V, H, S> Deref for KeylessUnjournaledUnmerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Target = CompactUnmerkleizedBatch<F, H, V, S>;
@@ -65,15 +58,12 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
+impl<F, V, H, S> KeylessUnjournaledUnmerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     /// Set commit metadata included in the next merkleization.
@@ -96,30 +86,23 @@ where
 }
 
 /// Wraps an unjournaled keyless batch after merkleization.
-pub struct KeylessUnjournaledMerkleized<F, E, V, H, S, C = ()>
+pub struct KeylessUnjournaledMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, V, S>>,
-    _phantom: PhantomData<fn(E, C)>,
 }
 
-impl<F, E, V, H, S, C> Deref for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+impl<F, V, H, S> Deref for KeylessUnjournaledMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Target = CompactMerkleizedBatch<F, H::Digest, V, S>;
@@ -129,7 +112,8 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> UnmerkleizedTrait for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S, C> UnmerkleizedTrait<CompactDb<F, E, V, H, C, S>>
+    for KeylessUnjournaledUnmerkleized<F, V, H, S>
 where
     F: Family,
     E: Context,
@@ -140,35 +124,31 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    type Merkleized = KeylessUnjournaledMerkleized<F, E, V, H, S, C>;
-    type Db = CompactDb<F, E, V, H, C, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, V, H, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+    async fn merkleize(
+        self,
+        db: &CompactDb<F, E, V, H, C, S>,
+    ) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
             .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
             .await;
-        Ok(KeylessUnjournaledMerkleized {
-            inner: merkleized,
-            _phantom: PhantomData,
-        })
+        Ok(KeylessUnjournaledMerkleized { inner: merkleized })
     }
 }
 
-impl<F, E, V, H, S, C> MerkleizedTrait for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+impl<F, V, H, S> MerkleizedTrait for KeylessUnjournaledMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, V, H, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     fn matches(&self, target: &Self::SyncTarget) -> bool {
@@ -184,7 +164,6 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 }
@@ -198,8 +177,8 @@ where
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, FixedEncoding<V>, H, S, ()>;
-    type Merkleized = KeylessUnjournaledMerkleized<F, E, FixedEncoding<V>, H, S, ()>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, FixedEncoding<V>, H, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -221,7 +200,6 @@ where
             batch: Self::new_batch(self),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -270,8 +248,8 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, VariableEncoding<V>, H, S, C>;
-    type Merkleized = KeylessUnjournaledMerkleized<F, E, VariableEncoding<V>, H, S, C>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, VariableEncoding<V>, H, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -293,7 +271,6 @@ where
             batch: Self::new_batch(self),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 

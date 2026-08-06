@@ -47,26 +47,21 @@ use commonware_storage::{
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{
-    marker::PhantomData,
     ops::{Deref, Range},
     sync::Arc,
 };
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] to implement [`Unmerkleized`](super::Unmerkleized).
-pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
+pub struct CurrentUnmerkleized<F, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, N, S>,
     metadata: Option<U::Value>,
-    _phantom: PhantomData<fn(E, C, I)>,
 }
 
 /// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`].
@@ -74,30 +69,23 @@ where
 /// Like any speculative batch, this handle is a branch-scoped view of the owning database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
 /// (see [`MerkleizedBatch`]'s branch-validity contract).
-pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
+pub struct CurrentStaged<F, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, N, S>,
     metadata: Option<U::Value>,
-    _phantom: PhantomData<fn(E, C, I)>,
 }
 
 /// Key-value operations shared by both `current` update kinds.
-impl<F, E, C, I, H, U, const N: usize, S> CurrentUnmerkleized<F, E, C, I, H, U, N, S>
+impl<F, H, U, const N: usize, S> CurrentUnmerkleized<F, H, U, N, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -110,40 +98,54 @@ where
     }
 
     /// Read a value by key, falling back to `db`'s committed state.
-    pub async fn get(
+    pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Option<U::Value>, Error<F>> {
+    ) -> Result<Option<U::Value>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         self.batch.get(key, db).await
     }
 
     /// Read multiple values by key, falling back to `db`'s committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(
+    pub async fn get_many<E, C, I>(
         &self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    ) -> Result<Vec<Option<U::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         self.batch.get_many(keys, db).await
     }
 
     /// Read multiple values and return a staged batch for the same keys.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn stage(
+    pub async fn stage<E, C, I>(
         self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Vec<Option<U::Value>>, CurrentStaged<F, E, C, I, H, U, N, S>), Error<F>> {
+    ) -> Result<(Vec<Option<U::Value>>, CurrentStaged<F, H, U, N, S>), Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         let (values, staged) = self.batch.stage(keys, db).await?;
         Ok((
             values,
             CurrentStaged {
                 staged,
                 metadata: self.metadata,
-                _phantom: PhantomData,
             },
         ))
     }
@@ -156,28 +158,21 @@ where
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] to implement [`Merkleized`](super::Merkleized).
-pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
+pub struct CurrentMerkleized<F, H, U, const N: usize, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, N, S>>,
-    _phantom: PhantomData<fn(E, C, I)>,
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, E, C, I, H, U, N, S>
+impl<F, H, U, const N: usize, S> Deref for CurrentUnmerkleized<F, H, U, N, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -189,13 +184,10 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Deref for CurrentMerkleized<F, E, C, I, H, U, N, S>
+impl<F, H, U, const N: usize, S> Deref for CurrentMerkleized<F, H, U, N, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -208,13 +200,10 @@ where
 }
 
 /// Read-expansion operations for the `current` staged batch.
-impl<F, E, C, I, H, U, const N: usize, S> CurrentStaged<F, E, C, I, H, U, N, S>
+impl<F, H, U, const N: usize, S> CurrentStaged<F, H, U, N, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -232,11 +221,16 @@ where
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
     /// and does not observe values computed for earlier staged slots but not yet passed to
     /// `merkleize`.
-    pub async fn expand(
+    pub async fn expand<E, C, I>(
         self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         let (range, values, staged) = self.staged.expand(keys, db).await?;
         Ok((
             range,
@@ -244,22 +238,17 @@ where
             Self {
                 staged,
                 metadata: self.metadata,
-                _phantom: PhantomData,
             },
         ))
     }
 }
 
 /// Staged merkleize for the `current` unordered update kind.
-impl<F, E, C, I, H, K, V, const N: usize, S>
-    CurrentStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>
+impl<F, H, K, V, const N: usize, S> CurrentStaged<F, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Context,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
@@ -277,33 +266,31 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, unordered::Update<K, V>, N, S>,
-    ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
+    ) -> Result<CurrentMerkleized<F, H, unordered::Update<K, V>, N, S>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         let inner = self
             .staged
             .merkleize(updates, upserts, self.metadata, db)
             .await?;
-        Ok(CurrentMerkleized {
-            inner,
-            _phantom: PhantomData,
-        })
+        Ok(CurrentMerkleized { inner })
     }
 }
 
 /// Staged merkleize for the `current` ordered update kind.
-impl<F, E, C, I, H, K, V, const N: usize, S>
-    CurrentStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>
+impl<F, H, K, V, const N: usize, S> CurrentStaged<F, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
-    E: Context,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
-    I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
@@ -321,59 +308,69 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, ordered::Update<K, V>, N, S>,
-    ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
+    ) -> Result<CurrentMerkleized<F, H, ordered::Update<K, V>, N, S>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
+        I: OrderedIndex<Value = Location<F>> + 'static,
+    {
         let inner = self
             .staged
             .merkleize(updates, upserts, self.metadata, db)
             .await?;
-        Ok(CurrentMerkleized {
-            inner,
-            _phantom: PhantomData,
-        })
+        Ok(CurrentMerkleized { inner })
     }
 }
 
 /// Read-through operations for the `current` merkleized batch.
-impl<F, E, C, I, H, U, const N: usize, S> CurrentMerkleized<F, E, C, I, H, U, N, S>
+impl<F, H, U, const N: usize, S> CurrentMerkleized<F, H, U, N, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Read a value by key, falling back to `db`'s committed state.
-    pub async fn get(
+    pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Option<U::Value>, Error<F>> {
+    ) -> Result<Option<U::Value>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         self.inner.get(key, db).await
     }
 
     /// Read multiple values by key, falling back to `db`'s committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(
+    pub async fn get_many<E, C, I>(
         &self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    ) -> Result<Vec<Option<U::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         self.inner.get_many(keys, db).await
     }
 }
 
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` unordered update kind.
-impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
-    for CurrentUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    UnmerkleizedTrait<Db<F, E, C, I, H, unordered::Update<K, V>, N, S>>
+    for CurrentUnmerkleized<F, H, unordered::Update<K, V>, N, S>
 where
     F: Graftable,
     E: Context,
@@ -385,22 +382,22 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    type Merkleized = CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>;
-    type Db = Db<F, E, C, I, H, unordered::Update<K, V>, N, S>;
+    type Merkleized = CurrentMerkleized<F, H, unordered::Update<K, V>, N, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+    async fn merkleize(
+        self,
+        db: &Db<F, E, C, I, H, unordered::Update<K, V>, N, S>,
+    ) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self.batch.merkleize(db, self.metadata).await?;
-        Ok(CurrentMerkleized {
-            inner: merkleized,
-            _phantom: PhantomData,
-        })
+        Ok(CurrentMerkleized { inner: merkleized })
     }
 }
 
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` ordered update kind.
-impl<F, E, C, I, H, K, V, const N: usize, S> UnmerkleizedTrait
-    for CurrentUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>
+impl<F, E, C, I, H, K, V, const N: usize, S>
+    UnmerkleizedTrait<Db<F, E, C, I, H, ordered::Update<K, V>, N, S>>
+    for CurrentUnmerkleized<F, H, ordered::Update<K, V>, N, S>
 where
     F: Graftable,
     E: Context,
@@ -412,35 +409,29 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    type Merkleized = CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>;
-    type Db = Db<F, E, C, I, H, ordered::Update<K, V>, N, S>;
+    type Merkleized = CurrentMerkleized<F, H, ordered::Update<K, V>, N, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+    async fn merkleize(
+        self,
+        db: &Db<F, E, C, I, H, ordered::Update<K, V>, N, S>,
+    ) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self.batch.merkleize(db, self.metadata).await?;
-        Ok(CurrentMerkleized {
-            inner: merkleized,
-            _phantom: PhantomData,
-        })
+        Ok(CurrentMerkleized { inner: merkleized })
     }
 }
 
 /// Implement [`Merkleized`](MerkleizedTrait) for all supported `current` update kinds.
-impl<F, E, C, I, H, U, const N: usize, S> MerkleizedTrait
-    for CurrentMerkleized<F, E, C, I, H, U, N, S>
+impl<F, H, U, const N: usize, S> MerkleizedTrait for CurrentMerkleized<F, H, U, N, S>
 where
     F: Graftable,
-    E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, U>: Codec,
-    CurrentUnmerkleized<F, E, C, I, H, U, N, S>: UnmerkleizedTrait,
 {
     type Digest = H::Digest;
-    type Unmerkleized = CurrentUnmerkleized<F, E, C, I, H, U, N, S>;
+    type Unmerkleized = CurrentUnmerkleized<F, H, U, N, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     fn matches(&self, target: &Self::SyncTarget) -> bool {
@@ -457,7 +448,6 @@ where
         CurrentUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            _phantom: PhantomData,
         }
     }
 }
@@ -483,26 +473,8 @@ where
     T: Translator,
     S: Strategy,
 {
-    type Unmerkleized = CurrentUnmerkleized<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        N,
-        S,
-    >;
-    type Merkleized = CurrentMerkleized<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        N,
-        S,
-    >;
+    type Unmerkleized = CurrentUnmerkleized<F, H, unordered::Update<K, FixedEncoding<V>>, N, S>;
+    type Merkleized = CurrentMerkleized<F, H, unordered::Update<K, FixedEncoding<V>>, N, S>;
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
@@ -530,7 +502,6 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -595,26 +566,8 @@ where
     T: Translator,
     S: Strategy,
 {
-    type Unmerkleized = CurrentUnmerkleized<
-        F,
-        E,
-        FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>,
-        OrderedIdx<T, Location<F>>,
-        H,
-        ordered::Update<K, FixedEncoding<V>>,
-        N,
-        S,
-    >;
-    type Merkleized = CurrentMerkleized<
-        F,
-        E,
-        FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>,
-        OrderedIdx<T, Location<F>>,
-        H,
-        ordered::Update<K, FixedEncoding<V>>,
-        N,
-        S,
-    >;
+    type Unmerkleized = CurrentUnmerkleized<F, H, ordered::Update<K, FixedEncoding<V>>, N, S>;
+    type Merkleized = CurrentMerkleized<F, H, ordered::Update<K, FixedEncoding<V>>, N, S>;
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
@@ -642,7 +595,6 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -781,26 +733,8 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
-    type Unmerkleized = CurrentUnmerkleized<
-        F,
-        E,
-        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, VariableEncoding<V>>,
-        N,
-        S,
-    >;
-    type Merkleized = CurrentMerkleized<
-        F,
-        E,
-        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, VariableEncoding<V>>,
-        N,
-        S,
-    >;
+    type Unmerkleized = CurrentUnmerkleized<F, H, unordered::Update<K, VariableEncoding<V>>, N, S>;
+    type Merkleized = CurrentMerkleized<F, H, unordered::Update<K, VariableEncoding<V>>, N, S>;
     type Error = Error<F>;
     type Config = VariableConfig<
         T,
@@ -832,7 +766,6 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -898,26 +831,8 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
 {
-    type Unmerkleized = CurrentUnmerkleized<
-        F,
-        E,
-        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
-        OrderedIdx<T, Location<F>>,
-        H,
-        ordered::Update<K, VariableEncoding<V>>,
-        N,
-        S,
-    >;
-    type Merkleized = CurrentMerkleized<
-        F,
-        E,
-        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
-        OrderedIdx<T, Location<F>>,
-        H,
-        ordered::Update<K, VariableEncoding<V>>,
-        N,
-        S,
-    >;
+    type Unmerkleized = CurrentUnmerkleized<F, H, ordered::Update<K, VariableEncoding<V>>, N, S>;
+    type Merkleized = CurrentMerkleized<F, H, ordered::Update<K, VariableEncoding<V>>, N, S>;
     type Error = Error<F>;
     type Config = VariableConfig<
         T,
@@ -949,7 +864,6 @@ where
         CurrentUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            _phantom: PhantomData,
         }
     }
 

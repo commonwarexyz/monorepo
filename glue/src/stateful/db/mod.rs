@@ -16,10 +16,8 @@
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
 //!
-//! Batch wrappers carry the type parameters of the database they merkleize against, so a
-//! batch cannot be paired with a database that did not create it. They hold no value of
-//! those types: the `PhantomData<fn(..)>` form pins the parameters without tying a
-//! wrapper's `Send`/`Sync` or drop behaviour to them.
+//! Batches hold no database handle. Reads and merkleization take the database as an
+//! argument, and callers must pass the database the batch was created from.
 //!
 //! # State Sync
 //!
@@ -122,12 +120,12 @@ pub use publication::{MemberSource, ServeSource, SetSource};
 /// Concrete types provide key-value operations (`get`, `write`, `set`,
 /// `append`, etc.) as inherent methods; the generic wrapper only needs
 /// [`merkleize`](Self::merkleize).
-pub trait Unmerkleized: Sized + Send {
+///
+/// `D` is the type of database the batch can merkleize against. Callers must
+/// pass the database the batch was created from.
+pub trait Unmerkleized<D>: Sized + Send {
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
-
-    /// The type of the underlying database.
-    type Db;
 
     /// The error type returned by fallible operations.
     type Error: Send;
@@ -138,7 +136,7 @@ pub trait Unmerkleized: Sized + Send {
     /// `db` is the underlying database.
     fn merkleize(
         self,
-        db: &Self::Db,
+        db: &D,
     ) -> impl Future<Output = Result<Self::Merkleized, Self::Error>> + Send;
 }
 
@@ -151,7 +149,7 @@ pub trait Merkleized: Sized + Send + Sync {
     type Digest: Digest;
 
     /// The unmerkleized batch type produced by [`new_batch`](Self::new_batch).
-    type Unmerkleized: Unmerkleized;
+    type Unmerkleized: Send;
 
     /// The sync target type accepted by [`matches`](Self::matches).
     type SyncTarget: Clone + PartialEq + Send + Sync;
@@ -190,9 +188,8 @@ pub trait Merkleized: Sized + Send + Sync {
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
     ///
-    /// Constrained to merkleize against this database type, so a batch cannot
-    /// be associated with a database that did not create it.
-    type Unmerkleized: Unmerkleized<Db = Self>;
+    /// Merkleizes against this database type.
+    type Unmerkleized: Unmerkleized<Self, Merkleized = Self::Merkleized>;
 
     /// A batch whose root has been computed but has not yet been applied to
     /// the underlying database.
@@ -2203,8 +2200,7 @@ mod tests {
         async fn assert_initial_sync_target_and_finalize<T>(context: Context, config: T::Config)
         where
             T: ManagedDb<Context> + 'static,
-            T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
-            <T::Unmerkleized as Unmerkleized>::Error: Debug,
+            <T::Unmerkleized as Unmerkleized<T>>::Error: Debug,
             T::SyncTarget: Debug,
         {
             let initial = T::initial_sync_target();
@@ -2267,8 +2263,7 @@ mod tests {
             #[case] config: fn(&Context, &str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
-            T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
-            <T::Unmerkleized as Unmerkleized>::Error: Debug,
+            <T::Unmerkleized as Unmerkleized<T>>::Error: Debug,
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
@@ -2302,8 +2297,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for TestDb {
-        type Unmerkleized = TestUnmerkleized<Self, ()>;
-        type Merkleized = TestMerkleized<Self, ()>;
+        type Unmerkleized = TestUnmerkleized<()>;
+        type Merkleized = TestMerkleized<()>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -2333,8 +2328,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for CountingRewindDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2370,8 +2365,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for PruneCountingDb {
-        type Unmerkleized = TestUnmerkleized<Self, ()>;
-        type Merkleized = TestMerkleized<Self, ()>;
+        type Unmerkleized = TestUnmerkleized<()>;
+        type Merkleized = TestMerkleized<()>;
         type Error = Infallible;
         type Config = Arc<AtomicUsize>;
         type SyncTarget = ();
@@ -2476,8 +2471,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FailingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized<Self, ()>;
-        type Merkleized = TestMerkleized<Self, ()>;
+        type Unmerkleized = TestUnmerkleized<()>;
+        type Merkleized = TestMerkleized<()>;
         type Error = TestFinalizeError;
         type Config = ();
         type SyncTarget = ();
@@ -2514,8 +2509,8 @@ mod tests {
     struct FailingSnapshotDb;
 
     impl<E: Send> ManagedDb<E> for FailingSnapshotDb {
-        type Unmerkleized = TestUnmerkleized<Self, ()>;
-        type Merkleized = TestMerkleized<Self, ()>;
+        type Unmerkleized = TestUnmerkleized<()>;
+        type Merkleized = TestMerkleized<()>;
         type Error = TestFinalizeError;
         type Config = ();
         type SyncTarget = ();
@@ -2597,8 +2592,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for BlockingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized<Self, ()>;
-        type Merkleized = TestMerkleized<Self, ()>;
+        type Unmerkleized = TestUnmerkleized<()>;
+        type Merkleized = TestMerkleized<()>;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -2639,8 +2634,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for SlowSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2674,8 +2669,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for RejectDuplicateTargetSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2713,8 +2708,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FastSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2748,8 +2743,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FailingStateSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2783,8 +2778,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for MismatchedTargetSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2818,8 +2813,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for ImmediateStateSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2853,8 +2848,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FinishClosedSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2888,8 +2883,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for ObservedSlowSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2923,8 +2918,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for ObservedFastSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -2958,8 +2953,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for DistinctObservedFastSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;
@@ -3106,8 +3101,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for StaleReachedSyncDb {
-        type Unmerkleized = TestUnmerkleized<Self>;
-        type Merkleized = TestMerkleized<Self>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = u64;

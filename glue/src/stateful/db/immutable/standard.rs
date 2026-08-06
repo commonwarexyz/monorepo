@@ -37,37 +37,30 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
-use std::{marker::PhantomData, ops::Deref, sync::Arc};
+use std::{ops::Deref, sync::Arc};
 
 /// Wraps an immutable [`UnmerkleizedBatch`] to implement
 /// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
-pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
+pub struct ImmutableUnmerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
-    _phantom: PhantomData<fn(E, C, T)>,
 }
 
-impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
+impl<F, K, V, H, S> Deref for ImmutableUnmerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
@@ -78,15 +71,12 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S> ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
+impl<F, K, V, H, S> ImmutableUnmerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
@@ -106,22 +96,32 @@ where
     }
 
     /// Read a value by key, falling back to the owning database's committed state.
-    pub async fn get(
+    pub async fn get<E, C, T>(
         &self,
         key: &K,
         db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Option<V::Value>, Error<F>> {
+    ) -> Result<Option<V::Value>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        T: Translator,
+    {
         self.batch.get(key, db).await
     }
 
     /// Read multiple values by key, falling back to the owning database's committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(
+    pub async fn get_many<E, C, T>(
         &self,
         keys: &[&K],
         db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        T: Translator,
+    {
         self.batch.get_many(keys, db).await
     }
 
@@ -134,31 +134,24 @@ where
 
 /// Wraps an immutable [`MerkleizedBatch`] to implement
 /// [`Merkleized`](crate::stateful::db::Merkleized).
-pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
+pub struct ImmutableMerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    _phantom: PhantomData<fn(E, C, T)>,
 }
 
-impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
+impl<F, K, V, H, S> Deref for ImmutableMerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
@@ -169,40 +162,48 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S> ImmutableMerkleized<F, E, K, V, C, H, T, S>
+impl<F, K, V, H, S> ImmutableMerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
     /// Read a value by key, falling back to the owning database's committed state.
-    pub async fn get(
+    pub async fn get<E, C, T>(
         &self,
         key: &K,
         db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Option<V::Value>, Error<F>> {
+    ) -> Result<Option<V::Value>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        T: Translator,
+    {
         self.inner.get(key, db).await
     }
 
     /// Read multiple values by key, falling back to the owning database's committed state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(
+    pub async fn get_many<E, C, T>(
         &self,
         keys: &[&K],
         db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        T: Translator,
+    {
         self.inner.get_many(keys, db).await
     }
 }
 
-impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait<Immutable<F, E, K, V, C, H, T, S>>
+    for ImmutableUnmerkleized<F, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -214,36 +215,32 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    type Merkleized = ImmutableMerkleized<F, E, K, V, C, H, T, S>;
-    type Db = Immutable<F, E, K, V, C, H, T, S>;
+    type Merkleized = ImmutableMerkleized<F, K, V, H, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+    async fn merkleize(
+        self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
             .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
             .await;
-        Ok(ImmutableMerkleized {
-            inner: merkleized,
-            _phantom: PhantomData,
-        })
+        Ok(ImmutableMerkleized { inner: merkleized })
     }
 }
 
-impl<F, E, K, V, C, H, T, S> MerkleizedTrait for ImmutableMerkleized<F, E, K, V, C, H, T, S>
+impl<F, K, V, H, S> MerkleizedTrait for ImmutableMerkleized<F, K, V, H, S>
 where
     F: Family,
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
-    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnmerkleized<F, E, K, V, C, H, T, S>;
+    type Unmerkleized = ImmutableUnmerkleized<F, K, V, H, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     fn matches(&self, target: &Self::SyncTarget) -> bool {
@@ -261,7 +258,6 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 }
@@ -276,26 +272,8 @@ where
     T: Translator,
     S: Strategy,
 {
-    type Unmerkleized = ImmutableUnmerkleized<
-        F,
-        E,
-        K,
-        FixedEncoding<V>,
-        FixedJournal<E, fixed::Operation<F, K, V>>,
-        H,
-        T,
-        S,
-    >;
-    type Merkleized = ImmutableMerkleized<
-        F,
-        E,
-        K,
-        FixedEncoding<V>,
-        FixedJournal<E, fixed::Operation<F, K, V>>,
-        H,
-        T,
-        S,
-    >;
+    type Unmerkleized = ImmutableUnmerkleized<F, K, FixedEncoding<V>, H, S>;
+    type Merkleized = ImmutableMerkleized<F, K, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -324,7 +302,6 @@ where
             batch: Self::new_batch(self),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -379,26 +356,8 @@ where
     S: Strategy,
     variable::Operation<F, K, V>: Codec,
 {
-    type Unmerkleized = ImmutableUnmerkleized<
-        F,
-        E,
-        K,
-        VariableEncoding<V>,
-        VariableJournal<E, variable::Operation<F, K, V>>,
-        H,
-        T,
-        S,
-    >;
-    type Merkleized = ImmutableMerkleized<
-        F,
-        E,
-        K,
-        VariableEncoding<V>,
-        VariableJournal<E, variable::Operation<F, K, V>>,
-        H,
-        T,
-        S,
-    >;
+    type Unmerkleized = ImmutableUnmerkleized<F, K, VariableEncoding<V>, H, S>;
+    type Merkleized = ImmutableMerkleized<F, K, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = variable::Config<T, <variable::Operation<F, K, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -427,7 +386,6 @@ where
             batch: Self::new_batch(self),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 

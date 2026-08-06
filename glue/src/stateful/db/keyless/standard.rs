@@ -35,16 +35,14 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{channel::mpsc, non_empty_range};
-use std::{marker::PhantomData, ops::Deref, sync::Arc};
+use std::{ops::Deref, sync::Arc};
 
 /// Wraps a keyless [`UnmerkleizedBatch`] to implement
 /// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
-pub struct KeylessUnmerkleized<F, E, V, C, H, S>
+pub struct KeylessUnmerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -52,15 +50,12 @@ where
     batch: UnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
-    _phantom: PhantomData<fn(E, C)>,
 }
 
-impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
+impl<F, V, H, S> Deref for KeylessUnmerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -72,12 +67,10 @@ where
     }
 }
 
-impl<F, E, V, C, H, S> KeylessUnmerkleized<F, E, V, C, H, S>
+impl<F, V, H, S> KeylessUnmerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -98,11 +91,15 @@ where
     }
 
     /// Read a value by location, falling back to the owning database's committed state.
-    pub async fn get(
+    pub async fn get<E, C>(
         &self,
         location: Location<F>,
         db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Option<V::Value>, Error<F>> {
+    ) -> Result<Option<V::Value>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+    {
         self.batch.get(location, db).await
     }
 
@@ -110,11 +107,15 @@ where
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
-    pub async fn get_many(
+    pub async fn get_many<E, C>(
         &self,
         locations: &[Location<F>],
         db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+    {
         self.batch.get_many(locations, db).await
     }
 
@@ -127,26 +128,21 @@ where
 
 /// Wraps a keyless [`MerkleizedBatch`] to implement
 /// [`Merkleized`](crate::stateful::db::Merkleized).
-pub struct KeylessMerkleized<F, E, V, C, H, S>
+pub struct KeylessMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    _phantom: PhantomData<fn(E, C)>,
 }
 
-impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
+impl<F, V, H, S> Deref for KeylessMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -158,22 +154,24 @@ where
     }
 }
 
-impl<F, E, V, C, H, S> KeylessMerkleized<F, E, V, C, H, S>
+impl<F, V, H, S> KeylessMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     /// Read a value by location, falling back to the owning database's committed state.
-    pub async fn get(
+    pub async fn get<E, C>(
         &self,
         location: Location<F>,
         db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Option<V::Value>, Error<F>> {
+    ) -> Result<Option<V::Value>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+    {
         self.inner.get(location, db).await
     }
 
@@ -181,16 +179,21 @@ where
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
-    pub async fn get_many(
+    pub async fn get_many<E, C>(
         &self,
         locations: &[Location<F>],
         db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    ) -> Result<Vec<Option<V::Value>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+    {
         self.inner.get_many(locations, db).await
     }
 }
 
-impl<F, E, V, C, H, S> UnmerkleizedTrait for KeylessUnmerkleized<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> UnmerkleizedTrait<Keyless<F, E, V, C, H, S>>
+    for KeylessUnmerkleized<F, V, H, S>
 where
     F: Family,
     E: Context,
@@ -200,34 +203,28 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    type Merkleized = KeylessMerkleized<F, E, V, C, H, S>;
-    type Db = Keyless<F, E, V, C, H, S>;
+    type Merkleized = KeylessMerkleized<F, V, H, S>;
     type Error = Error<F>;
 
-    async fn merkleize(self, db: &Self::Db) -> Result<Self::Merkleized, Error<F>> {
+    async fn merkleize(self, db: &Keyless<F, E, V, C, H, S>) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
             .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
             .await;
-        Ok(KeylessMerkleized {
-            inner: merkleized,
-            _phantom: PhantomData,
-        })
+        Ok(KeylessMerkleized { inner: merkleized })
     }
 }
 
-impl<F, E, V, C, H, S> MerkleizedTrait for KeylessMerkleized<F, E, V, C, H, S>
+impl<F, V, H, S> MerkleizedTrait for KeylessMerkleized<F, V, H, S>
 where
     F: Family,
-    E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     type Digest = H::Digest;
-    type Unmerkleized = KeylessUnmerkleized<F, E, V, C, H, S>;
+    type Unmerkleized = KeylessUnmerkleized<F, V, H, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     fn matches(&self, target: &Self::SyncTarget) -> bool {
@@ -245,7 +242,6 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 }
@@ -258,10 +254,8 @@ where
     H: Hasher + 'static,
     S: Strategy,
 {
-    type Unmerkleized =
-        KeylessUnmerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
-    type Merkleized =
-        KeylessMerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
+    type Unmerkleized = KeylessUnmerkleized<F, FixedEncoding<V>, H, S>;
+    type Merkleized = KeylessMerkleized<F, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::Config<S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -290,7 +284,6 @@ where
             batch: Self::new_batch(self),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 
@@ -342,22 +335,8 @@ where
     H: Hasher + 'static,
     S: Strategy,
 {
-    type Unmerkleized = KeylessUnmerkleized<
-        F,
-        E,
-        VariableEncoding<V>,
-        VariableJournal<E, variable::Operation<F, V>>,
-        H,
-        S,
-    >;
-    type Merkleized = KeylessMerkleized<
-        F,
-        E,
-        VariableEncoding<V>,
-        VariableJournal<E, variable::Operation<F, V>>,
-        H,
-        S,
-    >;
+    type Unmerkleized = KeylessUnmerkleized<F, VariableEncoding<V>, H, S>;
+    type Merkleized = KeylessMerkleized<F, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = variable::Config<<variable::Operation<F, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -386,7 +365,6 @@ where
             batch: Self::new_batch(self),
             metadata: None,
             inactivity_floor: None,
-            _phantom: PhantomData,
         }
     }
 

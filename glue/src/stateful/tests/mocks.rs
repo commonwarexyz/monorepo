@@ -20,53 +20,51 @@ pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
-/// No-op batch for mock databases, parameterized by the owning database type
-/// so every mock satisfies `ManagedDb::Unmerkleized: Unmerkleized<Db = Self>`.
-pub(crate) struct TestUnmerkleized<D = TestDb, T = u64>(PhantomData<fn(D, T)>);
+/// No-op batch for mock databases. Merkleizes against any database type.
+pub(crate) struct TestUnmerkleized<T = u64>(PhantomData<fn(T)>);
 
-pub(crate) struct TestMerkleized<D = TestDb, T = u64>(PhantomData<fn(D, T)>);
+pub(crate) struct TestMerkleized<T = u64>(PhantomData<fn(T)>);
 
-impl<D, T> TestUnmerkleized<D, T> {
+impl<T> TestUnmerkleized<T> {
     pub(crate) const fn new() -> Self {
         Self(PhantomData)
     }
 }
 
-impl<D, T> TestMerkleized<D, T> {
+impl<T> TestMerkleized<T> {
     pub(crate) const fn new() -> Self {
         Self(PhantomData)
     }
 }
 
-impl<D, T> Clone for TestUnmerkleized<D, T> {
+impl<T> Clone for TestUnmerkleized<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<D, T> Copy for TestUnmerkleized<D, T> {}
+impl<T> Copy for TestUnmerkleized<T> {}
 
-impl<D, T> Clone for TestMerkleized<D, T> {
+impl<T> Clone for TestMerkleized<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<D, T> Copy for TestMerkleized<D, T> {}
+impl<T> Copy for TestMerkleized<T> {}
 
-impl<D: Send + Sync, T: Clone + PartialEq + Send + Sync> Unmerkleized for TestUnmerkleized<D, T> {
-    type Merkleized = TestMerkleized<D, T>;
-    type Db = D;
+impl<D: Sync, T: Clone + PartialEq + Send + Sync> Unmerkleized<D> for TestUnmerkleized<T> {
+    type Merkleized = TestMerkleized<T>;
     type Error = Infallible;
 
-    async fn merkleize(self, _db: &Self::Db) -> Result<Self::Merkleized, Self::Error> {
+    async fn merkleize(self, _db: &D) -> Result<Self::Merkleized, Self::Error> {
         Ok(TestMerkleized::new())
     }
 }
 
-impl<D: Send + Sync, T: Clone + PartialEq + Send + Sync> Merkleized for TestMerkleized<D, T> {
+impl<T: Clone + PartialEq + Send + Sync> Merkleized for TestMerkleized<T> {
     type Digest = Sha256Digest;
-    type Unmerkleized = TestUnmerkleized<D, T>;
+    type Unmerkleized = TestUnmerkleized<T>;
     type SyncTarget = T;
 
     fn root(&self) -> Self::Digest {
