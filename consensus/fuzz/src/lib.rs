@@ -32,7 +32,10 @@ pub mod types;
 pub mod utils;
 use crate::{
     disrupter::Disrupter,
-    network::ByzantineFirstReceiver,
+    network::{
+        ByzantineFirstReceiver, FinalizationOmissionChannel, FinalizationOmissionReceiver,
+        NotarizeOmissionReceiver,
+    },
     simplex_audit::{RecordingAutomaton, RecordingReporter, summaries},
     simplex_node::NodeFuzzInput,
     strategy::{
@@ -84,7 +87,10 @@ use std::{
     fmt,
     num::{NonZeroU16, NonZeroUsize},
     panic,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tracing::{Dispatch, Level, dispatcher};
@@ -2077,7 +2083,31 @@ fn run_standard_once<P: simplex::Simplex>(
 /// This path exists only for the dedicated Standard audit fuzz targets. The
 /// shared [`run_standard_once`] path continues to use the consensus mock
 /// reporter and application automaton directly.
-fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool, bool) {
+#[derive(Clone)]
+struct NotarizeOmission {
+    victim: usize,
+    omitted_notarizes: Arc<AtomicUsize>,
+    omitted_finalizations: Arc<AtomicUsize>,
+}
+
+impl NotarizeOmission {
+    fn new(victim: usize) -> Self {
+        Self {
+            victim,
+            omitted_notarizes: Arc::new(AtomicUsize::new(0)),
+            omitted_finalizations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+fn run_audited_standard_once<P: simplex::Simplex>(input: FuzzInput) -> (bool, bool) {
+    run_audited_standard_once_with::<P>(input, None)
+}
+
+fn run_audited_standard_once_with<P: simplex::Simplex>(
+    mut input: FuzzInput,
+    notarize_omission: Option<NotarizeOmission>,
+) -> (bool, bool) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -2149,29 +2179,74 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
 
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
-            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            let reporter = spawn_audited_validator::<P, _, _, _, _, _, _, _>(
-                ctx,
-                &oracle,
-                &participants,
-                schemes[i].clone(),
-                validator.clone(),
-                P::elector(term_length),
-                relay.clone(),
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                input.mailbox_size,
-                input.fetch_concurrent,
-                input.forwarding,
-                pending,
-                recovered,
-                resolver,
-                input.certify,
-                input.reporting,
-            );
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+            let reporter = if let Some(omission) = &notarize_omission
+                && omission.victim == i
+            {
+                let (sender, receiver) = pending;
+                let receiver = NotarizeOmissionReceiver::<P::Scheme, Sha256Digest, _>::new(
+                    receiver,
+                    omission.omitted_notarizes.clone(),
+                );
+                let (certificate_sender, certificate_receiver) = recovered;
+                let certificate_receiver =
+                    FinalizationOmissionReceiver::<P::Scheme, Sha256Digest, _>::new(
+                        certificate_receiver,
+                        schemes[i].clone(),
+                        FinalizationOmissionChannel::Certificate,
+                        omission.omitted_finalizations.clone(),
+                    );
+                let (resolver_sender, resolver_receiver) = resolver;
+                let resolver_receiver =
+                    FinalizationOmissionReceiver::<P::Scheme, Sha256Digest, _>::new(
+                        resolver_receiver,
+                        schemes[i].clone(),
+                        FinalizationOmissionChannel::Resolver,
+                        omission.omitted_finalizations.clone(),
+                    );
+                spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator.clone(),
+                    P::elector(term_length),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
+                    input.forwarding,
+                    (sender, receiver),
+                    (certificate_sender, certificate_receiver),
+                    (resolver_sender, resolver_receiver),
+                    input.certify,
+                    input.reporting,
+                )
+            } else {
+                spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator.clone(),
+                    P::elector(term_length),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.fetch_concurrent,
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    input.certify,
+                    input.reporting,
+                )
+            };
             reporters.push((validator, reporter));
         }
 
@@ -2188,7 +2263,13 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
 
         if input.partition.is_connected() && config.is_valid() {
             let mut finalizers = Vec::new();
+            let omitted_validator = notarize_omission
+                .as_ref()
+                .map(|omission| &participants[omission.victim]);
             for (validator, reporter) in reporters.iter_mut() {
+                if omitted_validator == Some(validator) {
+                    continue;
+                }
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
@@ -2211,6 +2292,12 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             return (false, false);
         }
 
+        let omitted_reporter = notarize_omission.as_ref().and_then(|omission| {
+            let victim = &participants[omission.victim];
+            reporters
+                .iter()
+                .position(|(validator, _)| validator == victim)
+        });
         let reporter_only: Vec<_> = reporters
             .into_iter()
             .map(|(_, reporter)| reporter)
@@ -2238,6 +2325,9 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             &summary_reporters,
         );
         invariants::check::<P>(term_length, reporter_only.as_slice());
+        if let Some(index) = omitted_reporter {
+            invariants::check_notarization_unlocks_finalize_quorum(&reporter_only[index]);
+        }
         (true, rejected_certification_observed)
     })
 }
@@ -3853,6 +3943,46 @@ pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
     if let Err(payload) = run_result {
         println!("Panicked with raw_bytes: {:?}", raw_bytes);
         panic::resume_unwind(payload);
+    }
+}
+
+/// Fuzz the audited Standard harness with four correct nodes while one selected
+/// node omits every notarize vote and finalization certificate received from
+/// the network.
+///
+/// The selected victim is derived from the first raw input byte. All
+/// non-notarize votes remain connected, as do notarization and nullification
+/// certificates on both the certificate and resolver channels.
+pub fn fuzz_audit_notarize_omission<P: simplex::Simplex>(mut input: FuzzInput) {
+    input.configuration = N4F0C4;
+    input.partition = Partition::Connected;
+    input.degraded_network = false;
+    input.required_containers = input.required_containers.max(4);
+    input.term_length = TermLength::ONE;
+    input.certify = CertifyChoice::Always;
+    input.reporting = ReporterWiring::Solo;
+
+    let victim = usize::from(input.raw_bytes.first().copied().unwrap_or_default())
+        % usize::try_from(input.configuration.n).expect("node count exceeds usize");
+    let omission = NotarizeOmission::new(victim);
+    let omitted_notarizes = omission.omitted_notarizes.clone();
+    let omitted_finalizations = omission.omitted_finalizations.clone();
+
+    print_fuzz_input::<P>(Mode::Standard, &input);
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        run_audited_standard_once_with::<P>(input, Some(omission))
+    }));
+    match run_result {
+        Ok(_) => assert!(
+            omitted_notarizes.load(Ordering::Relaxed) > 0
+                && omitted_finalizations.load(Ordering::Relaxed) > 0,
+            "omission model did not omit both notarize votes and finalization certificates"
+        ),
+        Err(payload) => {
+            println!("Panicked with raw_bytes: {:?}", raw_bytes);
+            panic::resume_unwind(payload);
+        }
     }
 }
 

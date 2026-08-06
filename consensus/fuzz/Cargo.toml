@@ -183,6 +183,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_id_audit_notarize_omission"
+path = "fuzz_targets/simplex_id_audit_notarize_omission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_faulty_msg"
 path = "fuzz_targets/simplex_id_faulty_msg.rs"
 test = false
@@ -409,6 +416,20 @@ bench = false
 [[bin]]
 name = "marshal_e2e_standard_deferred_cert_mock_disrupter"
 path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_disrupter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_poison"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_poison.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_scenarios"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_scenarios.rs"
 test = false
 doc = false
 bench = false

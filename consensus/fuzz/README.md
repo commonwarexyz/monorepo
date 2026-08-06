@@ -66,6 +66,7 @@ Available fuzz targets (standard mode):
 - `simplex_ed25519`
 - `simplex_secp256r1`
 - `simplex_id`
+- `simplex_id_audit_notarize_omission`
 - `simplex_cert_mock`
 - `simplex_bls12381_multisig_minpk`
 - `simplex_bls12381_threshold_minsig`
@@ -114,6 +115,8 @@ cargo fuzz run marshal_actor_standard_deferred_cert_mock
 cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
 cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
 cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_poison
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_scenarios
 ```
 
 The inline and deferred targets include split-header equivocation in their
