@@ -162,14 +162,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// After the network is started, it is not possible to add more channels.
     pub fn start(mut self) -> Handle<()> {
+        // Size the router mailbox from the registered channels before binding their senders.
+        // Submissions made before binding are accepted and dropped.
         let (router, router_mailbox) = router::Actor::new(
             self.context.child("router"),
             router::Config {
                 mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
             },
         );
-        // Bind registered senders after sizing the outbound router mailbox.
-        // Submissions made before this point are accepted and dropped.
         self.channels.bind(router_mailbox.clone());
         spawn_cell!(self.context, self.run(router, router_mailbox))
     }

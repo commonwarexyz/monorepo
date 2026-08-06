@@ -100,8 +100,8 @@ impl<P: PublicKey> Mailbox<P> {
     }
 }
 
-// The router mailbox is created after channel registration determines its capacity.
-// Retain subscriptions made before then so binding can forward them.
+// Registered channels subscribe before the router mailbox exists. Retain those subscriptions
+// until start binds the mailbox.
 struct MessengerState<P: PublicKey> {
     mailbox: OnceLock<Mailbox<P>>,
     pending_subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
@@ -160,8 +160,7 @@ impl<P: PublicKey> Messenger<P> {
     /// Sends a message to the given `recipients`.
     ///
     /// Encodes the message once and shares the encoded bytes across all recipients.
-    /// Returns feedback from enqueueing the router message. Before the router is bound, the
-    /// submission is accepted and dropped without encoding.
+    /// Returns feedback from enqueueing the router message.
     pub fn content(
         &self,
         recipients: Recipients<P>,
