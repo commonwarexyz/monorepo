@@ -1,10 +1,12 @@
 use crate::types::Height;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
+    hash_map,
+    HashMap,
     N3f1,
     ordered::{Quorum, Set},
 };
-use std::collections::{BTreeMap, HashMap, btree_map};
+use std::collections::{BTreeMap, btree_map};
 
 /// A data structure that keeps track of the reported tip for each validator.
 /// It can efficiently query the `f`th highest tip, where `f` is the maximum number of faults
@@ -28,7 +30,7 @@ pub struct SafeTip<P: PublicKey> {
 impl<P: PublicKey> Default for SafeTip<P> {
     fn default() -> Self {
         Self {
-            tips: HashMap::new(),
+            tips: hash_map::new(),
             hi: BTreeMap::new(),
             lo: BTreeMap::new(),
         }
@@ -50,7 +52,7 @@ impl<P: PublicKey> SafeTip<P> {
         let f = validators.max_faults::<N3f1>() as usize;
 
         // Initialize the tips map
-        let mut tips = HashMap::with_capacity(n);
+        let mut tips = hash_map::with_capacity(n);
         for validator in validators {
             tips.insert(validator.clone(), Height::default());
         }

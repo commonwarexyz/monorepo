@@ -13,7 +13,8 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use rand_core::CryptoRng;
-use std::collections::{HashMap, HashSet};
+use commonware_utils::{hash_map, HashMap};
+use std::collections::HashSet;
 
 // Intentionally restates View::covers with independent integer arithmetic:
 // the fuzz oracle must not delegate to the production term predicates
@@ -99,7 +100,7 @@ pub fn check<P: Simplex>(n: u32, term_length: TermLength, replicas: Vec<ReplicaS
 
     // Invariant: no_conflicting_quorum_notarizations
     // In any view, there cannot be quorum notarizations for multiple digests.
-    let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
+    let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = hash_map::new();
     for (notarizations, _, _) in replicas.iter() {
         for (v, d) in notarizations {
             let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
@@ -282,13 +283,13 @@ where
 mod tests {
     use super::*;
     use crate::simplex::SimplexEd25519;
-    use commonware_utils::NZU32;
-    use std::{collections::HashMap, panic};
+    use commonware_utils::{hash_map, NZU32};
+    use std::panic;
 
     #[test]
     fn same_term_nullification_blocks_later_finalization() {
         let payload = Sha256Digest::from([7u8; 32]);
-        let mut notarizations = HashMap::new();
+        let mut notarizations = hash_map::new();
         notarizations.insert(
             3,
             Notarization {
@@ -296,14 +297,14 @@ mod tests {
                 signature_count: Some(3),
             },
         );
-        let mut nullifications = HashMap::new();
+        let mut nullifications = hash_map::new();
         nullifications.insert(
             1,
             Nullification {
                 signature_count: Some(3),
             },
         );
-        let mut finalizations = HashMap::new();
+        let mut finalizations = hash_map::new();
         finalizations.insert(
             3,
             Finalization {

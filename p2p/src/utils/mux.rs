@@ -13,12 +13,16 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
-use commonware_utils::channel::{
-    fallible::FallibleExt,
-    mpsc::{self, error::TrySendError},
-    oneshot,
+use commonware_utils::{
+    channel::{
+        fallible::FallibleExt,
+        mpsc::{self, error::TrySendError},
+        oneshot,
+    },
+    hash_map,
+    HashMap,
 };
-use std::{collections::HashMap, fmt::Debug, time::SystemTime};
+use std::{fmt::Debug, time::SystemTime};
 use thiserror::Error;
 use tracing::debug;
 
@@ -89,7 +93,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
             receiver,
             mailbox_size,
             control_rx,
-            routes: HashMap::new(),
+            routes: hash_map::new(),
             backup: None,
         };
 

@@ -2425,7 +2425,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -4805,7 +4805,8 @@ mod tests {
         btree.insert(1u8, Bytes::from(vec![0xEE; 48]));
         assert_encode_with_pool_matches_encode(&btree);
 
-        let mut hash = HashMap::new();
+        #[allow(clippy::disallowed_types)]
+        let mut hash = std::collections::HashMap::new();
         hash.insert(2u8, Bytes::from(vec![0x11; 96]));
         hash.insert(1u8, Bytes::from(vec![0x22; 48]));
         assert_encode_with_pool_matches_encode(&hash);

@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use std::collections::HashMap;
+use commonware_utils::HashMap;
 
 /// Message types the disrupter can send.
 #[derive(Debug, Clone, Arbitrary)]

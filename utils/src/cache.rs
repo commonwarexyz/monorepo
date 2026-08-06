@@ -71,9 +71,7 @@ use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
 };
-use hashbrown::HashMap;
-
-type Hasher = ahash::RandomState;
+use crate::hash_map::{HashMap, with_capacity};
 
 /// A single cache slot.
 ///
@@ -96,7 +94,7 @@ pub struct Clock<K, V> {
     /// Maps each live key to the index of its slot in `slots`.
     ///
     /// `index.len() + free.len() == slots.len()` always holds.
-    index: HashMap<K, usize, Hasher>,
+    index: HashMap<K, usize>,
     /// Backing storage for slots, grown lazily up to `capacity` and then reused.
     slots: Vec<Slot<K, V>>,
     /// Slots detached from the index and available for reuse. Populated by
@@ -114,7 +112,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn new(capacity: NonZeroUsize) -> Self {
         let capacity = capacity.get();
         Self {
-            index: HashMap::with_capacity_and_hasher(capacity, Hasher::default()),
+            index: with_capacity(capacity),
             slots: Vec::with_capacity(capacity),
             free: Vec::new(),
             hand: 0,
@@ -436,10 +434,10 @@ impl<K, V> core::fmt::Debug for Clock<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NZUsize;
+    use crate::{hash_map, NZUsize};
     use core::cell::Cell;
     use proptest::prelude::*;
-    use std::{collections::HashMap, rc::Rc, thread};
+    use std::{rc::Rc, thread};
 
     impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         /// Asserts the structural invariants hold (test-only).
@@ -975,7 +973,7 @@ mod tests {
             // Oracle: last value written for each live key. A key the cache
             // reports as present must hold its last-written value (no stale or
             // conjured values); an evicted key is simply absent.
-            let mut model: HashMap<u8, u16> = HashMap::new();
+            let mut model: HashMap<u8, u16> = hash_map::new();
             for op in ops {
                 match op {
                     Op::Get(k) => {

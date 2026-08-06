@@ -11,12 +11,13 @@ use crate::aws::{
     utils::*,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_utils::{hash_map, HashMap};
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::File,
     net::IpAddr,
     path::PathBuf,
@@ -177,7 +178,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!("persisted deployment metadata");
 
     // Collect instance types by region (for availability zone selection) and unique types (for architecture detection)
-    let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut instance_types_by_region: HashMap<String, HashSet<String>> = hash_map::new();
     let mut unique_instance_types: HashSet<String> = HashSet::new();
     instance_types_by_region
         .entry(MONITORING_REGION.to_string())
@@ -195,7 +196,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Detect architecture for each unique instance type (architecture is global, not region-specific)
     info!("detecting architectures for instance types");
     let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
-    let mut arch_by_instance_type: HashMap<String, Architecture> = HashMap::new();
+    let mut arch_by_instance_type: HashMap<String, Architecture> = hash_map::new();
     for instance_type in &unique_instance_types {
         let arch = detect_architecture(&ec2_client, instance_type).await?;
         info!(
@@ -212,7 +213,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .iter()
         .map(|instance| instance.instance_type.clone())
         .collect();
-    let mut nvme_supported_by_instance_type = HashMap::new();
+    let mut nvme_supported_by_instance_type = hash_map::new();
     for instance_type in &binary_instance_types {
         let supported = supports_nvme_instance_storage(&ec2_client, instance_type).await?;
         info!(
@@ -224,7 +225,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Build per-instance architecture map and collect architectures needed
     let monitoring_architecture = arch_by_instance_type[&config.monitoring.instance_type];
-    let mut instance_architectures: HashMap<String, Architecture> = HashMap::new();
+    let mut instance_architectures: HashMap<String, Architecture> = hash_map::new();
     let mut architectures_needed: HashSet<Architecture> = HashSet::new();
     architectures_needed.insert(monitoring_architecture);
     for instance in &config.instances {
@@ -274,7 +275,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         grafana_node_exporter_dashboard_download_url(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
     )
     .await?;
-    let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
+    let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = hash_map::new();
     for arch in &architectures_needed {
         let [docker_url, logrotate_url]: [String; 2] = try_join_all([
             cache_tool(
@@ -305,7 +306,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // cached sequentially: `docker pull --platform`/`docker save` share docker's per-tag local
     // image store, so caching two architectures of the same image at once would corrupt the save.
     info!("caching container images in S3");
-    let mut arches_by_image: HashMap<&'static str, HashSet<Architecture>> = HashMap::new();
+    let mut arches_by_image: HashMap<&'static str, HashSet<Architecture>> = hash_map::new();
     for image in monitoring_images() {
         arches_by_image
             .entry(image)
@@ -335,7 +336,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }))
     .await?;
     let mut image_urls_by_arch: HashMap<Architecture, HashMap<&'static str, String>> =
-        HashMap::new();
+        hash_map::new();
     for (arch, image, url) in cached.into_iter().flatten() {
         image_urls_by_arch
             .entry(arch)
@@ -621,7 +622,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let monitoring_az_support = monitoring_resources.az_support.clone();
 
     // Lookup AMI IDs for binary instances
-    let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
+    let mut ami_cache: HashMap<(String, Architecture), String> = hash_map::new();
     ami_cache.insert(
         (monitoring_region.clone(), monitoring_architecture),
         monitoring_ami_id.clone(),
@@ -747,7 +748,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!("instances requested");
 
     // Group binary instances by region for batched DescribeInstances calls
-    let mut instances_by_region: HashMap<String, Vec<(String, InstanceConfig)>> = HashMap::new();
+    let mut instances_by_region: HashMap<String, Vec<(String, InstanceConfig)>> = hash_map::new();
     for (instance_id, region, instance_config) in binary_launches {
         instances_by_region
             .entry(region)
@@ -885,7 +886,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     .unwrap();
 
     // Cache binary_service per architecture
-    let mut binary_service_urls_by_arch: HashMap<Architecture, String> = HashMap::new();
+    let mut binary_service_urls_by_arch: HashMap<Architecture, String> = hash_map::new();
     for arch in &architectures_needed {
         let binary_service_content = binary_service();
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
@@ -972,8 +973,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Write per-instance config files locally and compute digests
     let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
-    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
+    let mut instance_promtail_digest: HashMap<String, String> = hash_map::new();
+    let mut instance_pyroscope_digest: HashMap<String, String> = hash_map::new();
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
@@ -1069,7 +1070,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     )?;
 
     // Build instance URLs map with architecture-specific tool URLs
-    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = hash_map::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
         let arch = instance_architectures[name];
@@ -1369,7 +1370,7 @@ fn select_availability_zone_groups(
 ) -> Result<HashMap<AvailabilityZoneGroupKey, String>, Error> {
     // Collect the instance types per region/group pair so the same group name can be reused
     // independently in different regions.
-    let mut groups: HashMap<AvailabilityZoneGroupKey, BTreeSet<String>> = HashMap::new();
+    let mut groups: HashMap<AvailabilityZoneGroupKey, BTreeSet<String>> = hash_map::new();
     for instance in instances {
         let Some(group) = &instance.availability_zone_group else {
             continue;
@@ -1383,7 +1384,7 @@ fn select_availability_zone_groups(
             .insert(instance.instance_type.clone());
     }
 
-    let mut selected = HashMap::new();
+    let mut selected = hash_map::new();
     for (key, instance_types) in groups {
         let resources = resources
             .get(&key.region)
@@ -1458,7 +1459,8 @@ mod tests {
         select_group_availability_zone, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
-    use std::collections::{BTreeSet, HashMap};
+    use commonware_utils::{hash_map, HashMap};
+    use std::collections::BTreeSet;
 
     fn instance(
         name: &str,
@@ -1770,7 +1772,7 @@ mod tests {
         let resources = resources_in("us-east-1");
         let instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
 
-        let subnets = grouped_subnets(&instance, &resources, &HashMap::new());
+        let subnets = grouped_subnets(&instance, &resources, &hash_map::new());
 
         assert_eq!(subnets, resources.subnets);
     }

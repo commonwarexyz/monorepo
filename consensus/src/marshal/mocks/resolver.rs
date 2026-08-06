@@ -1,5 +1,6 @@
 use commonware_utils::sync::Mutex;
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc};
+use commonware_utils::{hash_map, HashMap};
 
 #[derive(Clone)]
 pub struct Resolver<K, V> {
@@ -9,7 +10,7 @@ pub struct Resolver<K, V> {
 impl<K: Eq + std::hash::Hash, V> Default for Resolver<K, V> {
     fn default() -> Self {
         Self {
-            data: Arc::new(Mutex::new(HashMap::new())),
+            data: Arc::new(Mutex::new(hash_map::new())),
         }
     }
 }

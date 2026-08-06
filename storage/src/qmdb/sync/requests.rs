@@ -9,9 +9,10 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_utils::futures::{AbortablePool, Aborter};
+use commonware_utils::{hash_map, HashMap};
 use futures::future::Aborted;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     future::Future,
     ops::Range,
 };
@@ -47,7 +48,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         Self {
             futures: AbortablePool::default(),
             next_id: 0,
-            tracked: HashMap::new(),
+            tracked: hash_map::new(),
             by_location: BTreeMap::new(),
         }
     }

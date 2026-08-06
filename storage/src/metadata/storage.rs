@@ -6,9 +6,9 @@ use commonware_runtime::{
     Blob, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Span;
+use commonware_utils::{hash_map, HashMap, Span};
 use futures::{FutureExt as _, future::try_join_all};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::{debug, warn};
 
 /// The names of the two blobs that store metadata.
@@ -53,7 +53,7 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
         Self {
             blob,
             version: 0,
-            lengths: HashMap::new(),
+            lengths: hash_map::new(),
             modified: BTreeSet::new(),
             data: IoBufMut::default(),
         }
@@ -201,7 +201,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // If the checksum is correct, we assume data is correctly packed and we don't perform
         // length checks on the cursor.
         let mut data = BTreeMap::new();
-        let mut lengths = HashMap::new();
+        let mut lengths = hash_map::new();
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
@@ -466,7 +466,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Since we can't overwrite in place, we rewrite the entire blob.
         // Pooled buffers do not grow, so compute the final encoded length before
         // selecting a destination buffer.
-        let mut lengths = HashMap::with_capacity(self.map.len());
+        let mut lengths = hash_map::with_capacity(self.map.len());
         let mut next_data_len = u64::SIZE + crc32::Digest::SIZE;
         for (key, value) in &self.map {
             let value_len = value.encode_size();

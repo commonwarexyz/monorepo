@@ -1,7 +1,6 @@
 use crate::{Error, mocks};
-use commonware_utils::{channel::mpsc, sync::Mutex};
+use commonware_utils::{channel::mpsc, hash_map, HashMap, sync::Mutex};
 use std::{
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
     sync::Arc,
@@ -58,7 +57,7 @@ impl Default for Network {
     fn default() -> Self {
         Self {
             ephemeral: Arc::new(Mutex::new(EPHEMERAL_PORT_RANGE.start)),
-            listeners: Arc::new(Mutex::new(HashMap::new())),
+            listeners: Arc::new(Mutex::new(hash_map::new())),
         }
     }
 }

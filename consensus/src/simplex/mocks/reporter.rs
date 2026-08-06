@@ -20,6 +20,8 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
+    hash_map,
+    HashMap,
     channel::{
         fallible::AsyncFallibleExt,
         mpsc::{Receiver, Sender},
@@ -29,7 +31,7 @@ use commonware_utils::{
 };
 use rand_core::CryptoRng;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     hash::Hash,
     sync::Arc,
 };
@@ -114,15 +116,15 @@ where
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
-            leaders: Arc::new(Mutex::new(HashMap::new())),
+            leaders: Arc::new(Mutex::new(hash_map::new())),
             certified: Arc::new(Mutex::new(HashSet::new())),
-            notarizes: Arc::new(Mutex::new(HashMap::new())),
-            notarizations: Arc::new(Mutex::new(HashMap::new())),
-            nullifies: Arc::new(Mutex::new(HashMap::new())),
-            nullifications: Arc::new(Mutex::new(HashMap::new())),
-            finalizes: Arc::new(Mutex::new(HashMap::new())),
-            finalizations: Arc::new(Mutex::new(HashMap::new())),
-            faults: Arc::new(Mutex::new(HashMap::new())),
+            notarizes: Arc::new(Mutex::new(hash_map::new())),
+            notarizations: Arc::new(Mutex::new(hash_map::new())),
+            nullifies: Arc::new(Mutex::new(hash_map::new())),
+            nullifications: Arc::new(Mutex::new(hash_map::new())),
+            finalizes: Arc::new(Mutex::new(hash_map::new())),
+            finalizations: Arc::new(Mutex::new(hash_map::new())),
+            faults: Arc::new(Mutex::new(hash_map::new())),
             invalid_votes: Arc::new(Mutex::new(0)),
             invalid_certificates: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(View::zero())),

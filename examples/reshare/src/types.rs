@@ -42,12 +42,12 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64,
+    Acknowledgement, NZU32, NZU64, NZUsize, HashMap, ordered::Set, range::NonEmptyRange, sequence::U64,
     sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},

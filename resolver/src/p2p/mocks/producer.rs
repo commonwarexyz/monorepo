@@ -1,7 +1,6 @@
 use crate::Span;
 use bytes::Bytes;
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use std::collections::HashMap;
+use commonware_utils::{channel::{fallible::OneshotExt, oneshot}, HashMap};
 
 /// A producer that can be used for testing
 #[derive(Clone, Default)]

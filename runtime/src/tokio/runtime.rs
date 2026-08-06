@@ -853,10 +853,10 @@ mod tests {
         tokio::telemetry,
     };
     use bytes::Bytes;
+    use commonware_utils::{hash_map, HashMap};
     use std::{
         self,
-        collections::HashMap,
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+            net::{IpAddr, Ipv4Addr, Ipv6Addr},
         str::FromStr,
     };
     use tracing::{Level, error};
@@ -999,7 +999,7 @@ mod tests {
             async fn read_headers<St: Stream>(
                 stream: &mut St,
             ) -> Result<HashMap<String, String>, Error> {
-                let mut headers = HashMap::new();
+                let mut headers = hash_map::new();
                 loop {
                     let line = read_line(stream).await?;
                     if line.is_empty() {

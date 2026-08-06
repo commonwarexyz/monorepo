@@ -123,7 +123,7 @@ pub mod test {
     use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::TestRng;
     use rand::Rng as _;
-    use std::collections::HashMap;
+    use commonware_utils::{hash_map, HashMap};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -215,7 +215,7 @@ pub mod test {
                         out.push((key(2000 + rng.next_u64() % 2000), Some(val(rng.next_u64()))));
                     }
                 }
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: HashMap<Digest, Option<Digest>> = hash_map::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }

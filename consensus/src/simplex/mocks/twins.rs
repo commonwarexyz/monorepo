@@ -76,10 +76,10 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::ordered::Set;
+use commonware_utils::{hash_map, HashMap, ordered::Set};
 use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::Arc,
 };
 
@@ -739,8 +739,8 @@ impl ScenarioGenerator {
     fn new(n: usize) -> Self {
         Self {
             n,
-            transition_memo: HashMap::new(),
-            local_memo: HashMap::new(),
+            transition_memo: hash_map::new(),
+            local_memo: hash_map::new(),
         }
     }
 
@@ -816,7 +816,7 @@ impl ScenarioGenerator {
         // A zero-round suffix has exactly one continuation: emit no more
         // rounds. Seed that base case for every state reachable after the full
         // scripted prefix.
-        let mut counts = vec![HashMap::new(); rounds + 1];
+        let mut counts = vec![hash_map::new(); rounds + 1];
         for state in layers[rounds].iter() {
             counts[0].insert(*state, 1);
         }
@@ -1704,7 +1704,7 @@ mod tests {
         for n in 2..=4 {
             for rounds in 1..=3 {
                 let initial_cells = vec![n];
-                let mut reference_memo = HashMap::new();
+                let mut reference_memo = hash_map::new();
                 let reference =
                     reference_scenario_count(&initial_cells, rounds, &mut reference_memo);
 

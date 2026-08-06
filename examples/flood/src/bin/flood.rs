@@ -13,11 +13,10 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{NZU32, TryCollect, ordered::Set, union};
+use commonware_utils::{NZU32, TryCollect, HashMap, ordered::Set, union};
 use futures::future::try_join_all;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},

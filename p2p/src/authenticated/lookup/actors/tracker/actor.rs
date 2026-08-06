@@ -13,9 +13,8 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
-use commonware_utils::channel::{fallible::FallibleExt, mpsc};
+use commonware_utils::{channel::{fallible::FallibleExt, mpsc}, hash_map, HashMap};
 use rand_core::Rng;
-use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -77,7 +76,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 receiver,
                 directory,
                 listener: cfg.listener,
-                mailboxes: HashMap::new(),
+                mailboxes: hash_map::new(),
                 subscribers: Vec::new(),
             },
             Mailbox::new(sender),

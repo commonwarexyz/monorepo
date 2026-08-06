@@ -14,10 +14,10 @@ use commonware_runtime::{
     iobuf::EncodeExt, telemetry::metrics::CounterFamily,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
+use commonware_utils::{channel::ring, hash_map, HashMap, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tracing::debug;
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
@@ -146,8 +146,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         channels: Channels<C>,
     ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
-        let mut rate_limits = HashMap::new();
-        let mut senders = HashMap::new();
+        let mut rate_limits = hash_map::new();
+        let mut senders = hash_map::new();
         for (channel, (rate, sender)) in channels.collect() {
             let rate_limiter = RateLimiter::direct_with_clock(
                 rate,
