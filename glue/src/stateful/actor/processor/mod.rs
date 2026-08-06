@@ -1160,6 +1160,15 @@ where
         ReplayClaim::Owner(replays.register_owner(digest, &mut entries))
     }
 
+    /// Whether finalization supersedes a winner replay's terminal failure.
+    fn finalization_recovers_replay(&self, digest: PendingDigest<A, E>) -> bool {
+        let state = self.state.lock();
+        state.last_processed.digest == digest
+            || state
+                .finalizing
+                .is_some_and(|finalizing| finalizing.digest == digest)
+    }
+
     /// Forks batches from a known parent.
     async fn fork_batches(
         &self,
@@ -1286,7 +1295,12 @@ where
                     };
                     match completion {
                         Ok(Ok(())) | Err(_) => continue,
-                        Ok(Err(error)) => return Err(error),
+                        Ok(Err(error)) => {
+                            if self.finalization_recovers_replay(digest) {
+                                continue;
+                            }
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -2774,11 +2788,13 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalize_self_applies_after_invalid_winner_replay() {
+    fn execution_replay_waiter_recovers_from_invalid_finalizing_winner() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
+            let probe = ApplicationProbe::new(winner.digest(), std::iter::empty());
+            harness.processor.app.apply_probe = Some(probe.clone());
 
             let owner = match harness
                 .processor
@@ -2788,6 +2804,25 @@ mod tests {
                 ReplayClaim::Owner(owner) => owner,
                 _ => panic!("winner replay claim should own the flight"),
             };
+
+            let execution = harness.processor.execution.clone();
+            let replays = harness.processor.replays.clone();
+            let mut waiter_app = harness.processor.app.clone();
+            let replay_context = harness.context_cell.as_present();
+            let waiter_progress = VerificationProgress::default();
+            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
+            let mut waiter = Box::pin(execution.replay_block_shared(
+                &mut waiter_app,
+                replay_context,
+                winner.digest(),
+                Arc::new(winner.clone()),
+                &mut waiter_cancellation,
+                ReplayTracking {
+                    flights: &replays,
+                    progress: &waiter_progress,
+                },
+            ));
+            assert!(futures::poll!(&mut waiter).is_pending());
 
             let mut finalize = Box::pin(
                 harness
@@ -2800,10 +2835,16 @@ mod tests {
             );
 
             owner.finish(Err(PrepareBatchesError::Invalid));
+            assert_eq!(
+                waiter.await,
+                Ok(()),
+                "retained waiter should join recovery of the finalizing winner",
+            );
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
             assert!(barrier.durable().await, "finalize flush must complete");
+            assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
             assert_eq!(harness.processor.last_processed().digest, winner.digest());
             assert!(harness.processor.replays_idle());
         });
