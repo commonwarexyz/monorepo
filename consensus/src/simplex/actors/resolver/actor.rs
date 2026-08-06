@@ -361,9 +361,8 @@ impl<
     ) {
         let ask = Ask::backfill();
 
-        // Every reported gap sits above the floor, and a cached nullification
-        // covering a view above the floor is also stored in [State], so a
-        // reported gap is never settled.
+        // State only emits a background fetch for a gap that is unsettled at
+        // issuance. Later evidence may settle and retire the queued fetch.
         assert!(!self.settled(view, ask.kind));
         let span = info_span!(
             "simplex.resolver.fetch",
