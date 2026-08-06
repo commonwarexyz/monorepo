@@ -136,8 +136,12 @@ where
                     }
                 }
 
+                // Publish completed verdicts before admitting another message.
+                // A later finalization cannot retroactively invalidate them.
                 verifications.complete_ready();
 
+                // A message deferred by an active proposal is the FIFO barrier
+                // for subsequent mailbox work, so handle it before later arrivals.
                 let message = match deferred_message.take() {
                     Some(message) => Ok(message),
                     None => self.mailbox.try_recv(),
