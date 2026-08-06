@@ -1504,26 +1504,32 @@ where
 
         // Resolve last-write-wins per distinct key without hashing each update: every staged slot
         // carries its distinct-key id, so a forward walk leaves each id's final write (the same
-        // winner as a newest-first scan). `touched` records each id on first write so the walks
-        // below stay proportional to the updates actually submitted, not the full staged read set.
+        // winner as a newest-first scan). `winner_of` is a directory over the staged read set
+        // holding one index per id, biased so zero means unwritten. `winners` stores the values,
+        // one per distinct key written, so it and the walks below scale with the writes.
         let StagedKeys { keys, slots, ids } = keys;
-        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = vec![None; ids.len()];
-        let mut touched: Vec<usize> = Vec::with_capacity(updates.len());
+        let mut winner_of: Vec<usize> = vec![0; ids.len()];
+        let mut winners: Vec<(usize, Option<U::Value>)> =
+            Vec::with_capacity(updates.len().min(ids.len()));
         for (slot, value) in updates {
             assert!(slot < keys.len(), "update index out of staged read range");
             let id = slots[slot];
-            if winners[id].is_none() {
-                touched.push(id);
+            match winner_of[id] {
+                0 => {
+                    winner_of[id] = winners.len() + 1;
+                    winners.push((slot, value));
+                }
+                entry => winners[entry - 1] = (slot, value),
             }
-            winners[id] = Some((slot, value));
         }
 
         // Upserts are applied last and win over overlapping staged updates. Reuse the staged key
         // index for overlap detection instead of building a second hash table, then release it
-        // before allocating the remaining merkleization bookkeeping.
+        // before allocating the remaining merkleization bookkeeping. Clearing the directory entry
+        // orphans that key's winner, which the split loop skips.
         for (key, _) in &upserts {
             if let Some(&id) = ids.get(key) {
-                winners[id] = None;
+                winner_of[id] = 0;
             }
         }
         drop(ids);
@@ -1533,42 +1539,39 @@ where
         // also emit an older batch mutation for the same key, so it is removed here. The
         // probe is skipped when the batch had no mutations before this call: each distinct
         // key is visited at most once (winners are per key id), so a staged winner can never
-        // chase a fallback inserted by this same loop. `touched` may also contain ids whose
-        // winners were cleared because an upsert supersedes them; those ids are skipped.
+        // chase a fallback inserted by this same loop. An entry the directory no longer points
+        // at was superseded by an upsert and is skipped.
         let had_mutations = !batch.mutations.is_empty();
-        let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(touched.len());
-        for &id in &touched {
-            let winner = &mut winners[id];
-            let Some((slot, value)) = winner else {
+        let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(winners.len());
+        for (entry, (slot, value)) in winners.iter_mut().enumerate() {
+            if winner_of[slots[*slot]] != entry + 1 {
                 continue;
-            };
+            }
             let key = &keys[*slot];
             match &resolutions[*slot] {
                 Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
                     if had_mutations {
                         batch.mutations.remove(key);
                     }
-                    order.push((sloc.loc(), *slot));
+                    order.push((sloc.loc(), entry));
                 }
                 _ => {
-                    let (_, value) = winner.take().expect("winner checked above");
-                    batch.mutations.insert(key.clone(), value);
+                    batch.mutations.insert(key.clone(), value.take());
                 }
             }
         }
+        drop(winner_of);
 
         // Locations are unique after last-write-wins dedup (each key resolves to exactly one
         // location, committed or ancestor), so the parallel sort is deterministic. Sorting
-        // compact `(location, slot)` pairs instead of the staged tuples keeps its memory
-        // traffic low. The tuples are then drained in sorted order, moving each winner's
-        // payload and value instead of cloning them.
+        // compact `(location, winner)` pairs instead of the staged tuples keeps its memory
+        // traffic low. Each index appears once, so the tuples are drained in sorted order,
+        // moving each winner's payload and value instead of cloning them.
         strategy.sort_by(&mut order, |a, b| a.0.cmp(&b.0));
         staged_updates = order
             .iter()
-            .map(|&(_, slot)| {
-                let (_, value) = winners[slots[slot]]
-                    .take()
-                    .expect("winner recorded for staged slot");
+            .map(|&(_, entry)| {
+                let (slot, value) = mem::take(&mut winners[entry]);
                 let (sloc, payload) = resolutions[slot].take().expect("resolution checked above");
                 (keys[slot].clone(), sloc, payload, value)
             })
