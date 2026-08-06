@@ -174,7 +174,7 @@ where
 /// # Errors
 ///
 /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` exceeds the operations
-/// `reader` holds: the floor walk is only defined within them.
+/// `reader` holds.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,

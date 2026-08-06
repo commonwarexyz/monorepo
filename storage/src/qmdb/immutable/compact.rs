@@ -301,7 +301,7 @@ where
         let imported = witness::import_tip::<F, H, S, _>(&merkle, last_commit_op)?;
 
         let store = witness::Store::from_import(journal, imported);
-        let root = store.tip_ref().root();
+        let root = store.tip().root();
         Ok(Self {
             merkle,
             root,
@@ -340,12 +340,12 @@ where
         )
         .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) =
-            store.tip_ref().op().clone()
+            store.tip().op().clone()
         else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = store.tip_ref().size() - 1;
-        let root = store.tip_ref().root();
+        let last_commit_loc = store.tip().size() - 1;
+        let root = store.tip().root();
 
         Ok(Self {
             merkle,
@@ -396,7 +396,7 @@ where
     /// called. A target installed by [`Self::start_sync`] is proven durable only when its
     /// handle completes.
     pub fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.store.tip_ref().target()
+        self.store.tip().target()
     }
 
     /// The [`Commitment`] for the database's current state.
@@ -524,7 +524,7 @@ where
         // Fast path: already at `target` with no uncommitted state. Wait for any pipelined sync
         // to prove the tip durable before returning.
         if self.size() == target
-            && self.store.tip_ref().size() == target
+            && self.store.tip().size() == target
             && !self.store.import_pending()
         {
             self.store.wait_for_sync().await?;
@@ -536,14 +536,14 @@ where
             .rewind::<H, S>(&self.merkle, target, &self.commit_codec_config)
             .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) =
-            self.store.tip_ref().op().clone()
+            self.store.tip().op().clone()
         else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
         self.last_commit_loc = target - 1;
-        self.root = self.store.tip_ref().root();
+        self.root = self.store.tip().root();
         Ok(self)
     }
 
@@ -571,7 +571,7 @@ where
 
     /// Capture an owned immutable [Snapshot] of the database's state.
     pub fn snapshot(&self) -> Snapshot<F, Operation<F, K, V>, H::Digest> {
-        self.store.tip()
+        Arc::clone(self.store.tip())
     }
 }
 
@@ -595,7 +595,7 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
-        self.store.tip_ref().serve(request).await
+        self.store.tip().serve(request).await
     }
 }
 

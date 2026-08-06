@@ -206,13 +206,9 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
         }
     }
 
-    /// Share the current tip. Prior handles stay valid when a persist installs a new tip.
-    pub(crate) fn tip(&self) -> Arc<Tip<F, Op, D>> {
-        Arc::clone(&self.tip)
-    }
-
-    /// Borrow the current tip.
-    pub(crate) fn tip_ref(&self) -> &Tip<F, Op, D> {
+    /// The current tip. Snapshot it by cloning the [`Arc`]; prior clones stay valid when a
+    /// persist installs a new tip.
+    pub(crate) const fn tip(&self) -> &Arc<Tip<F, Op, D>> {
         &self.tip
     }
 
