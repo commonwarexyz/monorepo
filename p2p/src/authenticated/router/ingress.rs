@@ -116,13 +116,13 @@ impl<P: PublicKey> MessengerState<P> {
     }
 
     fn bind(&self, mailbox: Mailbox<P>) {
-        // Publish the mailbox while holding this lock so each subscription is either
-        // drained here or observes the bound mailbox.
-        let mut pending_subscriptions = self.pending_subscriptions.lock();
+        // Publish the mailbox before draining pending subscriptions. Subscribers that observed it
+        // unbound recheck while holding the same lock, so they are either queued or send directly.
         assert!(
             self.mailbox.set(mailbox).is_ok(),
             "router messenger already bound"
         );
+        let mut pending_subscriptions = self.pending_subscriptions.lock();
         let mailbox = self.mailbox.get().unwrap();
         for sender in pending_subscriptions.drain(..) {
             let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
@@ -177,6 +177,8 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Unreliable<Feedback> {
+        // Treat sends before the router is bound as sends with no connected peers. Nothing can
+        // receive the content, so accept the submission without encoding or enqueueing it.
         let Some(mailbox) = self.state.mailbox.get() else {
             return Unreliable::new(Feedback::Ok);
         };
