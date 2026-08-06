@@ -238,8 +238,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         }
     }
 
+    /// Enforces the configured maximum over all retained peer identities.
     fn assert_peer_count(&self) {
-        // Enforce the configured maximum over all retained peer identities.
         let peer_count = self.directory.peer_count();
         assert!(
             peer_count <= self.max_peers,

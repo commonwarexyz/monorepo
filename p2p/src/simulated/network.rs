@@ -384,16 +384,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
         }
+        self.assert_peer_count();
 
-        // Enforce the configured maximum over all retained peer identities.
+        true
+    }
+
+    /// Enforces the configured maximum over all retained peer identities.
+    fn assert_peer_count(&self) {
         let peer_count = self.peer_ref_counts.len();
         assert!(
             peer_count <= self.max_peers.get(),
             "peer count exceeds max_peers: {peer_count} > {}",
             self.max_peers
         );
-
-        true
     }
 
     /// Returns (and increments) the next available socket address.
