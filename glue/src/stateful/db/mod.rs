@@ -126,7 +126,7 @@ pub trait Unmerkleized: Sized + Send {
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
 
-    /// The database this batch merkleizes against.
+    /// The type of the underlying database.
     type Db;
 
     /// The error type returned by fallible operations.
@@ -135,8 +135,7 @@ pub trait Unmerkleized: Sized + Send {
     /// Resolve all mutations, compute the new state root, and produce a
     /// merkleized batch.
     ///
-    /// Merkleization borrows the owning database because floor raises scan its live
-    /// activity bitmap; reads borrow it the same way at each call and never retain it.
+    /// `db` is the underlying database.
     fn merkleize(
         self,
         db: &Self::Db,
@@ -154,7 +153,7 @@ pub trait Merkleized: Sized + Send + Sync {
     /// The unmerkleized batch type produced by [`new_batch`](Self::new_batch).
     type Unmerkleized: Unmerkleized;
 
-    /// The sync target this sealed batch can be checked against.
+    /// The sync target type accepted by [`matches`](Self::matches).
     type SyncTarget: Clone + PartialEq + Send + Sync;
 
     /// The canonical state root committed in block headers.
@@ -166,7 +165,8 @@ pub trait Merkleized: Sized + Send + Sync {
     /// In QMDB, this maps to `merkleized_batch.new_batch()`.
     fn new_batch(&self) -> Self::Unmerkleized;
 
-    /// Return true if this sealed batch matches a committed sync target.
+    /// Return true if this batch's root and operation range are the ones
+    /// `target` commits to.
     fn matches(&self, target: &Self::SyncTarget) -> bool;
 }
 

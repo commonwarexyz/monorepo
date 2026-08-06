@@ -37,8 +37,8 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
-/// Wraps a keyless [`UnmerkleizedBatch`], implementing the
-/// [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// Wraps a keyless [`UnmerkleizedBatch`] to implement
+/// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -50,9 +50,9 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    _phantom: PhantomData<fn(E, C)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
+    _phantom: PhantomData<fn(E, C)>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
@@ -125,8 +125,8 @@ where
     }
 }
 
-/// Wraps a keyless [`MerkleizedBatch`], implementing the
-/// [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// Wraps a keyless [`MerkleizedBatch`] to implement
+/// [`Merkleized`](crate::stateful::db::Merkleized).
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -243,9 +243,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 }
@@ -288,9 +288,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnmerkleized {
             batch: Self::new_batch(self),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 
@@ -384,9 +384,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnmerkleized {
             batch: Self::new_batch(self),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 

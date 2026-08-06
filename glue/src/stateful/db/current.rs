@@ -52,8 +52,7 @@ use std::{
     sync::Arc,
 };
 
-/// Wraps a QMDB [`UnmerkleizedBatch`], implementing the
-/// [`Unmerkleized`](super::Unmerkleized) trait.
+/// Wraps a QMDB [`UnmerkleizedBatch`] to implement [`Unmerkleized`](super::Unmerkleized).
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -156,8 +155,7 @@ where
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`], implementing the
-/// [`Merkleized`](super::Merkleized) trait.
+/// Wraps a QMDB [`MerkleizedBatch`] to implement [`Merkleized`](super::Merkleized).
 pub struct CurrentMerkleized<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,

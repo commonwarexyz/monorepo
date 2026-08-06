@@ -13,6 +13,15 @@ use rand_core::Rng;
 type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
+/// Result of forwarding a target update to the state-sync coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpdateOutcome {
+    /// The live coordinator recorded the target update.
+    Observed,
+    /// State sync completed and published its artifact on the completion channel.
+    SyncCompleted,
+}
+
 pub(crate) enum Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -20,9 +29,8 @@ where
 {
     UpdateTargets {
         update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
-        /// Resolves `true` once sync has completed (the artifact travels on the
-        /// completion channel), `false` when the update was accepted instead.
-        response: oneshot::Sender<bool>,
+        /// Reports whether the update was accepted or sync already completed.
+        response: oneshot::Sender<UpdateOutcome>,
     },
 }
 
@@ -79,13 +87,12 @@ where
 
     /// Sends a target update and waits until the live sync coordinator records it.
     ///
-    /// Returns `true` if sync already completed; the artifact arrives on the
-    /// completion channel.
+    /// If sync already completed, the artifact arrives on the completion channel.
     pub async fn update_targets(
         &self,
         anchor: Anchor<BlockDigest<E, A>>,
         targets: SyncTargets<E, A>,
-    ) -> bool {
+    ) -> UpdateOutcome {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
@@ -97,19 +104,19 @@ where
                 "syncer must outlive update_targets callers",
             );
 
-            let Ok(completed) = receiver.await else {
+            let Ok(outcome) = receiver.await else {
                 // A newer queued update displaced this one before the syncer saw it.
                 continue;
             };
-            if completed {
-                return true;
+            if outcome == UpdateOutcome::SyncCompleted {
+                return outcome;
             }
 
             // Wait until the live sync coordinator has recorded the new tip update.
             // Enqueueing it into Syncer is not enough to prove the eventual sync
             // artifact includes the target or to discard its handoff state.
             if observed.await.is_ok() {
-                return false;
+                return UpdateOutcome::Observed;
             }
 
             // The active coordinator dropped before recording this update.
@@ -121,7 +128,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Mailbox, Message};
+    use super::{Mailbox, Message, UpdateOutcome};
     use crate::stateful::tests::mocks::{TestApp, anchor};
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
@@ -141,7 +148,7 @@ mod tests {
                 panic!("first update should be sent");
             };
             assert!(
-                response.send(false).is_ok(),
+                response.send(UpdateOutcome::Observed).is_ok(),
                 "response receiver should be alive"
             );
             drop(update);
@@ -152,13 +159,14 @@ mod tests {
                 panic!("dropped observation should trigger a retry");
             };
             assert!(
-                response.send(true).is_ok(),
+                response.send(UpdateOutcome::SyncCompleted).is_ok(),
                 "response receiver should be alive"
             );
 
-            assert!(
+            assert_eq!(
                 update_targets.await,
-                "retry should report the completed sync",
+                UpdateOutcome::SyncCompleted,
+                "retry should report the completed sync"
             );
         });
     }
@@ -184,13 +192,14 @@ mod tests {
                 panic!("displaced response should trigger a retry");
             };
             assert!(
-                response.send(true).is_ok(),
+                response.send(UpdateOutcome::SyncCompleted).is_ok(),
                 "response receiver should be alive"
             );
 
-            assert!(
+            assert_eq!(
                 update_targets.await,
-                "retry should report the completed sync",
+                UpdateOutcome::SyncCompleted,
+                "retry should report the completed sync"
             );
         });
     }
@@ -208,7 +217,7 @@ mod tests {
                 panic!("update should be sent");
             };
             assert!(
-                response.send(false).is_ok(),
+                response.send(UpdateOutcome::Observed).is_ok(),
                 "response receiver should be alive"
             );
 
@@ -216,7 +225,11 @@ mod tests {
 
             update.record(|_, _| {});
 
-            assert!(!update_targets.await, "recorded update completes nothing");
+            assert_eq!(
+                update_targets.await,
+                UpdateOutcome::Observed,
+                "recorded update should report observation"
+            );
         });
     }
 }

@@ -1,6 +1,6 @@
 use super::{
     BlockDigest, SyncResult,
-    mailbox::{Mailbox, Message},
+    mailbox::{Mailbox, Message, UpdateOutcome},
     resolve_state_sync_floor,
 };
 use crate::stateful::{
@@ -167,7 +167,7 @@ where
                     if self.sync_complete.is_none() {
                         // Sync already completed; the artifact went out on the
                         // completion channel.
-                        response.send_lossy(true);
+                        response.send_lossy(UpdateOutcome::SyncCompleted);
                         continue;
                     }
 
@@ -189,7 +189,7 @@ where
                                     .take()
                                     .expect("completion sender present until sync completes");
                                 sync_complete.send_lossy(SyncResult { databases, anchor });
-                                response.send_lossy(true);
+                                response.send_lossy(UpdateOutcome::SyncCompleted);
                             }
                             Err(err) => {
                                 panic!("state sync task failed: {err:?}");
@@ -198,7 +198,7 @@ where
                         tip_updates_tx = None;
                         continue;
                     }
-                    response.send_lossy(false);
+                    response.send_lossy(UpdateOutcome::Observed);
                 }
             },
         }
@@ -210,7 +210,7 @@ mod tests {
     use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
-        actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
+        actor::syncer::{StateSyncMetadata, UpdateOutcome, init_databases_from_marshal},
         db::{Anchor, Barrier, DatabaseSet, SetSource, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
@@ -760,8 +760,12 @@ mod tests {
             let update = context
                 .child("update")
                 .spawn(move |_| async move { mailbox.update_targets(anchor(1, 1), 1).await });
-            let completed = update.await.expect("update task failed");
-            assert!(completed, "stranded update must report the completed sync");
+            let outcome = update.await.expect("update task failed");
+            assert_eq!(
+                outcome,
+                UpdateOutcome::SyncCompleted,
+                "stranded update must report the completed sync"
+            );
 
             let artifact = sync_completed.await.expect("artifact must publish");
             assert_eq!(artifact.anchor.height, Height::zero());

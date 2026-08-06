@@ -42,9 +42,9 @@ where
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
-    _phantom: PhantomData<fn(E, C)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
+    _phantom: PhantomData<fn(E, C)>,
 }
 
 impl<F, E, V, H, S, C> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
@@ -182,9 +182,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 }
@@ -219,9 +219,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnjournaledUnmerkleized {
             batch: Self::new_batch(self),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 
@@ -291,9 +291,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         KeylessUnjournaledUnmerkleized {
             batch: Self::new_batch(self),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 

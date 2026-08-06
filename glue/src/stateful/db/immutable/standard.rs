@@ -39,8 +39,8 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
-/// Wraps an immutable [`UnmerkleizedBatch`], implementing the
-/// [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// Wraps an immutable [`UnmerkleizedBatch`] to implement
+/// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -54,9 +54,9 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
-    _phantom: PhantomData<fn(E, C, T)>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
+    _phantom: PhantomData<fn(E, C, T)>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
@@ -132,8 +132,8 @@ where
     }
 }
 
-/// Wraps an immutable [`MerkleizedBatch`], implementing the
-/// [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// Wraps an immutable [`MerkleizedBatch`] to implement
+/// [`Merkleized`](crate::stateful::db::Merkleized).
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -259,9 +259,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 }
@@ -322,9 +322,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: Self::new_batch(self),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 
@@ -425,9 +425,9 @@ where
     fn new_batch(&self) -> Self::Unmerkleized {
         ImmutableUnmerkleized {
             batch: Self::new_batch(self),
-            _phantom: PhantomData,
             metadata: None,
             inactivity_floor: None,
+            _phantom: PhantomData,
         }
     }
 

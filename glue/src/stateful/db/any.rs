@@ -52,8 +52,7 @@ use std::{
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
 
-/// Wraps a QMDB [`UnmerkleizedBatch`], implementing the
-/// [`Unmerkleized`](super::Unmerkleized) trait.
+/// Wraps a QMDB [`UnmerkleizedBatch`] to implement [`Unmerkleized`](super::Unmerkleized).
 pub struct AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -156,8 +155,7 @@ where
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`], implementing the
-/// [`Merkleized`](super::Merkleized) trait.
+/// Wraps a QMDB [`MerkleizedBatch`] to implement [`Merkleized`](super::Merkleized).
 pub struct AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,

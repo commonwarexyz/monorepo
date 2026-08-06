@@ -238,20 +238,30 @@ where
 
     /// Record `block` as the live sync target.
     async fn update_target(mut self, block: &Arc<A::Block>) -> (Self, bool) {
-        let completed = select! {
+        let outcome = select! {
             _ = self.context.stopped() => return (self, false),
-            completed = self.syncer.update_targets(
+            outcome = self.syncer.update_targets(
                 Anchor::from(block.as_ref()),
                 A::sync_targets(block.as_ref()),
-            ) => completed,
+            ) => outcome,
         };
-        if completed {
-            // The syncer sent the artifact on the completion channel; collect it here
-            // so the pending finalizations hand off against the newest recorded target.
-            let artifact = (&mut self.sync_completed)
-                .await
-                .expect("completed sync must deliver its artifact");
-            self.artifact = Some(artifact);
+        match outcome {
+            syncer::UpdateOutcome::Observed => {}
+            syncer::UpdateOutcome::SyncCompleted => {
+                // The syncer sent the artifact on the completion channel. Collect it here
+                // so the pending finalizations hand off against the newest target.
+                let artifact = select! {
+                    _ = self.context.stopped() => return (self, false),
+                    artifact = &mut self.sync_completed => match artifact {
+                        Ok(artifact) => artifact,
+                        Err(_) => {
+                            error!("syncer stopped before publishing state sync artifact");
+                            return (self, false);
+                        }
+                    },
+                };
+                self.artifact = Some(artifact);
+            }
         }
         (self, true)
     }
@@ -528,7 +538,7 @@ mod tests {
                 assert!(poll!(waiter).is_pending());
             }
             assert!(poll!(&mut newest_waiter).is_pending());
-            assert!(response.send(false).is_ok());
+            assert!(response.send(syncer::UpdateOutcome::Observed).is_ok());
             for waiter in &mut waiters {
                 assert!(poll!(waiter).is_pending());
             }
@@ -914,7 +924,7 @@ mod tests {
                 "completion receiver must be alive",
             );
             assert!(
-                response.send(true).is_ok(),
+                response.send(syncer::UpdateOutcome::SyncCompleted).is_ok(),
                 "target update must still await its response",
             );
             drop(update);
