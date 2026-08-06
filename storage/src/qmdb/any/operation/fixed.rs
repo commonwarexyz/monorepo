@@ -10,8 +10,8 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
-    util::{at_least, ensure_zeros},
+    Codec, CodecFixed, Error as CodecError, FixedSize, Read as _, ReadExt as _, Write,
+    types::zeroed::Zeroed, util::at_least,
 };
 use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
@@ -55,12 +55,12 @@ where
             Operation::Delete(k) => {
                 DELETE_CONTEXT.write(buf);
                 k.write(buf);
-                buf.put_bytes(0, total - delete_op_size::<S::Key>());
+                Zeroed::new(total - delete_op_size::<S::Key>()).write(buf);
             }
             Operation::Update(p) => {
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
-                buf.put_bytes(0, total - update_op_size::<S>());
+                Zeroed::new(total - update_op_size::<S>()).write(buf);
             }
             Operation::CommitFloor(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
@@ -68,10 +68,10 @@ where
                     true.write(buf);
                     metadata.write(buf);
                 } else {
-                    buf.put_bytes(0, V::SIZE + 1);
+                    Zeroed::new(V::SIZE + 1).write(buf);
                 }
                 buf.put_slice(&floor_loc.to_be_bytes());
-                buf.put_bytes(0, total - commit_op_size::<V>());
+                Zeroed::new(total - commit_op_size::<V>()).write(buf);
             }
         }
     }
@@ -86,12 +86,12 @@ where
         match u8::read(buf)? {
             DELETE_CONTEXT => {
                 let key = S::Key::read(buf)?;
-                ensure_zeros(buf, total - delete_op_size::<S::Key>())?;
+                Zeroed::read_cfg(buf, &(total - delete_op_size::<S::Key>()))?;
                 Ok(Operation::Delete(key))
             }
             UPDATE_CONTEXT => {
                 let payload = S::read_cfg(buf, cfg)?;
-                ensure_zeros(buf, total - update_op_size::<S>())?;
+                Zeroed::read_cfg(buf, &(total - update_op_size::<S>()))?;
                 Ok(Operation::Update(payload))
             }
             COMMIT_CONTEXT => {
@@ -99,7 +99,7 @@ where
                 let metadata = if is_some {
                     Some(V::read_cfg(buf, cfg)?)
                 } else {
-                    ensure_zeros(buf, V::SIZE)?;
+                    Zeroed::read_cfg(buf, &V::SIZE)?;
                     None
                 };
                 let floor_loc = Location::new(u64::read(buf)?);
@@ -109,7 +109,7 @@ where
                         "commit floor location overflow",
                     ));
                 }
-                ensure_zeros(buf, total - commit_op_size::<V>())?;
+                Zeroed::read_cfg(buf, &(total - commit_op_size::<V>()))?;
                 Ok(Operation::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
