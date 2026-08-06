@@ -14,7 +14,7 @@ const MAX_ENCODED_ROWS: u32 = 1 << 31;
 const MAX_TOTAL_SHARDS: u32 = 65_536;
 
 /// A non-zero encoded row count supported by row shuffling.
-pub(super) type EncodedRows = AtMost<NonZeroUsize, MAX_ENCODED_ROWS>;
+type EncodedRows = AtMost<NonZeroUsize, MAX_ENCODED_ROWS>;
 /// A non-zero shard count addressable by `u16` shard indices.
 type TotalShards = AtMost<NonZeroUsize, MAX_TOTAL_SHARDS>;
 
@@ -28,7 +28,7 @@ pub struct Topology {
     /// How many rows the data has.
     pub data_rows: usize,
     /// How many rows the encoded data has.
-    pub encoded_rows: EncodedRows,
+    pub encoded_rows: usize,
     /// How many samples each shard has.
     pub samples: usize,
     /// How many column samples we need.
@@ -36,7 +36,7 @@ pub struct Topology {
     /// How many shards we need to recover.
     pub min_shards: usize,
     /// How many shards there are in total (each shard containing multiple rows).
-    pub total_shards: TotalShards,
+    pub total_shards: usize,
 }
 
 impl Topology {
@@ -46,17 +46,18 @@ impl Topology {
         total_shards: TotalShards,
         data_cols: usize,
     ) -> Result<Self, Error> {
+        let total_shards = total_shards.get();
         let data_bits = data_bytes.checked_mul(8).ok_or(Error::TopologyOverflow)?;
         let data_els = F::bits_to_elements(data_bits);
         let data_rows = data_els.div_ceil(data_cols);
         let samples = data_rows.div_ceil(min_shards);
         let encoded_rows = total_shards
-            .get()
             .checked_mul(samples)
             .and_then(usize::checked_next_power_of_two)
             .ok_or(Error::TooManyEncodedRows)?;
-        let encoded_rows =
-            EncodedRows::try_from(encoded_rows).map_err(|_| Error::TooManyEncodedRows)?;
+        let encoded_rows = EncodedRows::try_from(encoded_rows)
+            .map_err(|_| Error::TooManyEncodedRows)?
+            .get();
         Ok(Self {
             data_bytes,
             data_cols,
@@ -70,7 +71,7 @@ impl Topology {
     }
 
     pub(crate) fn required_samples(&self) -> usize {
-        let encoded_rows = self.encoded_rows.get();
+        let encoded_rows = self.encoded_rows;
         let k = BigRational::from_usize(encoded_rows - self.data_rows);
         let m = BigRational::from_usize(encoded_rows);
         let fraction = (&k + BigRational::from_u64(1)) / (BigRational::from_usize(2) * &m);
@@ -147,7 +148,7 @@ impl Topology {
             let attempt =
                 Self::with_cols(corrected_data_bytes, min_shards, total_shards, data_cols)?;
             let required_samples = attempt.required_samples();
-            if required_samples <= attempt.encoded_rows.get() / total_shards.get() {
+            if required_samples <= attempt.encoded_rows / total_shards.get() {
                 out = Self {
                     samples: required_samples.max(attempt.samples),
                     ..attempt
@@ -162,7 +163,7 @@ impl Topology {
     }
 
     pub fn check_index(&self, i: u16) -> Result<(), Error> {
-        if (0..self.total_shards.get()).contains(&usize::from(i)) {
+        if (0..self.total_shards).contains(&usize::from(i)) {
             return Ok(());
         }
         Err(Error::InvalidIndex(i))
@@ -182,7 +183,7 @@ mod tests {
         };
         let topology = Topology::reckon(&config, 16).unwrap();
         assert_eq!(topology.min_shards, 3);
-        assert_eq!(topology.total_shards.get(), 4);
+        assert_eq!(topology.total_shards, 4);
 
         // Verify we hit the 1-column fallback and the security invariant holds.
         // When the loop in reckon() exits without finding a multi-column config,

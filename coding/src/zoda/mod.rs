@@ -189,7 +189,7 @@ fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
 }
 
 mod topology;
-use topology::{EncodedRows, Topology};
+use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone, Debug)]
@@ -336,8 +336,8 @@ pub struct CheckedShard {
 /// Take indices up to `total`, and shuffle them.
 ///
 /// The shuffle depends, deterministically, on the transcript.
-fn shuffle_indices(transcript: &Transcript, total: EncodedRows) -> Vec<u32> {
-    let total = u32::try_from(total.get()).expect("encoded row bound should fit u32");
+fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
+    let total = u32::try_from(total).expect("encoded row bound should fit u32");
     let mut out = (0..total).collect::<Vec<_>>();
     transcript.shuffle(b"shuffle", &mut out);
     out
@@ -407,7 +407,7 @@ impl<D: Digest> CheckingData<D> {
         // that we do Reed-Solomon encoding of the checksum ourselves.
         transcript.commit(checksum.encode());
         let encoded_checksum = checksum
-            .as_polynomials(topology.encoded_rows.get())
+            .as_polynomials(topology.encoded_rows)
             .expect("checksum has too many rows")
             .evaluate()
             .data();
@@ -541,7 +541,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
 
         // Step 2: Encode the data.
         let encoded_data = data
-            .as_polynomials(topology.encoded_rows.get())
+            .as_polynomials(topology.encoded_rows)
             .expect("data has too many rows")
             .evaluate()
             .data();
@@ -576,7 +576,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
 
         // Step 6: Produce the shards in parallel.
-        let shards = strategy.try_map_collect_vec(0..topology.total_shards.get(), |shard_idx| {
+        let shards = strategy.try_map_collect_vec(0..topology.total_shards, |shard_idx| {
             let indices =
                 &shuffled_indices[shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
             let rows = Matrix::init(
@@ -653,7 +653,6 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             min_shards,
             ..
         } = checking_data.topology;
-        let encoded_rows = encoded_rows.get();
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         let mut shard_count = 0usize;
         for shard in shards {
@@ -789,7 +788,7 @@ mod tests {
             let samples = checking_data.topology.samples;
             let a_indices =
                 checking_data.shuffled_indices[a_i * samples..(a_i + 1) * samples].to_vec();
-            let lg_rows = checking_data.topology.encoded_rows.get().ilog2() as usize;
+            let lg_rows = checking_data.topology.encoded_rows.ilog2() as usize;
             let shift = vanishing(lg_rows as u8, &a_indices);
             let mut checksum = (*shards[1].checksum).clone();
             for (i, shift_i) in shift.coefficients_up_to(checksum.rows()).enumerate() {
