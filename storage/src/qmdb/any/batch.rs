@@ -3882,7 +3882,7 @@ mod tests {
         2
     );
 
-    /// Build a [`Staged`] handle with the slot key-id map `stage`/`expand` would have built.
+    /// Build a [`Staged`] handle with the keys and resolutions `stage`/`expand` would produce.
     fn staged_with<F: Family, H: Hasher, U: update::Update + Send + Sync, S: Strategy>(
         batch: UnmerkleizedBatch<F, H, U, S>,
         keys: Vec<U::Key>,
