@@ -2,7 +2,11 @@ use crate::authenticated::discovery::types;
 use commonware_actor::mailbox::{self, UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Metrics;
-use std::{collections::VecDeque, fmt, num::NonZeroUsize};
+use commonware_utils::{NZUsize, channel::ring};
+use futures::Sink;
+#[cfg(test)]
+use std::sync::mpsc::TryRecvError;
+use std::{collections::VecDeque, fmt, num::NonZeroUsize, pin::Pin};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -31,33 +35,61 @@ impl<C: PublicKey> UnreliablePolicy for Message<C> {
     }
 }
 
-pub struct Mailbox<C: PublicKey>(mailbox::UnreliableSender<Message<C>>);
+pub struct Mailbox<C: PublicKey> {
+    messages: mailbox::UnreliableSender<Message<C>>,
+    kill: ring::Sender<()>,
+}
+
+pub struct Receiver<C: PublicKey> {
+    pub(super) messages: mailbox::UnreliableReceiver<Message<C>>,
+    pub(super) kill: ring::Receiver<()>,
+}
+
+#[cfg(test)]
+impl<C: PublicKey> Receiver<C> {
+    pub async fn recv(&mut self) -> Option<Message<C>> {
+        self.messages.recv().await
+    }
+
+    pub fn try_recv(&mut self) -> Result<Message<C>, TryRecvError> {
+        self.messages.try_recv()
+    }
+}
 
 impl<C: PublicKey> Mailbox<C> {
-    pub fn new(
-        metrics: impl Metrics,
-        size: NonZeroUsize,
-    ) -> (Self, mailbox::UnreliableReceiver<Message<C>>) {
-        let (sender, receiver) = mailbox::new_unreliable(metrics, size);
-        (Self(sender), receiver)
+    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receiver<C>) {
+        let (messages, receiver) = mailbox::new_unreliable(metrics, size);
+        let (kill, kill_receiver) = ring::channel(NZUsize!(1));
+        (
+            Self { messages, kill },
+            Receiver {
+                messages: receiver,
+                kill: kill_receiver,
+            },
+        )
     }
 
     pub fn bit_vec(&self, bit_vec: types::BitVec) {
-        let _ = self.0.enqueue(Message::BitVec(bit_vec));
+        let _ = self.messages.enqueue(Message::BitVec(bit_vec));
     }
 
     pub fn peers(&self, peers: Vec<types::Info<C>>) {
-        let _ = self.0.enqueue(Message::Peers(peers));
+        let _ = self.messages.enqueue(Message::Peers(peers));
     }
 
     pub fn kill(&self) {
-        let _ = self.0.enqueue(Message::Kill);
+        let mut kill = self.kill.clone();
+        let _ = Pin::new(&mut kill).start_send(());
+        let _ = self.messages.enqueue(Message::Kill);
     }
 }
 
 impl<C: PublicKey> Clone for Mailbox<C> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            messages: self.messages.clone(),
+            kill: self.kill.clone(),
+        }
     }
 }
 

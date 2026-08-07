@@ -59,12 +59,25 @@ use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     str::FromStr,
     time::Duration,
 };
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_LOG";
+
+fn validator_peer_limit<P: Ord>(validators: &Set<P>, local: &P) -> NonZeroUsize {
+    let peer_count = if validators.position(local).is_some() {
+        validators.len()
+    } else {
+        validators
+            .len()
+            .checked_add(1)
+            .expect("peer set size overflow")
+    };
+    NonZeroUsize::new(peer_count).expect("local identity ensures at least one peer")
+}
 
 fn main() {
     // Parse arguments
@@ -84,7 +97,9 @@ fn main() {
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(u64))
-                .help("All participants (arbiter and contributors)"),
+                .help(
+                    "All participant keys (arbiter and contributors), including the key from --me",
+                ),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
@@ -123,6 +138,7 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
+    let max_peers_per_set = validator_peer_limit(&validators, &signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -150,22 +166,13 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure network
-    let max_peers = Set::from_iter_dedup(
-        validators
-            .iter()
-            .cloned()
-            .chain(bootstrapper_identities.iter().map(|(peer, _)| peer.clone())),
-    )
-    .len()
-    .try_into()
-    .expect("at least one peer must be configured");
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        max_peers,
+        max_peers_per_set,
         1024 * 1024, // 1MB
     );
 
@@ -240,4 +247,23 @@ fn main() {
         let gui = gui::Gui::new(context.child("gui"));
         gui.run().await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validator_peer_limit_counts_included_local_identity() {
+        let validators = Set::from_iter_dedup([1, 2]);
+
+        assert_eq!(validator_peer_limit(&validators, &1).get(), 2);
+    }
+
+    #[test]
+    fn validator_peer_limit_counts_omitted_local_identity() {
+        let validators = Set::from_iter_dedup([1, 2]);
+
+        assert_eq!(validator_peer_limit(&validators, &3).get(), 3);
+    }
 }

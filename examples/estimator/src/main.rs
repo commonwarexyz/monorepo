@@ -313,7 +313,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
         context.child("network"),
         Config {
             max_size: u32::MAX,
-            max_peers: NZUsize!(peer_addresses.len()),
+            max_peers_per_set: NZUsize!(peer_addresses.len()),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),
         },

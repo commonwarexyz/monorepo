@@ -726,7 +726,7 @@ mod tests {
             Config {
                 max_size: 1024 * 1024,
                 // Some tests replace the initial set with the committee plus one injector.
-                max_peers: NZUsize!(peers.len() + 1),
+                max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -753,7 +753,7 @@ mod tests {
             context.child("network"),
             Config {
                 max_size: 1024 * 1024,
-                max_peers: NZUsize!(primary.len() + secondary.len()),
+                max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },

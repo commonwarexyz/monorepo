@@ -125,7 +125,7 @@ fn main() {
         }
 
         // Configure network
-        let max_peers = peer_keys
+        let max_peers_per_set = peer_keys
             .len()
             .try_into()
             .expect("allowed peers must contain at least one peer");
@@ -135,7 +135,7 @@ fn main() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
-            max_peers,
+            max_peers_per_set,
             config.message_size,
         );
         p2p_cfg.mailbox_size = config.mailbox_size;

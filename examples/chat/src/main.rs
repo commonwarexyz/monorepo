@@ -6,7 +6,7 @@
 //! `commonware-chat` only sends messages to connected friends. If a friend is offline at the time a message is sent,
 //! `commonware-p2p::authenticated` will drop the message. You can confirm you are connected to all your friends by
 //! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
-//! be equal to `count(friends)- 1` (you don't connect to yourself).
+//! equal the number of distinct `--friends` entries other than your own identity.
 //!
 //! # Synchronized Friends
 //!
@@ -70,6 +70,10 @@ use tracing::info;
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_CHAT";
 
+fn include_local<P: Ord>(peers: Set<P>, local: P) -> Set<P> {
+    Set::from_iter_dedup(peers.into_iter().chain([local]))
+}
+
 #[doc(hidden)]
 fn main() {
     // Initialize context
@@ -84,7 +88,8 @@ fn main() {
                 .long("friends")
                 .required(true)
                 .value_delimiter(',')
-                .value_parser(value_parser!(u64)),
+                .value_parser(value_parser!(u64))
+                .help("Friend keys; the key from --me is added automatically"),
         )
         .arg(
             Arg::new("bootstrappers")
@@ -134,6 +139,7 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
+    let recipients = include_local(recipients, signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -153,22 +159,17 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
-    let max_peers = Set::from_iter_dedup(
-        recipients
-            .iter()
-            .cloned()
-            .chain(bootstrapper_identities.iter().map(|(peer, _)| peer.clone())),
-    )
-    .len()
-    .try_into()
-    .expect("at least one peer must be configured");
+    let max_peers_per_set = recipients
+        .len()
+        .try_into()
+        .expect("at least one peer must be configured");
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        max_peers,
+        max_peers_per_set,
         MAX_MESSAGE_SIZE,
     );
 
@@ -203,4 +204,25 @@ fn main() {
         // Abort network
         network_handler.abort();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn includes_local_identity_once_in_peer_set() {
+        let local = ed25519::PrivateKey::from_seed(1).public_key();
+        let friend = ed25519::PrivateKey::from_seed(2).public_key();
+        let peers = Set::try_from([friend.clone()]).unwrap();
+
+        let peers = include_local(peers, local.clone());
+
+        assert_eq!(peers.len(), 2);
+        assert!(peers.position(&local).is_some());
+        assert!(peers.position(&friend).is_some());
+
+        let peers = include_local(peers, local);
+        assert_eq!(peers.len(), 2);
+    }
 }

@@ -2120,10 +2120,9 @@ mod tests {
                         context.child("network"),
                         simulated::Config {
                             max_size: MAX_SHARD_SIZE as u32,
-                            max_peers: NZUsize!(
+                            max_peers_per_set: NZUsize!(
                                 self.num_primary_peers
-                                    + self.num_secondary_peers
-                                    + self.num_future_peers
+                                    + self.num_secondary_peers.max(self.num_future_peers)
                             ),
                             disconnect_on_block: true,
                             tracked_peer_sets: NZUsize!(1),
@@ -4697,7 +4696,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
-                    max_peers: NZUsize!(5),
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -4825,7 +4824,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
-                    max_peers: NZUsize!(4),
+                    max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -5674,7 +5673,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
-                    max_peers: NZUsize!(num_peers),
+                    max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -5801,7 +5800,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
-                    max_peers: NZUsize!(4),
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -5880,7 +5879,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
-                    max_peers: NZUsize!(num_peers),
+                    max_peers_per_set: NZUsize!(num_peers - 1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -6019,7 +6018,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
-                    max_peers: NZUsize!(num_peers),
+                    max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },

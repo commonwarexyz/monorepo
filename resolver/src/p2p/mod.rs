@@ -205,7 +205,7 @@ mod tests {
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
-                max_peers: NZUsize!(peer_seeds.len()),
+                max_peers_per_set: NZUsize!(peer_seeds.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             },
@@ -1253,7 +1253,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(2),
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -3346,7 +3346,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(3),
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -3450,7 +3450,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(3),
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3581,7 +3581,7 @@ mod tests {
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(3),
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },

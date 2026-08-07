@@ -120,7 +120,7 @@ mod tests {
             context.child("network"),
             NConfig {
                 max_size: 1024 * 1024,
-                max_peers: NZUsize!(peers.len()),
+                max_peers_per_set: NZUsize!(peers.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -2607,7 +2607,7 @@ mod tests {
                 context.child("network"),
                 NConfig {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(n as usize),
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2717,7 +2717,7 @@ mod tests {
                 context.child("network"),
                 NConfig {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(n as usize),
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

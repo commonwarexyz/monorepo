@@ -338,6 +338,8 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Returns `true` if this identity is configured locally.
+    ///
+    /// The local identity is always configured.
     pub const fn configured(&self) -> bool {
         self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
     }

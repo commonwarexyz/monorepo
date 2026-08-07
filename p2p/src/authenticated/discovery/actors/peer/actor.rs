@@ -18,9 +18,10 @@ use commonware_runtime::{
     iobuf::EncodeExt, telemetry::metrics::CounterFamily,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::time::SYSTEM_TIME_PRECISION;
+use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
+use futures::StreamExt as _;
 use rand_core::CryptoRng;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 use tracing::debug;
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
@@ -34,6 +35,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_peers: usize,
 
     control: mailbox::UnreliableReceiver<Message<C>>,
+    kill: ring::Receiver<()>,
     high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
     low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
 
@@ -55,7 +57,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 info_verifier: cfg.info_verifier,
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
-                control: control_receiver,
+                control: control_receiver.messages,
+                kill: control_receiver.kill,
                 high: receivers.high,
                 low: receivers.low,
                 sent_messages: cfg.sent_messages,
@@ -151,8 +154,23 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         Ok(())
     }
 
+    /// Sends while allowing teardown to cancel a backpressured transport write.
+    async fn send_or_kill(
+        peer: &C,
+        kill: &mut ring::Receiver<()>,
+        send: impl Future<Output = Result<(), commonware_stream::encrypted::Error>>,
+    ) -> Result<(), Error> {
+        select! {
+            killed = kill.next() => match killed {
+                Some(()) => Err(Error::PeerKilled(peer.to_string())),
+                None => Err(Error::PeerDisconnected),
+            },
+            result = send => result.map_err(Error::SendFailed),
+        }
+    }
+
     pub async fn run<O: Sink, I: Stream>(
-        self,
+        mut self,
         peer: C,
         greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
@@ -179,10 +197,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         self.sent_messages
             .get_or_create(&metrics::Message::new_greeting(&peer))
             .inc();
-        conn_sender
-            .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
-            .await
-            .map_err(Error::SendFailed)?;
+        let greeting = types::Payload::Greeting(greeting).encode_with_pool(&pool);
+        Self::send_or_kill(&peer, &mut self.kill, conn_sender.send(greeting)).await?;
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
@@ -195,10 +211,17 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 
                 // Enter into the main loop
                 let mut batch = Vec::with_capacity(self.send_batch_size);
-                let (control, high, low) = &mut (self.control, self.high, self.low);
+                let (control, kill, high, low) =
+                    &mut (self.control, self.kill, self.high, self.low);
                 select_loop! {
                     context,
                     on_stopped => {},
+                    killed = kill.next() => {
+                        return Err(match killed {
+                            Some(()) => Error::PeerKilled(peer.to_string()),
+                            None => Error::PeerDisconnected,
+                        });
+                    },
                     _ = context.sleep_until(deadline) => {
                         // Get latest bitset from tracker (also used as ping)
                         tracker.construct(peer.clone());
@@ -229,10 +252,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        conn_sender
-                            .send_many(batch.drain(..))
-                            .await
-                            .map_err(Error::SendFailed)?;
+                        Self::send_or_kill(
+                            &peer,
+                            kill,
+                            conn_sender.send_many(batch.drain(..)),
+                        )
+                        .await?;
                     },
                 }
 
@@ -401,7 +426,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::actors::tracker, router};
+    use crate::authenticated::{discovery::actors::tracker, router, test_utils::BlockingSink};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -415,6 +440,11 @@ mod tests {
     use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroU32,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Duration,
     };
 
@@ -461,6 +491,214 @@ mod tests {
         let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
         messenger.bind(router::Mailbox::new(router_sender));
         Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
+    }
+
+    #[test]
+    fn test_kill_interrupts_pending_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+            let armed = Arc::new(AtomicBool::new(false));
+            let blocked = Arc::new(AtomicBool::new(false));
+
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.child("listener").spawn({
+                let armed = armed.clone();
+                let blocked = blocked.clone();
+                move |ctx| async move {
+                    commonware_stream::encrypted::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        BlockingSink::new(remote_sink, armed, blocked),
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (_local_sender, mut local_receiver) = commonware_stream::encrypted::dial(
+                context.child("dialer"),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let (peer_actor, peer_mailbox, relay) = Actor::new(
+                context.child("actor"),
+                default_peer_config(context.child("config"), remote_pk),
+            );
+            let greeting = types::Info::sign(
+                &remote_key,
+                IP_NAMESPACE,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let mut channels = create_channels(context.child("channels"));
+            let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
+            let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
+            let peer_handle = context.child("task").spawn(move |_context| async move {
+                peer_actor
+                    .run(
+                        local_pk,
+                        greeting,
+                        (remote_sender, remote_receiver),
+                        tracker::Mailbox::new(tracker_mailbox),
+                        channels,
+                    )
+                    .await
+            });
+
+            let _ = local_receiver.recv().await.expect("greeting not sent");
+            armed.store(true, Ordering::SeqCst);
+            let pool = context.network_buffer_pool().clone();
+            assert!(
+                relay
+                    .send(
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"blocked"))),
+                        false,
+                    )
+                    .accepted()
+            );
+            for _ in 0..10 {
+                if blocked.load(Ordering::SeqCst) {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(blocked.load(Ordering::SeqCst), "write never blocked");
+
+            peer_mailbox.kill();
+            let result = context
+                .timeout(Duration::from_millis(10), peer_handle)
+                .await
+                .expect("kill did not interrupt the pending write")
+                .expect("peer task failed");
+            assert!(matches!(result, Err(Error::PeerKilled(_))));
+        });
+    }
+
+    #[test]
+    fn test_kill_interrupts_pending_greeting_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+            let armed = Arc::new(AtomicBool::new(false));
+            let blocked = Arc::new(AtomicBool::new(false));
+
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.child("listener").spawn({
+                let armed = armed.clone();
+                let blocked = blocked.clone();
+                move |ctx| async move {
+                    commonware_stream::encrypted::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        BlockingSink::new(remote_sink, armed, blocked),
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (_local_sender, _local_receiver) = commonware_stream::encrypted::dial(
+                context.child("dialer"),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let (peer_actor, peer_mailbox, _relay) = Actor::new(
+                context.child("actor"),
+                default_peer_config(context.child("config"), remote_pk),
+            );
+            let greeting = types::Info::sign(
+                &remote_key,
+                IP_NAMESPACE,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let channels = create_channels(context.child("channels"));
+
+            armed.store(true, Ordering::SeqCst);
+            let peer_handle = context.child("task").spawn(move |_context| async move {
+                peer_actor
+                    .run(
+                        local_pk,
+                        greeting,
+                        (remote_sender, remote_receiver),
+                        tracker::Mailbox::new(tracker_mailbox),
+                        channels,
+                    )
+                    .await
+            });
+
+            for _ in 0..10 {
+                if blocked.load(Ordering::SeqCst) {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                blocked.load(Ordering::SeqCst),
+                "greeting write never blocked"
+            );
+
+            peer_mailbox.kill();
+            let result = context
+                .timeout(Duration::from_millis(10), peer_handle)
+                .await
+                .expect("kill did not interrupt the pending greeting write")
+                .expect("peer task failed");
+            assert!(matches!(result, Err(Error::PeerKilled(_))));
+        });
     }
 
     #[test]

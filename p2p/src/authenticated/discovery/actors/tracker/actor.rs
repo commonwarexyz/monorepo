@@ -4,11 +4,12 @@ use super::{
     ingress::{Mailbox, Message, Oracle},
 };
 use crate::{
-    PeerSetUpdate,
+    PeerSetUpdate, TrackedPeers,
     authenticated::discovery::{
         actors::{peer, tracker::ingress::Releaser},
         types::{self, Info, InfoVerifier},
     },
+    sizing::peer_set_size_including,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
@@ -36,11 +37,14 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// For signing and verifying messages.
     crypto: C,
 
-    /// The maximum number of peers in a set.
+    /// The maximum number of primary peers represented in a peer-set bit vector.
     max_peer_set_size: u64,
 
+    /// The maximum number of distinct identities in one peer set.
+    max_peers_per_set: usize,
+
     /// The maximum number of distinct peer identities.
-    max_peers: usize,
+    max_retained_peers: usize,
 
     /// The maximum number of [types::Info] allowable in a single message.
     peer_gossip_max_count: usize,
@@ -55,6 +59,9 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
+
+    /// Number of outstanding reservations, including active connections.
+    live_peers: usize,
 
     /// Set when a peer connects and cleared when it is killed or released.
     mailboxes: HashMap<C::PublicKey, peer::Mailbox<C::PublicKey>>,
@@ -117,10 +124,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             context: ContextCell::new(context),
             crypto: cfg.crypto,
             max_peer_set_size: cfg.max_peer_set_size,
-            max_peers: cfg.max_peers.get(),
+            max_peers_per_set: cfg.max_peers_per_set,
+            max_retained_peers: cfg.max_retained_peers.get(),
             peer_gossip_max_count: cfg.peer_gossip_max_count,
             receiver,
             directory,
+            live_peers: 0,
             mailboxes: HashMap::new(),
             subscribers: Vec::new(),
         };
@@ -156,17 +165,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Ensure that the primary peer set is not too large.
-                // Panic since there is no way to recover from this.
-                //
-                // Secondary peers are not checked here because max_peer_set_size
-                // exists to cap the bitvec size, which only covers primary peers.
-                let max = self.max_peer_set_size;
+                let primary_peer_count =
+                    u64::try_from(peers.primary.len()).expect("primary peer set size exceeds u64");
                 assert!(
-                    peers.primary.len() as u64 <= max,
-                    "primary peer set too large: {} > {max}",
-                    peers.primary.len()
+                    primary_peer_count <= self.max_peer_set_size,
+                    "primary peer set too large: {primary_peer_count} > {}",
+                    self.max_peer_set_size
                 );
+                self.assert_peer_set_size(&peers);
 
                 // Attempt to update peer set membership.
                 let Some(kill_peers) = self.directory.track(index, peers) else {
@@ -275,7 +281,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 public_key,
                 reservation,
             } => {
-                let _ = reservation.send(self.directory.dial(&public_key));
+                let result = if self.live_peers < self.max_retained_peers {
+                    self.directory.dial(&public_key)
+                } else {
+                    None
+                };
+                if result.is_some() {
+                    self.live_peers = self.live_peers.checked_add(1).unwrap();
+                }
+                let _ = reservation.send(result);
             }
             Message::Acceptable {
                 public_key,
@@ -287,7 +301,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 public_key,
                 reservation,
             } => {
-                let _ = reservation.send(self.directory.listen(&public_key));
+                let result = if self.live_peers < self.max_retained_peers {
+                    self.directory.listen(&public_key)
+                } else {
+                    None
+                };
+                if result.is_some() {
+                    self.live_peers = self.live_peers.checked_add(1).unwrap();
+                }
+                let _ = reservation.send(result);
             }
             Message::Block { public_key } => {
                 // Block the peer
@@ -301,6 +323,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Release the peer
                 self.directory.release(metadata);
+                self.live_peers = self.live_peers.checked_sub(1).unwrap();
             }
         }
     }
@@ -311,13 +334,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         }
     }
 
+    /// Enforces the configured maximum over one peer set.
+    fn assert_peer_set_size(&self, peers: &TrackedPeers<C::PublicKey>) {
+        let peer_count = peer_set_size_including(peers, &self.crypto.public_key());
+        assert!(
+            peer_count <= self.max_peers_per_set,
+            "peer set too large: {peer_count} > {}",
+            self.max_peers_per_set
+        );
+    }
+
     /// Enforces the configured maximum over all retained peer identities.
     fn assert_peer_count(&self) {
         let peer_count = self.directory.peer_count();
         assert!(
-            peer_count <= self.max_peers,
-            "peer count exceeds max_peers: {peer_count} > {}",
-            self.max_peers
+            peer_count <= self.max_retained_peers,
+            "peer count exceeds max_retained_peers: {peer_count} > {}",
+            self.max_retained_peers
         );
     }
 }
@@ -332,6 +365,7 @@ mod tests {
             config::Bootstrapper,
             types,
         },
+        sizing::max_retained_peers,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -353,6 +387,16 @@ mod tests {
         crypto: C,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     ) -> Config<C> {
+        let max_peers_per_set = NZUsize!(1024);
+        let tracked_peer_sets = NZUsize!(2);
+        let local = crypto.public_key();
+        let persistent_peers = Set::from_iter_dedup(
+            bootstrappers
+                .iter()
+                .map(|(peer, _)| peer.clone())
+                .filter(|peer| peer != &local),
+        )
+        .len();
         Config {
             crypto,
             namespace: b"test_tracker_actor_namespace".to_vec(),
@@ -362,8 +406,13 @@ mod tests {
             allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
             mailbox_size: NZUsize!(1024),
-            max_peers: NZUsize!(1024),
-            tracked_peer_sets: NZUsize!(2),
+            max_peers_per_set: max_peers_per_set.get(),
+            max_retained_peers: max_retained_peers(
+                max_peers_per_set,
+                tracked_peer_sets,
+                persistent_peers,
+            ),
+            tracked_peer_sets,
             peer_connection_cooldown: Duration::from_millis(200),
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
@@ -494,8 +543,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "peer count exceeds max_peers")]
-    fn test_register_exceeds_max_peers() {
+    #[should_panic(expected = "peer count exceeds max_retained_peers")]
+    fn test_register_exceeds_max_retained_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let signer = PrivateKey::from_seed(0);
@@ -504,7 +553,7 @@ mod tests {
             let bootstrapper_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             let mut cfg =
                 default_test_config(signer, vec![(bootstrapper, bootstrapper_addr.into())]);
-            cfg.max_peers = NZUsize!(3);
+            cfg.max_retained_peers = NZUsize!(3);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -522,8 +571,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "peer count exceeds max_peers")]
-    fn test_initial_peer_count_exceeds_max_peers() {
+    #[should_panic(expected = "peer set too large")]
+    fn test_peer_set_limit_includes_local_identity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            cfg.max_peers_per_set = 2;
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let peer_1 = PrivateKey::from_seed(1).public_key();
+            let peer_2 = PrivateKey::from_seed(2).public_key();
+            oracle.track(0, Set::try_from([peer_1, peer_2]).unwrap());
+            let _ = mailbox.dialable().await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "peer count exceeds max_retained_peers")]
+    fn test_initial_peer_count_exceeds_max_retained_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let bootstrappers = [1, 2]
@@ -535,14 +604,15 @@ mod tests {
                 })
                 .into();
             let mut cfg = default_test_config(PrivateKey::from_seed(0), bootstrappers);
-            cfg.max_peers = NZUsize!(2);
+            cfg.max_retained_peers = NZUsize!(2);
 
             let _ = Actor::new(context.child("actor"), cfg);
         });
     }
 
     #[test]
-    fn test_register_large_secondary_peer_set_accepted() {
+    #[should_panic(expected = "peer set too large")]
+    fn test_register_secondary_peer_set_too_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
@@ -553,10 +623,8 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg_initial);
 
-            // Create a secondary set larger than max_peer_set_size.
-            // This should not panic because the limit only applies to
-            // primary peers (bitvec size).
-            let large_secondary: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
+            // Create a secondary set larger than max_peers_per_set.
+            let large_secondary: Set<PublicKey> = (1..=cfg.max_peers_per_set as u64 + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .try_collect()
                 .unwrap();
@@ -733,7 +801,8 @@ mod tests {
         executor.start(|context| async move {
             let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
             cfg.tracked_peer_sets = NZUsize!(1);
-            cfg.max_peers = NZUsize!(2);
+            cfg.max_peers_per_set = 2;
+            cfg.max_retained_peers = NZUsize!(2);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -770,6 +839,64 @@ mod tests {
                 "connected peer should be killed after losing tracked-set membership"
             );
             assert_eq!(reservation.metadata().public_key(), &peer1_pk);
+        });
+    }
+
+    #[test]
+    fn test_live_peer_limit_across_rollovers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            cfg.tracked_peer_sets = NZUsize!(1);
+            cfg.max_peers_per_set = 2;
+            cfg.max_retained_peers = NZUsize!(2);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let peers = [1, 2, 3].map(|seed| PrivateKey::from_seed(seed).public_key());
+
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk.clone(), peers[0].clone()]).unwrap(),
+            );
+            let _ = mailbox.dialable().await;
+            let first = connect_to_peer(
+                &mailbox,
+                &peers[0],
+                peer::Mailbox::new(context.child("first_peer"), NZUsize!(1)).0,
+            )
+            .await;
+
+            oracle.track(
+                1,
+                Set::try_from([tracker_pk.clone(), peers[1].clone()]).unwrap(),
+            );
+            let _ = mailbox.dialable().await;
+            let second = connect_to_peer(
+                &mailbox,
+                &peers[1],
+                peer::Mailbox::new(context.child("second_peer"), NZUsize!(1)).0,
+            )
+            .await;
+
+            oracle.track(2, Set::try_from([tracker_pk, peers[2].clone()]).unwrap());
+            let _ = mailbox.dialable().await;
+            assert!(
+                mailbox.listen(peers[2].clone()).await.is_none(),
+                "a third live peer must wait for an evicted peer to release"
+            );
+
+            drop(first);
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                mailbox.listen(peers[2].clone()).await.is_some(),
+                "released capacity should admit the replacement peer"
+            );
+            drop(second);
         });
     }
 

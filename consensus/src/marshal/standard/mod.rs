@@ -2874,7 +2874,7 @@ mod tests {
                     context.child("network"),
                     simulated::Config {
                         max_size: 1024 * 1024,
-                        max_peers: NZUsize!(3),
+                        max_peers_per_set: NZUsize!(2),
                         disconnect_on_block: true,
                         tracked_peer_sets: NZUsize!(2),
                     },
@@ -6817,7 +6817,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: 1024 * 1024,
-                    max_peers: NZUsize!(1),
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
