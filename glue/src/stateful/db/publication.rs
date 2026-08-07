@@ -262,25 +262,25 @@ mod tests {
     #[test]
     fn empty_then_live_then_detached() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, source) = Publisher::<u32>::new(&context);
-            assert!(source.latest().is_none());
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            assert!(reader.latest().is_none());
             assert_eq!(published_generation(&context), -1);
 
             publisher.publish_durable(7);
-            let first = source.latest().unwrap();
+            let first = reader.latest().unwrap();
             assert_eq!(first.number(), 0);
             assert_eq!(*first.snapshots(), 7);
             assert_eq!(published_generation(&context), 0);
 
             publisher.publish_durable(8);
-            let held = source.latest().unwrap();
+            let held = reader.latest().unwrap();
             assert_eq!(held.number(), 1);
             assert_eq!(*held.snapshots(), 8);
             assert_eq!(published_generation(&context), 1);
 
             drop(publisher);
             // New requests decline while the held Arc still serves.
-            assert!(source.latest().is_none());
+            assert!(reader.latest().is_none());
             assert_eq!(*held.snapshots(), 8);
             assert_eq!(published_generation(&context), -1);
         });
@@ -289,16 +289,16 @@ mod tests {
     #[test]
     fn pipelined_publication_is_monotone() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, source) = Publisher::<u32>::new(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // Two generations staged before either publishes, as pipelined flushes allow.
             let first = publisher.stage(1);
             let second = publisher.stage(2);
 
             // The newer generation resolving first must win and stay won.
             second.publish();
-            assert_eq!(*source.latest().unwrap().snapshots(), 2);
+            assert_eq!(*reader.latest().unwrap().snapshots(), 2);
             first.publish();
-            let live = source.latest().unwrap();
+            let live = reader.latest().unwrap();
             assert_eq!(live.number(), 1);
             assert_eq!(*live.snapshots(), 2);
         });
@@ -307,24 +307,24 @@ mod tests {
     #[test]
     fn publish_after_publisher_drop_stays_detached() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, source) = Publisher::<u32>::new(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // A pool future can outlive the publisher, so its publish must not
             // resurrect a live state.
             let staged = publisher.stage(1);
             drop(publisher);
             staged.publish();
-            assert!(source.latest().is_none());
+            assert!(reader.latest().is_none());
         });
     }
 
     #[test]
     fn dropped_stage_skips_a_generation() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, source) = Publisher::<u32>::new(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // A shutdown drop of one staged generation must not block later ones.
             drop(publisher.stage(1));
             publisher.publish_durable(2);
-            let live = source.latest().unwrap();
+            let live = reader.latest().unwrap();
             assert_eq!(live.number(), 1);
             assert_eq!(*live.snapshots(), 2);
         });
@@ -333,8 +333,8 @@ mod tests {
     #[test]
     fn db_reader_projects_published_snapshot() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, source) = Publisher::<(u32, u32)>::new(&context);
-            let reader: DbReader<(u32, u32), u32> = DbReader::new(source, |set| &set.0);
+            let (mut publisher, set_reader) = Publisher::<(u32, u32)>::new(&context);
+            let reader: DbReader<(u32, u32), u32> = DbReader::new(set_reader, |set| &set.0);
             assert!(reader.latest().is_none());
             publisher.publish_durable((1, 10));
             assert_eq!(reader.latest(), Some(1));

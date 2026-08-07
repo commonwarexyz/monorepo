@@ -644,7 +644,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
         // The compact db keeps no operation history to observe.
-        let prune_observer = qmdb_sync_resolver_a.source.clone();
+        let prune_observer = qmdb_sync_resolver_a.reader.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
             let sources = prune_observer.clone();
             Box::pin(async move {

@@ -469,7 +469,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
-        source: SetReader<()>,
+        reader: SetReader<()>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -517,7 +517,7 @@ mod tests {
             }
 
             let (acknowledgement, mut newest_waiter) = Exact::handle();
-            let source = self.source.clone();
+            let reader = self.reader.clone();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
                     .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement.into())
@@ -548,7 +548,7 @@ mod tests {
             }
             assert!(newest_waiter.await.is_ok());
             assert!(syncing.pending_finalizations.is_empty());
-            Self { syncing, source }
+            Self { syncing, reader }
         }
     }
 
@@ -571,7 +571,7 @@ mod tests {
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
-            let (publisher, source) = Publisher::new(&syncing_context);
+            let (publisher, reader) = Publisher::new(&syncing_context);
 
             let harness = Self {
                 syncing: Syncing {
@@ -590,7 +590,7 @@ mod tests {
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
-                source,
+                reader,
             };
             (
                 harness,
@@ -626,7 +626,7 @@ mod tests {
             let (syncer_sender, _syncer_receiver) =
                 actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
             let (_sync_complete, sync_completed) = oneshot::channel();
-            let (publisher, source) = Publisher::new(&syncing_context);
+            let (publisher, reader) = Publisher::new(&syncing_context);
 
             Self {
                 syncing: Syncing {
@@ -648,7 +648,7 @@ mod tests {
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
-                source,
+                reader,
             }
         }
     }
@@ -760,7 +760,7 @@ mod tests {
             let (reflected_acknowledgement, mut reflected_waiter) = Exact::handle();
             let (first_acknowledgement, mut first_waiter) = Exact::handle();
             let (second_acknowledgement, mut second_waiter) = Exact::handle();
-            let source = harness.source.clone();
+            let reader = harness.reader.clone();
             let transition = context.child("transition").spawn(move |_| {
                 harness.syncing.transition([
                     FinalizedHandoff::Reflected(
@@ -790,7 +790,7 @@ mod tests {
                 "completion metadata must not be written before the handoff is durable",
             );
             assert_eq!(
-                served_generation(&source),
+                served_generation(&reader),
                 Some(0),
                 "the synced state must serve as generation zero before any handoff flush",
             );
@@ -804,7 +804,7 @@ mod tests {
             assert!(poll!(&mut first_waiter).is_ready());
             assert!(poll!(&mut second_waiter).is_pending());
             assert_eq!(
-                served_generation(&source),
+                served_generation(&reader),
                 Some(1),
                 "each handoff generation must serve once its flush is durable",
             );
@@ -862,8 +862,8 @@ mod tests {
                 "an aborted handoff must leave marshal's acknowledgement pending",
             );
             assert!(
-                served_generation(&harness.source).is_none(),
-                "the aborted generation must never serve, and the source must decline \
+                served_generation(&harness.reader).is_none(),
+                "the aborted generation must never serve, and the reader must decline \
                  once the writer is gone",
             );
             let reopened =

@@ -30,38 +30,38 @@ use std::{
 pub(crate) type OldestRetained =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;
 
-/// Wraps one sync resolver and captures the serving source the stateful actor attaches,
+/// Wraps one sync resolver and captures the reader the stateful actor attaches,
 /// so tests can observe published durable snapshots without a production read API.
 #[derive(Clone)]
-pub(crate) struct CapturingResolver<R, Src> {
+pub(crate) struct CapturingResolver<R, Reader> {
     inner: R,
-    pub(crate) source: Arc<Mutex<Option<Src>>>,
+    pub(crate) reader: Arc<Mutex<Option<Reader>>>,
 }
 
-impl<R, Src> CapturingResolver<R, Src> {
+impl<R, Reader> CapturingResolver<R, Reader> {
     pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
-            source: Arc::new(Mutex::new(None)),
+            reader: Arc::new(Mutex::new(None)),
         }
     }
 }
 
-impl<R, Src> AttachableResolver<Src> for CapturingResolver<R, Src>
+impl<R, Reader> AttachableResolver<Reader> for CapturingResolver<R, Reader>
 where
-    R: AttachableResolver<Src>,
-    Src: ServeSource,
+    R: AttachableResolver<Reader>,
+    Reader: ServeSource,
 {
-    async fn attach_reader(&self, source: Src) {
-        *self.source.lock() = Some(source.clone());
-        self.inner.attach_reader(source).await;
+    async fn attach_reader(&self, reader: Reader) {
+        *self.reader.lock() = Some(reader.clone());
+        self.inner.attach_reader(reader).await;
     }
 }
 
-impl<R, Src> Source for CapturingResolver<R, Src>
+impl<R, Reader> Source for CapturingResolver<R, Reader>
 where
     R: Source,
-    Src: Send + Sync + 'static,
+    Reader: Send + Sync + 'static,
 {
     type Family = R::Family;
     type Digest = R::Digest;

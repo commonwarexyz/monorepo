@@ -89,8 +89,6 @@ where
     /// Sends a target update and waits until the live sync coordinator records it.
     ///
     /// If sync already completed, the artifact arrives on the completion channel.
-    /// Callers must race this future against `context.stopped()`: if the syncer dies
-    /// abnormally, the retry loop would otherwise panic on the closed mailbox.
     pub async fn update_targets(
         &self,
         anchor: Anchor<BlockDigest<E, A>>,

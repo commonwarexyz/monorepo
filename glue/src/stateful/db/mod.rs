@@ -120,9 +120,6 @@ pub(crate) use publication::{Publisher, Staged};
 /// Concrete types provide key-value operations (`get`, `write`, `set`,
 /// `append`, etc.) as inherent methods; the generic wrapper only needs
 /// [`merkleize`](Self::merkleize).
-///
-/// `D` is the type of database the batch can merkleize against. Callers must
-/// pass the database the batch was created from.
 pub trait Unmerkleized<D>: Sized + Send {
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
@@ -163,11 +160,11 @@ pub trait Merkleized: Sized + Send + Sync {
 
 /// One database managed by the [`Stateful`](super::Stateful) wrapper.
 ///
-/// Implementations create new batches from committed state and apply finalized
+/// Implementations create new batches from applied state and apply finalized
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
 /// Batches hold no database handle: reads take the owning database at each call and
-/// fall back from pending batch state to committed state through that reference.
+/// fall back from pending batch state to applied state through that reference.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
@@ -180,8 +177,6 @@ pub trait Merkleized: Sized + Send + Sync {
 /// recoverable.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
-    ///
-    /// Merkleizes against this database type.
     type Unmerkleized: Unmerkleized<Self, Merkleized = Self::Merkleized>;
 
     /// A batch whose root has been computed but has not yet been applied to
@@ -203,10 +198,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     type SyncTarget: Clone + PartialEq + Send + Sync;
 
     /// Owned immutable snapshot of applied state.
-    ///
-    /// Captured by [`finalize`](Self::finalize) at the moment the batch is applied, so
-    /// the durability handle returned alongside it covers exactly the captured state.
-    /// Cheap to clone (an `Arc` around a frozen capture).
     type Snapshot: Clone + Send + Sync + 'static;
 
     /// Construct a new database from its configuration.
@@ -395,7 +386,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     type Readers: Send + Sync + 'static;
 
     /// Project `reader` into one reader per database.
-    fn readers(source: publication::SetReader<Self::Snapshots>) -> Self::Readers;
+    fn readers(reader: publication::SetReader<Self::Snapshots>) -> Self::Readers;
 
     /// Configuration needed to construct every database in the set: the database's
     /// [`ManagedDb::Config`] under [`Single`], a tuple of per-database configs for
@@ -521,8 +512,8 @@ where
         T::initial_sync_target()
     }
 
-    fn readers(source: publication::SetReader<Self::Snapshots>) -> Self::Readers {
-        publication::DbReader::new(source, |snapshot| snapshot)
+    fn readers(reader: publication::SetReader<Self::Snapshots>) -> Self::Readers {
+        publication::DbReader::new(reader, |snapshot| snapshot)
     }
 
     fn new_batches(&self) -> Self::Unmerkleized {
@@ -899,10 +890,10 @@ macro_rules! impl_database_set {
             }
 
             fn readers(
-                source: publication::SetReader<Self::Snapshots>,
+                reader: publication::SetReader<Self::Snapshots>,
             ) -> Self::Readers {
                 ($(
-                    publication::DbReader::new(source.clone(), |snapshot| &snapshot.$idx),
+                    publication::DbReader::new(reader.clone(), |snapshot| &snapshot.$idx),
                 )+)
             }
 
@@ -1697,7 +1688,7 @@ async fn snapshot_or_panic<E, T: ManagedDb<E>>(
     database: T,
     index: Option<usize>,
 ) -> (T, T::Snapshot) {
-    // Capture failures are fatal by design: a set that cannot snapshot its committed
+    // Capture failures are fatal by design: a set that cannot snapshot its applied
     // state cannot publish, and other members may already have captured.
     match database.snapshot().await {
         Ok(result) => result,
@@ -1771,32 +1762,32 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-/// A resolver that can attach a serving source at runtime.
+/// A resolver that can attach a snapshot reader at runtime.
 ///
-/// Implementations receive a [`publication::ServeSource`] after startup so they can serve
-/// incoming sync requests from published durable snapshots once the first generation
-/// publishes.
-pub trait AttachableResolver<Src>: Send + Sync + 'static {
-    /// Attach a serving source for incoming requests.
+/// Implementations receive a reader (a [`publication::ServeSource`]) after startup so
+/// they can serve incoming sync requests from published durable snapshots once the
+/// first generation publishes.
+pub trait AttachableResolver<Reader>: Send + Sync + 'static {
+    /// Attach a reader serving incoming requests.
     ///
     /// Await confirms only submission of the attachment, not its processing.
     /// Implementations must not block on publication.
-    fn attach_reader(&self, source: Src) -> impl Future<Output = ()> + Send;
+    fn attach_reader(&self, reader: Reader) -> impl Future<Output = ()> + Send;
 }
 
-/// Attach a set's member sources to a resolver set with matching shape.
+/// Attach a set's readers to a resolver set with matching shape.
 pub trait AttachableResolverSet<Readers>: Send + Sync + 'static {
     /// Attach each database's reader to its corresponding resolver.
     fn attach_readers(&self, readers: Readers) -> impl Future<Output = ()> + Send;
 }
 
-impl<R, Src> AttachableResolverSet<Src> for R
+impl<R, Reader> AttachableResolverSet<Reader> for R
 where
-    R: AttachableResolver<Src>,
-    Src: publication::ServeSource,
+    R: AttachableResolver<Reader>,
+    Reader: publication::ServeSource,
 {
-    async fn attach_readers(&self, source: Src) {
-        self.attach_reader(source).await;
+    async fn attach_readers(&self, reader: Reader) {
+        self.attach_reader(reader).await;
     }
 }
 
@@ -1809,9 +1800,9 @@ macro_rules! impl_attachable_resolver_set {
                 $S: publication::ServeSource,
             )+
         {
-            async fn attach_readers(&self, sources: ($($S,)+)) {
+            async fn attach_readers(&self, readers: ($($S,)+)) {
                 futures::join!($(
-                    self.$idx.attach_reader(sources.$idx),
+                    self.$idx.attach_reader(readers.$idx),
                 )+);
             }
         }

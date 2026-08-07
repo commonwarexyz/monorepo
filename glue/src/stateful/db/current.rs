@@ -1,7 +1,7 @@
 //! [`ManagedDb`] implementation for QMDB [`current`](commonware_storage::qmdb::current) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to committed state. The wrapper types here keep that shape: reads and
+//! read-through to applied state. The wrapper types here keep that shape: reads and
 //! merkleization borrow the owning database at each call, so batches hold no database
 //! handle and dropping one never drops the database.
 
@@ -66,7 +66,7 @@ where
 
 /// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`].
 ///
-/// A branch-scoped view of the owning database: it
+/// A branch-scoped view of the database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
 /// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct CurrentStaged<F, H, U, const N: usize, S>
@@ -498,8 +498,6 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        // Checks the ops root replay sync verifies against. `root()` returns the
-        // grafted root, deliberately not compared here.
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
             && *target.range.end() == batch.bounds().tip.size
@@ -599,8 +597,6 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        // Checks the ops root replay sync verifies against. `root()` returns the
-        // grafted root, deliberately not compared here.
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
             && *target.range.end() == batch.bounds().tip.size
@@ -778,8 +774,6 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        // Checks the ops root replay sync verifies against. `root()` returns the
-        // grafted root, deliberately not compared here.
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
             && *target.range.end() == batch.bounds().tip.size
@@ -884,8 +878,6 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        // Checks the ops root replay sync verifies against. `root()` returns the
-        // grafted root, deliberately not compared here.
         batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
             && *target.range.end() == batch.bounds().tip.size

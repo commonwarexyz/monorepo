@@ -39,7 +39,7 @@ enum Step<M, P> {
 ///
 /// After a prune, the published snapshot still holds pre-prune state. A durable
 /// publish above the stale boundary refreshes it on its own. Otherwise the loop
-/// must recapture once every flush drains.
+/// must refresh once every flush drains.
 #[derive(Default)]
 struct FlushTracker {
     pending: BTreeSet<Height>,
@@ -61,7 +61,7 @@ impl FlushTracker {
             self.pending.remove(&height),
             "completed flush must have a pending height",
         );
-        // Only an publish above the boundary is a post-prune capture.
+        // Only a durable publish above the boundary satisfies a pending refresh.
         if durable
             && self
                 .stale_boundary
@@ -80,19 +80,19 @@ impl FlushTracker {
     }
 
     /// Mark publication stale after a prune. Returns false when no flush is
-    /// pending, so the caller must republish immediately.
+    /// pending, so the caller must refresh immediately.
     fn mark_stale(&mut self) -> bool {
         self.stale_boundary = self.pending.last().copied();
         self.stale_boundary.is_some()
     }
 
-    /// A recapture is due once publication is stale and every flush has drained.
-    fn recapture_due(&self) -> bool {
+    /// A refresh is due once publication is stale and every flush has drained.
+    fn refresh_due(&self) -> bool {
         self.stale_boundary.is_some() && self.pending.is_empty()
     }
 
-    /// Publication was recaptured.
-    const fn recaptured(&mut self) {
+    /// Publication was refreshed.
+    const fn refreshed(&mut self) {
         self.stale_boundary = None;
     }
 }
@@ -160,8 +160,8 @@ where
                     Err(TryRecvError::Empty) => match pending_prune.take() {
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                        // Publication is stale and every flush drained: recapture.
-                        None if tracker.recapture_due() => {
+                        // Publication is stale and every flush drained: refresh.
+                        None if tracker.refresh_due() => {
                             Either::Left(ready(Some(Step::Refresh)))
                         }
                         // No message and nothing to prune: wait on the mailbox, driving flush
@@ -180,7 +180,7 @@ where
                                             if !tracker.complete(completion) {
                                                 return None;
                                             }
-                                            if tracker.recapture_due() {
+                                            if tracker.refresh_due() {
                                                 break Some(Step::Refresh);
                                             }
                                         },
@@ -315,7 +315,7 @@ where
                 Step::Refresh => {
                     // Every flush drained, so applied state is durable.
                     self.processor = self.processor.publish_durable().await;
-                    tracker.recaptured();
+                    tracker.refreshed();
                 }
             },
         }
@@ -367,7 +367,7 @@ mod tests {
     use futures::poll;
     use std::{sync::Arc, time::Duration};
 
-    /// Only an publish strictly above the stale boundary satisfies the refresh.
+    /// Only a publish strictly above the stale boundary satisfies the refresh.
     #[test]
     fn tracker_clears_stale_only_above_boundary() {
         let mut tracker = FlushTracker::default();
@@ -379,32 +379,32 @@ mod tests {
 
         // An publish at the boundary carries a pre-prune capture: still stale.
         assert!(tracker.complete((Height::new(2), true)));
-        assert!(!tracker.recapture_due());
+        assert!(!tracker.refresh_due());
 
         // An publish above the boundary carries a post-prune capture: refreshed.
         assert!(tracker.complete((Height::new(3), true)));
-        assert!(!tracker.recapture_due());
+        assert!(!tracker.refresh_due());
     }
 
     #[test]
-    fn tracker_defers_recapture_until_flushes_drain() {
+    fn tracker_defers_refresh_until_flushes_drain() {
         let mut tracker = FlushTracker::default();
         tracker.track(Height::new(1));
         tracker.track(Height::new(2));
         assert!(tracker.complete((Height::new(1), true)));
         assert!(tracker.mark_stale());
-        assert!(!tracker.recapture_due());
+        assert!(!tracker.refresh_due());
         assert!(tracker.complete((Height::new(2), true)));
-        assert!(tracker.recapture_due());
-        tracker.recaptured();
-        assert!(!tracker.recapture_due());
+        assert!(tracker.refresh_due());
+        tracker.refreshed();
+        assert!(!tracker.refresh_due());
     }
 
     #[test]
-    fn tracker_requests_immediate_republish_when_drained() {
+    fn tracker_requests_immediate_refresh_when_drained() {
         let mut tracker = FlushTracker::default();
         assert!(!tracker.mark_stale());
-        assert!(!tracker.recapture_due());
+        assert!(!tracker.refresh_due());
     }
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
@@ -579,7 +579,7 @@ mod tests {
             assert_eq!(control.pruned.lock().clone(), vec![1]);
 
             // Block 2's generation was captured before the prune, so its publish must
-            // not satisfy the refresh: with no later block, the loop itself recaptures
+            // not satisfy the refresh: with no later block, the loop itself refreshes
             // once every flush drains.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
@@ -590,13 +590,13 @@ mod tests {
             assert_eq!(
                 served_generation(&source),
                 Some(2),
-                "the post-prune recapture must serve",
+                "the post-prune refresh must serve",
             );
         });
     }
 
     /// A post-prune generation publishing on its own satisfies the publication
-    /// refresh: the loop must not recapture redundantly.
+    /// refresh: the loop must not refresh redundantly.
     #[test]
     fn post_prune_publish_clears_publication_refresh() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
@@ -647,7 +647,7 @@ mod tests {
             }
 
             // Block 2's pre-prune publish must not satisfy the refresh. Block 3's
-            // post-prune publish must, so no recapture generation ever appears.
+            // post-prune publish must, so no refresh generation ever appears.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
@@ -661,7 +661,7 @@ mod tests {
             assert_eq!(
                 served_generation(&source),
                 Some(2),
-                "block 3's own publish must satisfy the refresh without a recapture",
+                "block 3's own publish must satisfy the refresh without a separate refresh publication",
             );
         });
     }

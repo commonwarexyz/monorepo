@@ -1583,7 +1583,7 @@ mod tests {
         }
 
         async fn height_value(&self, height: Height) -> Option<u64> {
-            let db: &Qmdb<deterministic::Context> = &self.processor.databases;
+            let db = &self.processor.databases;
             db.get(&height_key(height))
                 .await
                 .expect("database read should succeed")
@@ -1591,7 +1591,7 @@ mod tests {
         }
 
         async fn counter_value(&self) -> Option<u64> {
-            let db: &Qmdb<deterministic::Context> = &self.processor.databases;
+            let db = &self.processor.databases;
             db.get(&counter_key())
                 .await
                 .expect("database read should succeed")

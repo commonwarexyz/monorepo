@@ -533,7 +533,7 @@ impl EngineDefinition for SingleDbEngine {
         );
 
         // Observe the oldest operation QMDB still retains, to assert pruning ran.
-        let prune_observer = qmdb_sync_resolver.source.clone();
+        let prune_observer = qmdb_sync_resolver.reader.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
             let sources = prune_observer.clone();
             Box::pin(async move {

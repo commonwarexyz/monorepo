@@ -152,8 +152,7 @@ where
                     // A tip update enqueued after the coordinator's final drain has no
                     // receiver left to record it or release its observation barrier.
                     // Dropping the sender frees the ring buffer, so the observer of any
-                    // queued update retries and learns sync completed (the artifact
-                    // travels on the completion channel).
+                    // queued update retries and learns sync completed.
                     tip_updates_tx = None;
                 }
                 Err(err) => {

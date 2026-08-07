@@ -311,7 +311,7 @@ where
             metrics,
             self.pruning,
         );
-        // Publish the recovered committed state as generation zero so serving can
+        // Publish the recovered state as generation zero so serving can
         // begin before the first finalization.
         let processor = processor.publish_durable().await;
         Processing {
@@ -424,9 +424,9 @@ mod tests {
             // No block is ever reported: the recovered state alone must publish as
             // generation zero and begin serving.
             loop {
-                let source = resolver.source.lock().clone();
-                if let Some(source) = source
-                    && crate::stateful::db::ServeSource::latest(&source).is_some()
+                let reader = resolver.reader.lock().clone();
+                if let Some(reader) = reader
+                    && crate::stateful::db::ServeSource::latest(&reader).is_some()
                 {
                     break;
                 }

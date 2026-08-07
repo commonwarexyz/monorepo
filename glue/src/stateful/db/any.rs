@@ -1,7 +1,7 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to committed state. The wrapper types here keep that shape: reads and
+//! read-through to applied state. The wrapper types here keep that shape: reads and
 //! merkleization borrow the owning database at each call, so batches hold no database
 //! handle and dropping one never drops the database.
 
@@ -66,7 +66,7 @@ where
 
 /// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`].
 ///
-/// A branch-scoped view of the owning database: it
+/// A branch-scoped view of the database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
 /// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct AnyStaged<F, H, U, S>
