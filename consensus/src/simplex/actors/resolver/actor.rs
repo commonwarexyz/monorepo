@@ -1978,6 +1978,60 @@ mod tests {
     }
 
     #[test_async]
+    async fn settled_request_still_processes_valid_stronger_finalization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let requested = View::new(4);
+            actor.updated(
+                &mut resolver,
+                Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    View::new(6),
+                )),
+            );
+            assert!(actor.settled(requested, Kind::Nullification));
+            assert!(actor.settled(requested, Kind::Notarization));
+
+            // A response queued across local settlement remains useful when it
+            // carries stronger evidence, so it is validated and recorded.
+            let stronger = View::new(8);
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: Certificate::<TestScheme, Sha256Digest>::Finalization(
+                        build_finalization(&schemes, &verifier, EPOCH, stronger),
+                    )
+                    .encode(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert_eq!(actor.last_finalized, stronger);
+            assert!(matches!(
+                actor.state.get(stronger),
+                Some(Certificate::Finalization(finalization))
+                    if finalization.view() == stronger
+            ));
+        });
+    }
+
+    #[test_async]
     async fn validate_accepts_nullification_covering_requested_view_in_term() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
