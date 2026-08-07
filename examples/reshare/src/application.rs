@@ -41,7 +41,7 @@ impl App {
     ) -> MerkleizedOf<Database<E>, E> {
         batches
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
-            .merkleize(databases)
+            .merkleize(databases.as_ref())
             .await
             .expect("height write must merkleize")
     }
