@@ -355,7 +355,7 @@ where
             self.metrics.serve_requests.inc(status::Status::Invalid);
             return;
         }
-        // Declines before the first installation and after the publisher drops.
+        // Declines before the first publication and after the publisher drops.
         let Some(handle) = source.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;

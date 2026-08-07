@@ -38,7 +38,7 @@ enum Step<M, P> {
 /// Pending finalize flushes, plus whether a prune left publication stale.
 ///
 /// After a prune, the published snapshot still holds pre-prune state. A durable
-/// install above the stale boundary refreshes it on its own. Otherwise the loop
+/// publish above the stale boundary refreshes it on its own. Otherwise the loop
 /// must recapture once every flush drains.
 #[derive(Default)]
 struct FlushTracker {
@@ -61,7 +61,7 @@ impl FlushTracker {
             self.pending.remove(&height),
             "completed flush must have a pending height",
         );
-        // Only an install above the boundary is a post-prune capture.
+        // Only an publish above the boundary is a post-prune capture.
         if durable
             && self
                 .stale_boundary
@@ -274,7 +274,7 @@ where
                                 "applied finalized database batch"
                             );
 
-                            // Install the snapshot and acknowledge marshal together
+                            // Publish the snapshot and acknowledge marshal together
                             // once the flush completes, so neither served state nor
                             // marshal's processed floor gets ahead of what is on
                             // disk. Marshal's ack window bounds the flush backlog,
@@ -282,7 +282,7 @@ where
                             let height = block.height();
                             tracker.track(height);
                             syncs.push(async move {
-                                let durable = publication.install_when_durable().await;
+                                let durable = publication.publish_when_durable().await;
                                 if durable {
                                     acknowledgement.acknowledge();
                                 }
@@ -370,7 +370,7 @@ mod tests {
     use futures::poll;
     use std::{sync::Arc, time::Duration};
 
-    /// Only an install strictly above the stale boundary satisfies the refresh.
+    /// Only an publish strictly above the stale boundary satisfies the refresh.
     #[test]
     fn tracker_clears_stale_only_above_boundary() {
         let mut tracker = FlushTracker::default();
@@ -380,11 +380,11 @@ mod tests {
         assert!(tracker.mark_stale());
         tracker.track(Height::new(3));
 
-        // An install at the boundary carries a pre-prune capture: still stale.
+        // An publish at the boundary carries a pre-prune capture: still stale.
         assert!(tracker.complete((Height::new(2), true)));
         assert!(!tracker.recapture_due());
 
-        // An install above the boundary carries a post-prune capture: refreshed.
+        // An publish above the boundary carries a post-prune capture: refreshed.
         assert!(tracker.complete((Height::new(3), true)));
         assert!(!tracker.recapture_due());
     }
@@ -581,7 +581,7 @@ mod tests {
             }
             assert_eq!(control.pruned.lock().clone(), vec![1]);
 
-            // Block 2's generation was captured before the prune, so its install must
+            // Block 2's generation was captured before the prune, so its publish must
             // not satisfy the refresh: with no later block, the loop itself recaptures
             // once every flush drains.
             let release = control.flushes.lock().remove(0);
@@ -598,10 +598,10 @@ mod tests {
         });
     }
 
-    /// A post-prune generation installing on its own satisfies the publication
+    /// A post-prune generation publishing on its own satisfies the publication
     /// refresh: the loop must not recapture redundantly.
     #[test]
-    fn post_prune_install_clears_publication_refresh() {
+    fn post_prune_publish_clears_publication_refresh() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, source, _marshal, _actor) = spawn_processing(
                 &context,
@@ -649,8 +649,8 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            // Block 2's pre-prune install must not satisfy the refresh. Block 3's
-            // post-prune install must, so no recapture generation ever appears.
+            // Block 2's pre-prune publish must not satisfy the refresh. Block 3's
+            // post-prune publish must, so no recapture generation ever appears.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
@@ -664,7 +664,7 @@ mod tests {
             assert_eq!(
                 served_generation(&source),
                 Some(2),
-                "block 3's own install must satisfy the refresh without a recapture",
+                "block 3's own publish must satisfy the refresh without a recapture",
             );
         });
     }

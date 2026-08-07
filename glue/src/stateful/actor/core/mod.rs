@@ -118,9 +118,6 @@ where
     pub provider: A::Provider,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
-    ///
-    /// The actor assumes exclusive control of marshal's processed floor. Nothing
-    /// else may advance it while the actor runs.
     pub marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Capacity of the stateful actor mailbox channel.
@@ -232,9 +229,9 @@ where
     }
 
     async fn run(self) {
-        let (publisher, set_reader) = Publisher::new(self.context.as_present());
+        let (publisher, db_readers) = Publisher::new(self.context.as_present());
         self.resolvers
-            .attach_sources(A::Databases::readers(set_reader))
+            .attach_sources(A::Databases::readers(db_readers))
             .await;
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor, publisher).await;
@@ -313,8 +310,7 @@ where
             self.pruning,
         );
         // Publish the recovered committed state as generation zero so serving can
-        // begin before the first finalization. Committed state is durable by
-        // construction.
+        // begin before the first finalization.
         let processor = processor.republish().await;
         Processing {
             context: self.context,
@@ -416,7 +412,7 @@ mod tests {
             );
             let handle = stateful.start();
 
-            // No block is ever reported: the recovered state alone must install as
+            // No block is ever reported: the recovered state alone must publish as
             // generation zero and begin serving.
             loop {
                 let source = resolver.source.lock().clone();

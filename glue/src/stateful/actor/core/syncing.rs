@@ -320,9 +320,6 @@ where
     /// Transitions to [`Processing`] state once the database set has converged
     /// on the state sync [`Anchor`].
     async fn transition(self, handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>) {
-        // Take only what processing needs. The syncer mailbox, completion channel,
-        // and handed-off finalizations drop here instead of living for the
-        // actor's remaining life.
         let Self {
             context,
             mailbox,
@@ -368,9 +365,9 @@ where
                         applied.expect("sync handoff block cannot be a duplicate");
 
                     // The processing loop's flush pool does not exist yet, so observe the
-                    // deferred flush inline. Keep state-sync metadata in progress until
-                    // every handoff block is durable.
-                    if !publication.install_when_durable().await {
+                    // deferred flush inline. Keep state-sync metadata in progress until every
+                    // handoff block is durable.
+                    if !publication.publish_when_durable().await {
                         return;
                     }
                     acknowledgement.acknowledge();
@@ -385,7 +382,7 @@ where
         }
 
         // Every applied handoff is durable, so completion can advance through the last one before
-        // pruning. The metadata is finished after this and drops here.
+        // pruning.
         let _ = sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             processor = processor.prune_databases(prune, &marshal).await;

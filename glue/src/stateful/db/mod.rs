@@ -10,7 +10,7 @@
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
 //! 3. Finalization: apply the sealed batch and start persisting it via
 //!    [`ManagedDb::finalize`], observing durability via [`Barrier`]. Finalize also
-//!    captures each database's serving snapshot, installed for resolver serving (see
+//!    captures each database's serving snapshot, published for resolver serving (see
 //!    [`SetReader`]) once the barrier proves the generation durable.
 //!
 //! [`DbSet`] groups one or more [`ManagedDb`] instances into one logical
@@ -367,11 +367,11 @@ impl<S> PendingPublication<S> {
         Self { staged, barrier }
     }
 
-    /// Await the barrier and install only if every flush proves durable.
-    pub(crate) async fn install_when_durable(self) -> bool {
+    /// Await the barrier and publish only if every flush proves durable.
+    pub(crate) async fn publish_when_durable(self) -> bool {
         let durable = self.barrier.durable().await;
         if durable {
-            self.staged.install();
+            self.staged.publish();
         }
         durable
     }
@@ -1833,7 +1833,7 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
 ///
 /// Implementations receive a [`publication::ServeSource`] after startup so they can serve
 /// incoming sync requests from published durable snapshots once the first generation
-/// installs.
+/// publishes.
 pub trait AttachableResolver<Src>: Send + Sync + 'static {
     /// Attach a serving source for incoming requests.
     ///
@@ -1925,7 +1925,7 @@ mod tests {
             let (mut publisher, source) =
                 Publisher::<<Pair as DbSet<deterministic::Context>>::Snapshots>::new(&context);
             let (first, second) = <Pair as DbSet<deterministic::Context>>::readers(source);
-            publisher.install_durable((1, 2));
+            publisher.publish_durable((1, 2));
             assert_eq!(first.latest(), Some(1));
             assert_eq!(second.latest(), Some(2));
         });

@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn startup_uses_floor_anchor_when_processed_predecessor_is_pruned() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-install", 1);
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-publish", 1);
             let floor = TestBlock::new(2, 2);
             let finalization = fixtures::finalization(&fixture, 2, Sha256::fill(2));
             let MarshalFixture {
@@ -444,7 +444,7 @@ mod tests {
                 ..
             } = fixtures::marshal_fixture_with_floor(
                 context.child("marshal"),
-                "syncer-floor-install",
+                "syncer-floor-publish",
                 fixture.schemes[0].clone(),
                 &floor,
                 finalization,
@@ -460,7 +460,7 @@ mod tests {
 
             let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                 &context,
-                "syncer-floor-install",
+                "syncer-floor-publish",
             )
             .await;
             let startup = init_databases_from_marshal::<

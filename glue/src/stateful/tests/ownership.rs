@@ -52,8 +52,8 @@ fn release(control: &FlushControl) {
 }
 
 /// Staging alone publishes nothing: a staged generation stays invisible until
-/// installed, and an unpublished generation does not hold the writer back.
-/// The actor installs only after durability, which the processing-loop and
+/// published, and an unpublished generation does not hold the writer back.
+/// The actor publishes only after durability, which the processing-loop and
 /// publication tests pin.
 #[test_traced]
 fn unpublished_generation_stays_invisible() {
@@ -83,14 +83,14 @@ fn unpublished_generation_stays_invisible() {
         release(&control);
         assert!(
             PendingPublication::new(staged, first)
-                .install_when_durable()
+                .publish_when_durable()
                 .await
         );
         assert_eq!(source.latest().unwrap().number(), 0);
         release(&control);
         assert!(
             PendingPublication::new(staged_second, second)
-                .install_when_durable()
+                .publish_when_durable()
                 .await
         );
         assert_eq!(source.latest().unwrap().number(), 1);
@@ -110,7 +110,7 @@ fn parked_serve_never_delays_the_writer() {
         release(&control);
         assert!(
             PendingPublication::new(staged, barrier)
-                .install_when_durable()
+                .publish_when_durable()
                 .await
         );
 
@@ -134,7 +134,7 @@ fn parked_serve_never_delays_the_writer() {
         release(&control);
         assert!(
             PendingPublication::new(staged, barrier)
-                .install_when_durable()
+                .publish_when_durable()
                 .await
         );
 

@@ -16,9 +16,9 @@
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
 //!   databases, start flushing them (durability is reported via
-//!   [`Barrier`](crate::stateful::db::Barrier)),
-//!   stage the generation's serving snapshot (returned in [`Applied`]), then
-//!   prune all pending entries at or below the finalized round.
+//!   [`Barrier`](crate::stateful::db::Barrier)), capture a snapshot of the
+//!   database set for publication (returned in [`Applied`]), then prune all
+//!   pending entries at or below the finalized round.
 //!
 //! - Maintenance: [`Processor::prune_databases`] runs due prunes and
 //!   [`Processor::republish`] refreshes the published snapshot afterwards.
@@ -87,7 +87,8 @@ pub(super) enum PrepareBatchesError {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T, S> {
-    /// The generation's staged snapshot and its durability barrier.
+    /// A snapshot of the database set, ready to publish once its flush proves
+    /// durable.
     pub(super) publication: PendingPublication<S>,
 
     /// Prune made due by this finalization.
@@ -216,7 +217,7 @@ where
     A: Application<E>,
 {
     /// Create a new processor with the given application, databases, the last
-    /// finalized block's anchor, and the publisher its generations install into.
+    /// finalized block's anchor, and the publisher its snapshots are served through.
     pub(super) const fn new(
         app: A,
         databases: A::Databases,
@@ -236,14 +237,11 @@ where
         }
     }
 
-    /// Run a due prune against the owned database set: database pruning, then marshal
-    /// pruning.
+    /// Prune `self.databases` and `marshal` to the `prune` target.
     ///
-    /// Callers must have observed every finalize barrier through `prune.barrier_height`
-    /// durable before calling. Database pruning never discards state a restart would
-    /// need (see [`DbSet::prune`]), and the durable commit justifying its target
-    /// sits at or above the oldest retained block, so the marshal prune that follows
-    /// retains every block a restart could replay.
+    /// # Invariant
+    ///
+    /// Databases must be durable through `prune.barrier_height`.
     pub(super) async fn prune_databases<S, V>(
         mut self,
         prune: Prune<PendingSyncTargets<A, E>>,
@@ -258,14 +256,14 @@ where
         self
     }
 
-    /// Capture the set's applied state and install it for serving immediately.
+    /// Capture a snapshot of the database set and publish it immediately.
     ///
     /// Callers must ensure no finalize flush is pending, because the capture is
     /// published without waiting for any barrier.
     pub(super) async fn republish(mut self) -> Self {
         let (databases, snapshot) = self.databases.snapshot().await;
         self.databases = databases;
-        self.publisher.install_durable(snapshot);
+        self.publisher.publish_durable(snapshot);
         self
     }
 
@@ -783,9 +781,9 @@ where
             }
         };
 
-        // Staging inside finalize makes serving generations follow apply order. The
-        // caller installs the staged snapshot only after the barrier proves every
-        // database flush durable, so readers never see state a crash could lose.
+        // Snapshots are staged here, inside finalize, so they publish in apply
+        // order. The caller publishes only once the barrier proves every database
+        // flush durable, so readers never see state a crash could lose.
         let (databases, snapshot, barrier) = self.databases.finalize(batch).await;
         self.databases = databases;
         let publication = PendingPublication::new(self.publisher.stage(snapshot), barrier);
@@ -1554,7 +1552,7 @@ mod tests {
                 return (self, false);
             };
             assert!(
-                publication.install_when_durable().await,
+                publication.publish_when_durable().await,
                 "finalize flush must complete"
             );
             (self, true)
@@ -1575,7 +1573,7 @@ mod tests {
             self.processor = processor;
             let Applied { publication, prune } = applied.expect("finalized block must apply");
             assert!(
-                publication.install_when_durable().await,
+                publication.publish_when_durable().await,
                 "finalize flush must complete"
             );
             (self, prune)
