@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotsOf, SyncEngineConfig,
+            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -47,7 +47,9 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
+    journal::contiguous::{
+        Contiguous as _, fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig,
+    },
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
@@ -72,12 +74,11 @@ type QmdbA<E> =
 type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
-/// A single QMDB database behind a lock.
-type DbA<E> = Shared<QmdbA<E>>;
-type DbB<E> = Shared<QmdbB<E>>;
-
 /// A full and a compact QMDB as a tuple.
-pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);
+pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
+
+/// Readers over the set's published snapshots.
+type MultiSnapshot<E> = SnapshotsOf<MultiDatabaseSet<E>, E>;
 
 /// A block carrying state from two QMDB databases.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,21 +200,16 @@ impl App {
     /// Execute a block against two databases.
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        batches: (
-            <DbA<E> as DatabaseSet<E>>::Unmerkleized,
-            <DbB<E> as DatabaseSet<E>>::Unmerkleized,
-        ),
-    ) -> (
-        <DbA<E> as DatabaseSet<E>>::Merkleized,
-        <DbB<E> as DatabaseSet<E>>::Merkleized,
-    ) {
+        databases: &MultiDatabaseSet<E>,
+        batches: UnmerkleizedOf<MultiDatabaseSet<E>, E>,
+    ) -> MerkleizedOf<MultiDatabaseSet<E>, E> {
         let (mut batch_a, batch_b) = batches;
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
         // per-block operation count so its state sync spans the same crash windows.
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch_a
-            .get(&counter)
+            .get(&counter, &databases.0)
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
@@ -229,8 +225,8 @@ impl App {
             u64_to_digest(height.get()),
         );
 
-        let merkleized_a = batch_a.merkleize().await.unwrap();
-        let merkleized_b = batch_b.merkleize().await.unwrap();
+        let merkleized_a = batch_a.merkleize(&databases.0).await.unwrap();
+        let merkleized_b = batch_b.merkleize(&databases.1).await.unwrap();
         (merkleized_a, merkleized_b)
     }
 }
@@ -251,13 +247,14 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
-        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(height, databases, batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = Block {
@@ -279,11 +276,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), databases, batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
@@ -300,9 +298,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
+        Self::execute(block.height(), databases, batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
@@ -575,43 +574,47 @@ impl EngineDefinition for MultiDbEngine {
             .await;
         let sync_floor = plan.floor().cloned();
 
-        // QMDB state-sync resolvers (one per database).
-        let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>>::new(
-                context.child("qmdb_resolver_a"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    database: None,
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-            );
+        // Snapshot publication channel and the QMDB state-sync resolvers (one per
+        // database), each serving from its own reader.
+        let publication = context.child("publication");
+        let (snapshot_publisher, snapshot_reader) =
+            crate::stateful::db::Publisher::<MultiSnapshot<_>>::new(&publication);
+        let snapshot_reader_a = snapshot_reader.view(|snapshots| &snapshots.0);
+        let snapshot_reader_b = snapshot_reader.view(|snapshots| &snapshots.1);
+        let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) = qmdb_resolver::Actor::new(
+            context.child("qmdb_resolver_a"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            snapshot_reader_a.clone(),
+        );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
-        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbB<_>>::new(
-                context.child("qmdb_resolver_b"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    database: None,
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-            );
+        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) = qmdb_resolver::Actor::new(
+            context.child("qmdb_resolver_b"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            snapshot_reader_b,
+        );
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
@@ -625,7 +628,8 @@ impl EngineDefinition for MultiDbEngine {
                 marshal: (marshal_mailbox.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
+                resolvers: (qmdb_sync_resolver_a.clone(), qmdb_sync_resolver_b.clone()),
+                snapshot_publisher,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
@@ -637,13 +641,12 @@ impl EngineDefinition for MultiDbEngine {
 
         // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
         // The compact db keeps no operation history to observe.
-        let prune_observer = stateful_mailbox.clone();
+        let prune_observer = snapshot_reader_a;
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let mailbox = prune_observer.clone();
+            let reader = prune_observer.clone();
             Box::pin(async move {
-                let (a, _b) = mailbox.subscribe_databases().await;
-
-                *a.read().await.bounds().start
+                let snapshot = reader.latest().expect("a published generation must exist");
+                snapshot.bounds().start
             })
         });
 
@@ -662,7 +665,7 @@ impl EngineDefinition for MultiDbEngine {
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Attach the marshal to probe, entering service. A syncing node has
-        // already consumed its floor above; a source attaches without ever soliciting peers.
+        // already consumed its floor above, so serving needs no peer solicitation.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {

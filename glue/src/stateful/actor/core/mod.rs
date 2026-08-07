@@ -12,7 +12,7 @@ use crate::stateful::{
         processor::{PendingSyncTargets, Processor, Pruning},
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{DatabaseSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -128,8 +128,11 @@ where
     /// metadata handle and the startup decision shared with marshal.
     pub plan: SyncPlan<E, S, V>,
 
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolver(s) for state sync fetches.
     pub resolvers: R,
+
+    /// Publishes each durable generation of snapshots.
+    pub snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
@@ -173,8 +176,11 @@ where
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
 
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolver(s) for state sync fetches.
     resolvers: R,
+
+    /// Publishes each durable generation of snapshots.
+    snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
@@ -190,7 +196,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    R: Send + Sync + 'static,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -217,6 +223,7 @@ where
                 db_config: config.db_config,
                 plan: config.plan,
                 resolvers: config.resolvers,
+                snapshot_publisher: config.snapshot_publisher,
                 sync_config: config.sync_config,
                 pruning,
             },
@@ -253,7 +260,7 @@ where
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
-            resolvers: self.resolvers.clone(),
+            resolvers: self.resolvers,
             finalization,
             marshal: (marshal.clone(), floor),
             sync_complete,
@@ -267,13 +274,12 @@ where
             sync_metadata,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
-            database_subscribers: Vec::new(),
             artifact: None,
-            resolvers: self.resolvers,
             sync_completed,
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
+            snapshot_publisher: self.snapshot_publisher,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -292,21 +298,19 @@ where
         )
         .await;
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs. The
-        // resolver handles can be dropped after this: serving runs on the resolver
-        // actors' own contexts.
-        self.resolvers.attach_databases(databases.clone()).await;
-
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
         let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let mut snapshot_publisher = self.snapshot_publisher;
+        let (processor, snapshots) = processor.snapshot().await;
+        snapshot_publisher.publish_now(anchor.height, snapshots);
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
             processor,
+            snapshot_publisher,
             skip_finalized_until,
         }
         .start()
@@ -319,7 +323,7 @@ mod tests {
     use super::{Config, Deferred, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
+        db::{Publisher, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
             mocks::{TestApp, TestBlock, TestDb},
@@ -341,17 +345,13 @@ mod tests {
     #[derive(Clone)]
     struct NoopResolver;
 
-    impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<TestDb>) {}
-    }
-
-    impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
+    impl<S: Send> StateSyncDb<deterministic::Context, S> for TestDb {
         type SyncError = Infallible;
 
         async fn sync_db(
             _context: deterministic::Context,
             _config: Self::Config,
-            _resolver: NoopResolver,
+            _source: S,
             _target: Self::SyncTarget,
             _tip_updates: mpsc::Receiver<Self::SyncTarget>,
             _finish: Option<mpsc::Receiver<()>>,
@@ -367,6 +367,57 @@ mod tests {
         let (acknowledgement, waiter) = Exact::handle();
         drop(Deferred::from(acknowledgement));
         assert!(waiter.now_or_never().is_none());
+    }
+
+    #[test]
+    fn startup_serves_recovered_state_as_generation_zero() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-serve", 1);
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal_fixture"),
+                "startup-serve",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
+            let publication = context.child("publication");
+            let (snapshot_publisher, snapshot_reader) = Publisher::new(&publication);
+            let (stateful, _mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp,
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox, marshal.floor),
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoopResolver,
+                    snapshot_publisher,
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    prune_config: None,
+                },
+            );
+            let handle = stateful.start();
+
+            // No block is ever reported: the recovered state alone must publish as
+            // generation zero and begin serving.
+            while snapshot_reader.latest() != Some(0) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            handle.abort();
+        });
     }
 
     #[test]
@@ -386,6 +437,7 @@ mod tests {
             .await;
 
             let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let publication = context.child("publication");
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -396,6 +448,7 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&publication).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

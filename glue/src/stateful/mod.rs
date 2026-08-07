@@ -6,7 +6,7 @@
 //! bookkeeping:
 //!
 //! 1. Before each `propose` or `verify`, the actor forks unmerkleized batches
-//!    from the parent block's pending state (or from committed database state
+//!    from the parent block's pending state (or from applied database state
 //!    if the parent has been finalized).
 //! 2. The application executes against those batches and returns merkleized
 //!    results, which the actor stores as a new pending tip keyed by the
@@ -96,7 +96,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::DatabaseSet;
+use db::{DatabaseSet, MerkleizedOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -141,7 +141,9 @@ pub struct Input<Upstream, Provider> {
 /// return [`DatabaseSet::Merkleized`] batches after execution. The surrounding
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
-/// finalization.
+/// finalization. In every execution method, reads of applied state go through
+/// the borrowed `databases`, while `batches` carries only that turn's
+/// speculative writes and holds no database handle.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -217,7 +219,8 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
@@ -256,8 +259,9 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> impl Future<Output = Option<MerkleizedOf<Self::Databases, E>>> + Send;
 
     /// Apply a previously certified block to reconstruct its merkleized state.
     ///
@@ -283,8 +287,9 @@ where
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> impl Future<Output = MerkleizedOf<Self::Databases, E>> + Send;
 
     /// Observe a finalized block after it is reflected in the database set.
     ///

@@ -1,6 +1,5 @@
 //! [`Syncer`](super::Syncer) actor ingress.
 
-use super::SyncResult;
 use crate::stateful::{
     Application,
     db::{Anchor, DatabaseSet, TipUpdate},
@@ -14,6 +13,17 @@ use rand_core::Rng;
 type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
+/// Reply to [`Mailbox::update_targets`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpdateOutcome {
+    /// The live sync coordinator recorded the update, so the eventual sync
+    /// artifact reflects this target or a newer one.
+    Observed,
+    /// State sync already completed, so no coordinator remains to record the
+    /// update. The artifact is on the completion channel.
+    SyncCompleted,
+}
+
 pub(crate) enum Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -21,7 +31,8 @@ where
 {
     UpdateTargets {
         update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
-        response: oneshot::Sender<Option<SyncResult<E, A>>>,
+        /// Reports whether the update was recorded or sync already completed.
+        response: oneshot::Sender<UpdateOutcome>,
     },
 }
 
@@ -78,49 +89,50 @@ where
 
     /// Sends a target update and waits until the live sync coordinator records it.
     ///
-    /// If sync already completed before the update could be observed, returns the
-    /// completed artifact instead.
+    /// If sync already completed, the artifact arrives on the completion channel.
     pub async fn update_targets(
         &self,
         anchor: Anchor<BlockDigest<E, A>>,
         targets: SyncTargets<E, A>,
-    ) -> Option<SyncResult<E, A>> {
+    ) -> UpdateOutcome {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
-            let _ = self
+            let feedback = self
                 .sender
                 .enqueue(Message::UpdateTargets { update, response });
+            assert!(
+                feedback.accepted(),
+                "syncer must outlive update_targets callers",
+            );
 
-            match receiver
-                .await
-                .expect("Syncer should respond to update_targets")
-            {
-                Some(artifact) => return Some(artifact),
-                None => {
-                    // Wait until the live sync coordinator has recorded the new tip update.
-                    // Enqueueing it into Syncer is not enough to prove the eventual sync
-                    // artifact includes the target or to discard its handoff state.
-                    if observed.await.is_ok() {
-                        return None;
-                    }
-
-                    // The active coordinator dropped before recording this update.
-                    // Retry so Syncer can either hand the update to the next coordinator
-                    // or report the completed sync artifact.
-                }
+            let Ok(outcome) = receiver.await else {
+                // A newer queued update displaced this one before the syncer saw it,
+                // or the syncer died with the message queued (see the doc above).
+                continue;
+            };
+            if outcome == UpdateOutcome::SyncCompleted {
+                return outcome;
             }
+
+            // Wait until the live sync coordinator has recorded the new tip update.
+            // Enqueueing it into Syncer is not enough to prove the eventual sync
+            // artifact includes the target or to discard its handoff state.
+            if observed.await.is_ok() {
+                return UpdateOutcome::Observed;
+            }
+
+            // The active coordinator dropped before recording this update.
+            // Retry so Syncer can either hand the update to the next coordinator
+            // or report the completed sync.
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Mailbox, Message};
-    use crate::stateful::{
-        actor::syncer::SyncResult,
-        tests::mocks::{TestApp, anchor, test_databases},
-    };
+    use super::{Mailbox, Message, UpdateOutcome};
+    use crate::stateful::tests::mocks::{TestApp, anchor};
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
@@ -139,35 +151,64 @@ mod tests {
                 panic!("first update should be sent");
             };
             assert!(
-                response.send(None).is_ok(),
+                response.send(UpdateOutcome::Observed).is_ok(),
                 "response receiver should be alive"
             );
             drop(update);
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
-            let expected = SyncResult::<deterministic::Context, TestApp> {
-                databases: test_databases(),
-                anchor: anchor(8, 10),
-            };
             let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
                 panic!("dropped observation should trigger a retry");
             };
             assert!(
-                response.send(Some(expected.clone())).is_ok(),
+                response.send(UpdateOutcome::SyncCompleted).is_ok(),
                 "response receiver should be alive"
             );
 
-            let result = update_targets.await;
             assert_eq!(
-                result.expect("retry should return artifact").anchor,
-                expected.anchor
+                update_targets.await,
+                UpdateOutcome::SyncCompleted,
+                "retry should report the completed sync"
             );
         });
     }
 
     #[test]
-    fn update_targets_returns_none_only_after_observation_is_recorded() {
+    fn update_targets_retries_when_response_is_displaced() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
+            let mut update_targets = Box::pin(mailbox.update_targets(anchor(7, 9), 7));
+
+            assert!(update_targets.as_mut().now_or_never().is_none());
+
+            // Drop the message without responding, as overflow displacement does.
+            let Some(message) = receiver.recv().await else {
+                panic!("first update should be sent");
+            };
+            drop(message);
+
+            assert!(update_targets.as_mut().now_or_never().is_none());
+
+            let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {
+                panic!("displaced response should trigger a retry");
+            };
+            assert!(
+                response.send(UpdateOutcome::SyncCompleted).is_ok(),
+                "response receiver should be alive"
+            );
+
+            assert_eq!(
+                update_targets.await,
+                UpdateOutcome::SyncCompleted,
+                "retry should report the completed sync"
+            );
+        });
+    }
+
+    #[test]
+    fn update_targets_resolves_only_after_observation_is_recorded() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
@@ -179,7 +220,7 @@ mod tests {
                 panic!("update should be sent");
             };
             assert!(
-                response.send(None).is_ok(),
+                response.send(UpdateOutcome::Observed).is_ok(),
                 "response receiver should be alive"
             );
 
@@ -187,7 +228,11 @@ mod tests {
 
             update.record(|_, _| {});
 
-            assert!(update_targets.await.is_none());
+            assert_eq!(
+                update_targets.await,
+                UpdateOutcome::Observed,
+                "recorded update should report observation"
+            );
         });
     }
 }
