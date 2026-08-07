@@ -285,14 +285,17 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random 128-bit scalar.
+    /// Generates a random non-zero 128-bit scalar.
     pub fn random(mut rng: impl CryptoRng) -> Self {
-        // blst_scalar is 32 bytes
-        let mut bytes = [0u8; 32];
+        // blst_scalar is 32 bytes.
+        let mut bytes = [0u8; SCALAR_LENGTH];
         // Fill the last 16 bytes (128 bits) with entropy.
         // In big-endian, bytes[16..32] are the least significant.
         // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
-        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+        let random_bytes = &mut bytes[(SCALAR_LENGTH - SMALL_SCALAR_LENGTH)..];
+        while bool::from(all_zero(random_bytes)) {
+            rng.fill_bytes(random_bytes);
+        }
 
         let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array.
@@ -1904,8 +1907,10 @@ mod tests {
     use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
+    use rand_core::{TryCryptoRng, TryRng};
     use std::{
         collections::{BTreeSet, HashMap},
+        convert::Infallible,
         num::NonZeroUsize,
     };
 
@@ -2520,6 +2525,42 @@ mod tests {
         let scalar = Scalar::from(small.clone());
         let round_tripped = scalar.as_blst_scalar();
         assert_eq!(small.as_bytes(), round_tripped.b.as_slice());
+    }
+
+    #[test]
+    fn test_small_scalar_random_rejects_zero() {
+        struct ZeroThenOne {
+            fills: usize,
+        }
+
+        impl TryRng for ZeroThenOne {
+            type Error = Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                dst.fill(0);
+                if self.fills > 0 {
+                    *dst.last_mut().expect("requested scalar bytes") = 1;
+                }
+                self.fills += 1;
+                Ok(())
+            }
+        }
+
+        impl TryCryptoRng for ZeroThenOne {}
+
+        let mut rng = ZeroThenOne { fills: 0 };
+        let scalar = SmallScalar::random(&mut rng);
+
+        assert_eq!(rng.fills, 2);
+        assert_ne!(scalar, SmallScalar::zero());
     }
 
     #[test]
