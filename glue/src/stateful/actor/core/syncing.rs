@@ -121,7 +121,7 @@ where
                     .retain(|request| !request.response.is_closed());
             },
             on_stopped => {
-                debug!("shutdown signal received, stopping syncing");
+                debug!("processor received shutdown signal");
             },
             Ok(artifact) = &mut self.sync_completed else {
                 error!("syncer stopped before publishing state sync artifact");
@@ -134,7 +134,7 @@ where
                 return;
             },
             Some(message) = self.mailbox.recv() else {
-                debug!("mailbox closed, stopping syncing");
+                debug!("mailbox closed, shutting down processor");
                 break;
             } => match message {
                 Message::Propose {

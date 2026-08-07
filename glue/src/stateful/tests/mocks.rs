@@ -21,7 +21,7 @@ use std::{convert::Infallible, marker::PhantomData, sync::Arc};
 /// The generation served by `source`, or `None` before the first install and
 /// after the publisher drops.
 pub(crate) fn served_generation(source: &SetReader<()>) -> Option<u64> {
-    source.latest().map(|snapshot| snapshot.generation())
+    source.latest().map(|generation| generation.number())
 }
 
 pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;

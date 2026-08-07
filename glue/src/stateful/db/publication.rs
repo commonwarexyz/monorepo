@@ -1,6 +1,6 @@
 //! Publishing database snapshots from the writer to readers.
 //!
-//! A generation is one [`SetSnapshot`]: every database's snapshot, captured at
+//! A [`Generation`] is every database's snapshot, captured at
 //! the same apply boundary. The writer stages each generation through its
 //! [`Publisher`], which numbers them in apply order, and installs it once its flush
 //! proves durable, so readers only ever see durable state. Installs are monotonic:
@@ -17,17 +17,17 @@ use commonware_utils::sync::Mutex;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::sync::Arc;
 
-/// One generation: every database's snapshot, captured at the same apply boundary.
+/// Every database's snapshot, captured at the same apply boundary and numbered.
 #[derive(Debug)]
-pub(crate) struct SetSnapshot<S> {
-    generation: u64,
+pub(crate) struct Generation<S> {
+    number: u64,
     snapshots: S,
 }
 
-impl<S> SetSnapshot<S> {
+impl<S> Generation<S> {
     /// The generation number, assigned in staging order.
-    pub(crate) const fn generation(&self) -> u64 {
-        self.generation
+    pub(crate) const fn number(&self) -> u64 {
+        self.number
     }
 
     /// The databases' snapshots.
@@ -38,7 +38,7 @@ impl<S> SetSnapshot<S> {
 
 enum State<S> {
     Empty,
-    Installed(Arc<SetSnapshot<S>>),
+    Installed(Arc<Generation<S>>),
     Detached,
 }
 
@@ -49,19 +49,19 @@ struct Slot<S> {
 }
 
 impl<S> Slot<S> {
-    /// Install `snapshot` unless a newer generation is already installed.
-    fn install(&self, snapshot: Arc<SetSnapshot<S>>) {
-        let generation = snapshot.generation();
+    /// Install `generation` unless a newer one is already installed.
+    fn install(&self, generation: Arc<Generation<S>>) {
+        let number = generation.number();
         let mut state = self.state.lock();
         let replaced = match &*state {
             State::Detached => return,
-            State::Installed(installed) if installed.generation() > generation => return,
+            State::Installed(installed) if installed.number() > number => return,
             State::Empty | State::Installed(_) => {
-                std::mem::replace(&mut *state, State::Installed(snapshot))
+                std::mem::replace(&mut *state, State::Installed(generation))
             }
         };
         // Update metrics under the lock so the gauge matches what readers see.
-        self.metrics.generation.set(generation as i64);
+        self.metrics.generation.set(number as i64);
         self.metrics.installed.inc();
         drop(state);
         // Free the displaced generation outside the lock so readers never wait on it.
@@ -71,9 +71,9 @@ impl<S> Slot<S> {
 
 /// Publication metrics.
 struct Metrics {
-    /// Generation of the latest installed snapshot.
+    /// Number of the latest installed generation.
     generation: Registered<Gauge>,
-    /// Number of installations since startup.
+    /// Generations installed since startup.
     installed: Registered<Counter>,
 }
 
@@ -82,12 +82,12 @@ impl Metrics {
         Self {
             generation: context.register(
                 "installed_generation",
-                "Generation of the latest installed snapshot",
+                "Number of the latest installed generation",
                 Gauge::default(),
             ),
             installed: context.register(
                 "installations",
-                "Snapshot installations since startup",
+                "Generations installed since startup",
                 Counter::default(),
             ),
         }
@@ -120,14 +120,11 @@ impl<S> Publisher<S> {
     ///
     /// Stage in apply order, and install only once the generation is durable.
     pub(crate) fn stage(&mut self, snapshots: S) -> Staged<S> {
-        let generation = self.next_generation;
+        let number = self.next_generation;
         self.next_generation += 1;
         Staged {
             slot: self.slot.clone(),
-            snapshot: Arc::new(SetSnapshot {
-                generation,
-                snapshots,
-            }),
+            generation: Arc::new(Generation { number, snapshots }),
         }
     }
 
@@ -152,13 +149,13 @@ impl<S> Drop for Publisher<S> {
 /// Dropping it skips the generation. Later ones still install.
 pub(crate) struct Staged<S> {
     slot: Arc<Slot<S>>,
-    snapshot: Arc<SetSnapshot<S>>,
+    generation: Arc<Generation<S>>,
 }
 
 impl<S> Staged<S> {
     /// Install the staged generation unless a newer one already installed.
     pub(super) fn install(self) {
-        self.slot.install(self.snapshot);
+        self.slot.install(self.generation);
     }
 }
 
@@ -181,9 +178,9 @@ impl<S> Clone for SetReader<S> {
 impl<S> SetReader<S> {
     /// The latest installed generation, or `None` before the first install or after
     /// the publisher drops.
-    pub(crate) fn latest(&self) -> Option<Arc<SetSnapshot<S>>> {
+    pub(crate) fn latest(&self) -> Option<Arc<Generation<S>>> {
         match &*self.slot.state.lock() {
-            State::Installed(snapshot) => Some(snapshot.clone()),
+            State::Installed(generation) => Some(generation.clone()),
             State::Empty | State::Detached => None,
         }
     }
@@ -210,8 +207,8 @@ impl<S, M> DbReader<S, M> {
     /// Narrow `reader` to the database `project` selects.
     ///
     /// Public so [`super::DatabaseSet::readers`] is implementable outside this
-    /// crate. Sources only read installed generations, so nothing here can mutate the
-    /// database.
+    /// crate. Readers only see installed generations, so nothing here can mutate
+    /// the database.
     pub fn new(reader: SetReader<S>, project: fn(&S) -> &M) -> Self {
         Self { reader, project }
     }
@@ -256,12 +253,12 @@ mod tests {
 
             publisher.install_durable(7);
             let first = source.latest().unwrap();
-            assert_eq!(first.generation(), 0);
+            assert_eq!(first.number(), 0);
             assert_eq!(*first.snapshots(), 7);
 
             publisher.install_durable(8);
             let held = source.latest().unwrap();
-            assert_eq!(held.generation(), 1);
+            assert_eq!(held.number(), 1);
             assert_eq!(*held.snapshots(), 8);
 
             drop(publisher);
@@ -284,7 +281,7 @@ mod tests {
             assert_eq!(*source.latest().unwrap().snapshots(), 2);
             first.install();
             let live = source.latest().unwrap();
-            assert_eq!(live.generation(), 1);
+            assert_eq!(live.number(), 1);
             assert_eq!(*live.snapshots(), 2);
         });
     }
@@ -310,7 +307,7 @@ mod tests {
             drop(publisher.stage(1));
             publisher.install_durable(2);
             let live = source.latest().unwrap();
-            assert_eq!(live.generation(), 1);
+            assert_eq!(live.number(), 1);
             assert_eq!(*live.snapshots(), 2);
         });
     }

@@ -234,7 +234,6 @@ where
     }
 
     async fn run(self) {
-        // Readers attach once, and both startup paths publish through this publisher.
         let (publisher, set_reader) = Publisher::new(self.context.as_present());
         self.resolvers
             .attach_sources(A::Databases::readers(set_reader))

@@ -86,14 +86,14 @@ fn unpublished_generation_stays_invisible() {
                 .install_when_durable()
                 .await
         );
-        assert_eq!(source.latest().unwrap().generation(), 0);
+        assert_eq!(source.latest().unwrap().number(), 0);
         release(&control);
         assert!(
             PendingPublication::new(staged_second, second)
                 .install_when_durable()
                 .await
         );
-        assert_eq!(source.latest().unwrap().generation(), 1);
+        assert_eq!(source.latest().unwrap().number(), 1);
     });
 }
 
@@ -118,9 +118,9 @@ fn parked_serve_never_delays_the_writer() {
         let served = source.latest().unwrap();
         let (io_done, io_gate) = oneshot::channel();
         let serve = context.child("serve").spawn(move |_| async move {
-            let generation = served.generation();
+            let number = served.number();
             let _ = io_gate.await;
-            (generation, served)
+            (number, served)
         });
 
         // The parked serve shares nothing with the writer, so the next
@@ -141,11 +141,11 @@ fn parked_serve_never_delays_the_writer() {
         // The serve completes against its captured generation while the
         // source already serves the newer one.
         io_done.send(()).unwrap();
-        let (generation, held) = serve.await.unwrap();
-        assert_eq!(generation, 0, "the serve captured the first generation");
-        assert_eq!(held.generation(), 0, "the held snapshot never moved");
+        let (number, held) = serve.await.unwrap();
+        assert_eq!(number, 0, "the serve captured the first generation");
+        assert_eq!(held.number(), 0, "the held generation never moved");
         assert_eq!(
-            source.latest().unwrap().generation(),
+            source.latest().unwrap().number(),
             1,
             "publication moved on while the serve was parked"
         );
