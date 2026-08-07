@@ -37,10 +37,9 @@ use commonware_glue::{
 use commonware_macros::boxed;
 use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{NZDuration, NZU64, NZUsize};
-use futures::future::try_join_all;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
@@ -56,7 +55,7 @@ pub struct Validator {
     pub state_sync: bool,
 }
 
-/// Start every validator actor and run until one fails.
+/// Start every validator actor and run until one stops.
 #[boxed]
 pub async fn run(context: tokio::Context, args: Validator) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
@@ -371,7 +370,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     probe_mailbox.attach(marshal.clone());
     let stateful_handle = stateful_actor.start();
 
-    if let Err(err) = try_join_all(vec![
+    if let Err(err) = Handle::select([
         p2p_handle,
         broadcast_handle,
         probe_handle,
@@ -404,5 +403,55 @@ fn archive_config<C>(
         key_write_buffer: IO_BUFFER_SIZE,
         value_write_buffer: IO_BUFFER_SIZE,
         replay_buffer: IO_BUFFER_SIZE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{FutureExt as _, future::pending};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountDrop(Arc<AtomicUsize>);
+
+    impl Drop for CountDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn pending_handle(dropped: Arc<AtomicUsize>) -> Handle<()> {
+        let count_drop = CountDrop(dropped);
+        Handle::from_future(async move {
+            let _count_drop = count_drop;
+            pending().await
+        })
+    }
+
+    #[test]
+    fn successful_actor_completion_stops_validator() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+
+        // Model a clean actor exit alongside siblings that would otherwise run forever.
+        let actors = [
+            Handle::ready(Ok(())),
+            pending_handle(dropped.clone()),
+            pending_handle(dropped.clone()),
+            pending_handle(dropped.clone()),
+            pending_handle(dropped.clone()),
+            pending_handle(dropped.clone()),
+            pending_handle(dropped.clone()),
+            pending_handle(dropped.clone()),
+        ];
+
+        // Supervision must complete and abort every pending sibling.
+        assert!(matches!(
+            Handle::select(actors).now_or_never(),
+            Some(Ok(()))
+        ));
+        assert_eq!(dropped.load(Ordering::Relaxed), 7);
     }
 }
