@@ -1453,10 +1453,12 @@ where
 
         // Resolve last-write-wins per distinct key: a forward walk keyed on the staged key leaves
         // each key's final write, the same winner as a newest-first scan. Later writes overwrite
-        // their key's entry in place, so `winners` holds one entry per distinct key written and
-        // every structure here is sized by the updates submitted, not by the staged read set.
-        let mut winner_of: AHashMap<&U::Key, usize> = AHashMap::with_capacity(updates.len());
-        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = Vec::with_capacity(updates.len());
+        // their key's entry in place, so `winners` holds one entry per distinct key written. A
+        // distinct key needs a staged slot, so the staged read set caps the reservation that a
+        // duplicate-heavy update list would otherwise inflate.
+        let capacity = updates.len().min(keys.len());
+        let mut winner_of: AHashMap<&U::Key, usize> = AHashMap::with_capacity(capacity);
+        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = Vec::with_capacity(capacity);
         for (slot, value) in updates {
             assert!(slot < keys.len(), "update index out of staged read range");
             match winner_of.entry(&keys[slot]) {
