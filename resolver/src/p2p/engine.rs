@@ -221,8 +221,8 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Retain or shutdown) before the consumer finished validating.
-                if let Ok((peer, delivery, result)) = delivery {
-                    self.handle_delivery(peer, delivery, result);
+                if let Ok((peer, elapsed, delivery, result)) = delivery {
+                    self.handle_delivery(peer, elapsed, delivery, result);
                 }
             },
             // Handle mailbox messages
@@ -407,7 +407,7 @@ where
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
+        let Some((key, elapsed)) = self.fetcher.pop_response(id, &peer) else {
             // It's possible that the key does not exist if the request was pruned.
             return;
         };
@@ -420,13 +420,14 @@ where
         let delivery = Delivery { key, subscribers };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(delivery, peer, response);
+        self.inflight.deliver(delivery, peer, elapsed, response);
     }
 
     /// Handle completed delivery to the consumer.
     fn handle_delivery(
         &mut self,
         peer: P,
+        elapsed: std::time::Duration,
         delivery: Delivery<Key, Con::Subscriber>,
         outcome: Outcome,
     ) {
@@ -436,10 +437,13 @@ where
             ..
         } = delivery;
 
+        let already_accepted = self.inflight.response_accepted(&key);
+        if !already_accepted && outcome != Outcome::Ignored {
+            self.fetcher.record_response(&peer, elapsed);
+        }
+
         match outcome {
             Outcome::Complete => {
-                let already_accepted = self.inflight.response_accepted(&key);
-
                 // Remove only the subscribers that accepted this response. If other
                 // subscribers still need the key, deliver the same accepted response
                 // locally with the remaining annotations.
@@ -476,7 +480,7 @@ where
                 // joined while validation was pending. A later invalid outcome therefore reflects
                 // conflicting consumer verdicts, not invalid peer data. Retire the fetch without
                 // blocking the peer or retrying the accepted response.
-                if self.inflight.response_accepted(&key) {
+                if already_accepted {
                     warn!(
                         ?key,
                         "previously accepted response was rejected during local redelivery"
@@ -496,6 +500,14 @@ where
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
+            Outcome::Ignored => {
+                // The consumer no longer needs the key. Retire the entire fetch without
+                // scoring or blocking the response's source.
+                self.metrics.fetch.inc(Status::Dropped);
+                self.inflight.cancel(&key);
+                self.subscribers.remove(&key);
+                self.fetcher.clear_targets(&key);
+            }
         }
     }
 
@@ -504,7 +516,7 @@ where
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
-        let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
+        let Some(key) = self.fetcher.pop_missing(id, &peer) else {
             // It's possible that the key does not exist if the request was pruned.
             return;
         };

@@ -438,6 +438,14 @@ impl<
         }
     }
 
+    /// Returns whether every ask sharing the resolver key for `view` is settled.
+    ///
+    /// Ignoring a delivery retires the key, including subscribers that may not
+    /// be present in the delivery, so demand for both kinds must be settled.
+    fn key_settled(&self, view: View) -> bool {
+        self.settled(view, Kind::Nullification) && self.settled(view, Kind::Notarization)
+    }
+
     /// Returns the cached nullification covering `view`, if any.
     ///
     /// A nullification covers the rest of its term, so it may be keyed at an
@@ -555,6 +563,13 @@ impl<
                     view = view.traced()
                 );
                 let _guard = span.entered();
+
+                // Ignoring is key-wide, so only skip validation after every
+                // certificate kind that can share this view is settled.
+                if self.key_settled(view) {
+                    response.send_lossy(Outcome::Ignored);
+                    return;
+                }
 
                 // Validate incoming message
                 let validate = info_span!(
@@ -1974,6 +1989,140 @@ mod tests {
                 &mut resolver,
             );
             assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+        });
+    }
+
+    #[test_async]
+    async fn settled_key_ignores_delivery_without_validation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, mut voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let requested = View::new(4);
+            actor.updated(
+                &mut resolver,
+                Certificate::Finalization(build_finalization(
+                    &schemes,
+                    &verifier,
+                    EPOCH,
+                    View::new(6),
+                )),
+            );
+            assert!(actor.settled(requested, Kind::Nullification));
+            assert!(actor.settled(requested, Kind::Notarization));
+
+            // Garbage queued before local settlement is ignored without
+            // decoding, verification, or peer penalty.
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: Bytes::from_static(b"unverifiable"),
+                    asks: non_empty_vec![
+                        Ask::backfill(),
+                        Ask::ancestry(Kind::Nullification),
+                        Ask::ancestry(Kind::Notarization),
+                    ],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
+            assert_eq!(actor.last_finalized, View::new(6));
+            assert!(matches!(
+                actor.state.get(View::new(6)),
+                Some(Certificate::Finalization(finalization))
+                    if finalization.view() == View::new(6)
+            ));
+            drop(voter);
+            assert!(voter_rx.recv().await.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn nullification_only_settled_key_still_validates_delivery() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let requested = View::new(4);
+            actor.updated(
+                &mut resolver,
+                Certificate::Nullification(build_nullification(
+                    &schemes, &verifier, EPOCH, requested,
+                )),
+            );
+            assert!(actor.settled(requested, Kind::Nullification));
+            assert!(!actor.settled(requested, Kind::Notarization));
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: Bytes::from_static(b"unverifiable"),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Nullification)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert_eq!(receiver.await.unwrap(), Outcome::Invalid);
+        });
+    }
+
+    #[test_async]
+    async fn notarization_only_settled_key_still_validates_delivery() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let requested = View::new(4);
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(
+                    &schemes, &verifier, EPOCH, requested,
+                )),
+            );
+            assert!(!actor.settled(requested, Kind::Nullification));
+            assert!(actor.settled(requested, Kind::Notarization));
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: Bytes::from_static(b"unverifiable"),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert_eq!(receiver.await.unwrap(), Outcome::Invalid);
         });
     }
 
