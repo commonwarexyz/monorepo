@@ -1,10 +1,14 @@
 # UNO formal-specification and model-checking handoff
 
 > **Paused checkpoint, 6 August 2026.** This handoff's original “next task” and two-module inventory
-> are now historical. `docs/uno-protocol.qnt` has 5,075 lines and three modules, including the
+> are now historical. `docs/uno-protocol.qnt` has 5,089 lines and three modules, including the
 > two-participant `uno_composed` byte-level bridge. Its current SHA-256 is
-> `ee66bfc46088ffd9b1ccd1aa5779ff59f05bff7b44aaa72c48cd9446a33465f4`, and it typechecks with the
-> command below. Development runs found the intended broken-generation counterexample and completed
+> `dde48576de33b8993cdc340a01a9019f842ae61bb91a15c996af834f32b75965`. Its immediate predecessor,
+> SHA-256 `ee66bfc46088ffd9b1ccd1aa5779ff59f05bff7b44aaa72c48cd9446a33465f4`, typechecked with the
+> command below. A later full-diff audit found and corrected that checkpoint's generation-2
+> predecessor fixture: it claimed ordinary `R` but encoded the `M` guard and CRCs. Because formal
+> execution remains paused, the corrected current artifact has not yet been typechecked.
+> Development runs found the intended broken-generation counterexample and completed
 > several shallow pair-fixed obligations, but later edits mean that no final-current-hash Apalache
 > matrix is complete. The exact-A recovery run was manually stopped (`exit=137`,
 > `OOMKilled=false`) when the user paused formal-model execution. Do not resume a checker merely to
@@ -19,24 +23,50 @@
 > pre-attempt source, including its own exact lower-generation witness, has no distinguishable new
 > generation to consume.
 
+> **Post-handoff workspace update.** The branch was externally advanced to
+> `5ecb6c433c0392cd9fc7f6d7ab9cafc1b4a69cea` (`progress`), which tracks the six UNO artifacts and
+> changes no Rust relative to `26a532dd6`. After explicit authorization, commit
+> `c5597b66670f31c71795e9c2cd02d195e711af10` adds the reviewed cancellation-ownership repair and
+> regressions without changing the R13 on-disk format. The workspace-state inventory below is
+> preserved as the historical starting checkpoint. Fresh Linux/ext4 and Rust/cancellation review
+> results and exact validation commands are recorded in `docs/uno-model-checking.md`; formal-model
+> execution remains paused. The current TeX rebuilt successfully as a 25-page, 257,917-byte PDF
+> with SHA-256
+> `68b469865c29dc74a3f7ebcd6109a651bde927f37df37fccb14d81c3e3a4a354`.
+
+> **Confirmed target-protocol blocker.** A final full-diff audit and an independent byte-level
+> reconstruction confirmed that the one-phase proposed R14 prepare does not bind the adjacent
+> generation-independent witness to the issued candidate-generation guard. Old two-member topology
+> bytes and issued-new three-member candidate bytes can form an exact checksummed two-member ring,
+> publishing two participants while the third remains old. This requires no CRC collision,
+> generation skip, incarnation reuse, or external namespace mutation. The paper now withdraws the
+> unconditional theorem and records only a conditional conjecture. The current two-participant
+> `uno_composed` model starts witnesses from zero and cannot express this old-two/new-three trace.
+> The next action requires an architecture choice: (A) two-phase code-last prepare, which adds a
+> second ordered durability layer and is the correctness-first recommendation; (B) a splice-binding
+> root-to-witness commitment with a stronger computational assumption; or (C) narrowing away
+> admitted-but-unacknowledged atomicity. Formal execution remains paused until that choice is made.
+
 This document is a session handoff for continuing the UNO protocol audit in a fresh Codex session.
 It records the exact local state, user requirements, work completed, known correctness gaps, and
 reproducible validation commands. Do not infer that an item is complete merely because it appears
 in the specification: the paper deliberately distinguishes the proposed R14 protocol from the
 checked-in R13 implementation.
 
-## Immediate objective
+## Historical starting objective
 
-Make the UNO formal specification sound under adversarial review and use a real model checker
-(Quint with Apalache), not a home-grown state-machine explorer. The next concrete task is to close
-the gap between the separate byte-provenance and group-control abstractions by adding a small
-composed, byte-level, two-participant model. Then rerun all checks, update the validation report,
-compile the paper, and conduct another adversarial review.
+The session began with the objective of making the UNO formal specification sound under adversarial
+review and using a real model checker (Quint with Apalache), not a home-grown state-machine
+explorer. The original next task was to close the gap between the separate byte-provenance and
+group-control abstractions by adding a small composed, byte-level, two-participant model. That model
+now exists, but the confirmed three-participant witness-provenance counterexample above supersedes
+this historical objective. The current next action is the architecture choice in the checkpoint.
 
-This is currently a specification/modeling task. Do not silently modify the Rust implementation to
-match the target protocol unless the user explicitly expands the scope.
+The explicitly authorized cancellation repair is complete. Do not make further Rust changes to
+implement any witness-provenance option unless the user selects that architecture and authorizes
+implementation work.
 
-## Workspace state
+## Historical workspace state (original handoff)
 
 - Repository: `/Users/patrickogrady/code/monorepo-pr-4368`
 - Branch: `pr/4368`
@@ -46,8 +76,8 @@ match the target protocol unless the user explicitly expands the scope.
 - Quint: 0.32.0
 - Apalache: 0.56.1
 
-The following files are untracked and contain the current work. Preserve them; do not reset, clean,
-or overwrite them:
+At the original handoff, the following files were intentionally untracked and contained the work.
+They are tracked by `5ecb6c433` now, but must still not be reset, cleaned, or overwritten:
 
 ```text
 docs/uno-model-checking.md
@@ -57,7 +87,7 @@ docs/uno-protocol.qnt
 docs/uno-quint.Dockerfile
 ```
 
-This handoff file is also untracked until deliberately added by the user.
+This handoff file was also untracked at that checkpoint and is tracked now.
 
 The existing presentation is tracked and clean:
 
@@ -73,8 +103,9 @@ At handoff creation, the paper source was newer than its PDF:
 2026-08-05 23:00:24 docs/uno-protocol-spec.pdf
 ```
 
-Therefore the formal-specification PDF must be rebuilt before delivery. The presentation PDF was
-already current relative to its source at the last check.
+That stale original PDF has since been rebuilt. The current PDF dimensions and digest are recorded
+in the checkpoint at the top of this file. The presentation PDF was already current relative to its
+source at the original handoff.
 
 ## Non-negotiable user requirements and corrections
 
@@ -141,10 +172,13 @@ accidentally synthesizing an exact final root that was never issued. R14 also re
   one-byte abort guard;
 - only exact group-bound `M/T` roots plus their witness may act as final group certificates;
 - ordinary `R` roots are not group certificates.
+- an authority-bearing witness must have disk-observable issuance provenance; exact CRC validation
+  alone does not supply it.
 
-Do not describe the checked-in R13 implementation as satisfying the R14 theorem.
+Do not describe the checked-in R13 implementation as satisfying the proposed R14 conditions, and
+do not describe the current one-phase target as having an unconditional theorem.
 
-## Current artifacts
+## Original artifact inventory (superseded by the top checkpoint)
 
 ### `docs/uno-protocol-spec.tex`
 
@@ -156,7 +190,8 @@ Approximately 2,055 lines. It is written like a conference protocol paper and in
 - backing-blob geometry, root and witness layouts;
 - preparation, decision, materialization, deletion, ring discovery, and missing-participant recovery;
 - generation-colored R14 state guard and code-last abort protocol;
-- invariants, lemmas, safety theorem, liveness conditions, cost discussion, and API semantics;
+- invariants, lemmas, a conditional safety conjecture, liveness conditions, cost discussion, and
+  API semantics;
 - source-to-spec correspondence;
 - a candid implementation-refinement status section with concrete blockers and counterexamples;
 - executable-model scope and audit checklist.
@@ -166,12 +201,12 @@ profile rather than modeling JBD2. The intended initial profile is local non-DAX
 journal replay, working barriers/flushes, and `data=ordered` or `data=journal`. A successful
 `fdatasync` establishes the relevant file-data/size frontier; directory-entry durability requires a
 directory `fsync`. `RWF_DSYNC` is not `RWF_ATOMIC`. `data=writeback`, `nobarrier`, `noload`, devices
-that lie about flushes, misdirected writes, and neighboring-block damage are outside the theorem
+that lie about flushes, misdirected writes, and neighboring-block damage are outside the conditional safety envelope
 unless separately refined.
 
 ### `docs/uno-protocol.qnt`
 
-Approximately 1,197 lines and currently has two modules:
+At the original handoff this was approximately 1,197 lines and had two modules:
 
 1. `uno_group`
    - one, two, or three participants;
@@ -193,24 +228,25 @@ Approximately 1,197 lines and currently has two modules:
    - deliberate generation-uncolored negative control (`initBuggy`);
    - generation-colored, code-last target (`initFixed`).
 
-The model header and paper both admit that these modules are disconnected abstractions. That is the
-main unfinished modeling gap.
+At that checkpoint the model header and paper both admitted that these modules were disconnected
+abstractions. The later `uno_composed` module closed that two-participant structural gap but not the
+three-participant witness-provenance gap recorded at the top of this handoff.
 
 ### `docs/uno-model-checking.md`
 
-Contains the pinned Docker commands and explains the fault abstraction. It needs updating after the
-composed model and final validation run. Its current depth-12 group example is aspirational unless
-rerun on the final model; do not quote it as a completed result solely because it appears in the
-file.
+At the original handoff it contained the pinned Docker commands and fault abstraction but still
+needed the composed-model ledger. The current file now distinguishes final-hash, development,
+interrupted, and pending evidence; do not quote any result outside the category in which it is
+recorded.
 
 ### `docs/uno-quint.Dockerfile`
 
 Pins the actual tools. Continue using it rather than installing Java or Apalache directly on the
 host.
 
-## Validation state at handoff
+## Historical validation state at original handoff
 
-The current `docs/uno-protocol.qnt` typechecks successfully with:
+The model artifact present at the original handoff typechecked successfully with:
 
 ```sh
 docker run --rm \
@@ -224,7 +260,7 @@ Important: the image entrypoint is already `quint`. Do **not** run
 `uno-quint:0.32.0 quint typecheck ...`; that accidentally launches the REPL and can produce an
 irrelevant `write EPIPE` message.
 
-Historical bounded results obtained during this session:
+Historical bounded results obtained before the current artifact:
 
 - generation-uncolored slot negative control: violation found within depth 5 (expected);
 - generation-colored/code-last slot model: no violation through depth 8;
@@ -232,13 +268,20 @@ Historical bounded results obtained during this session:
 - randomized group simulation: 10,000 samples, 24 steps, no violation;
 - focused cut-point initializers typechecked and passed a shallow reachability check.
 
-These runs preceded the last small group-model edits. Treat them as historical evidence only. Rerun
-every command against the final file before reporting results. A 100,000-sample/30-step randomized
+These runs preceded later model edits. Treat them as historical evidence only. The current digest
+has not been typechecked because formal execution is paused. A 100,000-sample/30-step randomized
 run was stopped because it was too slow; never claim it passed.
 
-## Known implementation blockers recorded in the paper
+## Known target and implementation blockers
 
 The paper intentionally does not hide these:
+
+- **Target witness provenance is unsound.** The one-phase proposed R14 prepare can reconstruct an
+  exact never-issued smaller ring from an older same-parity witness and issued-new candidate bytes.
+  This blocks the unconditional conjecture independently of every Rust correspondence issue and
+  requires the architecture choice recorded at the top of this handoff.
+
+The checked-in implementation additionally has these refinement blockers:
 
 1. **Namespace shape is not fully checked.** Hard-link aliases can make two logical participants
    write the same inode. Existing-file open can follow a symlink while recovery uses no-follow
@@ -253,14 +296,15 @@ The paper intentionally does not hide these:
    carries no group identity as evidence for a stale group.
 5. **Rejected witnesses can survive payload reuse.** Without durable reject-and-consume, later
    payload written at reused offsets can accidentally make an old witness validate.
-6. **Cancellation-safe namespace ownership is incomplete.** A canceled Tokio operation can release
-   the namespace guard while admitted blocking cleanup/materialization/truncation continues. A
-   delayed stale unlink, root write, or truncate can damage a newer incarnation or acknowledged
-   payload. io_uring avoids some pathname awaits but still has carried-materialization exposure.
-7. **Missing successor partition causes an availability failure.** Current ordered-delete recovery
+6. **Missing successor partition causes an availability failure.** Current ordered-delete recovery
    can propagate `ENOENT` instead of using independent local `M/T` authority.
-8. **Integrity geometry has acknowledged-reopen gaps.** Empty chunk completion and malformed rewind
+7. **Integrity geometry has acknowledged-reopen gaps.** Empty chunk completion and malformed rewind
    units can stage a root that admission accepts but ordinary reopen rejects.
+
+The earlier cancellation-ownership blocker was repaired after explicit Rust authorization. Tokio
+open/scan/remove and direct Tokio/io_uring publication now become self-driving after namespace
+admission, with exact post-unlink, recovery-truncate, and carried-materialization regressions. This
+does not repair or validate the remaining R13/R14 format and correspondence blockers above.
 
 These are implementation-refinement blockers, not all defects in the abstract R14 protocol. A fresh
 session should keep that distinction explicit.
@@ -287,7 +331,11 @@ Two findings were already repaired in the current model:
 - after a partial unlink, independently final/missing participants can re-enter cleanup instead of
   getting stuck because the old exact-tombstone predicate no longer holds.
 
-## Next task: add a composed byte-level model
+## Historical next task: add a composed byte-level model
+
+This task was completed by adding `uno_composed`. The design notes below are retained as provenance,
+not as the current instruction. The next task is instead to select and model one of the three
+witness-provenance contracts in the top checkpoint.
 
 Add a third Quint module, preferably `uno_composed`, with a deliberately small state space but a
 real end-to-end connection between bytes and group observations.
@@ -367,7 +415,10 @@ This proposed model is intentionally more concrete than the current paper target
 do not exactly match the intended R14 codec, fix the model or label it representative; do not imply
 it validates checked-in R13 bytes.
 
-## Suggested execution order in the new session
+## Historical suggested execution order (superseded)
+
+Do not follow the checker steps below while formal execution remains paused. After an architecture
+choice, use the current ordered obligations in `docs/uno-model-checking.md` instead.
 
 1. Read the repository `AGENTS.md` instructions from the user/session and inspect `git status`.
 2. Read this handoff and all of:
@@ -516,9 +567,9 @@ Responses HTTPS request failed: error sending request for url
 Those were Codex response-transport failures, not repository, Docker, Quint, or Apalache failures.
 Local edits and completed tool invocations remained intact. One misleading `write EPIPE` came from
 invoking `quint` twice despite the Docker image already using it as the entrypoint; the correct
-typecheck command above exits successfully.
+typecheck command above exited successfully for the recorded predecessor artifact.
 
-## Copy/paste prompt for the next session
+## Current copy/paste prompt for the next session
 
 ```text
 Continue the UNO formal-specification and model-checking work in:
@@ -529,33 +580,35 @@ First read the repository instructions and then read this handoff completely:
 
   /Users/patrickogrady/code/monorepo-pr-4368/docs/uno-handoff.md
 
-Preserve all existing work. In particular, the UNO specification/model files are intentionally
-untracked; do not run git clean, reset them, or replace them from HEAD. The branch should begin at
-pr/4368, commit 26a532dd6.
+Preserve all existing work. Do not run git clean, reset the UNO artifacts, replace them from HEAD,
+stage, commit, or push without explicit authorization. The branch is `pr/4368` at
+`c5597b66670f31c71795e9c2cd02d195e711af10`; compare the complete work to
+`26a532dd658fbee10137ad185da087548d9b114c`.
 
 The goal is to make the UNO protocol specification sound under adversarial review. Use the pinned
 Quint 0.32.0 + Apalache 0.56.1 Docker image (`uno-quint:0.32.0`); do not build a custom model
 checker. The storage fault model is that ANY subset of every unsynced write's addressed bytes may
 survive—not a prefix—and recovery/repair writes may crash and tear in exactly the same way.
 
-The immediate missing work is a small composed byte-level two-participant Quint module that joins
-the current `uno_slot` byte-provenance model to the current `uno_group` ring/recovery model. It must
-cover mixed append, rewind, and remove operations; payload evidence; partial unlink; interrupted
-abort and final repair; and observations derived from decoded on-disk bytes. Add a deliberate broken
-variant and require Apalache to find its counterexample. Keep the larger symbolic modules for scale
-and fast negative controls.
+The two-participant composed model exists, but fresh adversarial review confirmed that it
+underapproximates a real old-two/new-three exact-witness splice. The proposed one-phase R14 target
+therefore has no unconditional admitted-window theorem. Before changing or running the model, ask
+the user to choose: (A) two-phase code-last prepare, the correctness-first noncryptographic repair;
+(B) a root-to-witness splice-binding commitment with an explicit stronger computational
+assumption; or (C) an acknowledged-prefix-only contract that withdraws admitted-but-unacknowledged
+atomicity. Do not silently choose among those materially different contracts.
 
-After implementing it, rerun every check on the final file, record exact commands/bounds/results in
-docs/uno-model-checking.md, update the executable-model section of docs/uno-protocol-spec.tex,
-rebuild docs/uno-protocol-spec.pdf, and perform fresh adversarial reviews of (1) formal soundness,
-(2) Linux/ext4 assumptions, and (3) Rust correspondence/cancellation. Fix every specification
-defect found or state it candidly as a blocker. Do not claim the current R13 Rust implementation
-satisfies the proposed R14 theorem.
+Once a contract is selected, follow `docs/uno-model-checking.md`: add an old `H={a,b}` / new
+`G={a,b,c}` physical regression whose broken control reproduces the mixed vector and whose repaired
+variant blocks it, then run the complete pinned Quint/Apalache matrix on the final hash. Do not claim
+the current R13 Rust implementation satisfies the proposed R14 conditions or conditional
+conjecture.
 
-AIO work was explicitly dropped. Do not resume it. This turn is specification/modeling work unless
-I explicitly authorize Rust implementation changes.
+AIO work was explicitly dropped. Do not resume it. The cancellation-ownership Rust repair is
+already committed and reviewed; do not make additional Rust changes without explicit authorization.
 
-Start by showing `git status`, confirming the handoff artifacts are present, and running the correct
-Quint typecheck command from the handoff. Then continue autonomously, with concise progress updates,
-until the final adversarial review is clean or a concrete blocker requires my decision.
+Start by showing `git status`, confirming the artifact hashes, and asking for the architecture
+decision above. Formal execution remains paused until that choice is made. If it resumes, run one
+checker at a time with the established 44 GiB JVM heap and approximately 58.75 GiB Docker ceiling;
+do not repeat low-memory calibration.
 ```

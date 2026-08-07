@@ -1272,8 +1272,8 @@ module uno_composed {
       if (p == 0) Map(108 -> 206, 109 -> 89, 110 -> 138, 111 -> 39)
       else Map(108 -> 223, 109 -> 247, 110 -> 180, 111 -> 218)
     else if (kind == CPredecessor)
-      if (p == 0) Map(108 -> 152, 109 -> 88, 110 -> 247, 111 -> 163)
-      else Map(108 -> 137, 109 -> 246, 110 -> 201, 111 -> 94)
+      if (p == 0) Map(108 -> 36, 109 -> 60, 110 -> 136, 111 -> 93)
+      else Map(108 -> 53, 109 -> 146, 110 -> 182, 111 -> 160)
     else if (kind == CAbort)
       if (p == 0) Map(108 -> 132, 109 -> 68, 110 -> 9, 111 -> 4)
       else Map(108 -> 149, 109 -> 234, 110 -> 55, 111 -> 249)
@@ -1319,7 +1319,7 @@ module uno_composed {
 
   pure def stateGuard(op: COperation, kind: CHeaderKind): int =
     if (kind == CSameSlotOld) 11
-    else if (kind == CPredecessor) 17
+    else if (kind == CPredecessor) 15
     else if (kind == CPrepared) 2
     else if (kind == CRecovered) 3
     else if (kind == CAbort) 4
@@ -4492,7 +4492,21 @@ module uno_composed {
       rootByte(p, CAppend, CSameSlotOld, 15) == 1,
       rootByte(p, CAppend, CPredecessor, 15) == 2,
       rootByte(p, CAppend, CPrepared, 15) == 3,
-      rootByte(p, CAppend, CPredecessor, 7) == 17,
+      rootByte(p, CAppend, CPredecessor, 7) == 15,
+      (if (p == 0)
+        and {
+          rootByte(p, CAppend, CPredecessor, 108) == 36,
+          rootByte(p, CAppend, CPredecessor, 109) == 60,
+          rootByte(p, CAppend, CPredecessor, 110) == 136,
+          rootByte(p, CAppend, CPredecessor, 111) == 93,
+        }
+      else
+        and {
+          rootByte(p, CAppend, CPredecessor, 108) == 53,
+          rootByte(p, CAppend, CPredecessor, 109) == 146,
+          rootByte(p, CAppend, CPredecessor, 110) == 182,
+          rootByte(p, CAppend, CPredecessor, 111) == 160,
+        }),
       LogicalOffsets.forall(offset =>
         rootByte(p, CAppend, CPredecessor, offset) ==
           rootByte(p, CAppend, CAbort, offset)),

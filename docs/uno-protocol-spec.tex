@@ -47,6 +47,7 @@
 \newtheorem{invariant}{Invariant}
 \newtheorem{lemma}{Lemma}
 \newtheorem{theorem}{Theorem}
+\newtheorem{conjecture}{Conjecture}
 \newtheorem{corollary}{Corollary}
 \newtheorem{proposition}{Proposition}
 \theoremstyle{remark}
@@ -112,37 +113,44 @@
 \maketitle
 
 \begin{abstract}
-UNO is an append-oriented storage protocol that atomically publishes pending epochs of several
+UNO is an append-oriented storage design for atomically publishing pending epochs of several
 ordinary blobs without a coordinator file, root WAL, or shared allocation layer. Payload is written
 once at its final offset. Each participant stores one checksummed local witness beside an otherwise
-invisible prepared root; witnesses form a canonical successor ring. A complete, valid ring is the
-commit decision. All participant durability operations can therefore occupy one serial barrier
-layer, even though each file retains its own durability boundary.
+invisible prepared root; witnesses form a canonical successor ring. The intended design treats a
+complete, valid ring as the commit decision and places participant durability operations in one
+serial barrier layer, even though each file retains its own durability boundary.
 
 This paper specifies a target transition system using generation-colored root spellings under a crash model
 in which \emph{any subset} of non-durable addressed writes may survive---not merely a prefix of
-submission order. It states the assumptions, invariants, and conditional safety proof; gives a
-separate proof for rings broken after deletion finalization; derives bounded-recovery and
-acknowledged-durability properties; and identifies the cases outside the theorem. In particular,
+submission order. It states the assumptions and invariants, gives a separate argument for rings
+broken after deletion finalization, derives bounded-recovery and acknowledged-durability targets,
+and identifies the cases outside the intended theorem. In particular,
 absence is never a prepare vote. No path may disappear until every participant has an independent,
 durable final root. Thereafter each retained root selects the new value and each tombstone
 independently denotes logical absence, so out-of-order cleanup can strand physical garbage but
 cannot expose a mixed vector. The checked-in implementation is compared against that target rather
 than assumed to satisfy it. The audit exposes concrete refinement blockers, including stale-ring
-authority, unconsumed rejected witnesses, and filesystem-backend cancellation during admitted work;
-\S\ref{sec:implementation-status} states them explicitly. The result is a reviewable refinement
-argument, not a claim of machine verification.
+authority and unconsumed rejected witnesses, and records the reviewed repair for a filesystem-
+backend cancellation defect; \S\ref{sec:implementation-status} states the distinction explicitly.
+Fresh adversarial review found a target-protocol blocker: a one-phase prepare can splice an older
+witness topology with newly issued candidate bytes into an exact, never-issued smaller ring. The
+unconditional crash-atomicity theorem is therefore withdrawn at this checkpoint. The result is a
+reviewable specification with an explicit open architecture choice, not a claim of proof or machine
+verification.
 \end{abstract}
 
 \noindent\fcolorbox{Accent}{AccentSoft}{%
   \parbox{\dimexpr\columnwidth-2\fboxsep-2\fboxrule\relax}{\small
   \textbf{Status.} UNO is an opt-in ALPHA API. Ordinary blob APIs and formats are unchanged.
   The append/rewind mechanism corresponds to the current code, while the root format below is a
-  proposed R14 repair. The safety theorem is for
-  the transition system specified here. Current implementation deviations---including stale-ring
-  authority, rejected-witness reuse, cancellation-safe namespace ownership, one integrity-boundary error, and
-  unenforced direct-file/no-alias namespace preconditions---are listed
-  in \S\ref{sec:implementation-status}; no conformance claim is made until they are repaired.}}
+  proposed R14 repair. The previously stated unconditional safety theorem is blocked even for that
+  target: the one-phase prepare does not give exact witnesses issuance provenance under arbitrary
+  byte-subset survival. Conjecture~\ref{thm:atomic} is conditional on closing that gap.
+  Current implementation deviations---including stale-ring
+  authority, rejected-witness reuse, one integrity-boundary error, and unenforced
+  direct-file/no-alias namespace preconditions---are listed in
+  \S\ref{sec:implementation-status}. That section separately records a reviewed cancellation-
+  ownership repair; no R14 conformance claim follows from that narrower fix.}}
 
 \section{Problem and scope}
 
@@ -275,15 +283,19 @@ The proof uses the following abstract interface.
   \item[$\dirsync(q)$] makes earlier namespace changes in partition directory $q$ durable.
 \end{description}
 A durable positioned write such as Linux \code{pwritev2(RWF\_DSYNC)} is a scoped durability
-operation: on success its addressed bytes and required retrieval metadata enter the durable base,
-without proving unrelated earlier writes. UNO uses that weaker obligation only where the candidate
-does not depend on those unrelated bytes, such as a deletion candidate naming the prior committed
-payload.
-A write beyond the current end also issues the length extension needed to address its bytes. Before
-a barrier, crash selection may retain that length update independently; bytes beyond the selected
-end are inaccessible and cannot satisfy candidate validation. A selected shrinking truncate
-preserves the prefix and discards the old tail. If the file is later extended, UNO assigns fresh
-write stamps and never treats discarded tail contents as durability credit.
+operation: on success at least its addressed bytes and required retrieval metadata enter the durable
+base. The implementation may persist unrelated dirty data too, but the proof takes no durability
+credit for it. UNO uses that weaker obligation only where the candidate does not depend on those
+unrelated bytes, such as a deletion candidate naming the prior committed payload.
+A write beyond the current end also issues the length extension needed to address its bytes. When a
+retained extension is reached in issue order, it first zero-initializes the offsets newly exposed at
+that point; retained addressed-byte updates belonging to the extending write are then applied. Thus
+if the extension survives without every byte of that write, the gap and the missing addressed cells
+read as zero, matching Linux hole and unwritten-extension semantics; this zero-fill is part of the
+length operation rather than invented medium damage. Bytes beyond the selected end remain
+inaccessible and cannot satisfy candidate validation. A selected shrinking truncate preserves the
+prefix and discards the old tail. Any later extension exposes zeros, and UNO assigns fresh write
+stamps rather than treating discarded tail contents as durability credit.
 
 \begin{assumption}[Arbitrary-subset addressed-write crash model]\label{a:fault}
 For each file, a successful barrier establishes a durable base equal to applying every prior issued
@@ -311,8 +323,9 @@ actually encoded by the protocol does not validate merely through a checksum col
 reconstruction is \emph{not} excluded. If a torn later write supplies common constant bytes while
 older bytes supply the remainder of an earlier valid spelling, that spelling may validate and the
 protocol must handle it. The implementation uses CRC32C to detect tears and accidental corruption,
-not to authenticate data. The safety theorems are therefore probabilistic and conditional on this
-validity event and on the medium honoring completed barriers.
+not to authenticate data. Any safety claim is therefore probabilistic and conditional on this
+validity event and on the medium honoring completed barriers. This assumption does not exclude the
+exact old/new witness reconstruction in Limitation~\ref{l:witness-provenance}.
 \end{assumption}
 
 \subsection{Linux/ext4 refinement boundary}
@@ -323,24 +336,35 @@ Linux includes file size and other metadata required to retrieve the data in tha
 an \code{fsync} of the file alone does not necessarily persist its directory entry. The latter
 requires an explicit parent-directory \code{fsync}.\footnote{Linux \code{fsync(2)}:
 \url{https://man7.org/linux/man-pages/man2/fsync.2.html}.} A range-scoped
-\code{pwritev2(RWF\_DSYNC)} has durability semantics for the addressed range; it is not
-\code{RWF\_ATOMIC} and supplies no torn-write protection.
+\code{pwritev2(RWF\_DSYNC)} provides the per-write \code{O\_DSYNC} obligation for the addressed
+range; it is not \code{RWF\_ATOMIC} and supplies no torn-write protection. A conforming backend may
+use that result only after the complete logical write has finished under the same durability
+obligation. A short completion must be continued, and an unsupported flag or any other error is an
+indeterminate failure rather than permission to fall back to unsynchronized success.
 
-The initial conformance profile is a local, non-DAX regular file on ext4 in \code{data=ordered}
-(the default) or \code{data=journal} mode, with normal JBD2 replay enabled and a storage stack that
-honors cache flushes and write barriers.\footnote{Linux ext4 journal and data-mode documentation:
-\url{https://www.kernel.org/doc/html/latest/filesystems/ext4/journal.html} and
-\url{https://www.kernel.org/doc/html/latest/admin-guide/ext4.html}.} UNO does not rely on ext4's
-helpful pre-sync ordering: before a successful barrier, Assumption~\ref{a:fault} permits any
-addressed-byte subset. Delayed allocation, block allocation, and inode-size updates are considered
-unproved until the file barrier succeeds. A sync error is indeterminate and invokes
+The initial conformance profile is a local, buffered, non-DAX regular file on ext4 in
+\code{data=ordered} (the default) or \code{data=journal} mode, beneath case-sensitive directories,
+with normal JBD2 replay enabled and a storage stack that honors cache flushes and write barriers.
+Ext4 casefold directories are outside this initial profile because distinct partition spellings can
+otherwise resolve to one namespace object. Files protected by fscrypt or inline encryption, and any
+other transforming storage layer whose tear granularity can produce application-visible bytes
+outside the old-or-issued envelope, also require a separate refinement argument.\footnote{Linux
+ext4 journal, mount-option, data-mode, and casefold documentation:
+\url{https://docs.kernel.org/filesystems/ext4/journal.html} and
+\url{https://docs.kernel.org/admin-guide/ext4.html}. Linux fscrypt documents that file contents are
+encrypted in independent data units and that authenticated encryption is not currently supported:
+\url{https://docs.kernel.org/filesystems/fscrypt.html}.} UNO does not rely on ext4's helpful pre-sync
+ordering: before a successful barrier, Assumption~\ref{a:fault} permits any addressed-byte subset.
+Delayed allocation, block allocation, unwritten-extent conversion, and inode-size updates
+are considered unproved until the file barrier succeeds. A sync error is indeterminate and invokes
 Assumption~\ref{a:failstop}.
 
 The crash image in this paper means the logical regular-file and namespace state after normal
 filesystem journal replay. Mounting with journal replay disabled, using \code{data=writeback} or an
 unsafe \code{nobarrier} stack without a separate refinement argument, a device that lies about
 flush completion, misdirected writes, bit rot, and damage to bytes the protocol did not address are
-outside the theorem. Independent byte survival is conservative relative to ordinary block-sized
+outside the conditional safety envelope. Independent byte survival is conservative relative to
+ordinary block-sized
 tears, but the ``old or issued value, no neighboring damage'' envelope remains an explicit device
 assumption rather than a guarantee obtained from ext4 journaling.
 
@@ -580,6 +604,42 @@ group into one descriptor.}
 \label{tab:link}
 \end{table*}
 
+\begin{limitation}[Exact-witness provenance blocker]\label{l:witness-provenance}
+The generation-colored root guard proves that a state byte for generation $h$ was issued; it does
+not prove that an adjacent generation-independent \code{CWUNOW13} wrapper was issued with that
+root. The wrapper CRC proves byte consistency, not issuance provenance. Under
+Assumption~\ref{a:fault}, checksum bytes may themselves be selected independently from the old and
+new slot images.
+
+A concrete protocol-reachable trace starts with an independently finalized generation-one
+two-member group $H=\{a,b\}$, selects generation-two ordinary $R$ predecessors, and admits a
+generation-three three-member append group $G=\{a,b,c\}$ into the same-parity slots. A crash before
+any $G$ prepare barrier may retain exact issued $B_3$ roots and new candidate fields at $a$ and $b$
+while retaining $H$'s group identifier, count, ordinals, and $a\leftrightarrow b$ successor fields.
+The wrapper checksums can also be exact old/new mosaics: in one independently reconstructed fixture,
+the old/new/hybrid CRC32C values are \code{47ad25a0}/\code{c3bcb36c}/\code{47ad256c} at $a$ and
+\code{73a8b16e}/\code{47775580}/\code{7377b16e} at $b$. Each hybrid checksum byte comes from the
+old or issued-new checksum at that address and equals the canonical checksum of the hybrid link.
+This is exact reconstruction, not a CRC collision. Retaining no generation-three update at $c$
+then lets recovery accept a synthetic exact two-member ring, publish $a$ and $b$, and leave $c$
+old. The observation of the admitted $G$ is mixed.
+
+Write $\mathsf{IssuedWitness}(G)$ for the missing premise that every witness accepted as authority
+for $G$ is byte-for-byte the canonical witness issued by the same prepare event and participant set
+as its candidate-generation guard. The current one-phase transition system does not establish this
+premise. The results below that relate a decoded ring to the originally admitted $G$ are conditional
+on it.
+
+Three repairs have materially different contracts. A two-phase, code-last batch prepare can first
+make the candidate payload/length obligation and all 2,047 non-guard bytes of the exact 2 KiB slot
+durable, then issue and synchronize only $\chi(h,\Prepared)$. This preserves the existing
+noncryptographic fault assumptions but adds a second ordered durability layer. A one-layer design
+instead needs a root-to-witness commitment over every decision-relevant topology byte and an
+explicit computational \emph{splice-binding} assumption; CRC32C or ordinary collision resistance
+is insufficient. If neither change is accepted, the admitted-but-unacknowledged old-or-new claim
+must be withdrawn. This architecture choice is unresolved here.
+\end{limitation}
+
 \begin{definition}[Candidate]
 A candidate $c_i$ is the tuple
 \[
@@ -791,7 +851,9 @@ produce another transition does not refine this protocol.
   $\mathsf{Eligible}$ candidates, and establish
   Invariant~\ref{i:payload}. Issuing the first $B_i$/witness byte is $\mathsf{admit}(G)$. Each
   participant receives its exact canonical full-slot $B_i$/wrapped-link/zero-padding image in its
-  candidate slot. No prepared root is an ordinary visible root.
+  candidate slot. No prepared root is an ordinary visible root. This is the one-phase prepare
+  analyzed by Limitation~\ref{l:witness-provenance}; without an additional issuance mechanism, a
+  checksummed ring recovered from a torn prepare need not be the ring this transition issued.
 
   \item[Normal decision and acknowledgement.] Submit each participant's durability obligation.
   Only the successful join over \emph{all} obligations establishes $\mathsf{decide}(G)$ on the live
@@ -948,10 +1010,11 @@ record the complete decision in process memory
 return Ok from start_apply       // durable acknowledgement
 \end{lstlisting}
 
-There is no later coordinator write. If a crash happens before acknowledgement, recovery may find
-an incomplete ring and choose old, or may find that every unsynchronized prepare happened to
-survive and choose new. Both are legal indeterminate outcomes. If acknowledgement occurred, all
-prepare records and covered payload are durable.
+There is no later coordinator write. If acknowledgement occurred, all prepare records and covered
+payload are durable. The intended rule for an earlier crash was to choose old for an incomplete
+ring and new for a complete ring. Limitation~\ref{l:witness-provenance} shows that this dichotomy is
+false for the current one-phase transition: old and issued-new slot bytes can reconstruct a complete
+ring over only a strict subset of the admitted participants.
 
 \begin{invariant}[Prepared invisibility]\label{i:invisible}
 No $\Prepared$ root is selected by ordinary blob recovery. Until namespace recovery validates an
@@ -1227,7 +1290,7 @@ by a scan may remain allocated indefinitely; this is delayed reclamation, not lo
 The missing-path argument relies on exclusive namespace ownership. UNO itself unlinks only exact
 tombstones, so a missing retained participant is not protocol-reachable after independent
 finalization. A file removed by another process or lost independently by the medium is corruption
-outside the crash-atomicity theorem; UNO does not reconstruct its payload or promise failover
+outside the conditional crash-atomicity target; UNO does not reconstruct its payload or promise failover
 semantics.
 \end{limitation}
 
@@ -1243,7 +1306,11 @@ replacement that reuses the same human-readable name.
 
 All results in this section are conditional on Assumptions~\ref{a:fault}--\ref{a:identity}.
 ``Valid'' means checksums do not collide. The invariants are consequences of the guarded transition
-system rather than additional assumptions.
+system rather than additional assumptions. Statements that identify a decoded ring or certificate
+with the originally admitted group additionally require $\mathsf{IssuedWitness}(G)$ from
+Limitation~\ref{l:witness-provenance}. The current one-phase prepare does not establish that premise,
+so the crash-atomicity result is a conditional conjecture rather than a theorem of the specified
+transition system.
 
 \begin{lemma}[Invariant preservation]\label{lem:preservation}
 Every protocol-reachable configuration satisfies Invariants~\ref{i:color}, \ref{i:abortorder},
@@ -1357,10 +1424,12 @@ pre-$A$ rejection classification itself need not be monotone.
 \end{proof}
 
 \begin{lemma}[Complete prepare is sufficient]\label{lem:complete}
-If recovery validates a complete prepared ring with no group-bound final certificate, every participant's
-candidate state is reconstructible in full.
+If recovery validates a complete prepared ring with no group-bound final certificate and
+$\mathsf{IssuedWitness}(G)$ holds for that ring, every participant of the admitted $G$ has its
+candidate state reconstructible in full.
 \end{lemma}
 \begin{proof}
+Issuance provenance identifies the decoded participant set and witnesses with the admitted $G$.
 The ring supplies the exact candidate root and identity for every participant.
 Definition~\ref{def:eligible} validates candidate length, parity, integrity geometry, and ordinary
 recoverability. By Invariant~\ref{i:payload}, bytes
@@ -1371,8 +1440,8 @@ to $\Materialized$ (and removals to $\Tombstone$) cannot synthesize a partial ca
 \end{proof}
 
 \begin{lemma}[Final certificate implies an established decision]\label{lem:certificate}
-An exact group-bound $\Materialized$ or $\Tombstone$ certificate can exist only after
-$\mathsf{decide}(G)$.
+An exact group-bound $\Materialized$ or $\Tombstone$ certificate whose witness satisfies
+$\mathsf{IssuedWitness}(G)$ can exist only after $\mathsf{decide}(G)$.
 \end{lemma}
 \begin{proof}
 There are exactly two finalize guards. Normal execution first joins successful durability
@@ -1383,7 +1452,8 @@ nor an $A$ abort contains $\chi(g_i,\Materialized)$ or $\chi(g_i,\Tombstone)$. A
 header therefore implies that the corresponding guarded final write was issued; it cannot be an
 exact bytewise reconstruction assembled from pre-decision writes. A crash may tear that later
 write but cannot reorder its issue event before the guard. The exact adjacent witness binds the
-certificate to $G$; an unbound $R$ is excluded by Definition~\ref{def:certificate}.
+certificate to $G$ only under the explicit issuance-provenance premise; an unbound $R$ is excluded
+by Definition~\ref{def:certificate}.
 \end{proof}
 
 \begin{lemma}[Installation convergence]\label{lem:install}
@@ -1435,14 +1505,16 @@ broken ring changes only which eager cleanup walk is available, and recovery adm
 history containing $G$ followed by the later operation.
 \end{proof}
 
-\begin{theorem}[UNO group crash atomicity]\label{thm:atomic}
-A conforming implementation satisfies Definition~\ref{def:atomic}: during $G$'s protected
-logical-key interval, every protocol-reachable crash image has a recovery observation exposing
-either $G$'s complete old vector or its complete new vector, never a mixed vector.
-\end{theorem}
+\begin{conjecture}[UNO group crash atomicity, conditional]\label{thm:atomic}
+If the transition system is strengthened so every authority-bearing prepared or final witness
+satisfies $\mathsf{IssuedWitness}(G)$, then a conforming implementation satisfies
+Definition~\ref{def:atomic}: during $G$'s protected logical-key interval, every protocol-reachable
+crash image exposes either $G$'s complete old vector or its complete new vector, never a mixed
+vector. The current one-phase prepare does not satisfy the premise.
+\end{conjecture}
 \begin{proof}
-Lemma~\ref{lem:preservation} supplies the protocol invariants. Partition the trace at the crash into
-three disjoint cases.
+Conditional on the missing issuance premise, Lemma~\ref{lem:preservation} supplies the remaining
+protocol invariants. Partition the trace at the crash into three disjoint cases.
 
 \emph{No pre-crash decision, and recovery returns old without establishing one:} there is no
 group-bound final certificate. If every candidate slot equals its canonical lower-generation
@@ -1479,12 +1551,16 @@ the two vectors in Definition~\ref{def:atomic}.
 \end{proof}
 
 \begin{remark}[Refinement status]
-Theorem~\ref{thm:atomic} is a theorem of the state machine plus its assumptions, not
-a machine-checked proof of the Rust implementation. Current code has counterexamples to newer-$T$
-authority, group-bound certificate selection, and rejected-witness reuse, plus filesystem namespace-ownership gaps and an
-ineligible integrity candidate; it also relies on, but does not mechanically enforce, the
-direct-regular-file and no-alias namespace preconditions. Executable correspondence and each repair obligation are recorded
-in \S\ref{sec:implementation-status}.
+Conjecture~\ref{thm:atomic} is not a theorem of the current one-phase target state machine, and it
+is not a machine-checked proof of the Rust implementation. Limitation~\ref{l:witness-provenance}
+is a target-protocol blocker independent of implementation correspondence. The R13 baseline at
+\code{26a532dd6} also has
+counterexamples to newer-$T$ authority, group-bound certificate selection, rejected-witness reuse,
+filesystem namespace ownership, and an ineligible integrity candidate. The reviewed branch repairs
+the namespace-ownership item without changing the storage format; the other counterexamples remain.
+Current code also relies on, but does not mechanically enforce, the direct-regular-file and no-alias
+namespace preconditions. Executable correspondence and each repair obligation are recorded in
+\S\ref{sec:implementation-status}.
 \end{remark}
 
 \begin{corollary}[Acknowledged durability]\label{cor:ack}
@@ -1494,27 +1570,29 @@ after that vector.
 \end{corollary}
 \begin{proof}
 Acknowledgement occurs only after all prepare durability operations succeed. Thus the group has a
-durable complete ring and $\mathsf{decide}(G)$ even if no root has yet been materialized. Apply
-Theorem~\ref{thm:atomic}; later groups are serialized on overlapping participants and preserve or
-transfer the earlier proof before slot reuse. Lemma~\ref{lem:composition} covers later namespace
-changes that physically break the earlier ring.
+durable byte-for-byte copy of the actually issued complete ring and $\mathsf{decide}(G)$ even if no
+root has yet been materialized; the pre-acknowledgement splice in
+Limitation~\ref{l:witness-provenance} is therefore unavailable for $G$. Finalization preserves that
+witness, and later groups are serialized on overlapping participants and preserve or transfer the
+earlier proof before slot reuse. Lemma~\ref{lem:composition} covers later namespace changes that
+physically break the earlier ring. This is an acknowledged-prefix claim, not a restoration of the
+unacknowledged admitted-window conjecture.
 \end{proof}
 
-\begin{corollary}[Indeterminate admitted window]
-If physical admission occurred but \code{start\_apply} did not return \code{Ok}, recovery may return
-old or new, but cannot return partially new. A validation failure or cancellation proved to precede
-admission returns only old selected states.
-\end{corollary}
-\begin{proof}
-Before all prepare barriers, an arbitrary subset may survive. If it is incomplete,
-Lemma~\ref{lem:incomplete} applies. If every prepare and payload byte happened to survive,
-Lemma~\ref{lem:complete} applies. Theorem~\ref{thm:atomic} excludes a mixed vector.
-\end{proof}
+\begin{limitation}[Indeterminate admitted window is not atomic]\label{l:admitted-window}
+If physical admission occurred but \code{start\_apply} did not return \code{Ok}, the current
+one-phase protocol can return a partially new vector. The old-two/new-three trace in
+Limitation~\ref{l:witness-provenance} is a concrete counterexample. A validation failure or
+cancellation proved to precede admission still leaves only old selected states. Code-last prepare,
+a splice-binding commitment, or a narrowed API guarantee is required before the old-or-new
+admitted-window claim can be reinstated.
+\end{limitation}
 
 \begin{proposition}[No cross-group temporal order]
 For disjoint groups $G$ and $H$, UNO records no durable order between their decisions. If neither
-has been acknowledged, a crash may recover either group, both, or neither, subject to each group's
-own atomicity. An acknowledged group still satisfies Corollary~\ref{cor:ack} independently.
+has been acknowledged, a crash may recover either group, both, neither, or---until
+Limitation~\ref{l:witness-provenance} is repaired---a synthetic subset. An acknowledged group still
+satisfies Corollary~\ref{cor:ack} independently.
 \end{proposition}
 \begin{proof}
 Neither ring contains a link, sequence number, or authority belonging to the other. Per-file
@@ -1627,8 +1705,9 @@ The public distinction between decision and cleanup mirrors the proof boundary:
   truncation, and namespace deletion required by that batch have completed.
   \item[Validation error before admission.] No candidate/link byte was issued and selected states
   are unchanged. Invisible payload writes or preflush may already have occurred.
-  \item[Error or cancellation after admission.] Outcome may be old or new. Reopen; do not reuse a
-  poisoned generation. Cancellation proved to precede admission is old-only.
+  \item[Error or cancellation after admission.] Reopen; do not reuse a poisoned generation. Until
+  Limitation~\ref{l:witness-provenance} is repaired, a torn one-phase prepare may recover old, new,
+  or a partially new synthetic sub-ring. Cancellation proved to precede admission is old-only.
 \end{description}
 
 Committed-only readers observe the selected root. Pending appends are immediately visible through
@@ -1705,7 +1784,7 @@ would then be followed by recovery of the old alternate root because no two-memb
 The runtime creates distinct inodes for distinct names and its exclusive-directory contract rules
 out external namespace mutation during operation, but revision \code{26a532dd6} does not detect a
 hard-link alias already present at open or compare participant device/inode identities during batch
-preflight. The theorem therefore applies only when the owned namespace was created through
+preflight. The conditional conjecture therefore applies only when the owned namespace was created through
 conforming operations and has not been externally aliased. If arbitrary pre-populated directories
 must be accepted, initialization or admission must reject aliases and a two-hard-link
 acknowledge/crash regression is required.
@@ -1723,6 +1802,28 @@ the old alternate root. The acknowledged candidate is lost. A conforming backend
 directory entry and open it with no-follow semantics as one serialized admission step, then bind the
 opened descriptor to the inspected device/inode identity. A symlink-to-valid-V2 acknowledge/crash/
 reopen regression is required on both filesystem backends.
+
+\subsection{Target blocker: exact witness need not have been issued}
+
+Limitation~\ref{l:witness-provenance} is not an R13/R14 correspondence mismatch: it invalidates the
+one-phase proposed target itself. A full-slot prepare may tear into an exact current-generation
+$B$ root plus a checksummed witness whose topology came from the previous same-parity group and
+whose candidate fields came from the new group. Recovery has no separate manifest with which to
+distinguish that exact synthetic ring. The two-participant composed model starts from zero witness
+bytes and therefore underapproximates this trace.
+
+The independently reconstructed old-two/new-three fixture satisfies consecutive lineage, distinct
+group identifiers and incarnations, canonical slot and link parsing, payload validation, and the
+paper's no-CRC-collision event. It yields a mixed observation of the actually admitted three-member
+group. Consequently Conjecture~\ref{thm:atomic}, the indeterminate admitted-window guarantee, and
+any positive model result that assumes witness intent are blocked.
+
+The correctness-first repair is a code-last prepare: make all non-guard slot bytes and candidate
+payload/length state durable, then issue the one-byte $B$ guard and make it durable. This gives the
+guard disk-observable provenance for the exact witness but requires two ordered per-file durability
+layers. Preserving one layer instead requires a new splice-binding cryptographic commitment and a
+stronger computational assumption. Selecting between those contracts is an unresolved architecture
+decision; no Rust implementation change for either repair is claimed here.
 
 \subsection{Blocker: newer tombstone can lose to an older ring}
 
@@ -1812,56 +1913,47 @@ regression must tear every non-guard cell in the first phase and the guard in th
 again during retry, then reuse the payload and slot; no trace may revive the rejected
 group or expose a value that no admitted operation built.
 
-\subsection{Current blocker: cancellation-safe namespace ownership}
+\subsection{Reviewed cancellation repair: self-driving namespace ownership}
 
-The filesystem backends do not yet fully refine Assumption~\ref{a:namespace} under caller
-cancellation. In Tokio,
-\code{open\_versioned\_inner} owns the namespace guard in its async frame while awaiting a blocking
-\code{recover\_named\_embedded} job and, after a removal verdict, an asynchronous pathname unlink.
-\code{scan} has the same shape around \code{recover\_partition\_embedded}. \code{Storage::remove}
-similarly awaits witness recovery and pathname or partition removal before generation invalidation.
-The inline \code{V2Publisher::publish} path used by synchronous atomic writes has the same ownership
-gap while awaiting blocking materialization of a carried decision in both Tokio and io\_uring.
-Dropping any caller future releases the guard, but already admitted blocking filesystem work may
-continue.
+The R13 baseline originally kept the Tokio namespace guard in the cancelable observer for
+\code{open}, \code{scan}, and \code{remove}. Already admitted recovery, unlink, directory-barrier,
+or blocking \code{set\_len} work could therefore outlive that guard. The synchronous atomic-write
+path also awaited carried-decision materialization inline in both Tokio and io\_uring. Those gaps
+admitted three concrete stale-work races: pathname cleanup against a recreated name, reuse of the
+removed generation between unlink and invalidation, and an older materializer or recovery truncate
+overwriting a later acknowledged publication.
 
-A violating execution is therefore possible:
-\begin{enumerate}
-  \item recovery validates a lingering tombstone and admits cleanup;
-  \item the caller is canceled, releasing the namespace guard while cleanup remains queued;
-  \item another operation acquires the guard and publishes a fresh incarnation at the same key;
-  and
-  \item stale cleanup resumes and unlinks that path by name.
-\end{enumerate}
-This violates Invariant~\ref{i:cleanup}; it is not merely delayed reclamation. The io\_uring
-open/remove recovery paths perform their synchronous cleanup calls while the guard is held and do
-not have this pathname-cleanup await boundary; its inline publisher nevertheless has the carried-
-materialization boundary described next.
+The reviewed branch makes these operations self-driving after namespace admission. Tokio
+\code{open\_versioned\_inner}, \code{scan}, and \code{remove} acquire an owned namespace guard and
+move it, the storage handle, and owned arguments into a spawned backend task. The caller awaits only
+that task's result. Dropping the observer no longer stops the worker or releases authority: open
+retains it through named recovery, any physical-surplus truncate, and shared V2-state installation;
+scan retains it through partition recovery and creation-file cleanup; and remove retains it through
+requested unlink, the appropriate directory barrier, generation/V2-state invalidation, and sidecar
+cleanup.
 
-Inline publication has a second stale-write shape: cancel a synchronous write while its blocking
-job is materializing an older carried multi-participant group, let a later publication advance and
-eventually reuse the affected slot, then allow the old job to overwrite that slot with the older
-$M$ root. This can invalidate a later acknowledged decision even though no pathname is removed.
+The runtime-agnostic UNO wrapper now routes an admitted synchronous publication through the same
+self-driving \code{Publisher::spawn} mechanism already used by \code{start\_sync}. The spawned task
+owns the armed mutation state. Consequently a canceled \code{write\_at\_sync} observer cannot release
+the publisher's namespace authority while an older carried group is being materialized. This shared
+repair applies to the Tokio and io\_uring publishers; a spawn failure drops the armed guard and
+poisons that generation.
 
-Ordinary Tokio open has a third detached-I/O shape. Root recovery may schedule a blocking
-\code{set\_len} to discard physical surplus. If the open future is canceled after admission but
-before that job executes, the namespace guard can be released without installing shared state.
-A second open may then append and acknowledge a publication on the same inode; the delayed first
-truncate can subsequently remove the acknowledged payload. Cancellation-safe ownership must cover
-ordinary recovery resize as well as linked recovery and namespace cleanup.
+Deterministic regressions pause and cancel Tokio open, scan, and remove with blocking work queued;
+pause exact removal after unlink but before directory durability and invalidation; pause the exact
+recovery \code{set\_len}, then reopen and acknowledge an append; and pause carried-group
+materialization during a direct synchronous publication. The last regression also runs against the
+Linux io\_uring backend. Each test proves that namespace authority remains unavailable while the
+parked worker is outstanding and that a later reopen derives the expected bytes or a fresh
+generation. These tests close the cancellation-ownership races above for the reviewed code.
 
-A conforming repair must retain owned namespace authority until every admitted cleanup or
-materialization operation has stopped. One direct implementation is to move the guard into a single blocking job that
-performs recovery, exact tombstone/inode validation, and unlink, returning the guard only after the
-job completes. Partition recovery and exact/whole-partition remove need the same treatment through
-requested unlink, directory durability, generation invalidation, and sidecar cleanup. Tests must
-pause each path after admission, cancel its caller, attempt same-name recreation, and prove that the
-new incarnation/inode survives. A separate synchronous-publication regression must pause carried
-group materialization, cancel the write, advance through slot reuse, and prove the stale job cannot
-overwrite the newer authority on both Tokio and io\_uring. Making admitted publication self-driving
-is another valid repair. Tokio also needs a regression that pauses ordinary recovery's scheduled
-truncate, cancels open, reopens and acknowledges an append, then resumes the stale truncate and
-checks the next crash recovery.
+This repair does not weaken Assumption~\ref{a:failstop}. Runtime shutdown, task panic, or an
+indeterminate mutable I/O error still requires the affected instance to stop and recover from disk;
+self-driving work is not a promise that an observer canceled after admission can safely ignore that
+assumption. Nor does this R13 implementation acquire the proposed R14 generation-colored guard,
+code-last abort normalization, or the other format and integrity repairs in this section. It is
+therefore not a refinement proof from the checked-in implementation to the proposed R14
+conditions or conditional conjecture.
 
 \subsection{Availability deviation: missing successor partition}
 
@@ -1930,7 +2022,7 @@ abort/final repair, post-decision rewind, and partial unlink.
 
 The \code{uno\_composed} bridge fixes exactly two participants and derives recovery observations
 from on-disk evidence. It uses concrete offset-indexed 112-byte representative R14 headers, all four
-CRC bytes, generation-1 same-slot source/generation-2 predecessor/generation-3 candidate lineage, a
+CRC bytes, generation-1 same-slot source/generation-2 ordinary-$R$ predecessor/generation-3 candidate lineage, a
 seven-byte payload, and a compact exact 16-byte reciprocal-ring witness abstraction. It defines
 pair-fixed cuts for all nine ordered append/rewind/remove combinations. Prepare, ordinary-$R$,
 abort-body, abort-guard, final, witness, payload, and unlink outcomes retain independent survivor
@@ -1944,8 +2036,19 @@ namespace rather than consulting an intended outcome. In particular, it represen
 pre-$A$ rejection, reconsideration after a torn abort body, exact-$A$ precedence, interrupted final
 repair, and observations stored from the disk decoder.
 
+The composed bridge deliberately initializes each generation-three witness overlay from an all-zero
+image and fixes the intended ring to two participants. It therefore cannot express the confirmed
+generation-one $H=\{a,b\}$ to generation-three $G=\{a,b,c\}$ witness splice in
+Limitation~\ref{l:witness-provenance}. Positive results from this module do not establish
+$\mathsf{IssuedWitness}(G)$ and cannot validate Conjecture~\ref{thm:atomic}. A repair model must
+include the exact older wrapped witnesses, a differing later participant set, independent survival
+of every wrapper/link/checksum byte, and disk observations for every originally admitted
+participant.
+
 Validation is paused at a non-final checkpoint. The current model artifact (SHA-256
-\code{ee66bfc4...a33465f4}; full digest in the companion note) typechecks. Apalache found
+\code{dde48576...2b75965}; full digest in the companion note) has not been typechecked since a fresh
+full-diff audit corrected its generation-2 predecessor fixture from the $M$ guard and CRCs to the
+claimed ordinary-$R$ encoding. Its immediate predecessor typechecked. Apalache found
 the intended deliberately generation-broken counterexample and completed several pair-fixed staged
 obligations on earlier development revisions, but the file changed afterward. The exact-$A$ run was
 interrupted when execution was paused, and the current-hash all-pair matrix has not been run.
@@ -1964,12 +2067,15 @@ concrete syscall order, or cancellation ownership.
 It also does not establish public API reachability, multi-generation source-window wraparound, the
 newer-tombstone/older-ring implementation trace, stale-ring direct-$R$ aliasing, rejected-witness
 payload reuse across multiple later generations, or the fixed-chunk and rewind integrity blockers.
-Those require codec tests, filesystem refinement tests, and Rust/cancellation correspondence work.
+Those require codec tests, filesystem refinement tests, and continuing Rust correspondence work
+beyond the reviewed cancellation-ownership repair.
 
 \subsection{Audit checklist}
 
 The state-machine proof fails if any of the following becomes reachable:
 \begin{enumerate}
+  \item a checksummed exact witness can be reconstructed from older and issued-new slot bytes without
+  being the exact witness issued by the candidate-generation prepare;
   \item an $M/T$ final write can be issued before either the all-prepare barrier join or complete
   recovery validation establishes $\mathsf{decide}(G)$;
   \item a root format permits an exact $R/M/T$ generation-$g$ spelling to be assembled without
@@ -2017,6 +2123,9 @@ The state-machine proof fails if any of the following becomes reachable:
 \section{Non-goals and known boundaries}
 
 \begin{itemize}
+  \item \textbf{No current admitted-window atomicity claim.} The one-phase target remains subject
+  to Limitation~\ref{l:witness-provenance}; only the acknowledged-prefix result is retained while
+  the prepare-provenance architecture choice is open.
   \item \textbf{No global WAL or total order.} This avoids a global durable lock and volume-like
   layer, but callers must represent temporal dependencies explicitly.
   \item \textbf{No random overwrite atomicity.} Supporting it requires copy-on-write mappings,
@@ -2040,33 +2149,36 @@ The state-machine proof fails if any of the following becomes reachable:
 \section{Conclusion}
 
 UNO's commit authority is a closed set of local facts rather than a separate global record. That
-choice gives append-oriented structures write-once payload, one durability layer across an
-arbitrary participant set, direct per-file reads, and recovery work independent of historical blob
-size. The central proof obligation is correspondingly narrow but nonstandard: complete-ring
-validation must survive arbitrary subset tears, distinct logical participants must not alias one
-inode, and deletion must transfer authority from the ring
-to independently meaningful final roots before destroying any link. Alternating slots, prepared
-invisibility, stamp-specific payload coverage, group-bound $M/T$ certificates, group-wide proof
-transfer, generation-colored state provenance, canonical full-slot prepares, disk-derived orphan
-normalization, code-last generation-consuming abort roots, final-before-unlink materialization, tombstone
-dominance, and incarnation-safe cleanup
-jointly establish that obligation under the stated medium and namespace assumptions. Descending
-directory-synced deletion accelerates reclamation but is not needed to keep the selected logical
-vector atomic.
+choice is intended to give append-oriented structures write-once payload, direct per-file reads,
+and recovery work independent of historical blob size. The central proof obligation is
+nonstandard: complete-ring validation must survive arbitrary subset tears, distinct logical
+participants must not alias one inode, and deletion must transfer authority from the ring to
+independently meaningful final roots before destroying any link.
 
-The refinement audit is deliberately stricter than the theorem. Revision \code{26a532dd6} still
+The current one-durability-layer target does not establish that obligation. Generation coloring
+proves issuance of a root state, but a checksummed adjacent witness can be an exact never-issued
+old/new mosaic. The confirmed old-two/new-three trace therefore invalidates unconditional
+admitted-window atomicity and leaves Conjecture~\ref{thm:atomic} blocked. Alternating slots,
+prepared invisibility, payload coverage, abort ordering, final-before-unlink materialization,
+tombstone dominance, and incarnation-safe cleanup remain necessary, but they are not sufficient
+without exact-witness issuance provenance.
+
+The refinement audit also found independent implementation gaps. Revision \code{26a532dd6} still
 allows a newer tombstone to lose to an older complete ring, accepts an unbound ordinary $R$ as group
 evidence, uses generation-independent R13 spellings that permit exact unissued-root reconstruction,
 can reactivate a rejected witness after payload-offset reuse, can let admitted namespace work or an
 ordinary recovery truncate outlive its guard, and can construct noncanonical fixed-chunk or rewind
-candidates. It also does not enforce the theorem's direct-regular-file and
-no-alias preconditions for a pre-populated directory. Until those paths are repaired and regression-tested, the
-theorem describes the target protocol rather than the Rust backend. Keeping that distinction
-explicit is part of the specification's correctness result.
+candidates. The reviewed branch repairs the cancellation-ownership item only. It does not enforce
+the conditional conjecture's direct-regular-file and no-alias preconditions for a pre-populated
+directory, and it does not repair the target witness-provenance blocker. No claim is made that R13
+satisfies the proposed R14 conditions.
 
-The specification also makes the trade explicit. UNO provides per-group atomicity, not a global
-timeline or a general transactional filesystem. That limitation is what lets the protocol remain a
-wrapper over ordinary blobs instead of becoming a WAL, allocator, or volume.
+The unresolved trade is explicit. Code-last prepare retains the existing noncryptographic crash
+model but adds a second ordered durability layer. A splice-binding commitment may preserve one
+layer but changes the format and theorem assumptions. Narrowing the guarantee preserves the current
+one-phase shape but gives up atomicity for admitted, unacknowledged groups. Until one of those paths
+is selected and modeled, UNO has an acknowledged-prefix result and a conditional per-group target,
+not a complete crash-atomicity proof.
 
 \appendix
 
@@ -2101,7 +2213,9 @@ $A_{g+1}$ transition. Only exact $A_{g+1}$ selects a mutable predecessor and mak
 irreversible. This reconsideration/orphan branch is what makes the arrow sound under repeated crashes.
 Any arrow may crash after changing an arbitrary subset of addressed bytes. The wrapped local link
 remains exact after the prepare barrier and supplies the complete source and destination spellings
-for repair. A direct non-batch correctness-first publisher may use
+for repair. Before that barrier, however, a checksummed exact link need not have been issued;
+Limitation~\ref{l:witness-provenance} blocks treating such a ring as the admitted group's decision.
+A direct non-batch correctness-first publisher may use
 $\mathsf{P}_{g+1}\to\Root_{g+1}$ only outside batch-capable persistent media or after proof transfer
 has resolved decided evidence and abort publication has consumed rejected evidence; $R$ never proves
 a linked group. The
