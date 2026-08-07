@@ -30,7 +30,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, DbSet, PendingPublication, Publisher, SnapshotsOf, UnmerkleizedOf},
+    db::{Anchor, DatabaseSet, PendingPublication, Publisher, SnapshotsOf, UnmerkleizedOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -58,10 +58,10 @@ use std::{
 use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
-type PendingBatches<A, E> = <<A as Application<E>>::Databases as DbSet<E>>::Merkleized;
+type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 pub(super) type PendingSyncTargets<A, E> =
-    <<A as Application<E>>::Databases as DbSet<E>>::SyncTargets;
+    <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
@@ -966,7 +966,8 @@ mod tests {
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{
-            Anchor, DbSet, Merkleized as _, MerkleizedOf, Publisher, SyncTargetsOf, UnmerkleizedOf,
+            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, SyncTargetsOf,
+            UnmerkleizedOf,
         },
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};

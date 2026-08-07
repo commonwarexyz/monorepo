@@ -12,7 +12,9 @@ use crate::stateful::{
         processor::{PendingSyncTargets, Processor, Pruning},
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{AttachableResolverSet, DbSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig},
+    db::{
+        AttachableResolverSet, DatabaseSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig,
+    },
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -112,7 +114,7 @@ where
     pub application: A,
 
     /// Configuration used to construct the database set.
-    pub db_config: <A::Databases as DbSet<E>>::Config,
+    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
 
     /// Provider cloned into each proposal.
     pub provider: A::Provider,
@@ -168,7 +170,7 @@ where
     marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Configuration used to initialize the database set at startup.
-    db_config: <A::Databases as DbSet<E>>::Config,
+    db_config: <A::Databases as DatabaseSet<E>>::Config,
 
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
@@ -190,7 +192,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<<A::Databases as DbSet<E>>::Readers>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Readers>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].

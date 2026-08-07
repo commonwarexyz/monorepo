@@ -165,7 +165,7 @@ impl<S> Staged<S> {
 /// A reader's handle to the latest published generation.
 ///
 /// Cloned freely. Public only so set implementations can name it in
-/// [`super::DbSet::readers`]. Everything it can do is crate-internal.
+/// [`super::DatabaseSet::readers`]. Everything it can do is crate-internal.
 pub struct SetReader<S> {
     slot: Arc<Slot<S>>,
 }
@@ -209,7 +209,7 @@ impl<S, M> Clone for DbReader<S, M> {
 impl<S, M> DbReader<S, M> {
     /// Narrow `reader` to the database `project` selects.
     ///
-    /// Public so [`super::DbSet::readers`] is implementable outside this
+    /// Public so [`super::DatabaseSet::readers`] is implementable outside this
     /// crate. Readers only see published generations, so nothing here can mutate
     /// the database.
     pub fn new(reader: SetReader<S>, project: fn(&S) -> &M) -> Self {

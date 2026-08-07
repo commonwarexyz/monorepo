@@ -13,7 +13,7 @@
 //!    captures each database's serving snapshot, published for resolver serving (see
 //!    [`SetReader`]) once the barrier proves the generation durable.
 //!
-//! [`DbSet`] groups one or more [`ManagedDb`] instances into one logical
+//! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
 //!
 //! Batches hold no database handle. Reads and merkleization take the database as an
@@ -276,12 +276,12 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
-/// Durability barrier for batches applied by [`DbSet::finalize`].
+/// Durability barrier for batches applied by [`DatabaseSet::finalize`].
 ///
 /// Holds one [`ManagedDb::finalize`] handle per database in the set. Deferred
 /// flush failures surface only here, so every barrier must be awaited via
 /// [`durable`](Self::durable), typically on a futures pool. Before
-/// [`DbSet::prune`] runs, every barrier through its target must resolve.
+/// [`DatabaseSet::prune`] runs, every barrier through its target must resolve.
 /// Barriers for later state may remain pending.
 ///
 /// # Examples
@@ -290,10 +290,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 /// use commonware_glue::stateful::db::Barrier;
 /// use commonware_runtime::Handle;
 ///
-/// struct CustomDbSet;
+/// struct CustomDatabaseSet;
 ///
 /// # async fn example() {
-/// let barrier = Barrier::from_handles::<CustomDbSet>([
+/// let barrier = Barrier::from_handles::<CustomDatabaseSet>([
 ///     Handle::ready(Ok(())),
 /// ]);
 /// assert!(barrier.durable().await);
@@ -384,7 +384,7 @@ impl<S> PendingPublication<S> {
 ///
 /// `E` is a trait generic (not an associated type), so one set type can work
 /// across runtimes that satisfy the bounds.
-pub trait DbSet<E>: Send + Sync + Sized + 'static {
+pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// One [`ManagedDb::Unmerkleized`] per database: scalar under [`Single`], a tuple
     /// for tuple sets.
     type Unmerkleized: Send;
@@ -463,17 +463,17 @@ pub trait DbSet<E>: Send + Sync + Sized + 'static {
     fn rewind_to_targets(self, targets: Self::SyncTargets) -> impl Future<Output = Self> + Send;
 }
 
-/// Syntactic sugar for the type of unmerkleized batches used by a given [DbSet] D.
-pub type UnmerkleizedOf<D, E> = <D as DbSet<E>>::Unmerkleized;
+/// Syntactic sugar for the type of unmerkleized batches used by a given [DatabaseSet] D.
+pub type UnmerkleizedOf<D, E> = <D as DatabaseSet<E>>::Unmerkleized;
 
-/// Syntactic sugar for the type of merkleized batches used by a given [DbSet] D.
-pub type MerkleizedOf<D, E> = <D as DbSet<E>>::Merkleized;
+/// Syntactic sugar for the type of merkleized batches used by a given [DatabaseSet] D.
+pub type MerkleizedOf<D, E> = <D as DatabaseSet<E>>::Merkleized;
 
-/// Syntactic sugar for the type of published snapshot used by a given [DbSet] D.
-pub type SnapshotsOf<D, E> = <D as DbSet<E>>::Snapshots;
+/// Syntactic sugar for the type of published snapshot used by a given [DatabaseSet] D.
+pub type SnapshotsOf<D, E> = <D as DatabaseSet<E>>::Snapshots;
 
-/// Syntactic sugar for the type of sync targets used by a given [DbSet] D.
-pub type SyncTargetsOf<D, E> = <D as DbSet<E>>::SyncTargets;
+/// Syntactic sugar for the type of sync targets used by a given [DatabaseSet] D.
+pub type SyncTargetsOf<D, E> = <D as DatabaseSet<E>>::SyncTargets;
 
 /// The one-database set: the single spelling for applications that own exactly one
 /// database. Every associated value stays scalar, and reads reach the database through
@@ -500,7 +500,7 @@ impl<T> From<T> for Single<T> {
     }
 }
 
-impl<E, T> DbSet<E> for Single<T>
+impl<E, T> DatabaseSet<E> for Single<T>
 where
     E: Send + Sync + Metrics,
     T: ManagedDb<E> + 'static,
@@ -680,12 +680,12 @@ impl<D: Digest, T> TipUpdate<D, T> {
     }
 }
 
-/// A [`DbSet`] that can run one-time state sync.
+/// A [`DatabaseSet`] that can run one-time state sync.
 ///
 /// `D` is the block digest type. Each set of sync targets is paired
 /// with an [`Anchor`] identifying the block that produced those targets.
 /// On convergence, `sync` returns the anchor that all databases agreed on.
-pub trait StateSyncSet<E, S, D>: DbSet<E>
+pub trait StateSyncSet<E, S, D>: DatabaseSet<E>
 where
     D: Digest,
 {
@@ -867,10 +867,10 @@ where
     target_tx.send_lossy(new_target).await
 }
 
-/// Implement [`DbSet`] for a tuple of [`ManagedDb`] instances owned by value.
+/// Implement [`DatabaseSet`] for a tuple of [`ManagedDb`] instances owned by value.
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
-        impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DbSet<E>
+        impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
             for ($($T,)+)
         {
             type Unmerkleized = ($($T::Unmerkleized,)+);
@@ -1307,7 +1307,7 @@ macro_rules! impl_state_sync_set {
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
-                if <Self as DbSet<E>>::applied_targets(&synced) != converged_targets {
+                if <Self as DatabaseSet<E>>::applied_targets(&synced) != converged_targets {
                     return Err(
                         "state sync database targets do not match the coordinator target set"
                             .into(),
@@ -1859,7 +1859,7 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
-        CoordinatorState, DbSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher,
+        CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher,
         ServeSource as _, Single, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
         drain_single_tip_updates,
     };
@@ -1869,9 +1869,10 @@ mod tests {
     fn tuple_readers_project_their_own_members() {
         deterministic::Runner::default().start(|context| async move {
             type Pair = (NumberedDb, NumberedDb);
-            let (mut publisher, source) =
-                Publisher::<<Pair as DbSet<deterministic::Context>>::Snapshots>::new(&context);
-            let (first, second) = <Pair as DbSet<deterministic::Context>>::readers(source);
+            let (mut publisher, source) = Publisher::<
+                <Pair as DatabaseSet<deterministic::Context>>::Snapshots,
+            >::new(&context);
+            let (first, second) = <Pair as DatabaseSet<deterministic::Context>>::readers(source);
             publisher.publish_durable((1, 2));
             assert_eq!(first.latest(), Some(1));
             assert_eq!(second.latest(), Some(2));
@@ -2617,11 +2618,12 @@ mod tests {
                 rewind_count: 0,
             };
 
-            let (left, right) = <RewindPair as DbSet<deterministic::Context>>::rewind_to_targets(
-                (left, right),
-                (1, 1),
-            )
-            .await;
+            let (left, right) =
+                <RewindPair as DatabaseSet<deterministic::Context>>::rewind_to_targets(
+                    (left, right),
+                    (1, 1),
+                )
+                .await;
 
             assert_eq!(left.current_target, 1);
             assert_eq!(left.rewind_count, 1);
@@ -2640,8 +2642,11 @@ mod tests {
             });
 
             let _database =
-                <Single<PruneCountingDb> as DbSet<deterministic::Context>>::prune(database, &())
-                    .await;
+                <Single<PruneCountingDb> as DatabaseSet<deterministic::Context>>::prune(
+                    database,
+                    &(),
+                )
+                .await;
 
             assert_eq!(prune_count.load(Ordering::SeqCst), 1);
         });
@@ -3624,7 +3629,7 @@ mod tests {
                 BlockingFinalizeDb::new(started2_tx, release2_rx),
             );
 
-            let finalize = <(BlockingFinalizeDb, BlockingFinalizeDb) as DbSet<
+            let finalize = <(BlockingFinalizeDb, BlockingFinalizeDb) as DatabaseSet<
                 deterministic::Context,
             >>::finalize(
                 databases, (TestMerkleized::new(), TestMerkleized::new())
@@ -3656,7 +3661,7 @@ mod tests {
     fn tuple_finalize_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
             let databases = (TestDb, FailingFinalizeDb);
-            let _ = <(TestDb, FailingFinalizeDb) as DbSet<deterministic::Context>>::finalize(
+            let _ = <(TestDb, FailingFinalizeDb) as DatabaseSet<deterministic::Context>>::finalize(
                 databases,
                 (TestMerkleized::new(), TestMerkleized::new()),
             )
@@ -3671,9 +3676,10 @@ mod tests {
     fn tuple_snapshot_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
             let databases = (TestDb, FailingSnapshotDb);
-            let _ =
-                <(TestDb, FailingSnapshotDb) as DbSet<deterministic::Context>>::snapshot(databases)
-                    .await;
+            let _ = <(TestDb, FailingSnapshotDb) as DatabaseSet<deterministic::Context>>::snapshot(
+                databases,
+            )
+            .await;
         });
     }
 

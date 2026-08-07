@@ -1232,7 +1232,7 @@ mod tests {
     {
     }
 
-    fn assert_database_set<T: crate::stateful::db::DbSet<deterministic::Context>>() {}
+    fn assert_database_set<T: crate::stateful::db::DatabaseSet<deterministic::Context>>() {}
 
     #[test]
     fn ordered_current_db_trait_impls_compile() {

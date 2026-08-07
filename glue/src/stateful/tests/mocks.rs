@@ -1,6 +1,8 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DbSet, ManagedDb, Merkleized, MerkleizedOf, SetReader, Unmerkleized, UnmerkleizedOf},
+    db::{
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, SetReader, Unmerkleized, UnmerkleizedOf,
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -278,7 +280,7 @@ impl<
     type Provider = ();
     type Input = ();
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DbSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         block.height().get()
     }
 

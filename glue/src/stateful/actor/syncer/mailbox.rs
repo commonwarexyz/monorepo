@@ -2,7 +2,7 @@
 
 use crate::stateful::{
     Application,
-    db::{Anchor, DbSet, TipUpdate},
+    db::{Anchor, DatabaseSet, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::Digestible;
@@ -10,7 +10,7 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
 
-type SyncTargets<E, A> = <<A as Application<E>>::Databases as DbSet<E>>::SyncTargets;
+type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 /// Result of forwarding a target update to the state-sync coordinator.
