@@ -17,7 +17,7 @@
 //! # Database Layer
 //!
 //! The [`db`] module defines batch lifecycle traits ([`db::Unmerkleized`],
-//! [`db::Merkleized`], [`db::ManagedDb`]) and a [`db::DatabaseSet`] trait that
+//! [`db::Merkleized`], [`db::ManagedDb`]) and a [`db::DbSet`] trait that
 //! groups one or more databases into a single unit.
 //!
 //! The [`db::p2p`] submodule provides a P2P resolver actor
@@ -96,7 +96,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::{DatabaseSet, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf};
+use db::{DbSet, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -135,10 +135,10 @@ pub struct Input<Upstream, Provider> {
     pub provider: Provider,
 }
 
-/// A stateful application whose storage is managed by a [`DatabaseSet`].
+/// A stateful application whose storage is managed by a [`DbSet`].
 ///
-/// Implementors receive [`DatabaseSet::Unmerkleized`] batches and
-/// return [`DatabaseSet::Merkleized`] batches after execution. The surrounding
+/// Implementors receive [`DbSet::Unmerkleized`] batches and
+/// return [`DbSet::Merkleized`] batches after execution. The surrounding
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
 /// finalization. In every execution method, reads of applied state go through
@@ -167,7 +167,7 @@ where
     type Block: CertifiableBlock<Context = Self::Context>;
 
     /// The set of databases managed on behalf of this application.
-    type Databases: DatabaseSet<E>;
+    type Databases: DbSet<E>;
 
     /// The stateful-owned provider, supplied through
     /// [`Config::provider`](crate::stateful::Config::provider).
@@ -296,7 +296,7 @@ where
     /// Once the database set is ready, the wrapper calls this for every
     /// finalized block it receives from marshal before releasing that block's
     /// marshal acknowledgement. Blocks applied through normal processing are
-    /// reported after [`DatabaseSet::finalize`] succeeds: the block's state is
+    /// reported after [`DbSet::finalize`] succeeds: the block's state is
     /// readable from the databases, but its flush to disk may still be in
     /// flight. Blocks already reflected by startup reconciliation or completed
     /// state sync are reported without reapplying them.

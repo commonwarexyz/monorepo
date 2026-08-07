@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotOf, SyncEngineConfig,
-            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DbSet, Merkleized as _, MerkleizedOf, SnapshotsOf, SyncEngineConfig, Unmerkleized as _,
+            UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -67,11 +67,11 @@ type Qmdb<E> =
 
 /// Serving source projected from the set's published snapshots.
 type SingleSrc<E> = crate::stateful::db::DbReader<
-    SnapshotOf<SingleDatabaseSet<E>, E>,
+    SnapshotsOf<SingleDbSet<E>, E>,
     <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
 
-pub(crate) type SingleDatabaseSet<E> = crate::stateful::db::Single<Qmdb<E>>;
+pub(crate) type SingleDbSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,9 +175,9 @@ impl App {
     /// Execute a block: increment "counter" and write `height -> height_val`.
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        databases: &SingleDatabaseSet<E>,
-        mut batches: UnmerkleizedOf<SingleDatabaseSet<E>, E>,
-    ) -> MerkleizedOf<SingleDatabaseSet<E>, E> {
+        databases: &SingleDbSet<E>,
+        mut batches: UnmerkleizedOf<SingleDbSet<E>, E>,
+    ) -> MerkleizedOf<SingleDbSet<E>, E> {
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
             .get(&counter, databases.as_ref())
@@ -197,7 +197,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
-    type Databases = SingleDatabaseSet<E>;
+    type Databases = SingleDbSet<E>;
     type Provider = ();
     type Input = ();
 
@@ -257,7 +257,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DbSet<E>>::SyncTargets {
         Target::new(block.state_root, block.range.clone())
     }
 }
@@ -436,7 +436,7 @@ impl EngineDefinition for SingleDbEngine {
         .expect("failed to initialize blocks archive");
 
         let initial_target =
-            <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+            <SingleDbSet<deterministic::Context> as DbSet<_>>::initial_sync_targets();
         let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");

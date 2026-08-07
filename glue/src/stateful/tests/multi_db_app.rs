@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotOf, SyncEngineConfig,
-            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DbSet, Merkleized as _, MerkleizedOf, SnapshotsOf, SyncEngineConfig, Unmerkleized as _,
+            UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -75,10 +75,10 @@ type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
 /// A full and a compact QMDB as a tuple, owned by value.
-pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
+pub(crate) type MultiDbSet<E> = (QmdbA<E>, QmdbB<E>);
 
 /// Serving sources projected from the set's published snapshots, one per member.
-type MultiSnapshot<E> = SnapshotOf<MultiDatabaseSet<E>, E>;
+type MultiSnapshot<E> = SnapshotsOf<MultiDbSet<E>, E>;
 type SrcA<E> = crate::stateful::db::DbReader<
     MultiSnapshot<E>,
     <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
@@ -208,9 +208,9 @@ impl App {
     /// Execute a block against two databases.
     async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        databases: &MultiDatabaseSet<E>,
-        batches: UnmerkleizedOf<MultiDatabaseSet<E>, E>,
-    ) -> MerkleizedOf<MultiDatabaseSet<E>, E> {
+        databases: &MultiDbSet<E>,
+        batches: UnmerkleizedOf<MultiDbSet<E>, E>,
+    ) -> MerkleizedOf<MultiDbSet<E>, E> {
         let (mut batch_a, batch_b) = batches;
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
@@ -243,7 +243,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
-    type Databases = MultiDatabaseSet<E>;
+    type Databases = MultiDbSet<E>;
     type Provider = ();
     type Input = ();
 
@@ -312,7 +312,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DbSet<E>>::SyncTargets {
         (
             Target::new(block.root_a, block.range_a.clone()),
             CompactTarget {
@@ -522,7 +522,7 @@ impl EngineDefinition for MultiDbEngine {
         .expect("failed to initialize blocks archive");
 
         let (initial_a, initial_b) =
-            <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+            <MultiDbSet<deterministic::Context> as DbSet<_>>::initial_sync_targets();
         let genesis_block = Block::genesis(
             initial_a.root,
             initial_a.range,

@@ -12,7 +12,7 @@
 //! scheduling point.
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
-use crate::stateful::db::{Barrier, DatabaseSet, PendingPublication, Publisher, Single};
+use crate::stateful::db::{Barrier, DbSet, PendingPublication, Publisher, Single};
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::channel::oneshot;
@@ -30,7 +30,7 @@ fn parked_set() -> (Single<TestDb>, FlushControl) {
 /// Finalize an empty batch, pinning the set's environment to the
 /// deterministic runtime ([`TestDb`] works in any environment).
 async fn finalize(set: Single<TestDb>) -> (Single<TestDb>, (), Barrier) {
-    DatabaseSet::<deterministic::Context>::finalize(set, TestMerkleized::new()).await
+    DbSet::<deterministic::Context>::finalize(set, TestMerkleized::new()).await
 }
 
 /// Await `future` against a deterministic timeout, `Ok` if it completed and

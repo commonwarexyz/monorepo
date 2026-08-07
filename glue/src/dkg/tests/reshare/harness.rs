@@ -20,7 +20,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, SyncEngineConfig, Unmerkleized as _,
+            DbSet, Merkleized as _, MerkleizedOf, SyncEngineConfig, Unmerkleized as _,
             UnmerkleizedOf, p2p as qmdb_resolver,
         },
     },
@@ -317,7 +317,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         }
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DbSet<E>>::SyncTargets {
         Target::new(block.state_root, block.range.clone())
     }
 }

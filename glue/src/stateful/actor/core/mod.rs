@@ -12,9 +12,7 @@ use crate::stateful::{
         processor::{PendingSyncTargets, Processor, Pruning},
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{
-        AttachableResolverSet, DatabaseSet, Publisher, SnapshotOf, StateSyncSet, SyncEngineConfig,
-    },
+    db::{AttachableResolverSet, DbSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -114,7 +112,7 @@ where
     pub application: A,
 
     /// Configuration used to construct the database set.
-    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
+    pub db_config: <A::Databases as DbSet<E>>::Config,
 
     /// Provider cloned into each proposal.
     pub provider: A::Provider,
@@ -173,7 +171,7 @@ where
     marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Configuration used to initialize the database set at startup.
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: <A::Databases as DbSet<E>>::Config,
 
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
@@ -195,7 +193,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Readers>,
+    R: AttachableResolverSet<<A::Databases as DbSet<E>>::Readers>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -252,7 +250,7 @@ where
     async fn start_state_sync(
         self,
         finalization: Finalization<S, V::Commitment>,
-        publisher: Publisher<SnapshotOf<A::Databases, E>>,
+        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     ) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
@@ -291,7 +289,7 @@ where
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self, publisher: Publisher<SnapshotOf<A::Databases, E>>) {
+    async fn start_from_marshal(self, publisher: Publisher<SnapshotsOf<A::Databases, E>>) {
         let (marshal, _) = self.marshal;
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },

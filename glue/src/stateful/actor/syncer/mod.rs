@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application,
-    db::{Anchor, DatabaseSet},
+    db::{Anchor, DbSet},
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
@@ -144,7 +144,7 @@ where
     A: Application<E>,
 {
     pub anchor: Anchor<BlockDigest<A, E>>,
-    pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
+    pub targets: <A::Databases as DbSet<E>>::SyncTargets,
 }
 
 /// Durable state-sync metadata.
@@ -367,7 +367,7 @@ where
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: <A::Databases as DbSet<E>>::Config,
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
 ) -> StartupResult<E, A>
 where

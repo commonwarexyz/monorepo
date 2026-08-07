@@ -6,7 +6,7 @@ use crate::stateful::{
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, Publisher, SnapshotOf},
+    db::{Anchor, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -90,7 +90,7 @@ where
     pub(super) artifact: Option<SyncResult<E, A>>,
 
     /// Publisher for serving snapshots, handed to the [`Processor`] at transition.
-    pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
+    pub(super) publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,

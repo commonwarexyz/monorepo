@@ -30,7 +30,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, DatabaseSet, PendingPublication, Publisher, SnapshotOf, UnmerkleizedOf},
+    db::{Anchor, DbSet, PendingPublication, Publisher, SnapshotsOf, UnmerkleizedOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -58,10 +58,10 @@ use std::{
 use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
-type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
+type PendingBatches<A, E> = <<A as Application<E>>::Databases as DbSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 pub(super) type PendingSyncTargets<A, E> =
-    <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
+    <<A as Application<E>>::Databases as DbSet<E>>::SyncTargets;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -203,7 +203,7 @@ where
 {
     app: A,
     databases: A::Databases,
-    publisher: Publisher<SnapshotOf<A::Databases, E>>,
+    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
     metrics: StatefulMetrics,
@@ -220,7 +220,7 @@ where
     pub(super) const fn new(
         app: A,
         databases: A::Databases,
-        publisher: Publisher<SnapshotOf<A::Databases, E>>,
+        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
@@ -241,7 +241,7 @@ where
     ///
     /// Callers must have observed every finalize barrier through `prune.barrier_height`
     /// durable before calling. Database pruning never discards state a restart would
-    /// need (see [`DatabaseSet::prune`]), and the durable commit justifying its target
+    /// need (see [`DbSet::prune`]), and the durable commit justifying its target
     /// sits at or above the oldest retained block, so the marshal prune that follows
     /// retains every block a restart could replay.
     pub(super) async fn prune_databases<S, V>(
@@ -734,7 +734,7 @@ where
         block: &A::Block,
     ) -> (
         Self,
-        Option<Applied<PendingSyncTargets<A, E>, SnapshotOf<A::Databases, E>>>,
+        Option<Applied<PendingSyncTargets<A, E>, SnapshotsOf<A::Databases, E>>>,
     ) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
@@ -966,8 +966,7 @@ mod tests {
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{
-            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, SyncTargetsOf,
-            UnmerkleizedOf,
+            Anchor, DbSet, Merkleized as _, MerkleizedOf, Publisher, SyncTargetsOf, UnmerkleizedOf,
         },
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -1013,7 +1012,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = crate::stateful::db::Single<Qmdb<E>>;
+    type TestSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1167,9 +1166,9 @@ mod tests {
         async fn execute(
             height: Height,
             view: View,
-            databases: &DbSet<deterministic::Context>,
-            mut batches: UnmerkleizedOf<DbSet<deterministic::Context>, deterministic::Context>,
-        ) -> MerkleizedOf<DbSet<deterministic::Context>, deterministic::Context> {
+            databases: &TestSet<deterministic::Context>,
+            mut batches: UnmerkleizedOf<TestSet<deterministic::Context>, deterministic::Context>,
+        ) -> MerkleizedOf<TestSet<deterministic::Context>, deterministic::Context> {
             let current_counter = batches
                 .get(&counter_key(), databases)
                 .await
@@ -1187,7 +1186,7 @@ mod tests {
         type SigningScheme = MockScheme<ed25519::PublicKey>;
         type Context = TestContext;
         type Block = Block;
-        type Databases = DbSet<deterministic::Context>;
+        type Databases = TestSet<deterministic::Context>;
         type Provider = ();
         type Input = ();
 
@@ -1402,7 +1401,7 @@ mod tests {
             prune_config: Option<PruneConfig>,
         ) -> Self {
             let databases =
-                DbSet::<deterministic::Context>::init(context.child("db_set"), config.clone())
+                TestSet::<deterministic::Context>::init(context.child("db_set"), config.clone())
                     .await;
             let metrics = StatefulMetrics::new(&context);
             let (publisher, _source) = Publisher::new(&context);
@@ -1504,7 +1503,7 @@ mod tests {
                         batches,
                     )
                     .await;
-                if !DbSet::<deterministic::Context>::matches_sync_targets(
+                if !TestSet::<deterministic::Context>::matches_sync_targets(
                     &merkleized,
                     &ExecutionApp::sync_targets(&block),
                 ) {
@@ -1567,7 +1566,7 @@ mod tests {
             block: Block,
         ) -> (
             Self,
-            Option<Prune<SyncTargetsOf<DbSet<deterministic::Context>, deterministic::Context>>>,
+            Option<Prune<SyncTargetsOf<TestSet<deterministic::Context>, deterministic::Context>>>,
         ) {
             let (processor, applied) = self
                 .processor

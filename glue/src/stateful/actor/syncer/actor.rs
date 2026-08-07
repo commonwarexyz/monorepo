@@ -5,7 +5,7 @@ use super::{
 };
 use crate::stateful::{
     Application,
-    db::{DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{DbSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
@@ -38,7 +38,7 @@ where
     pub context: E,
 
     /// Database configuration for the managed set.
-    pub db_config: <A::Databases as DatabaseSet<E>>::Config,
+    pub db_config: <A::Databases as DbSet<E>>::Config,
 
     /// Per-database sync engine parameters.
     pub sync_config: SyncEngineConfig,
@@ -71,7 +71,7 @@ where
     mailbox: Receiver<Message<E, A>>,
 
     /// Database configuration for the managed set.
-    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    db_config: <A::Databases as DbSet<E>>::Config,
 
     /// Per-database sync engine parameters.
     sync_config: SyncEngineConfig,
@@ -212,7 +212,7 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed,
         actor::syncer::{StateSyncMetadata, UpdateOutcome, init_databases_from_marshal},
-        db::{Anchor, Barrier, DatabaseSet, SetReader, StateSyncSet, SyncEngineConfig, TipUpdate},
+        db::{Anchor, Barrier, DbSet, SetReader, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor},
@@ -245,15 +245,15 @@ mod tests {
     #[derive(Clone, Default)]
     struct WedgeSet(u64);
 
-    impl DatabaseSet<deterministic::Context> for WedgeSet {
+    impl DbSet<deterministic::Context> for WedgeSet {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
-        type Snapshot = ();
+        type Snapshots = ();
         type Readers = ();
         type Config = u64;
         type SyncTargets = u64;
 
-        fn readers(_source: SetReader<Self::Snapshot>) -> Self::Readers {}
+        fn readers(_source: SetReader<Self::Snapshots>) -> Self::Readers {}
 
         async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
             Self(config)
@@ -275,11 +275,11 @@ mod tests {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn finalize(self, _batches: Self::Merkleized) -> (Self, Self::Snapshot, Barrier) {
+        async fn finalize(self, _batches: Self::Merkleized) -> (Self, Self::Snapshots, Barrier) {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn snapshot(self) -> (Self, Self::Snapshot) {
+        async fn snapshot(self) -> (Self, Self::Snapshots) {
             (self, ())
         }
 
