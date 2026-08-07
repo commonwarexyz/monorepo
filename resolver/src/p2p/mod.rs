@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ignored_delivery_retires_without_rating_or_retry() {
+    fn test_ignored_delivery_retires_late_subscribers_without_rating_or_retry() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1053,7 +1053,7 @@ mod tests {
             let producer_observer = producer.clone();
 
             let (gate_sender, gate_receiver) = oneshot::channel();
-            let (consumer, mut deliveries, mut started) = BlockingConsumer::new(
+            let (consumer, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
                 vec![(gate_receiver, Outcome::Ignored)],
             );
@@ -1080,8 +1080,31 @@ mod tests {
                 producer,
             );
 
-            mailbox.fetch(key.clone());
-            assert_eq!(started.recv().await.expect("delivery did not start"), key);
+            let first_subscriber = SubscriberTag(1);
+            let late_subscriber = SubscriberTag(2);
+            let fresh_subscriber = SubscriberTag(3);
+            mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+                span: tracing::Span::none(),
+            });
+            assert_eq!(
+                started.recv().await.expect("delivery did not start"),
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
+                }
+            );
+
+            // A subscriber attached after the delivery snapshot is still retired by
+            // the key-global ignored outcome.
+            mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: late_subscriber,
+                span: tracing::Span::none(),
+            });
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(producer_observer.remaining(&key), vec![second.clone()]);
             gate_sender.send(()).expect("consumer gate dropped");
 
             context
@@ -1104,14 +1127,27 @@ mod tests {
             );
 
             // A new request for the same key starts cleanly after the ignored fetch is retired.
-            mailbox.fetch(key.clone());
+            mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: fresh_subscriber.clone(),
+                span: tracing::Span::none(),
+            });
             assert_eq!(
                 started.recv().await.expect("fresh delivery did not start"),
-                key
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(fresh_subscriber.clone(), tracing::Span::none())],
+                }
             );
             assert_eq!(
                 deliveries.recv().await.expect("consumer channel closed"),
-                (key.clone(), second)
+                (
+                    Delivery {
+                        key: key.clone(),
+                        subscribers: non_empty_vec![(fresh_subscriber, tracing::Span::none())],
+                    },
+                    second
+                )
             );
             assert!(producer_observer.remaining(&key).is_empty());
         });

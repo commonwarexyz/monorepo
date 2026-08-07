@@ -2049,7 +2049,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn partially_settled_key_still_validates_delivery() {
+    async fn nullification_only_settled_key_still_validates_delivery() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -2077,6 +2077,45 @@ mod tests {
                     view: requested,
                     data: Bytes::from_static(b"unverifiable"),
                     asks: non_empty_vec![Ask::ancestry(Kind::Nullification)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert_eq!(receiver.await.unwrap(), Outcome::Invalid);
+        });
+    }
+
+    #[test_async]
+    async fn notarization_only_settled_key_still_validates_delivery() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let requested = View::new(4);
+            actor.updated(
+                &mut resolver,
+                Certificate::Notarization(build_notarization(
+                    &schemes, &verifier, EPOCH, requested,
+                )),
+            );
+            assert!(!actor.settled(requested, Kind::Nullification));
+            assert!(actor.settled(requested, Kind::Notarization));
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: Bytes::from_static(b"unverifiable"),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
                 },
                 &mut voter,
