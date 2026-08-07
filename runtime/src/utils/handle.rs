@@ -563,10 +563,7 @@ mod tests {
     #[test]
     fn select_empty_returns_closed() {
         deterministic::Runner::default().start(|_| async move {
-            assert!(matches!(
-                Handle::<()>::select([]).await,
-                Err(Error::Closed)
-            ));
+            assert!(matches!(Handle::<()>::select([]).await, Err(Error::Closed)));
         });
     }
 
