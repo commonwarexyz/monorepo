@@ -97,7 +97,7 @@ where
         self
     }
 
-    /// Read a value by key, falling back to `db`'s committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -111,7 +111,7 @@ where
         self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
@@ -336,7 +336,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to `db`'s committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -350,7 +350,7 @@ where
         self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
@@ -432,16 +432,6 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = CurrentUnmerkleized<F, H, U, N, S>;
-    type SyncTarget = CurrentSyncTarget<F, H::Digest>;
-
-    fn matches(&self, target: &Self::SyncTarget) -> bool {
-        // Checks the ops root replay sync verifies against. `root()` returns the
-        // grafted root, deliberately not compared here.
-        self.ops_root() == target.root
-            && *target.range.start() == self.sync_boundary()
-            && *target.range.end() == self.bounds().tip.size
-    }
-
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -505,6 +495,14 @@ where
             batch: Self::new_batch(self),
             metadata: None,
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        // Checks the ops root replay sync verifies against. `root()` returns the
+        // grafted root, deliberately not compared here.
+        batch.ops_root() == target.root
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -598,6 +596,14 @@ where
             batch: Self::new_batch(self),
             metadata: None,
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        // Checks the ops root replay sync verifies against. `root()` returns the
+        // grafted root, deliberately not compared here.
+        batch.ops_root() == target.root
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -771,6 +777,14 @@ where
         }
     }
 
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        // Checks the ops root replay sync verifies against. `root()` returns the
+        // grafted root, deliberately not compared here.
+        batch.ops_root() == target.root
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == batch.bounds().tip.size
+    }
+
     async fn finalize(
         self,
         batch: Self::Merkleized,
@@ -867,6 +881,14 @@ where
             batch: Self::new_batch(self),
             metadata: None,
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        // Checks the ops root replay sync verifies against. `root()` returns the
+        // grafted root, deliberately not compared here.
+        batch.ops_root() == target.root
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -1431,16 +1453,25 @@ mod tests {
             let verification_db = verification_db.sync().await.unwrap();
 
             let valid_target = <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db);
-            assert!(merkleized.matches(&valid_target));
+            assert!(<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
 
             let mut wrong_root = valid_target.clone();
             wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
-            assert!(!merkleized.matches(&wrong_root));
+            assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_root,
+            ));
 
             let mut wrong_range = valid_target.clone();
             wrong_range.range =
                 non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
-            assert!(!merkleized.matches(&wrong_range));
+            assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_range,
+            ));
         });
     }
 
@@ -1513,16 +1544,25 @@ mod tests {
             let verification_db = verification_db.sync().await.unwrap();
 
             let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db);
-            assert!(merkleized.matches(&valid_target));
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
 
             let mut wrong_root = valid_target.clone();
             wrong_root.root = Sha256::hash(&[b"wrong ops root"]);
-            assert!(!merkleized.matches(&wrong_root));
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_root,
+            ));
 
             let mut wrong_range = valid_target.clone();
             wrong_range.range =
                 non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
-            assert!(!merkleized.matches(&wrong_range));
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_range,
+            ));
         });
     }
 }

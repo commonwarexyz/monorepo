@@ -157,12 +157,6 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, K, V, H, S>;
-    type SyncTarget = sync::CompactTarget<F, H::Digest>;
-
-    fn matches(&self, target: &Self::SyncTarget) -> bool {
-        self.root() == target.root && target.size == self.bounds().tip.size
-    }
-
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -210,6 +204,10 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -282,6 +280,10 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
     async fn finalize(

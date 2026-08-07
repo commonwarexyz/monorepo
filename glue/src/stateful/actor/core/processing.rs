@@ -257,12 +257,12 @@ where
                             .await;
                         acknowledgement.acknowledge();
                     } else {
-                        let (processor, applied) = self
+                        let applied;
+                        (self.processor, applied) = self
                             .processor
                             .finalize(self.context.as_present(), block.as_ref())
                             .instrument(process.clone())
                             .await;
-                        self.processor = processor;
                         // Keep the publication bookkeeping under the same span.
                         let _process = process.entered();
                         if let Some(Applied { publication, prune }) = applied {

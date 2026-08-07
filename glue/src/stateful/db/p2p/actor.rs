@@ -5,7 +5,7 @@ use crate::stateful::db::ServeSource;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
@@ -334,7 +334,7 @@ where
     async fn handle_produce(
         &mut self,
         key: Request<F>,
-        mut response_tx: oneshot::Sender<bytes::Bytes>,
+        response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let Some(source) = &self.source else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
@@ -351,22 +351,9 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
-
-        // The handle is an owned snapshot, so serving reads frozen state and never touches
-        // the live database. Abandon the read when the requester or the runtime goes away.
-        let serve = handle.serve(key);
-        futures::pin_mut!(serve);
-        let result = select! {
-            result = &mut serve => result,
-            _ = response_tx.closed() => {
-                self.metrics.serve_cancelled.inc();
-                return;
-            },
-            _ = self.context.stopped() => {
-                self.metrics.serve_cancelled.inc();
-                return;
-            },
-        };
+        // The handle is an owned snapshot, so serving reads frozen state and never
+        // touches the live database.
+        let result = handle.serve(key).await;
 
         let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);

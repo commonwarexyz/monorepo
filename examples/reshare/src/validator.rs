@@ -31,7 +31,7 @@ use commonware_glue::{
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
-        db::{DbSet, p2p as qmdb_resolver},
+        db::{DatabaseSet, p2p as qmdb_resolver},
     },
 };
 use commonware_macros::boxed;
@@ -164,7 +164,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .expect("blocks archive");
 
     let genesis_target =
-        <types::Database<tokio::Context> as DbSet<tokio::Context>>::initial_sync_targets();
+        <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
     let genesis = Block::genesis(
         network.participants[0].clone(),
         genesis_info.clone(),

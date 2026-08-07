@@ -149,12 +149,6 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = KeylessUnjournaledUnmerkleized<F, V, H, S>;
-    type SyncTarget = sync::CompactTarget<F, H::Digest>;
-
-    fn matches(&self, target: &Self::SyncTarget) -> bool {
-        self.root() == target.root && target.size == self.bounds().tip.size
-    }
-
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -201,6 +195,10 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -272,6 +270,10 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -576,13 +578,19 @@ mod tests {
                 root: merkleized.root(),
                 size: merkleized.bounds().tip.size,
             };
-            assert!(merkleized.matches(&valid_target));
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
 
             let wrong_size = sync::CompactTarget {
                 root: merkleized.root(),
                 size: merkleized.bounds().tip.size - 1,
             };
-            assert!(!merkleized.matches(&wrong_size));
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_size,
+            ));
         });
     }
 

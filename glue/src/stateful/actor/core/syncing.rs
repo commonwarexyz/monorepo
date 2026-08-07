@@ -356,10 +356,10 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let (returned, applied) = processor
+                    let applied;
+                    (processor, applied) = processor
                         .finalize(context.as_present(), block.as_ref())
                         .await;
-                    processor = returned;
                     let Applied { publication, prune } =
                         applied.expect("sync handoff block cannot be a duplicate");
 

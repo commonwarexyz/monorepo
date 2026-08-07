@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
-use std::{convert::Infallible, marker::PhantomData, sync::Arc};
+use std::{convert::Infallible, sync::Arc};
 
 /// The generation served by `source`, or `None` before the first publish and
 /// after the publisher drops.
@@ -29,64 +29,32 @@ pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
 /// No-op batch for mock databases. Merkleizes against any database type.
-pub(crate) struct TestUnmerkleized<T = u64>(PhantomData<fn(T)>);
+#[derive(Clone, Copy)]
+pub(crate) struct TestUnmerkleized;
 
-/// Merkleized counterpart of [`TestUnmerkleized`]. Its `matches()` accepts every
-/// sync target, so mismatch paths need real wrappers.
-pub(crate) struct TestMerkleized<T = u64>(PhantomData<fn(T)>);
+/// Merkleized counterpart of [`TestUnmerkleized`].
+#[derive(Clone, Copy)]
+pub(crate) struct TestMerkleized;
 
-impl<T> TestUnmerkleized<T> {
-    pub(crate) const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T> TestMerkleized<T> {
-    pub(crate) const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T> Clone for TestUnmerkleized<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for TestUnmerkleized<T> {}
-
-impl<T> Clone for TestMerkleized<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for TestMerkleized<T> {}
-
-impl<D: Sync, T: Clone + PartialEq + Send + Sync> Unmerkleized<D> for TestUnmerkleized<T> {
-    type Merkleized = TestMerkleized<T>;
+impl<D: Sync> Unmerkleized<D> for TestUnmerkleized {
+    type Merkleized = TestMerkleized;
     type Error = Infallible;
 
     async fn merkleize(self, _db: &D) -> Result<Self::Merkleized, Self::Error> {
-        Ok(TestMerkleized::new())
+        Ok(TestMerkleized)
     }
 }
 
-impl<T: Clone + PartialEq + Send + Sync> Merkleized for TestMerkleized<T> {
+impl Merkleized for TestMerkleized {
     type Digest = Sha256Digest;
-    type Unmerkleized = TestUnmerkleized<T>;
-    type SyncTarget = T;
+    type Unmerkleized = TestUnmerkleized;
 
     fn root(&self) -> Self::Digest {
         Sha256Digest::from([0; 32])
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
-        TestUnmerkleized::new()
-    }
-
-    fn matches(&self, _target: &Self::SyncTarget) -> bool {
-        true
+        TestUnmerkleized
     }
 }
 
@@ -146,7 +114,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
-        TestUnmerkleized::new()
+        TestUnmerkleized
+    }
+
+    fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+        true
     }
 
     async fn finalize(
@@ -316,7 +288,7 @@ impl<
         _databases: &Self::Databases,
         _batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> MerkleizedOf<Self::Databases, E> {
-        TestMerkleized::new()
+        TestMerkleized
     }
 }
 

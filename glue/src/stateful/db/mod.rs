@@ -151,9 +151,6 @@ pub trait Merkleized: Sized + Send + Sync {
     /// The unmerkleized batch type produced by [`new_batch`](Self::new_batch).
     type Unmerkleized: Send;
 
-    /// The sync target type accepted by [`matches`](Self::matches).
-    type SyncTarget: Clone + PartialEq + Send + Sync;
-
     /// The canonical state root committed in block headers.
     fn root(&self) -> Self::Digest;
 
@@ -162,10 +159,6 @@ pub trait Merkleized: Sized + Send + Sync {
     ///
     /// In QMDB, this maps to `merkleized_batch.new_batch()`.
     fn new_batch(&self) -> Self::Unmerkleized;
-
-    /// Return true if this batch carries the state commitment and operation range
-    /// `target` commits to.
-    fn matches(&self, target: &Self::SyncTarget) -> bool;
 }
 
 /// One database managed by the [`Stateful`](super::Stateful) wrapper.
@@ -196,7 +189,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// Constrained so that [`Merkleized::new_batch`] produces the same
     /// [`Unmerkleized`] type as [`ManagedDb::new_batch`](Self::new_batch).
-    type Merkleized: Merkleized<Unmerkleized = Self::Unmerkleized, SyncTarget = Self::SyncTarget>;
+    type Merkleized: Merkleized<Unmerkleized = Self::Unmerkleized>;
 
     /// The error type returned by fallible operations.
     type Error: Debug + Send;
@@ -231,6 +224,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// state.
     fn new_batch(&self) -> Self::Unmerkleized;
 
+    /// Return true if a merkleized batch matches a sync target.
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
+
     /// Apply a merkleized batch's changeset to the underlying database, capture a snapshot
     /// of the applied state, and begin persisting it.
     ///
@@ -252,10 +248,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Prune the database to a previously finalized sync target.
     ///
-    /// Implementations that retain pruneable operation history must make the prune
-    /// durable before returning, and must never discard history a restart would need
-    /// to recover unflushed state. Databases without pruneable history can rely on the
-    /// default no-op.
+    /// Handles returned while finalizing later state may still be pending. Implementations that
+    /// discard history must coordinate pruning with those in-flight writes. Databases that do not
+    /// retain pruneable operation history can rely on the default no-op. Any pruning effects must
+    /// be durable before returning.
     fn prune(
         self,
         _target: &Self::SyncTarget,
@@ -266,7 +262,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return the sync target for this database's current applied state.
     fn sync_target(&self) -> Self::SyncTarget;
 
-    /// Rewind committed state to `target`.
+    /// Rewind applied state to `target`.
     ///
     /// Implementations must ensure rewind effects are durable before returning
     /// the database (for example by committing after rewind).
@@ -322,10 +318,9 @@ impl Barrier {
 
     /// Resolves `true` once every deferred flush is durable.
     ///
-    /// A flush failure panics because the databases already advanced past the unflushed
-    /// batch, so the failure cannot be reported as recoverable. Resolves `false` only when
-    /// the runtime shut down before every flush completed. The covered state must not be
-    /// treated as durable.
+    /// A flush failure panics because the database has already advanced past
+    /// the unflushed batch. Returns `false` only when runtime shutdown aborts
+    /// or closes a flush handle.
     pub async fn durable(self) -> bool {
         let syncs = self
             .syncs
@@ -539,7 +534,7 @@ where
     }
 
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool {
-        batches.matches(targets)
+        T::matches_sync_target(batches, targets)
     }
 
     fn applied_targets(&self) -> Self::SyncTargets {
@@ -920,7 +915,7 @@ macro_rules! impl_database_set {
             }
 
             fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool {
-                $(batches.$idx.matches(&targets.$idx))&&+
+                $($T::matches_sync_target(&batches.$idx, &targets.$idx))&&+
             }
 
             fn applied_targets(&self) -> Self::SyncTargets {
@@ -1722,8 +1717,8 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     batch: T::Merkleized,
     index: Option<usize>,
 ) -> (T, T::Snapshot, Handle<()>) {
-    // Mutable finalize failures are fatal by design because other databases in
-    // the same set may already have committed, leaving partially applied state.
+    // Mutable finalize failures are fatal by design because the batch may already have been
+    // applied to other databases in the same set, leaving partially applied state.
     match database.finalize(batch).await {
         Ok(result) => result,
         Err(err) => {
@@ -2317,8 +2312,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for TestDb {
-        type Unmerkleized = TestUnmerkleized<()>;
-        type Merkleized = TestMerkleized<()>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -2335,7 +2330,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2352,8 +2351,8 @@ mod tests {
     struct NumberedDb;
 
     impl<E: Send> ManagedDb<E> for NumberedDb {
-        type Unmerkleized = TestUnmerkleized<()>;
-        type Merkleized = TestMerkleized<()>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -2370,7 +2369,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         async fn finalize(
@@ -2408,7 +2411,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2425,8 +2432,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for PruneCountingDb {
-        type Unmerkleized = TestUnmerkleized<()>;
-        type Merkleized = TestMerkleized<()>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = Arc<AtomicUsize>;
         type SyncTarget = ();
@@ -2443,7 +2450,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2531,8 +2542,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for FailingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized<()>;
-        type Merkleized = TestMerkleized<()>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = TestFinalizeError;
         type Config = ();
         type SyncTarget = ();
@@ -2549,7 +2560,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         async fn finalize(
@@ -2569,8 +2584,8 @@ mod tests {
     struct FailingSnapshotDb;
 
     impl<E: Send> ManagedDb<E> for FailingSnapshotDb {
-        type Unmerkleized = TestUnmerkleized<()>;
-        type Merkleized = TestMerkleized<()>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = TestFinalizeError;
         type Config = ();
         type SyncTarget = ();
@@ -2587,7 +2602,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         async fn finalize(
@@ -2653,8 +2672,8 @@ mod tests {
     }
 
     impl<E: Send> ManagedDb<E> for BlockingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized<()>;
-        type Merkleized = TestMerkleized<()>;
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
         type Error = Infallible;
         type Config = ();
         type SyncTarget = ();
@@ -2671,7 +2690,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         async fn finalize(
@@ -2715,7 +2738,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2754,7 +2781,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2789,7 +2820,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2824,7 +2859,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2859,7 +2898,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2894,7 +2937,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2929,7 +2976,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2964,7 +3015,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -2999,7 +3054,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -3038,7 +3097,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -3182,7 +3245,11 @@ mod tests {
         }
 
         fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized::new()
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
         }
 
         ready_finalize!();
@@ -3631,9 +3698,7 @@ mod tests {
 
             let finalize = <(BlockingFinalizeDb, BlockingFinalizeDb) as DatabaseSet<
                 deterministic::Context,
-            >>::finalize(
-                databases, (TestMerkleized::new(), TestMerkleized::new())
-            );
+            >>::finalize(databases, (TestMerkleized, TestMerkleized));
             pin_mut!(finalize);
             assert!(finalize.as_mut().now_or_never().is_none());
 
@@ -3663,7 +3728,7 @@ mod tests {
             let databases = (TestDb, FailingFinalizeDb);
             let _ = <(TestDb, FailingFinalizeDb) as DatabaseSet<deterministic::Context>>::finalize(
                 databases,
-                (TestMerkleized::new(), TestMerkleized::new()),
+                (TestMerkleized, TestMerkleized),
             )
             .await;
         });

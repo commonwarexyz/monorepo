@@ -11,7 +11,7 @@ use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
         Application, Input, Proposed,
-        db::{DbSet, Merkleized as _, MerkleizedOf, Unmerkleized as _, UnmerkleizedOf},
+        db::{DatabaseSet, Merkleized as _, MerkleizedOf, Unmerkleized as _, UnmerkleizedOf},
     },
 };
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
@@ -114,7 +114,7 @@ where
         Self::execute(block.height(), databases, batches).await
     }
 
-    fn sync_targets(block: &Self::Block) -> <Self::Databases as DbSet<E>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.range.clone())
     }
 }

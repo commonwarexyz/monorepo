@@ -21,12 +21,8 @@ pub(super) struct Metrics {
     /// Deliveries from peers by outcome.
     pub deliveries: status::Counter,
 
-    /// Completed serve requests by outcome. Serves abandoned mid-request count
-    /// only in `serve_cancelled`.
+    /// Completed serve requests by outcome.
     pub serve_requests: status::Counter,
-
-    /// Serves abandoned because the requester or the runtime went away.
-    pub serve_cancelled: Registered<Counter>,
 
     /// Whether a serving source has been attached (never unset).
     pub has_source: Registered<Gauge>,
@@ -53,11 +49,6 @@ impl Metrics {
         let deliveries = context.family("deliveries", "Deliveries from peers by outcome");
         let serve_requests =
             context.family("serve_requests", "Completed serve requests by outcome");
-        let serve_cancelled = context.register(
-            "serve_cancelled",
-            "Serves abandoned because the requester or the runtime went away",
-            Counter::default(),
-        );
         let has_source = context.register(
             "has_source",
             "Whether a serving source has been attached",
@@ -70,7 +61,6 @@ impl Metrics {
             cancel_requests,
             deliveries,
             serve_requests,
-            serve_cancelled,
             has_source,
         }
     }

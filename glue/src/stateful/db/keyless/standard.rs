@@ -88,7 +88,7 @@ where
         self
     }
 
-    /// Read a value by location, falling back to `db`'s committed state.
+    /// Read a value by location, falling back to applied state.
     pub async fn get<E, C>(
         &self,
         location: Location<F>,
@@ -101,7 +101,7 @@ where
         self.batch.get(location, db).await
     }
 
-    /// Read multiple values by location, falling back to `db`'s committed state.
+    /// Read multiple values by location, falling back to applied state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
@@ -160,7 +160,7 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to `db`'s committed state.
+    /// Read a value by location, falling back to applied state.
     pub async fn get<E, C>(
         &self,
         location: Location<F>,
@@ -173,7 +173,7 @@ where
         self.inner.get(location, db).await
     }
 
-    /// Read multiple values by location, falling back to `db`'s committed state.
+    /// Read multiple values by location, falling back to applied state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
@@ -223,14 +223,6 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = KeylessUnmerkleized<F, V, H, S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
-
-    fn matches(&self, target: &Self::SyncTarget) -> bool {
-        self.root() == target.root
-            && *target.range.start() == self.bounds().inactivity_floor
-            && *target.range.end() == self.bounds().tip.size
-    }
-
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -283,6 +275,12 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -364,6 +362,12 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -594,13 +598,19 @@ mod tests {
                     merkleized.bounds().tip.size
                 ),
             );
-            assert!(merkleized.matches(&valid_target));
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
 
             let wrong_start = AnySyncTarget::new(
                 merkleized.root(),
                 non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip.size),
             );
-            assert!(!merkleized.matches(&wrong_start));
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_start,
+            ));
 
             let wrong_end = AnySyncTarget::new(
                 merkleized.root(),
@@ -609,7 +619,10 @@ mod tests {
                     merkleized.bounds().tip.size - 1
                 ),
             );
-            assert!(!merkleized.matches(&wrong_end));
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_end,
+            ));
         });
     }
 

@@ -21,7 +21,7 @@
 //!   pending entries at or below the finalized round.
 //!
 //! - Maintenance: [`Processor::prune_databases`] runs due prunes and
-//!   [`Processor::republish`] refreshes the published snapshot afterwards.
+//!   [`Processor::publish_durable`] refreshes the published snapshot afterwards.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
 //! response channel, in-progress work stops at the next await point via
@@ -263,8 +263,8 @@ where
     ///
     /// `self.databases` must be durably flushed.
     pub(super) async fn publish_durable(mut self) -> Self {
-        let (databases, snapshots) = self.databases.snapshot().await;
-        self.databases = databases;
+        let snapshots;
+        (self.databases, snapshots) = self.databases.snapshot().await;
         self.publisher.publish_durable(snapshots);
         self
     }
@@ -786,8 +786,8 @@ where
         // Snapshots are staged here, inside finalize, so they publish in apply
         // order. The caller publishes only once the barrier proves every database
         // flush durable, so readers never see state a crash could lose.
-        let (databases, snapshot, barrier) = self.databases.finalize(batch).await;
-        self.databases = databases;
+        let (snapshot, barrier);
+        (self.databases, snapshot, barrier) = self.databases.finalize(batch).await;
         let publication = PendingPublication::new(self.publisher.stage(snapshot), barrier);
         self.notify_finalized(context, block).await;
         let prune = self
@@ -1546,11 +1546,11 @@ mod tests {
         /// duplicate report).
         #[boxed]
         async fn finalize(mut self, block: Block) -> (Self, bool) {
-            let (processor, applied) = self
+            let applied;
+            (self.processor, applied) = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
                 .await;
-            self.processor = processor;
             let Some(Applied { publication, .. }) = applied else {
                 return (self, false);
             };
@@ -1569,11 +1569,11 @@ mod tests {
             Self,
             Option<Prune<SyncTargetsOf<TestSet<deterministic::Context>, deterministic::Context>>>,
         ) {
-            let (processor, applied) = self
+            let applied;
+            (self.processor, applied) = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
                 .await;
-            self.processor = processor;
             let Applied { publication, prune } = applied.expect("finalized block must apply");
             assert!(
                 publication.publish_when_durable().await,

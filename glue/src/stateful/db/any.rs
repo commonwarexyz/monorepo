@@ -97,7 +97,7 @@ where
         self
     }
 
-    /// Read a value by key, falling back to `db`'s committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -111,7 +111,7 @@ where
         self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
@@ -336,7 +336,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to `db`'s committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -350,7 +350,7 @@ where
         self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
@@ -432,16 +432,6 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = AnyUnmerkleized<F, H, U, S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
-
-    fn matches(&self, target: &Self::SyncTarget) -> bool {
-        // For any-databases the sync boundary equals the inactivity floor, which is
-        // what `sync_target` publishes as the range start.
-        self.root() == target.root
-            && *target.range.start() == self.bounds().inactivity_floor
-            && *target.range.end() == self.bounds().tip.size
-    }
-
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -505,6 +495,14 @@ where
             batch: Db::new_batch(self),
             metadata: None,
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        // For any-databases the sync boundary equals the inactivity floor, which is
+        // what `sync_target` publishes as the range start.
+        batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -603,6 +601,14 @@ where
             batch: Db::new_batch(self),
             metadata: None,
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        // For any-databases the sync boundary equals the inactivity floor, which is
+        // what `sync_target` publishes as the range start.
+        batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(

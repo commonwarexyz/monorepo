@@ -93,7 +93,7 @@ where
         self
     }
 
-    /// Read a value by key, falling back to `db`'s committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get<E, C, T>(
         &self,
         key: &K,
@@ -107,7 +107,7 @@ where
         self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, T>(
@@ -169,7 +169,7 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to `db`'s committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get<E, C, T>(
         &self,
         key: &K,
@@ -183,7 +183,7 @@ where
         self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to `db`'s committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, T>(
@@ -239,14 +239,6 @@ where
 {
     type Digest = H::Digest;
     type Unmerkleized = ImmutableUnmerkleized<F, K, V, H, S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
-
-    fn matches(&self, target: &Self::SyncTarget) -> bool {
-        self.root() == target.root
-            && *target.range.start() == self.bounds().inactivity_floor
-            && *target.range.end() == self.bounds().tip.size
-    }
-
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -301,6 +293,12 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
@@ -385,6 +383,12 @@ where
             metadata: None,
             inactivity_floor: self.inactivity_floor_loc(),
         }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == batch.bounds().tip.size
     }
 
     async fn finalize(
