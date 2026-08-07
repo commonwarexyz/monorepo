@@ -1,7 +1,10 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::{Deferred, mailbox::Message, processing::Processing},
+        core::{
+            Deferred, mailbox::Message, processing::Processing,
+            verifications::Request as VerificationRequest,
+        },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
@@ -10,9 +13,9 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    Block, Epochable, Heightable, Viewable,
+    Epochable, Heightable, Viewable,
     marshal::{
-        ancestry::{BlockProvider, BoxedAncestry},
+        ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
 };
@@ -23,18 +26,7 @@ use commonware_storage::Context;
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
-use tracing::{Instrument as _, Span, debug, error, info_span};
-
-/// Verify request buffered while state sync is still in progress.
-pub(super) struct HeldVerify<C, B: Block> {
-    span: Span,
-    context: C,
-    ancestry: BoxedAncestry<B>,
-    response: oneshot::Sender<bool>,
-}
-
-type HeldVerifyRequest<E, A> =
-    HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
+use tracing::{Instrument as _, debug, error, info_span};
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
@@ -82,8 +74,8 @@ where
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
-    /// Verify requests held while syncing.
-    pub(super) held_verify_requests: Vec<HeldVerifyRequest<E, A>>,
+    /// Verification requests deferred until state sync completes.
+    pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
     /// Open subscriptions to the synced databases.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
@@ -121,8 +113,8 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.held_verify_requests
-                    .retain(|request| !request.response.is_closed());
+                self.deferred_verifications
+                    .retain(|request| !request.verification.is_cancelled());
                 self.database_subscribers
                     .retain(|subscriber| !subscriber.is_closed());
             },
@@ -158,21 +150,21 @@ where
                     span,
                     context,
                     ancestry,
-                    response,
+                    verification,
                 } => {
-                    let process = info_span!(parent: &span, "stateful.actor.hold_verify");
-                    self.held_verify_requests
-                        .retain(|request| !request.response.is_closed());
-                    self.held_verify_requests.push(HeldVerify {
+                    let process = info_span!(parent: &span, "stateful.actor.verify.defer");
+                    self.deferred_verifications
+                        .retain(|request| !request.verification.is_cancelled());
+                    self.deferred_verifications.push(VerificationRequest {
                         span,
                         context,
                         ancestry,
-                        response,
+                        verification,
                     });
                     process.in_scope(|| {
                         debug!(
-                            held_verify_requests = self.held_verify_requests.len(),
-                            "verify held: state sync in progress"
+                            deferred_verifications = self.deferred_verifications.len(),
+                            "verification deferred: state sync in progress"
                         );
                     });
                 }
@@ -180,6 +172,7 @@ where
                     span,
                     block,
                     acknowledgement,
+                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoffs;
@@ -368,7 +361,7 @@ where
         // pruning or exposing the databases to other actors.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
-            prune.run(processor.databases_mut(), &self.marshal).await;
+            prune.run(processor.databases(), &self.marshal).await;
         }
 
         // Attach the resolvers to the initialized databases before starting the processor,
@@ -383,26 +376,13 @@ where
             subscriber.send_lossy(processor.databases().clone());
         }
 
-        for request in self.held_verify_requests.drain(..) {
-            let process = info_span!(parent: &request.span, "stateful.actor.replay_verify");
-            processor
-                .verify(
-                    self.context.as_present(),
-                    self.marshal.clone(),
-                    request.context,
-                    request.ancestry,
-                    request.response,
-                )
-                .instrument(process)
-                .await;
-        }
-
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            deferred_verifications: self.deferred_verifications,
             skip_finalized_until: Some(completed_height),
         }
         .start()
@@ -578,7 +558,7 @@ mod tests {
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
-                    held_verify_requests: Vec::new(),
+                    deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: None,
                     resolvers: NoopResolver,
@@ -632,7 +612,7 @@ mod tests {
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
-                    held_verify_requests: Vec::new(),
+                    deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: Some(SyncResult {
                         databases: test_databases(),

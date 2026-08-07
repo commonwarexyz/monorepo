@@ -32,9 +32,11 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
+pub(super) use mailbox::Verification;
 
 mod processing;
 mod syncing;
+mod verifications;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
@@ -266,7 +268,7 @@ where
             marshal,
             sync_metadata,
             syncer: syncer_mailbox,
-            held_verify_requests: Vec::new(),
+            deferred_verifications: Vec::new(),
             database_subscribers: Vec::new(),
             artifact: None,
             resolvers: self.resolvers,
@@ -307,6 +309,7 @@ where
             provider: self.provider,
             marshal,
             processor,
+            deferred_verifications: Vec::new(),
             skip_finalized_until,
         }
         .start()

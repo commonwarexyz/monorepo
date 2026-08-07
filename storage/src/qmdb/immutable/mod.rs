@@ -2534,6 +2534,51 @@ pub(super) mod test {
     }
 
     #[boxed]
+    pub(crate) async fn test_immutable_delayed_merkleize_after_ancestor_apply<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let key1 = Sha256::hash(&[&[1]]);
+        let key2 = Sha256::hash(&[&[2]]);
+        let key3 = Sha256::hash(&[&[3]]);
+        let v1 = Sha256::fill(1u8);
+        let v2 = Sha256::fill(2u8);
+        let v3 = Sha256::fill(3u8);
+
+        let a = db
+            .new_batch()
+            .set(key1, v1)
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let b = a
+            .new_batch::<Sha256>()
+            .set(key2, v2)
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let c = b.new_batch::<Sha256>().set(key3, v3);
+
+        let (db, _) = db.apply_batch(a).await.unwrap();
+        let c = c.merkleize(&db, None, Location::new(0)).await;
+        let expected_root = c.root();
+        let (db, _) = db.apply_batch(c).await.unwrap();
+
+        assert_eq!(db.root(), expected_root);
+        assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
     pub(crate) async fn test_immutable_sequential_commit_parent_then_child<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(

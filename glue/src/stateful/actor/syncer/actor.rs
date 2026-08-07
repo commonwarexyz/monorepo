@@ -266,6 +266,7 @@ mod tests {
     impl DatabaseSet<deterministic::Context> for WedgeSet {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
+        type Readers = ();
         type Config = u64;
         type SyncTargets = u64;
 
@@ -288,6 +289,8 @@ mod tests {
         fn matches_sync_targets(_batches: &Self::Merkleized, _targets: &Self::SyncTargets) -> bool {
             unreachable!("WedgeSet only serves the syncer harness")
         }
+
+        fn readers(&self) -> Self::Readers {}
 
         async fn finalize(&self, _batches: Self::Merkleized) -> Barrier {
             unreachable!("WedgeSet only serves the syncer harness")
