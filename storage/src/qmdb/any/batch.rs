@@ -989,7 +989,8 @@ where
         let mut diff_sort = None;
         if !diff.is_empty() {
             let unsorted = mem::take(&mut diff);
-            diff_sort = Some(db.strategy().spawn(move |strategy| {
+            let unsorted_len = unsorted.len();
+            diff_sort = Some(db.strategy().spawn(unsorted_len, move |strategy| {
                 let mut diff = unsorted;
                 strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
                 diff
@@ -1136,31 +1137,53 @@ where
                             }
                         };
 
-                        // Classification is already partitioned by candidate chunk, so use
-                        // manual strategy execution and keep each location aligned with the
-                        // operation resolved for the same filtered candidate. Chunks are
-                        // subdivided past the pool parallelism because the snapshot probes
-                        // that dominate classification have variable latency, so finer
-                        // chunks balance the tail.
-                        let manual = strategy.manual();
-                        let target = read_candidates
-                            .len()
-                            .div_ceil(manual.parallelism() * 4)
-                            .max(1);
-                        let mut chunks: Vec<CandidateChunk<'_, F, U>> = Vec::new();
-                        let mut offset = 0;
-                        for chunk in &resolved {
-                            let locs = &read_candidates[offset..offset + chunk.len()];
-                            offset += chunk.len();
-                            chunks.extend(locs.chunks(target).zip(chunk.chunks(target)));
-                        }
-                        let outcomes = manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
-                            chunk_locs
-                                .iter()
-                                .zip(chunk_ops)
-                                .map(|(loc, op)| classify(*loc, op))
-                                .collect()
-                        });
+                        // Classify against the pre-raise state. The candidate count drives an
+                        // adaptive serial-vs-parallel choice: a small per-block candidate set is
+                        // classified inline (a pool hand-off would not pay), while a large set
+                        // fans out. When parallel, the work is subdivided past the pool
+                        // parallelism because the snapshot probes that dominate classification
+                        // have variable latency, so finer chunks balance the tail. Both paths keep
+                        // each location aligned with the operation resolved for the same filtered
+                        // candidate and yield outcomes in candidate order (the caller flattens).
+                        let outcomes: Vec<Vec<FloorOutcome<F>>> = strategy.run(
+                            read_candidates.len(),
+                            || {
+                                let mut outcomes = Vec::with_capacity(resolved.len());
+                                let mut offset = 0;
+                                for chunk in &resolved {
+                                    let locs = &read_candidates[offset..offset + chunk.len()];
+                                    offset += chunk.len();
+                                    outcomes.push(
+                                        locs.iter()
+                                            .zip(chunk)
+                                            .map(|(loc, op)| classify(*loc, op))
+                                            .collect(),
+                                    );
+                                }
+                                outcomes
+                            },
+                            || {
+                                let manual = strategy.manual();
+                                let target = read_candidates
+                                    .len()
+                                    .div_ceil(manual.parallelism() * 4)
+                                    .max(1);
+                                let mut chunks: Vec<CandidateChunk<'_, F, U>> = Vec::new();
+                                let mut offset = 0;
+                                for chunk in &resolved {
+                                    let locs = &read_candidates[offset..offset + chunk.len()];
+                                    offset += chunk.len();
+                                    chunks.extend(locs.chunks(target).zip(chunk.chunks(target)));
+                                }
+                                manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                                    chunk_locs
+                                        .iter()
+                                        .zip(chunk_ops)
+                                        .map(|(loc, op)| classify(*loc, op))
+                                        .collect()
+                                })
+                            },
+                        );
                         (resolved, outcomes)
                     };
 
@@ -1230,7 +1253,8 @@ where
         // never revisits it), so the merge inputs are disjoint.
         let mut diff_merge = None;
         if !floor_diff.is_empty() {
-            diff_merge = Some(db.strategy().spawn(move |strategy| {
+            let merge_len = floor_diff.len() + diff.len();
+            diff_merge = Some(db.strategy().spawn(merge_len, move |strategy| {
                 let mut floor_diff = floor_diff;
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
                 let diff = merge_sorted_diffs(diff, floor_diff);
@@ -1636,9 +1660,10 @@ where
         // source, and the step bound, none of which depend on the resolution. The batch
         // moves into the job, so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
-        let resolve = db
-            .strategy()
-            .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
+        let resolve_len = updates.len() + upserts.len();
+        let resolve = db.strategy().spawn(resolve_len, move |strategy| {
+            self.resolve_updates(updates, upserts, &strategy)
+        });
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
