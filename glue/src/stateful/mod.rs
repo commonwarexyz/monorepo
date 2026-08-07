@@ -96,7 +96,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::{DatabaseSet, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf};
+use db::{DatabaseSet, MerkleizedOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -115,7 +115,7 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     pub block: A::Block,
 
     /// The merkleized database batches produced during execution.
-    pub merkleized: MerkleizedOf<A::Databases, E>,
+    pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
 }
 
 /// Aggregated per-proposal input a [`Stateful`] application hands its inner
@@ -193,7 +193,7 @@ where
     ///
     /// The returned targets are handed to the state sync coordinator so the
     /// sync engines can track the latest finalized state root and range.
-    fn sync_targets(block: &Self::Block) -> SyncTargetsOf<Self::Databases, E>;
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 
     /// Block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
