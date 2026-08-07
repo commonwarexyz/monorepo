@@ -10,9 +10,7 @@ use commonware_actor::{
 use commonware_consensus::{Reporter, marshal::Update, types::Height};
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{
-    Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit,
-};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
 use futures::Stream;
 use std::{collections::VecDeque, pin::Pin, sync::Arc};
 use tracing::{Span, error, info_span};
