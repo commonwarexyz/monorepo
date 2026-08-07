@@ -768,9 +768,10 @@ where
     let mut grafted_batch = grafted_parent.new_batch();
     let ancestors = grafted_batch.retain_ancestors();
     let grafted_tree = Arc::clone(grafted_tree);
+    let graft_len = graft_inputs.len();
     strategy
         .clone()
-        .spawn(move |strategy| {
+        .spawn(graft_len, move |strategy| {
             let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
             for (chunk_idx, digest) in new_leaves {
                 if chunk_idx < old_grafted_leaves {

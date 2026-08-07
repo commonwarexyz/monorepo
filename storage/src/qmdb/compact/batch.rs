@@ -13,9 +13,10 @@ use std::sync::Arc;
 /// post-apply root, all as one CPU-bound job submitted through [`Strategy::spawn`].
 ///
 /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
-/// strategy hosts the batch's dominant CPU phase on its own pool instead of occupying the
-/// calling task. If the caller is cancelled mid-job, the job still runs to completion against
-/// its snapshot and the result is discarded.
+/// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
+/// calling task -- or run it inline when the batch is small enough that the pool hand-off would
+/// not pay. If an offloaded job's caller is cancelled mid-job, the job still runs to completion
+/// against its snapshot and the result is discarded.
 #[allow(clippy::type_complexity)]
 pub(crate) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
@@ -33,8 +34,9 @@ where
     let ancestors = batch.retain_ancestors();
     let mem = merkle.snapshot();
     let strategy = merkle.strategy().clone();
+    let ops_len = ops.len();
     strategy
-        .spawn(move |strategy| {
+        .spawn(ops_len, move |strategy| {
             let hasher = qmdb::hasher::<H>();
             let leaf_digests =
                 strategy.map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
