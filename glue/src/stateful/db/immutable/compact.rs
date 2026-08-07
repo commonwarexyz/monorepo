@@ -5,7 +5,7 @@
 //! adapters expose set and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncSession,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -24,10 +24,10 @@ use commonware_storage::{
             initial_root, variable,
         },
         operation::Key,
-        sync::{self},
+        sync,
     },
 };
-use commonware_utils::{Array, channel::mpsc};
+use commonware_utils::Array;
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps an unjournaled immutable batch before merkleization.
@@ -42,7 +42,7 @@ where
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
+    inactivity_floor: Location<F>,
 }
 
 impl<F, K, V, H, S> Deref for ImmutableUnjournaledUnmerkleized<F, K, V, H, S>
@@ -77,8 +77,11 @@ where
     }
 
     /// Set the inactivity floor included in the next merkleization.
+    ///
+    /// If unset, the batch carries forward the floor it forked from. The floor must never
+    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+        self.inactivity_floor = floor;
         self
     }
 
@@ -140,7 +143,7 @@ where
     ) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
-            .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
+            .merkleize(db, self.metadata, self.inactivity_floor)
             .await;
         Ok(ImmutableUnjournaledMerkleized { inner: merkleized })
     }
@@ -171,7 +174,7 @@ where
         ImmutableUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inner.bounds().inactivity_floor,
         }
     }
 }
@@ -208,7 +211,7 @@ where
         ImmutableUnjournaledUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inactivity_floor_loc(),
         }
     }
 
@@ -237,12 +240,9 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.size).await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -280,7 +280,7 @@ where
         ImmutableUnjournaledUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inactivity_floor_loc(),
         }
     }
 
@@ -309,12 +309,9 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.size).await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -335,24 +332,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_compact_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_compact_db(context, config, session).await
     }
 }
 
@@ -373,30 +355,16 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_compact_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_compact_db(context, config, session).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::SyncEngineConfig;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -409,7 +377,7 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         translator::TwoCap,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
     use futures::pin_mut;
     use std::time::Duration;
 
@@ -585,12 +553,14 @@ mod tests {
             let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
                 fixed_config(&context, "target"),
-                Arc::new(source),
-                target.clone(),
-                update_rx,
-                None,
-                None,
-                sync_config(),
+                SyncSession {
+                    source: Arc::new(source),
+                    target: target.clone(),
+                    tip_updates: update_rx,
+                    finish: None,
+                    reached_target: None,
+                    sync_config: sync_config(),
+                },
             )
             .await
             .unwrap();
@@ -642,12 +612,14 @@ mod tests {
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
                 client_context,
                 client_config,
-                superseding_source,
-                target.clone(),
-                update_rx,
-                Some(finish_rx),
-                Some(reached_tx),
-                sync_config(),
+                SyncSession {
+                    source: superseding_source,
+                    target: target.clone(),
+                    tip_updates: update_rx,
+                    finish: Some(finish_rx),
+                    reached_target: Some(reached_tx),
+                    sync_config: sync_config(),
+                },
             );
             pin_mut!(sync);
 
@@ -737,12 +709,14 @@ mod tests {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
                     fixed_config(&context, "supersede-target"),
-                    superseding_source,
-                    stale_target,
-                    update_rx,
-                    None,
-                    None,
-                    sync_config(),
+                    SyncSession {
+                        source: superseding_source,
+                        target: stale_target,
+                        tip_updates: update_rx,
+                        finish: None,
+                        reached_target: None,
+                        sync_config: sync_config(),
+                    },
                 )
                 .await
             });

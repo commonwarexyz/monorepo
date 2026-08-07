@@ -121,12 +121,6 @@ impl<Src, F: Family, Op, D: Digest> Mailbox<Src, F, Op, D> {
     }
 }
 
-impl<Src: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<Src, F, Op, D> {
-    pub fn attach_source(&self, source: Src) {
-        let _ = self.sender.enqueue(Message::AttachSource(source));
-    }
-}
-
 impl<Src, F, Op, D> Source for Mailbox<Src, F, Op, D>
 where
     F: Family,
@@ -165,7 +159,7 @@ where
     Src: ServeSource,
 {
     fn attach_source(&self, source: Src) -> impl Future<Output = ()> + Send {
-        Self::attach_source(self, source);
+        let _ = self.sender.enqueue(Message::AttachSource(source));
         std::future::ready(())
     }
 }

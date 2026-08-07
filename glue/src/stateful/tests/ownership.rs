@@ -1,33 +1,24 @@
-//! Causal ownership tests for the by-value database set.
+//! Causal ownership tests for the by-value database set: readers and the writer
+//! share nothing that can block either side.
 //!
-//! The old shared-lock design let a slow reader block the writer and a parked
-//! flush block serving. These tests pin that the ownership design has no such
-//! coupling at the public seams:
-//!
-//! - a generation whose flush is still parked is never published, so no
-//!   subscriber can observe state a crash could roll back, while the writer
-//!   proceeds ([`unpublished_generation_stays_invisible`])
+//! - a generation whose flush is still parked is never published, and does not
+//!   hold the writer back ([`unpublished_generation_stays_invisible`])
 //! - a serve holding a published snapshot across parked I/O cannot delay the
 //!   writer, and its snapshot stays frozen while publication moves on
 //!   ([`parked_serve_never_delays_the_writer`])
 //!
-//! Causality, not timing. The deterministic runtime advances time only when
-//! every task is blocked, so `blocked_on` resolving to its timeout proves the
-//! probed future could not progress at any scheduling point, and a probe that
-//! completes proves nothing was ever in its way. Generation ordering under
-//! pipelining is covered by the publication and processing tests.
+//! The deterministic runtime advances time only at quiescence, so `blocked_on`
+//! resolving to its timeout proves the probed future could not progress at any
+//! scheduling point.
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
-use crate::stateful::db::{Barrier, DatabaseSet, Publisher, Single};
+use crate::stateful::db::{Barrier, DatabaseSet, PendingPublication, Publisher, Single};
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::channel::oneshot;
 use std::time::Duration;
 
 /// How long `blocked_on` waits before declaring the probed future blocked.
-///
-/// Deterministic time only advances at quiescence, so any value works. This
-/// one keeps traces readable.
 const BLOCKED: Duration = Duration::from_secs(1);
 
 /// A parked single-member set plus the flush controls driving it.
@@ -55,13 +46,9 @@ where
     }
 }
 
-/// Release the oldest parked flush and prove its barrier durable.
-async fn release(control: &FlushControl, barrier: Barrier) {
+/// Release the oldest parked flush.
+fn release(control: &FlushControl) {
     control.flushes.lock().remove(0).send(Ok(())).unwrap();
-    assert!(
-        barrier.durable().await,
-        "flush release must prove durability"
-    );
 }
 
 /// Staging alone publishes nothing: a staged generation stays invisible until
@@ -86,18 +73,26 @@ fn unpublished_generation_stays_invisible() {
 
         // The unpublished generation does not hold the writer back.
         let next = context.child("finalize").spawn(move |_| finalize(set));
-        let (_, snapshot, second) = blocked_on(&context, Box::pin(next))
+        let (_, snapshot, second) = blocked_on(&context, next)
             .await
             .unwrap_or_else(|_| panic!("an unpublished generation delayed the writer"))
             .unwrap();
         let staged_second = publisher.stage(snapshot);
 
         // Durability publishes, in order.
-        release(&control, first).await;
-        staged.install();
+        release(&control);
+        assert!(
+            PendingPublication::new(staged, first)
+                .install_when_durable()
+                .await
+        );
         assert_eq!(source.latest().unwrap().generation(), 0);
-        release(&control, second).await;
-        staged_second.install();
+        release(&control);
+        assert!(
+            PendingPublication::new(staged_second, second)
+                .install_when_durable()
+                .await
+        );
         assert_eq!(source.latest().unwrap().generation(), 1);
     });
 }
@@ -112,8 +107,12 @@ fn parked_serve_never_delays_the_writer() {
         let (mut publisher, source) = Publisher::new(&context);
         let (set, snapshot, barrier) = finalize(set).await;
         let staged = publisher.stage(snapshot);
-        release(&control, barrier).await;
-        staged.install();
+        release(&control);
+        assert!(
+            PendingPublication::new(staged, barrier)
+                .install_when_durable()
+                .await
+        );
 
         // A serve clones the published generation and parks mid-assembly.
         let served = source.latest().unwrap();
@@ -127,13 +126,17 @@ fn parked_serve_never_delays_the_writer() {
         // The parked serve shares nothing with the writer, so the next
         // finalize and publication proceed without delay.
         let next = context.child("finalize").spawn(move |_| finalize(set));
-        let (_, snapshot, barrier) = blocked_on(&context, Box::pin(next))
+        let (_, snapshot, barrier) = blocked_on(&context, next)
             .await
             .unwrap_or_else(|_| panic!("a parked serve delayed the writer"))
             .unwrap();
         let staged = publisher.stage(snapshot);
-        release(&control, barrier).await;
-        staged.install();
+        release(&control);
+        assert!(
+            PendingPublication::new(staged, barrier)
+                .install_when_durable()
+                .await
+        );
 
         // The serve completes against its captured generation while the
         // source already serves the newer one.

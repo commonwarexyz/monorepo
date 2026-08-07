@@ -538,7 +538,7 @@ impl EngineDefinition for SingleDbEngine {
             let sources = prune_observer.clone();
             Box::pin(async move {
                 let source = sources.lock().clone().expect("source must be attached");
-                let snapshot = crate::stateful::db::ServeSource::serve(&source)
+                let snapshot = crate::stateful::db::ServeSource::latest(&source)
                     .expect("a published generation must exist");
                 snapshot.bounds().start
             })

@@ -62,7 +62,7 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Maximum number of operations to serve in a single response.
+    /// Requests asking for more operations than this are declined.
     pub max_serve_ops: NonZeroU64,
 
     /// Send fetch requests with network priority.
@@ -70,14 +70,6 @@ where
 
     /// Send responses with network priority.
     pub priority_responses: bool,
-}
-
-/// Runtime serving state for the resolver actor.
-enum State<Src> {
-    /// No serving source is attached yet.
-    NoSource,
-    /// A serving source is attached and incoming requests can be served.
-    HasSource(Src),
 }
 
 /// An action dispatched by incoming mailbox messages.
@@ -102,7 +94,8 @@ where
     context: ContextCell<E>,
     config: Config<P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, Src>>,
-    state: State<Src>,
+    /// The serving source, attached after startup.
+    source: Option<Src>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, Src>,
 }
@@ -128,7 +121,7 @@ where
             context: ContextCell::new(context),
             config: cfg,
             mailbox_rx,
-            state: State::NoSource,
+            source: None,
             metrics,
             pending: BTreeMap::new(),
         };
@@ -176,6 +169,7 @@ where
                     subs.retain(|s| !s.is_closed());
                     !subs.is_empty()
                 });
+                let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 let mailbox_message = async {
                     match self.mailbox_rx.recv().await {
                         Some(message) => Some(message),
@@ -187,6 +181,7 @@ where
                 return;
             },
             _ = &mut resolver_task => {
+                debug!("resolver engine stopped, shutting down");
                 return;
             },
             Some(message) = mailbox_message else continue => {
@@ -201,6 +196,7 @@ where
                 }
             },
             Some(message) = handler_rx.recv() else {
+                debug!("resolver handler closed, shutting down");
                 return;
             } => match message {
                 handler::EngineMessage::Deliver {
@@ -217,13 +213,14 @@ where
         }
     }
 
-    /// Process a mailbox message. Returns a request to fetch if a new key was registered.
+    /// Process a mailbox message, returning the fetch or cancel action to forward to
+    /// the resolver engine.
     fn handle_mailbox_message(&mut self, message: SyncMessage<F, Src>) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachSource(source) => {
-                let replacing_existing = matches!(self.state, State::HasSource(_));
+                let replacing_existing = self.source.is_some();
                 info!(replacing_existing, "attached resolver source");
-                self.state = State::HasSource(source);
+                self.source = Some(source);
                 let _ = self.metrics.has_source.try_set(1i64);
                 MailboxAction::None
             }
@@ -321,7 +318,11 @@ where
 
         let mut peer_valid = true;
         for approval in approvals {
-            if let Ok(approved) = approval.await {
+            let approved = select! {
+                approved = approval => approved,
+                _ = self.context.stopped() => return,
+            };
+            if let Ok(approved) = approved {
                 peer_valid &= approved;
             }
         }
@@ -336,23 +337,26 @@ where
     }
 
     /// Serve a peer's request from the latest published snapshot.
+    ///
+    /// Serves run one at a time in the actor loop. Spawning them per-request is a
+    /// possible follow-up now that the handle is an owned snapshot.
     async fn handle_produce(
         &mut self,
         key: Request<F>,
         mut response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
-        let State::HasSource(source) = &self.state else {
+        let Some(source) = &self.source else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
         if let Request::Operations { max_ops, .. } = key
             && max_ops > self.config.max_serve_ops
         {
-            self.metrics.serve_requests.inc(status::Status::Dropped);
+            self.metrics.serve_requests.inc(status::Status::Invalid);
             return;
         }
         // Declines before the first installation and after the publisher drops.
-        let Some(handle) = source.serve() else {
+        let Some(handle) = source.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -447,7 +451,7 @@ mod tests {
     impl ServeSource for StaticSource {
         type Serve = Arc<TestDb>;
 
-        fn serve(&self) -> Option<Arc<TestDb>> {
+        fn latest(&self) -> Option<Arc<TestDb>> {
             Some(self.0.clone())
         }
     }
@@ -459,7 +463,7 @@ mod tests {
     impl ServeSource for EmptySource {
         type Serve = Arc<TestDb>;
 
-        fn serve(&self) -> Option<Arc<TestDb>> {
+        fn latest(&self) -> Option<Arc<TestDb>> {
             None
         }
     }
@@ -625,6 +629,15 @@ mod tests {
             actor.handle_produce(request, response_tx).await;
 
             assert!(response_rx.await.is_err());
+            let metrics = context.encode();
+            assert!(
+                metrics.lines().any(|line| {
+                    line.contains("serve_requests_total")
+                        && line.contains("status=\"Invalid\"")
+                        && line.ends_with(" 1")
+                }),
+                "oversized request must count as a client error"
+            );
         });
     }
 

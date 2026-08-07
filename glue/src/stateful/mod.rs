@@ -141,7 +141,9 @@ pub struct Input<Upstream, Provider> {
 /// return [`DatabaseSet::Merkleized`] batches after execution. The surrounding
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
-/// finalization.
+/// finalization. In every execution method, reads of applied state go through
+/// the borrowed `databases`, while `batches` carries only that turn's
+/// speculative writes and holds no database handle.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -210,9 +212,6 @@ where
     /// canonical root. The wrapper's sync-target check only verifies the ops
     /// root and operation range used by replay sync.
     ///
-    /// Reads of applied state go through the borrowed `databases`; `batches` carries only
-    /// this turn's speculative writes and holds no database handle.
-    ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
@@ -253,9 +252,6 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// Reads of applied state go through the borrowed `databases`; `batches` carries only
-    /// this turn's speculative writes and holds no database handle.
-    ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
@@ -278,9 +274,6 @@ where
     /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
-    ///
-    /// Reads of applied state go through the borrowed `databases`; `batches` carries only
-    /// this turn's speculative writes and holds no database handle.
     ///
     /// This future may be cancelled if the originating propose/verify request
     /// is dropped. Implementations should be cancellation-safe: dropping and

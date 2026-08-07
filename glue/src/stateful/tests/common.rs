@@ -25,7 +25,7 @@ use std::{
 /// Type-erased accessor returning the oldest operation location still retained
 /// by a validator's database set (tests observe one representative member).
 ///
-/// Used by pruning properties to observe that QMDB actually discarded
+/// Used by pruning tests to observe that QMDB actually discarded
 /// historical operations through the live actor.
 pub(crate) type OldestRetained =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;

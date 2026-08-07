@@ -120,6 +120,9 @@ where
     pub provider: A::Provider,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
+    ///
+    /// The actor assumes exclusive control of marshal's processed floor. Nothing
+    /// else may advance it while the actor runs.
     pub marshal: (MarshalMailbox<S, V>, Floor),
 
     /// Capacity of the stateful actor mailbox channel.
@@ -232,8 +235,7 @@ where
 
     async fn run(self) {
         // One publisher spans the actor's whole life: its member sources attach to the
-        // resolvers here, once, and serve nothing until the first installation. Both
-        // startup paths install their initial durable snapshot into this publisher.
+        // resolvers here, once, and serve nothing until the first installation.
         let (publisher, set_source) = Publisher::new(self.context.as_present());
         self.resolvers
             .attach_sources(A::Databases::member_sources(set_source))
@@ -291,7 +293,7 @@ where
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self, mut publisher: Publisher<SnapshotOf<A::Databases, E>>) {
+    async fn start_from_marshal(self, publisher: Publisher<SnapshotOf<A::Databases, E>>) {
         let (marshal, _) = self.marshal;
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
@@ -304,21 +306,26 @@ where
         )
         .await;
 
-        // Install the recovered committed state as generation zero so serving can begin
-        // before the first finalization; committed state is durable by construction.
-        let (databases, initial) = databases.snapshot().await;
-        publisher.install_durable(initial);
-
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            publisher,
+            anchor,
+            metrics,
+            self.pruning,
+        );
+        // Publish the recovered committed state as generation zero so serving can
+        // begin before the first finalization. Committed state is durable by
+        // construction.
+        let processor = processor.republish().await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
             processor,
-            publisher,
             skip_finalized_until,
         }
         .start()
@@ -331,7 +338,7 @@ mod tests {
     use super::{Config, Deferred, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        db::{AttachableResolver, StateSyncDb, SyncEngineConfig, SyncSession},
         tests::{
             fixtures,
             mocks::{TestApp, TestBlock, TestDb},
@@ -344,9 +351,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{
-        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
-    };
+    use commonware_utils::{Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact};
     use futures::FutureExt as _;
     use std::{convert::Infallible, time::Duration};
 
@@ -357,18 +362,13 @@ mod tests {
         async fn attach_source(&self, _source: Src) {}
     }
 
-    impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
+    impl<S: Send> StateSyncDb<deterministic::Context, S> for TestDb {
         type SyncError = Infallible;
 
         async fn sync_db(
             _context: deterministic::Context,
             _config: Self::Config,
-            _resolver: NoopResolver,
-            _target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            _finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            _session: SyncSession<S, Self::SyncTarget>,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
         }
@@ -379,6 +379,61 @@ mod tests {
         let (acknowledgement, waiter) = Exact::handle();
         drop(Deferred::from(acknowledgement));
         assert!(waiter.now_or_never().is_none());
+    }
+
+    #[test]
+    fn startup_serves_recovered_state_as_generation_zero() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-serve", 1);
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal_fixture"),
+                "startup-serve",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
+            let resolver = crate::stateful::tests::common::CapturingResolver::new(NoopResolver);
+            let (stateful, _mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp,
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox, marshal.floor),
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: resolver.clone(),
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    prune_config: None,
+                },
+            );
+            let handle = stateful.start();
+
+            // No block is ever reported: the recovered state alone must install as
+            // generation zero and begin serving.
+            loop {
+                let source = resolver.source.lock().clone();
+                if let Some(source) = source
+                    && crate::stateful::db::ServeSource::latest(&source).is_some()
+                {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            handle.abort();
+        });
     }
 
     #[test]

@@ -16,7 +16,8 @@ type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Result of forwarding a target update to the state-sync coordinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpdateOutcome {
-    /// The live coordinator recorded the target update.
+    /// The update was forwarded to the live coordinator. The observation barrier
+    /// confirms recording.
     Observed,
     /// State sync completed and published its artifact on the completion channel.
     SyncCompleted,
@@ -29,7 +30,7 @@ where
 {
     UpdateTargets {
         update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
-        /// Reports whether the update was accepted or sync already completed.
+        /// Reports whether the update was forwarded or sync already completed.
         response: oneshot::Sender<UpdateOutcome>,
     },
 }
@@ -88,6 +89,8 @@ where
     /// Sends a target update and waits until the live sync coordinator records it.
     ///
     /// If sync already completed, the artifact arrives on the completion channel.
+    /// Callers must race this future against `context.stopped()`: if the syncer dies
+    /// abnormally, the retry loop would otherwise panic on the closed mailbox.
     pub async fn update_targets(
         &self,
         anchor: Anchor<BlockDigest<E, A>>,
@@ -105,7 +108,8 @@ where
             );
 
             let Ok(outcome) = receiver.await else {
-                // A newer queued update displaced this one before the syncer saw it.
+                // A newer queued update displaced this one before the syncer saw it,
+                // or the syncer died with the message queued (see the doc above).
                 continue;
             };
             if outcome == UpdateOutcome::SyncCompleted {

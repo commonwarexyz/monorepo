@@ -1,8 +1,8 @@
 //! Speculative execution engine for the [`Stateful`](super::Stateful) actor.
 //!
-//! The [`Processor`] owns the in-memory pending-tip DAG and the applied
-//! database set. It is the workhorse behind the actor's `Processing` mode,
-//! handling three operations:
+//! The [`Processor`] owns the in-memory pending-tip DAG, the applied database
+//! set, and the [`Publisher`] that serves snapshots. It is the workhorse
+//! behind the actor's `Processing` mode:
 //!
 //! - Propose/Verify: fork unmerkleized batches from a parent's pending
 //!   state (or from applied state), delegate to the [`Application`], and
@@ -15,9 +15,13 @@
 //!   into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   databases and start flushing them (durability is reported via
-//!   [`Barrier`]), then prune all pending entries at or below the
-//!   finalized round.
+//!   databases, start flushing them (durability is reported via
+//!   [`Barrier`](crate::stateful::db::Barrier)),
+//!   stage the generation's serving snapshot (returned in [`Applied`]), then
+//!   prune all pending entries at or below the finalized round.
+//!
+//! - Maintenance: [`Processor::prune_databases`] runs due prunes and
+//!   [`Processor::republish`] refreshes the published snapshot afterwards.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
 //! response channel, in-progress work stops at the next await point via
@@ -26,7 +30,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::metrics::Metrics as StatefulMetrics,
-    db::{Anchor, Barrier, DatabaseSet, SnapshotOf, UnmerkleizedOf},
+    db::{Anchor, DatabaseSet, PendingPublication, Publisher, SnapshotOf, UnmerkleizedOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -58,7 +62,6 @@ type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 pub(super) type PendingSyncTargets<A, E> =
     <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
-type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -84,15 +87,11 @@ pub(super) enum PrepareBatchesError {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T, S> {
-    /// The generation's captured snapshot, installed for serving once its barrier
-    /// proves durable.
-    pub(super) snapshot: S,
-
-    /// Deferred flush for the applied batch (see [`Barrier`]).
-    pub(super) barrier: Barrier,
+    /// The generation's staged snapshot and its durability barrier.
+    pub(super) publication: PendingPublication<S>,
 
     /// Prune made due by this finalization.
-    pub(super) prune: DeferredPrune<T>,
+    pub(super) prune: Option<Prune<T>>,
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -157,7 +156,7 @@ impl<T: Clone> Pruning<T> {
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
     /// matches the selected phase of the configured maintenance interval.
-    fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
+    fn observe_finalized(&mut self, height: Height, targets: T) -> Option<Prune<T>> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
             self.retained_targets.pop_front();
@@ -204,6 +203,7 @@ where
 {
     app: A,
     databases: A::Databases,
+    publisher: Publisher<SnapshotOf<A::Databases, E>>,
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
     metrics: StatefulMetrics,
@@ -215,11 +215,12 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Create a new processor with the given application, databases, and
-    /// the last finalized block's anchor.
+    /// Create a new processor with the given application, databases, the last
+    /// finalized block's anchor, and the publisher its generations install into.
     pub(super) const fn new(
         app: A,
         databases: A::Databases,
+        publisher: Publisher<SnapshotOf<A::Databases, E>>,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
@@ -227,6 +228,7 @@ where
         Self {
             app,
             databases,
+            publisher,
             pending: BTreeMap::new(),
             last_processed,
             metrics,
@@ -237,10 +239,11 @@ where
     /// Run a due prune against the owned database set: database pruning, then marshal
     /// pruning.
     ///
-    /// Database pruning never discards state a restart would need (see
-    /// [`DatabaseSet::prune`]), and the durable commit justifying its target
-    /// sits at or above the oldest retained block, so the marshal prune that
-    /// follows retains every block a restart could replay.
+    /// Callers must have observed every finalize barrier through `prune.barrier_height`
+    /// durable before calling. Database pruning never discards state a restart would
+    /// need (see [`DatabaseSet::prune`]), and the durable commit justifying its target
+    /// sits at or above the oldest retained block, so the marshal prune that follows
+    /// retains every block a restart could replay.
     pub(super) async fn prune_databases<S, V>(
         mut self,
         prune: Prune<PendingSyncTargets<A, E>>,
@@ -255,14 +258,15 @@ where
         self
     }
 
-    /// Capture a snapshot of the set's applied state.
+    /// Capture the set's applied state and install it for serving immediately.
     ///
-    /// Callers must prove the applied state durable before installing the
-    /// capture for serving.
-    pub(super) async fn snapshot(mut self) -> (Self, SnapshotOf<A::Databases, E>) {
+    /// Callers must ensure no finalize flush is pending, because the capture is
+    /// published without waiting for any barrier.
+    pub(super) async fn republish(mut self) -> Self {
         let (databases, snapshot) = self.databases.snapshot().await;
         self.databases = databases;
-        (self, snapshot)
+        self.publisher.install_durable(snapshot);
+        self
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -722,7 +726,7 @@ where
 
     /// Apply finalized state, start persisting it, and prune dead in-memory forks.
     ///
-    /// Hands the processor back alongside the applied artifacts; the artifacts are
+    /// Hands the processor back alongside the applied artifacts. The artifacts are
     /// [`None`] when the block was already processed (a duplicate report).
     pub(super) async fn finalize(
         mut self,
@@ -779,11 +783,12 @@ where
             }
         };
 
-        // Publication rides the barrier. The processing loop publishes this generation's
-        // captured snapshot only after the barrier proves every member flush durable, so
-        // a published snapshot can never expose state a crash could roll back.
+        // Staging inside finalize makes serving generations follow apply order. The
+        // caller installs the staged snapshot only after the barrier proves every
+        // member flush durable, so serving never exposes state a crash could lose.
         let (databases, snapshot, barrier) = self.databases.finalize(batch).await;
         self.databases = databases;
+        let publication = PendingPublication::new(self.publisher.stage(snapshot), barrier);
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -797,14 +802,7 @@ where
         };
         timer.observe(context);
 
-        (
-            self,
-            Some(Applied {
-                snapshot,
-                barrier,
-                prune,
-            }),
-        )
+        (self, Some(Applied { publication, prune }))
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -967,7 +965,10 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf},
+        db::{
+            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, SyncTargetsOf,
+            UnmerkleizedOf,
+        },
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -1403,13 +1404,14 @@ mod tests {
             let databases =
                 DbSet::<deterministic::Context>::init(context.child("db_set"), config.clone())
                     .await;
-            let (databases, _genesis) = DbSet::<deterministic::Context>::snapshot(databases).await;
             let metrics = StatefulMetrics::new(&context);
+            let (publisher, _source) = Publisher::new(&context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
                     app,
                     databases,
+                    publisher,
                     Anchor {
                         height: Height::zero(),
                         round: Block::genesis().context().round,
@@ -1549,10 +1551,13 @@ mod tests {
                 .finalize(self.context_cell.as_present(), &block)
                 .await;
             self.processor = processor;
-            let Some(Applied { barrier, .. }) = applied else {
+            let Some(Applied { publication, .. }) = applied else {
                 return (self, false);
             };
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert!(
+                publication.install_when_durable().await,
+                "finalize flush must complete"
+            );
             (self, true)
         }
 
@@ -1569,12 +1574,11 @@ mod tests {
                 .finalize(self.context_cell.as_present(), &block)
                 .await;
             self.processor = processor;
-            let Applied {
-                snapshot: _,
-                barrier,
-                prune,
-            } = applied.expect("finalized block must apply");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            let Applied { publication, prune } = applied.expect("finalized block must apply");
+            assert!(
+                publication.install_when_durable().await,
+                "finalize flush must complete"
+            );
             (self, prune)
         }
 
@@ -1780,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalization_returns_deferred_prune() {
+    fn execution_finalization_defers_prune_until_window_full() {
         deterministic::Runner::default().start(|context| async move {
             let provider = MapProvider::default();
             let config = qmdb_config("db_config", &context);

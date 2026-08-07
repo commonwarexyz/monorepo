@@ -6,7 +6,7 @@
 //! handle and dropping one never drops the database.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncSession,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
@@ -45,7 +45,7 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use commonware_utils::{Array, non_empty_range};
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -66,7 +66,7 @@ where
 
 /// Staged batch returned by [`CurrentUnmerkleized::stage`], wrapping a QMDB [`Staged`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the owning database: it
+/// A branch-scoped view of the owning database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
 /// (see [`MerkleizedBatch`]'s branch-validity contract).
 pub struct CurrentStaged<F, H, U, const N: usize, S>
@@ -435,6 +435,8 @@ where
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     fn matches(&self, target: &Self::SyncTarget) -> bool {
+        // Checks the ops root replay sync verifies against. `root()` returns the
+        // grafted root, deliberately not compared here.
         self.ops_root() == target.root
             && *target.range.start() == self.sync_boundary()
             && *target.range.end() == self.bounds().tip.size
@@ -535,12 +537,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -628,12 +627,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -799,12 +795,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -897,12 +890,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -934,24 +924,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -982,24 +957,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -1031,24 +991,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -1080,24 +1025,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -1400,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
+    fn ordered_merkleized_matches_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-matches-sync-target", &context);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
@@ -1439,6 +1369,11 @@ mod tests {
             wrong_range.range =
                 non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!merkleized.matches(&wrong_range));
+
+            let mut wrong_start = valid_target.clone();
+            wrong_start.range =
+                non_empty_range!(valid_target.range.start() + 1, valid_target.range.end());
+            assert!(!merkleized.matches(&wrong_start));
         });
     }
 
@@ -1483,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
+    fn unordered_merkleized_matches_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config.clone())
@@ -1521,6 +1456,11 @@ mod tests {
             wrong_range.range =
                 non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!merkleized.matches(&wrong_range));
+
+            let mut wrong_start = valid_target.clone();
+            wrong_start.range =
+                non_empty_range!(valid_target.range.start() + 1, valid_target.range.end());
+            assert!(!merkleized.matches(&wrong_start));
         });
     }
 }

@@ -258,6 +258,11 @@ pub enum Error<F: Family> {
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
+    /// A rewind reached the requested position, but the resulting state does not
+    /// match the requested target.
+    #[error("rewound state does not match the sync target")]
+    RewindTargetMismatch,
+
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]
     FloorRegressed(Location<F>, Location<F>),

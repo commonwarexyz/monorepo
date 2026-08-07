@@ -1,25 +1,24 @@
-//! Durable snapshot publication, the writer's post-durability handoff to serving.
+//! Publication of durable snapshots: how state moves from the writer to serving.
 //!
-//! [`super::DatabaseSet::finalize`] captures one snapshot per member at the apply boundary
-//! and returns it with the generation's [`super::Barrier`]. Actor orchestration stages the
-//! capture through a [`Publisher`] and installs it once the barrier proves every member
-//! durable; resolver actors serve the latest installed generation through cloned
-//! [`MemberSource`]s. Publication is atomic at the set level because one [`SetSnapshot`]
-//! carries every member: a single source load can never observe members from different
-//! generations. That atomicity covers one [`ServeSource::serve`] (or `latest`) call;
-//! independent calls may straddle an installation and observe different generations.
-//! While a generation's durability is pending, sources continue to serve the previous
-//! installed generation.
+//! [`super::DatabaseSet::finalize`] captures one snapshot per member database as it
+//! applies a batch and returns it with the generation's [`super::Barrier`]. The owning
+//! actor stages the capture through a [`Publisher`] and installs it once the barrier
+//! proves every member flush durable. Resolver actors serve the latest installed
+//! generation through cloned [`MemberSource`]s. One [`SetSnapshot`] carries every
+//! member, so a single [`ServeSource::latest`] call always sees members from the same
+//! generation. Two separate calls may straddle an installation and see different
+//! generations. While a generation's flush is pending, sources keep serving the
+//! previous installed generation.
 //!
 //! Flushes may be pipelined, so several staged generations can await durability at once.
-//! Staging order fixes generation numbers and installation is monotone, which keeps the
-//! served sequence moving forward even if pool completions are observed out of order.
+//! Staging assigns generation numbers and installation is monotone: a slow flush that
+//! finishes after a newer one can never move serving backward.
 //!
-//! A source serves nothing before the first installation (the node has not finished
-//! starting) and nothing after the [`Publisher`] drops (writer failure and clean shutdown
-//! degrade identically); snapshots already handed out drain naturally. Serving code sees
-//! only [`ServeSource::serve`]'s `Option`. The distinction between those states, like the
-//! generation numbers, stays internal.
+//! A source serves nothing before the first installation (the node is still starting)
+//! and nothing after the [`Publisher`] drops (writer failure and clean shutdown look
+//! the same to readers). Snapshots already handed out keep working until dropped.
+//! Serving code sees only [`ServeSource::latest`]'s `Option`. The states behind it,
+//! like the generation numbers, stay internal.
 
 use commonware_runtime::{Metrics as RuntimeMetrics, telemetry::metrics::Registered};
 use commonware_utils::sync::Mutex;
@@ -35,7 +34,7 @@ pub(crate) struct SetSnapshot<S> {
 }
 
 impl<S> SetSnapshot<S> {
-    /// Monotonically increasing installation identifier (the set's commit generation).
+    /// Monotonically increasing installation identifier, assigned in staging order.
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }
@@ -90,12 +89,12 @@ impl Metrics {
     fn register<E: RuntimeMetrics>(context: &E) -> Self {
         Self {
             generation: context.register(
-                "published_generation",
+                "installed_generation",
                 "Generation of the latest installed snapshot",
                 Gauge::default(),
             ),
             installed: context.register(
-                "publications",
+                "installations",
                 "Snapshot installations since startup",
                 Counter::default(),
             ),
@@ -128,9 +127,8 @@ impl<S> Publisher<S> {
 
     /// Stage `members` as the next generation, returning the token that installs it.
     ///
-    /// Staging fixes the generation number, so callers must stage in apply order. The token
-    /// must be installed only after the generation's durability is proven. The caller holds
-    /// it across the barrier await and installs on success.
+    /// Staging assigns the next generation number, so callers must stage in apply order.
+    /// Install the token only once the generation is durable.
     pub(crate) fn stage(&mut self, members: S) -> Staged<S> {
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -143,8 +141,8 @@ impl<S> Publisher<S> {
         }
     }
 
-    /// Stage and immediately install `members`, for state that is already durable
-    /// (startup recovery and sync handoff).
+    /// Stage and immediately install `members`, for state whose durability is
+    /// already proven.
     pub(crate) fn install_durable(&mut self, members: S) {
         self.stage(members).install();
     }
@@ -152,8 +150,9 @@ impl<S> Publisher<S> {
 
 impl<S> Drop for Publisher<S> {
     fn drop(&mut self) {
-        // Detach serving so new requests decline while held snapshots drain. Drop
-        // the displaced snapshot outside the lock.
+        // Detach serving: new requests get nothing, while snapshots already handed
+        // out keep working until dropped. Drop the displaced snapshot outside the
+        // lock.
         let mut state = self.slot.state.lock();
         let replaced = std::mem::replace(&mut *state, State::Detached);
         drop(state);
@@ -161,10 +160,10 @@ impl<S> Drop for Publisher<S> {
     }
 }
 
-/// A staged generation awaiting its durability proof.
+/// A staged generation waiting to be proven durable.
 ///
-/// Dropping the token without installing simply skips this generation, as on a runtime
-/// shutdown before its flush completed. Later generations still install.
+/// Dropping the token without installing simply skips this generation, as when the
+/// runtime shuts down before its flush completes. Later generations still install.
 pub(crate) struct Staged<S> {
     slot: Arc<Slot<S>>,
     snapshot: Arc<SetSnapshot<S>>,
@@ -172,16 +171,17 @@ pub(crate) struct Staged<S> {
 
 impl<S> Staged<S> {
     /// Install the staged generation unless a newer one already installed.
-    pub(crate) fn install(self) {
+    pub(super) fn install(self) {
         self.slot.install(self.snapshot);
     }
 }
 
 /// A reader-side handle to the latest installed generation.
 ///
-/// Cloned freely. Each request clones the current generation's Arc once and uses that
-/// generation for its whole lifetime. Public only so set implementations can name it in
-/// [`super::DatabaseSet::member_sources`]; everything it can do is crate-internal.
+/// Cloned freely. Each request clones the current generation's Arc once and keeps
+/// using that generation even if a newer one installs mid-request. Public only so set
+/// implementations can name it in [`super::DatabaseSet::member_sources`]. Everything
+/// it can do is crate-internal.
 pub struct SetSource<S> {
     slot: Arc<Slot<S>>,
 }
@@ -205,10 +205,10 @@ impl<S> SetSource<S> {
     }
 }
 
-/// A source projected to one member of the set.
+/// A source narrowed to one member of the set.
 ///
-/// Reads the set atomically (one slot load), then clones the member's snapshot Arc, so
-/// per-member serving still can never observe a torn cross-member generation.
+/// Loads the whole set once, then clones out one member's snapshot, so even per-member
+/// reads always come from a single generation.
 pub struct MemberSource<S, M> {
     source: SetSource<S>,
     project: fn(&S) -> &M,
@@ -223,12 +223,12 @@ impl<S, M> Clone for MemberSource<S, M> {
     }
 }
 
-impl<S, M: Clone> MemberSource<S, M> {
+impl<S, M> MemberSource<S, M> {
     /// Create a projection of `source` via `project`.
     ///
     /// Public so [`super::DatabaseSet::member_sources`] is implementable outside this
-    /// crate; the source only reads installed generations, so nothing mutation-capable
-    /// escapes.
+    /// crate. The source only reads installed generations, so it exposes nothing that
+    /// can mutate the database.
     pub fn new(source: SetSource<S>, project: fn(&S) -> &M) -> Self {
         Self { source, project }
     }
@@ -244,7 +244,7 @@ pub trait ServeSource: Clone + Send + Sync + 'static {
 
     /// The serving handle for the latest installed generation, or `None` when there is
     /// nothing to serve (before the node finishes starting, or after writer shutdown).
-    fn serve(&self) -> Option<Self::Serve>;
+    fn latest(&self) -> Option<Self::Serve>;
 }
 
 impl<S, M> ServeSource for MemberSource<S, M>
@@ -254,7 +254,7 @@ where
 {
     type Serve = M;
 
-    fn serve(&self) -> Option<M> {
+    fn latest(&self) -> Option<M> {
         let set = self.source.latest()?;
         Some((self.project)(set.members()).clone())
     }
@@ -307,6 +307,19 @@ mod tests {
     }
 
     #[test]
+    fn install_after_publisher_drop_stays_detached() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, source) = Publisher::<u32>::new(&context);
+            // A pool future can outlive the publisher, so its install must not
+            // resurrect a live state.
+            let staged = publisher.stage(1);
+            drop(publisher);
+            staged.install();
+            assert!(source.latest().is_none());
+        });
+    }
+
+    #[test]
     fn dropped_stage_skips_a_generation() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, source) = Publisher::<u32>::new(&context);
@@ -320,15 +333,15 @@ mod tests {
     }
 
     #[test]
-    fn member_projection_is_atomic() {
+    fn member_source_projects_installed_member() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, source) = Publisher::<(u32, u32)>::new(&context);
             let member: MemberSource<(u32, u32), u32> = MemberSource::new(source, |set| &set.0);
-            assert!(member.serve().is_none());
+            assert!(member.latest().is_none());
             publisher.install_durable((1, 10));
-            assert_eq!(member.serve(), Some(1));
+            assert_eq!(member.latest(), Some(1));
             publisher.install_durable((2, 20));
-            assert_eq!(member.serve(), Some(2));
+            assert_eq!(member.latest(), Some(2));
         });
     }
 }

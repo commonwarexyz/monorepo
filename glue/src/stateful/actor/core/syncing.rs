@@ -6,7 +6,7 @@ use crate::stateful::{
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, DatabaseSet, Publisher, SnapshotOf},
+    db::{Anchor, Publisher, SnapshotOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -38,8 +38,10 @@ type HeldVerifyRequest<E, A> =
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
-    Covered(B, Deferred),
+    /// At or below the sync anchor: already reflected in the synced state, so the
+    /// application is only notified.
     Reflected(B, Deferred),
+    /// Above the sync anchor: applied against the synced databases.
     Apply(B, Deferred),
 }
 
@@ -87,8 +89,7 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// Publisher for serving snapshots. The synced state installs as
-    /// generation zero during the transition to processing.
+    /// Publisher for serving snapshots, handed to the [`Processor`] at transition.
     pub(super) publisher: Publisher<SnapshotOf<A::Databases, E>>,
 
     /// Signals that the syncer has produced a usable artifact.
@@ -120,7 +121,7 @@ where
                     .retain(|request| !request.response.is_closed());
             },
             on_stopped => {
-                debug!("processor received shutdown signal");
+                debug!("shutdown signal received, stopping syncing");
             },
             Ok(artifact) = &mut self.sync_completed else {
                 error!("syncer stopped before publishing state sync artifact");
@@ -133,7 +134,7 @@ where
                 return;
             },
             Some(message) = self.mailbox.recv() else {
-                debug!("mailbox closed, shutting down processor");
+                debug!("mailbox closed, stopping syncing");
                 break;
             } => match message {
                 Message::Propose {
@@ -248,14 +249,17 @@ where
         match outcome {
             syncer::UpdateOutcome::Observed => {}
             syncer::UpdateOutcome::SyncCompleted => {
-                // The syncer sent the artifact on the completion channel. Collect it here
-                // so the pending finalizations hand off against the newest target.
+                // The syncer sent the artifact on the completion channel. Collect it
+                // here so the pending finalizations are handed off under the newest
+                // recorded target.
                 let artifact = select! {
                     _ = self.context.stopped() => return (self, false),
                     artifact = &mut self.sync_completed => match artifact {
                         Ok(artifact) => artifact,
                         Err(_) => {
-                            error!("syncer stopped before publishing state sync artifact");
+                            // The consumed receiver must not be polled again. Leave a
+                            // dead one so the loop's completion arm logs and stops.
+                            self.sync_completed = oneshot::channel().1;
                             return (self, false);
                         }
                     },
@@ -289,7 +293,7 @@ where
         } in finalized
         {
             if block.height() < artifact.anchor.height {
-                handoffs.push_back(FinalizedHandoff::Covered(block, acknowledgement));
+                handoffs.push_back(FinalizedHandoff::Reflected(block, acknowledgement));
                 continue;
             }
             if block.height() == artifact.anchor.height {
@@ -315,58 +319,60 @@ where
 
     /// Transitions to [`Processing`] state once the database set has converged
     /// on the state sync [`Anchor`].
-    async fn transition(
-        mut self,
-        handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>,
-    ) {
-        let artifact = self.artifact.take().expect("transition must have artifact");
-        let mut completed_height = artifact.anchor.height;
+    async fn transition(self, handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>) {
+        // Take only what processing needs. The syncer mailbox, completion channel,
+        // and handed-off finalizations drop here instead of living for the
+        // actor's remaining life.
+        let Self {
+            context,
+            mailbox,
+            application,
+            provider,
+            marshal,
+            sync_metadata,
+            syncer: _,
+            held_verify_requests,
+            artifact,
+            publisher,
+            sync_completed: _,
+            pending_finalizations: _,
+            pruning,
+            metrics,
+        } = self;
+        let SyncResult { databases, anchor } = artifact.expect("transition must have artifact");
+        let mut completed_height = anchor.height;
 
-        let _ = self.metrics.sync_done.try_set(1);
-        // Install the synced committed state as generation zero so serving can begin
-        // before the first finalization; synced state is durable by construction.
-        let mut publisher = self.publisher;
-        let (databases, synced) = artifact.databases.snapshot().await;
-        publisher.install_durable(synced);
-        let mut processor = Processor::new(
-            self.application,
-            databases,
-            artifact.anchor,
-            self.metrics,
-            self.pruning,
-        );
+        let _ = metrics.sync_done.try_set(1);
+        let mut processor =
+            Processor::new(application, databases, publisher, anchor, metrics, pruning);
+        // Publish the synced state as generation zero so serving can begin before
+        // the first finalization. Synced state is durable by construction.
+        processor = processor.republish().await;
 
         let mut pending_prune = None;
 
         for handoff in handoffs {
             match handoff {
-                FinalizedHandoff::Covered(block, acknowledgement)
-                | FinalizedHandoff::Reflected(block, acknowledgement) => {
+                FinalizedHandoff::Reflected(block, acknowledgement) => {
                     processor
-                        .notify_finalized(self.context.as_present(), block.as_ref())
+                        .notify_finalized(context.as_present(), block.as_ref())
                         .await;
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     let (returned, applied) = processor
-                        .finalize(self.context.as_present(), block.as_ref())
+                        .finalize(context.as_present(), block.as_ref())
                         .await;
                     processor = returned;
-                    let Applied {
-                        snapshot,
-                        barrier,
-                        prune,
-                    } = applied.expect("sync handoff block cannot be a duplicate");
+                    let Applied { publication, prune } =
+                        applied.expect("sync handoff block cannot be a duplicate");
 
                     // The processing loop's flush pool does not exist yet, so observe the
-                    // deferred flush inline. Keep state-sync metadata in progress until every
-                    // handoff block is durable, and install each staged snapshot only once
-                    // its flush proves durable.
-                    let staged = publisher.stage(snapshot);
-                    if !barrier.durable().await {
+                    // deferred flush inline. Keep state-sync metadata in progress until
+                    // every handoff block is durable.
+                    if !publication.install_when_durable().await {
                         return;
                     }
-                    staged.install();
                     acknowledgement.acknowledge();
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -379,24 +385,22 @@ where
         }
 
         // Every applied handoff is durable, so completion can advance through the last one before
-        // pruning.
-        self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
+        // pruning. The metadata is finished after this and drops here.
+        let _ = sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
-            processor = processor.prune_databases(prune, &self.marshal).await;
-            // The published snapshot was captured before this prune; recapture so
+            processor = processor.prune_databases(prune, &marshal).await;
+            // The published snapshot was captured before this prune. Republish so
             // serving stops pinning the pruned state. Every handoff barrier was
             // awaited above, so the capture is already durable.
-            let (returned, snapshot) = processor.snapshot().await;
-            processor = returned;
-            publisher.install_durable(snapshot);
+            processor = processor.republish().await;
         }
 
-        for request in self.held_verify_requests.drain(..) {
+        for request in held_verify_requests {
             let process = info_span!(parent: &request.span, "stateful.actor.replay_verify");
             processor
                 .verify(
-                    self.context.as_present(),
-                    self.marshal.clone(),
+                    context.as_present(),
+                    marshal.clone(),
                     request.context,
                     request.ancestry,
                     request.response,
@@ -406,12 +410,11 @@ where
         }
 
         Processing {
-            context: self.context,
-            mailbox: self.mailbox,
-            provider: self.provider,
-            marshal: self.marshal,
+            context,
+            mailbox,
+            provider,
+            marshal,
             processor,
-            publisher,
             skip_finalized_until: Some(completed_height),
         }
         .start()
@@ -436,7 +439,7 @@ mod tests {
             fixtures::{self, MarshalFixture},
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor,
-                test_databases,
+                served_generation, test_databases,
             },
         },
     };
@@ -471,12 +474,6 @@ mod tests {
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
         source: SetSource<()>,
-    }
-
-    /// The generation served by `source`, or `None` before the first install and
-    /// after the publisher drops.
-    fn served_generation(source: &SetSource<()>) -> Option<u64> {
-        source.latest().map(|snapshot| snapshot.generation())
     }
 
     impl TestHarness<deterministic::Context> {
@@ -678,7 +675,7 @@ mod tests {
             let mut handoffs = harness.syncing.prepare_handoffs(finalized);
             assert!(matches!(
                 handoffs.pop_front(),
-                Some(FinalizedHandoff::Covered(block, _))
+                Some(FinalizedHandoff::Reflected(block, _))
                     if block.height() == Height::new(u64::MAX - 3)
             ));
             assert!(matches!(
@@ -728,7 +725,7 @@ mod tests {
                 .prepare_handoffs([pending(TestBlock::new(6, 8))]);
             assert!(matches!(
                 handoffs.front(),
-                Some(FinalizedHandoff::Covered(block, _)) if block.height() == Height::new(6)
+                Some(FinalizedHandoff::Reflected(block, _)) if block.height() == Height::new(6)
             ));
         });
     }

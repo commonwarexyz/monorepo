@@ -78,13 +78,13 @@ type QmdbB<E> =
 pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
 /// Serving sources projected from the set's published snapshots, one per member.
-type SetSnapshot<E> = SnapshotOf<MultiDatabaseSet<E>, E>;
+type MultiSnapshot<E> = SnapshotOf<MultiDatabaseSet<E>, E>;
 type SrcA<E> = crate::stateful::db::MemberSource<
-    SetSnapshot<E>,
+    MultiSnapshot<E>,
     <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
 type SrcB<E> = crate::stateful::db::MemberSource<
-    SetSnapshot<E>,
+    MultiSnapshot<E>,
     <QmdbB<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
 
@@ -649,7 +649,7 @@ impl EngineDefinition for MultiDbEngine {
             let sources = prune_observer.clone();
             Box::pin(async move {
                 let source = sources.lock().clone().expect("source must be attached");
-                let snapshot = crate::stateful::db::ServeSource::serve(&source)
+                let snapshot = crate::stateful::db::ServeSource::latest(&source)
                     .expect("a published generation must exist");
                 snapshot.bounds().start
             })

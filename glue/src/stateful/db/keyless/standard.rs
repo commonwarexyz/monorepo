@@ -6,7 +6,7 @@
 //! owning database.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncSession,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -34,7 +34,7 @@ use commonware_storage::{
         sync::{self, Target as AnySyncTarget},
     },
 };
-use commonware_utils::{channel::mpsc, non_empty_range};
+use commonware_utils::non_empty_range;
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps a keyless [`UnmerkleizedBatch`] to implement
@@ -49,7 +49,7 @@ where
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
+    inactivity_floor: Location<F>,
 }
 
 impl<F, V, H, S> Deref for KeylessUnmerkleized<F, V, H, S>
@@ -84,13 +84,14 @@ where
 
     /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
     ///
-    /// If unset, [`merkleize`](UnmerkleizedTrait::merkleize) will use the [`Default`] of [`Location`].
+    /// If unset, the batch carries forward the floor it forked from. The floor must never
+    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+        self.inactivity_floor = floor;
         self
     }
 
-    /// Read a value by location, falling back to the owning database's committed state.
+    /// Read a value by location, falling back to `db`'s committed state.
     pub async fn get<E, C>(
         &self,
         location: Location<F>,
@@ -103,7 +104,7 @@ where
         self.batch.get(location, db).await
     }
 
-    /// Read multiple values by location, falling back to the owning database's committed state.
+    /// Read multiple values by location, falling back to `db`'s committed state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
@@ -162,7 +163,7 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to the owning database's committed state.
+    /// Read a value by location, falling back to `db`'s committed state.
     pub async fn get<E, C>(
         &self,
         location: Location<F>,
@@ -175,7 +176,7 @@ where
         self.inner.get(location, db).await
     }
 
-    /// Read multiple values by location, falling back to the owning database's committed state.
+    /// Read multiple values by location, falling back to `db`'s committed state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
@@ -209,7 +210,7 @@ where
     async fn merkleize(self, db: &Keyless<F, E, V, C, H, S>) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
-            .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
+            .merkleize(db, self.metadata, self.inactivity_floor)
             .await;
         Ok(KeylessMerkleized { inner: merkleized })
     }
@@ -241,7 +242,7 @@ where
         KeylessUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inner.bounds().inactivity_floor,
         }
     }
 }
@@ -283,7 +284,7 @@ where
         KeylessUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inactivity_floor_loc(),
         }
     }
 
@@ -317,12 +318,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -364,7 +362,7 @@ where
         KeylessUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inactivity_floor_loc(),
         }
     }
 
@@ -398,12 +396,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -422,24 +417,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -457,24 +437,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -576,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
+    fn merkleized_matches_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -612,6 +577,53 @@ mod tests {
                 ),
             );
             assert!(!merkleized.matches(&wrong_end));
+        });
+    }
+
+    /// A batch that does not set the floor must carry the parent's floor forward,
+    /// not regress it to zero.
+    #[test]
+    fn unset_floor_carries_forward_across_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-keyless-floor-carry", &context);
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+                .await
+                .unwrap();
+            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
+            durability.await.expect("finalize flush failed");
+
+            // A fresh batch without an explicit floor must commit at the raised
+            // floor instead of regressing it to zero.
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db).append(U64::new(8));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+                .await
+                .unwrap();
+            let fork = MerkleizedTrait::new_batch(&merkleized);
+            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
+            durability.await.expect("finalize flush failed");
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target.range.start(), mmr::Location::new(1));
+
+            // The same holds for a batch forked from a merkleized parent.
+            let fork = fork.append(U64::new(9));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork, &db)
+                .await
+                .unwrap();
+            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
+            durability.await.expect("finalize flush failed");
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target.range.start(), mmr::Location::new(1));
         });
     }
 }

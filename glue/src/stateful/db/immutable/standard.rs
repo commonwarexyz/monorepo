@@ -6,7 +6,7 @@
 //! immutable proof snapshot carries no keyed index.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncSession,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -36,7 +36,7 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use commonware_utils::{Array, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps an immutable [`UnmerkleizedBatch`] to implement
@@ -52,7 +52,7 @@ where
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
+    inactivity_floor: Location<F>,
 }
 
 impl<F, K, V, H, S> Deref for ImmutableUnmerkleized<F, K, V, H, S>
@@ -89,13 +89,14 @@ where
 
     /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
     ///
-    /// If unset, [`merkleize`](UnmerkleizedTrait::merkleize) will use the [`Default`] of [`Location`].
+    /// If unset, the batch carries forward the floor it forked from. The floor must never
+    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+        self.inactivity_floor = floor;
         self
     }
 
-    /// Read a value by key, falling back to the owning database's committed state.
+    /// Read a value by key, falling back to `db`'s committed state.
     pub async fn get<E, C, T>(
         &self,
         key: &K,
@@ -109,7 +110,7 @@ where
         self.batch.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to the owning database's committed state.
+    /// Read multiple values by key, falling back to `db`'s committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, T>(
@@ -171,7 +172,7 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to the owning database's committed state.
+    /// Read a value by key, falling back to `db`'s committed state.
     pub async fn get<E, C, T>(
         &self,
         key: &K,
@@ -185,7 +186,7 @@ where
         self.inner.get(key, db).await
     }
 
-    /// Read multiple values by key, falling back to the owning database's committed state.
+    /// Read multiple values by key, falling back to `db`'s committed state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, T>(
@@ -224,7 +225,7 @@ where
     ) -> Result<Self::Merkleized, Error<F>> {
         let merkleized = self
             .batch
-            .merkleize(db, self.metadata, self.inactivity_floor.unwrap_or_default())
+            .merkleize(db, self.metadata, self.inactivity_floor)
             .await;
         Ok(ImmutableMerkleized { inner: merkleized })
     }
@@ -257,7 +258,7 @@ where
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inner.bounds().inactivity_floor,
         }
     }
 }
@@ -301,7 +302,7 @@ where
         ImmutableUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inactivity_floor_loc(),
         }
     }
 
@@ -335,12 +336,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -385,7 +383,7 @@ where
         ImmutableUnmerkleized {
             batch: Self::new_batch(self),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inactivity_floor_loc(),
         }
     }
 
@@ -419,12 +417,9 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
+        if db.sync_target() != target {
+            return Err(Error::RewindTargetMismatch);
+        }
         Ok(db)
     }
 }
@@ -445,24 +440,9 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
     }
 }
 
@@ -483,23 +463,152 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<R, Self::SyncTarget>,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
+        sync_standard_db(context, config, session).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_storage::{
+        journal::contiguous::{Contiguous as _, fixed::Config as FixedJournalConfig},
+        merkle::full::Config as MerkleConfig,
+        mmr,
+        translator::TwoCap,
+    };
+    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    type FixedDb =
+        fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+    type VariableDb = variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<TwoCap, Sequential> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        fixed::Config {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            log: FixedJournalConfig {
+                partition: format!("log-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
+            translator: TwoCap,
+            init_cache_size: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+        }
+    }
+
+    fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
+
+    fn assert_state_sync_db<T, R>()
+    where
+        T: StateSyncDb<deterministic::Context, R>,
+    {
+    }
+
+    #[test]
+    fn immutable_trait_impls_compile() {
+        assert_managed_db::<FixedDb>();
+        assert_managed_db::<VariableDb>();
+        assert_state_sync_db::<FixedDb, Arc<FixedDb>>();
+        assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
+    }
+
+    #[test]
+    fn managed_db_finalize_commits_fixed_immutable_batches() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-immutable-managed-db", &context);
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db).set(key, value);
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+                .await
+                .unwrap();
+
+            let (db, snapshot, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
+            durability.await.expect("finalize flush failed");
+
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target.root, db.root());
+            assert_eq!(
+                mmr::Location::new(snapshot.bounds().end),
+                *target.range.end(),
+                "captured snapshot must cover the applied batch",
+            );
+        });
+    }
+
+    #[test]
+    fn merkleized_matches_rejects_wrong_replay_range() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-immutable-matches", &context);
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db).set(key, value);
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+                .await
+                .unwrap();
+
+            let valid_target = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    merkleized.bounds().tip.size
+                ),
+            );
+            assert!(merkleized.matches(&valid_target));
+
+            let wrong_start = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
+                    merkleized.bounds().inactivity_floor + 1,
+                    merkleized.bounds().tip.size
+                ),
+            );
+            assert!(!merkleized.matches(&wrong_start));
+
+            let wrong_end = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    merkleized.bounds().tip.size - 1
+                ),
+            );
+            assert!(!merkleized.matches(&wrong_end));
+        });
     }
 }

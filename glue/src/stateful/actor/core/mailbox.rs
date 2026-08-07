@@ -193,7 +193,7 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         // We must panic if we don't get a response; We cannot override the decision
-        // of the application based on the availabilitiy of the actor.
+        // of the application based on the availability of the actor.
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.verify",

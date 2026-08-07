@@ -1,6 +1,8 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Unmerkleized, UnmerkleizedOf},
+    db::{
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, SetSource, Unmerkleized, UnmerkleizedOf,
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -16,6 +18,12 @@ use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{convert::Infallible, marker::PhantomData, sync::Arc};
 
+/// The generation served by `source`, or `None` before the first install and
+/// after the publisher drops.
+pub(crate) fn served_generation(source: &SetSource<()>) -> Option<u64> {
+    source.latest().map(|snapshot| snapshot.generation())
+}
+
 pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
@@ -23,6 +31,8 @@ pub(crate) type TestVariant = Standard<TestBlock>;
 /// No-op batch for mock databases. Merkleizes against any database type.
 pub(crate) struct TestUnmerkleized<T = u64>(PhantomData<fn(T)>);
 
+/// Merkleized counterpart of [`TestUnmerkleized`]. Its `matches()` accepts every
+/// sync target, so mismatch paths need real wrappers.
 pub(crate) struct TestMerkleized<T = u64>(PhantomData<fn(T)>);
 
 impl<T> TestUnmerkleized<T> {
