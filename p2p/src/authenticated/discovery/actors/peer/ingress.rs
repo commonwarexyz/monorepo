@@ -5,6 +5,8 @@ use commonware_runtime::Metrics;
 use commonware_utils::{NZUsize, channel::ring};
 use futures::Sink;
 #[cfg(test)]
+use futures::StreamExt as _;
+#[cfg(test)]
 use std::sync::mpsc::TryRecvError;
 use std::{collections::VecDeque, fmt, num::NonZeroUsize, pin::Pin};
 
@@ -16,22 +18,13 @@ pub enum Message<C: PublicKey> {
 
     /// Send a list of [types::Info] to the peer.
     Peers(Vec<types::Info<C>>),
-
-    /// Kill the peer actor.
-    Kill,
 }
 
 impl<C: PublicKey> UnreliablePolicy for Message<C> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
-        if matches!(message, Self::Kill) {
-            overflow.clear();
-            overflow.push_back(message);
-            true
-        } else {
-            false
-        }
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
+        false
     }
 }
 
@@ -53,6 +46,10 @@ impl<C: PublicKey> Receiver<C> {
 
     pub fn try_recv(&mut self) -> Result<Message<C>, TryRecvError> {
         self.messages.try_recv()
+    }
+
+    pub async fn killed(&mut self) -> bool {
+        self.kill.next().await.is_some()
     }
 }
 
@@ -80,7 +77,6 @@ impl<C: PublicKey> Mailbox<C> {
     pub fn kill(&self) {
         let mut kill = self.kill.clone();
         let _ = Pin::new(&mut kill).start_send(());
-        let _ = self.messages.enqueue(Message::Kill);
     }
 }
 
@@ -104,9 +100,10 @@ mod tests {
     use super::*;
     use commonware_cryptography::ed25519;
     use commonware_utils::NZUsize;
+    use futures::FutureExt as _;
 
     #[test]
-    fn kill_retained_on_overflow() {
+    fn kill_delivered_despite_full_mailbox() {
         let (mailbox, mut receiver) =
             Mailbox::<ed25519::PublicKey>::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox.peers(Vec::new());
@@ -114,7 +111,7 @@ mod tests {
         mailbox.kill();
 
         assert!(matches!(receiver.try_recv(), Ok(Message::Peers(_))));
-        assert!(matches!(receiver.try_recv(), Ok(Message::Kill)));
         assert!(receiver.try_recv().is_err());
+        assert!(matches!(receiver.killed().now_or_never(), Some(true)));
     }
 }

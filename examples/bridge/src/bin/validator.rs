@@ -27,22 +27,9 @@ use commonware_stream::encrypted::{Config as StreamConfig, dial};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::NonZeroUsize,
     str::FromStr,
     time::Duration,
 };
-
-fn validator_peer_limit<P: Ord>(validators: &Set<P>, local: &P) -> NonZeroUsize {
-    let peer_count = if validators.position(local).is_some() {
-        validators.len()
-    } else {
-        validators
-            .len()
-            .checked_add(1)
-            .expect("peer set size overflow")
-    };
-    NonZeroUsize::new(peer_count).expect("local identity ensures at least one peer")
-}
 
 fn main() {
     // Parse arguments
@@ -109,7 +96,7 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
-    let max_peers_per_set = validator_peer_limit(&validators, &signer.public_key());
+    let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -278,23 +265,4 @@ fn main() {
         // Block on application
         application.run().await;
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validator_peer_limit_counts_included_local_identity() {
-        let validators = Set::from_iter_dedup([1, 2]);
-
-        assert_eq!(validator_peer_limit(&validators, &1).get(), 2);
-    }
-
-    #[test]
-    fn validator_peer_limit_counts_omitted_local_identity() {
-        let validators = Set::from_iter_dedup([1, 2]);
-
-        assert_eq!(validator_peer_limit(&validators, &3).get(), 3);
-    }
 }

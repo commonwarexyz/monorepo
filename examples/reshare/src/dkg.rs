@@ -15,9 +15,9 @@ use commonware_glue::dkg::{
     bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, ordered::Set};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -42,11 +42,10 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let bootstrappers = network.bootstrappers(&local);
-    let max_peers_per_set = network
-        .participants
-        .len()
-        .try_into()
-        .expect("at least one peer must be configured");
+    let max_peers_per_set = authenticated::peer_set_limit(
+        &Set::from_iter_dedup(network.participants.iter().cloned()),
+        &local,
+    );
 
     let mut p2p_config = discovery::Config::local(
         node.signing_key.clone(),

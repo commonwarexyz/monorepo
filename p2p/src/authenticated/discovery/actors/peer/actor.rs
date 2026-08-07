@@ -71,13 +71,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     }
 
     /// Converts a control message into an outbound metric/payload pair.
-    ///
-    /// Returns `Err` for `Kill` so the caller can terminate the connection.
     fn prepare_control(
         peer: &C,
         msg: Message<C>,
         pool: &commonware_runtime::BufferPool,
-    ) -> Result<(metrics::Message<C>, IoBufs), Error> {
+    ) -> (metrics::Message<C>, IoBufs) {
         let (metric, payload) = match msg {
             Message::BitVec(bit_vec) => (
                 metrics::Message::new_bit_vec(peer),
@@ -87,9 +85,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 metrics::Message::new_peers(peer),
                 types::Payload::Peers(peers),
             ),
-            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
         };
-        Ok((metric, payload.encode_with_pool(pool)))
+        (metric, payload.encode_with_pool(pool))
     }
 
     /// Converts pre-encoded data into an outbound metric/payload pair.
@@ -132,10 +129,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
-    ) -> Result<(), Error> {
+    ) {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
-                let (metric, payload) = Self::prepare_control(peer, msg, pool)?;
+                let (metric, payload) = Self::prepare_control(peer, msg, pool);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
@@ -151,7 +148,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             }
             break;
         }
-        Ok(())
     }
 
     /// Sends while allowing teardown to cancel a backpressured transport write.
@@ -235,7 +231,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     msg = recv_prioritized(control, high, low) => {
                         let (metric, payload) = match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
-                            Prioritized::Control(msg) => Self::prepare_control(&peer, msg, &pool)?,
+                            Prioritized::Control(msg) => Self::prepare_control(&peer, msg, &pool),
                             Prioritized::Data(encoded) => {
                                 Self::prepare_data(&peer, encoded, &rate_limits)
                             }
@@ -251,7 +247,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             low,
                             &rate_limits,
                             &self.sent_messages,
-                        )?;
+                        );
                         Self::send_or_kill(
                             &peer,
                             kill,

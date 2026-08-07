@@ -785,10 +785,7 @@ mod tests {
             crate::block_peer(&mut oracle, pk1.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(matches!(
-                peer_receiver_pk1.recv().await,
-                Some(peer::Message::Kill)
-            ));
+            assert!(peer_receiver_pk1.killed().await);
 
             let dialable_peers = mailbox.dialable().await;
             assert!(!dialable_peers.peers.iter().any(|peer| peer == &pk1));
@@ -832,10 +829,7 @@ mod tests {
 
             // Peer1 should be killed after losing tracked-set membership
             assert!(
-                matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(peer_receiver.killed().now_or_never(), Some(true)),
                 "connected peer should be killed after losing tracked-set membership"
             );
             assert_eq!(reservation.metadata().public_key(), &peer1_pk);
@@ -940,10 +934,7 @@ mod tests {
                 "reserved peer should be rejected if it connects after losing tracked-set membership"
             );
             assert!(
-                !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver.killed().now_or_never(), Some(true)),
                 "discovery connect rejection is signaled by a missing greeting"
             );
 
@@ -989,10 +980,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver.killed().now_or_never(), Some(true)),
                 "connected peer present in the new set should not be killed when the old set rolls off"
             );
 
@@ -1035,20 +1023,14 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(peer_receiver.killed().now_or_never(), Some(true)),
                 "connected peer should be killed when blocked"
             );
 
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver.killed().now_or_never(), Some(true)),
                 "no kill after handle has been cleared"
             );
             assert_eq!(reservation.metadata().public_key(), &peer_pk);
@@ -1086,10 +1068,7 @@ mod tests {
                 "blocked peer should not receive a greeting"
             );
             assert!(
-                !matches!(
-                    peer_receiver_pk1.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver_pk1.killed().now_or_never(), Some(true)),
                 "connect rejection is signaled by a missing greeting"
             );
         });
@@ -1500,10 +1479,7 @@ mod tests {
                 bits: BitMap::ones(2),
             };
             mailbox.bit_vec(pk1.clone(), invalid_bit_vec);
-            assert!(matches!(
-                peer_receiver.recv().await,
-                Some(peer::Message::Kill)
-            ));
+            assert!(peer_receiver.killed().await);
         });
     }
 
@@ -1535,10 +1511,7 @@ mod tests {
                 "unauthorized peer should not receive a greeting"
             );
             assert!(
-                !matches!(
-                    peer_receiver1.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver1.killed().now_or_never(), Some(true)),
                 "connect rejection is signaled by a missing greeting"
             );
 
@@ -1623,7 +1596,7 @@ mod tests {
 
             // Peer1 was only in set 0, which is now evicted.
             assert!(
-                matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),
+                peer_receiver1.killed().await,
                 "Peer1 should be killed after its only set was evicted"
             );
 

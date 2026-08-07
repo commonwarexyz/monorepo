@@ -35,11 +35,11 @@ use commonware_glue::{
     },
 };
 use commonware_macros::boxed;
-use commonware_p2p::authenticated::discovery;
+use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU64, NZUsize};
+use commonware_utils::{NZDuration, NZU64, NZUsize, ordered::Set};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
@@ -67,11 +67,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let partition_prefix = "validator";
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
     let bootstrappers = network.bootstrappers(&local);
-    let max_peers_per_set = network
-        .participants
-        .len()
-        .try_into()
-        .expect("at least one peer must be configured");
+    let max_peers_per_set = authenticated::peer_set_limit(
+        &Set::from_iter_dedup(network.participants.iter().cloned()),
+        &local,
+    );
 
     let mut p2p_config = discovery::Config::local(
         node.signing_key.clone(),

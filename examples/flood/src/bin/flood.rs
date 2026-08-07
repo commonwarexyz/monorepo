@@ -7,9 +7,12 @@ use commonware_cryptography::{
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_formatting::from_hex;
-use commonware_p2p::{Manager as _, Receiver, Recipients, Sender, authenticated::discovery};
+use commonware_p2p::{
+    CheckedSender as _, LimitedSender as _, Manager as _, Receiver, Recipients,
+    authenticated::{self, discovery},
+};
 use commonware_runtime::{
-    Buf, Handle, Quota, Runner, Spawner, Supervisor as _,
+    Buf, Clock as _, Handle, Quota, Runner, Spawner, Supervisor as _,
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
@@ -125,10 +128,7 @@ fn main() {
         }
 
         // Configure network
-        let max_peers_per_set = peer_keys
-            .len()
-            .try_into()
-            .expect("allowed peers must contain at least one peer");
+        let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
             key.clone(),
             &union(FLOOD_NAMESPACE, b"_P2P"),
@@ -146,7 +146,8 @@ fn main() {
         // Provide authorized peers
         oracle.track(0, peer_keys.clone());
 
-        // Register the flood channel with a per-peer message rate
+        // Register the flood channel. The quota is the offered per-peer load and sizes the
+        // derived channel mailboxes, so raising it trades memory for saturation.
         let (mut flood_sender, mut flood_receiver) =
             network.register(0, Quota::per_second(config.message_rate));
 
@@ -160,6 +161,15 @@ fn main() {
                 let mut rng = SmallRng::seed_from_u64(0);
                 let messages = context.counter("messages", "Sent messages");
                 loop {
+                    // Pace to the quota, sleeping while every connected peer is rate-limited
+                    let checked = match flood_sender.check(Recipients::All) {
+                        Ok(checked) => checked,
+                        Err(wait_until) => {
+                            context.sleep_until(wait_until).await;
+                            continue;
+                        }
+                    };
+
                     // Create message with timestamp in first 8 bytes
                     let mut msg = vec![0u8; config.message_size as usize];
                     let now = SystemTime::now()
@@ -169,9 +179,10 @@ fn main() {
                     msg[0..8].copy_from_slice(&now.to_le_bytes());
                     rng.fill_bytes(&mut msg[8..]);
 
-                    // Send to all peers
-                    flood_sender.send(Recipients::All, msg, true);
-                    messages.inc();
+                    // Send to all non-limited peers
+                    if checked.send(msg, true).accepted() {
+                        messages.inc();
+                    }
                 }
             });
         let flood_receiver = context

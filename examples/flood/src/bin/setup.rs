@@ -81,7 +81,7 @@ fn main() {
             Arg::new("message-rate")
                 .long("message-rate")
                 .required(true)
-                .help("Maximum messages per second per peer")
+                .help("Offered messages per second per peer (sizes the derived channel mailboxes)")
                 .value_parser(value_parser!(NonZeroU32)),
         )
         .arg(
