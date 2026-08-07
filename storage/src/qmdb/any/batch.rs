@@ -974,8 +974,7 @@ where
         let mut diff_sort = None;
         if !diff.is_empty() {
             let unsorted = mem::take(&mut diff);
-            let unsorted_len = unsorted.len();
-            diff_sort = Some(db.strategy().spawn(unsorted_len, move |strategy| {
+            diff_sort = Some(db.strategy().spawn(unsorted.len(), move |strategy| {
                 let mut diff = unsorted;
                 strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
                 diff
@@ -1122,14 +1121,8 @@ where
                             }
                         };
 
-                        // Classify against the pre-raise state. The candidate count drives an
-                        // adaptive serial-vs-parallel choice: a small per-block candidate set is
-                        // classified inline (a pool hand-off would not pay), while a large set
-                        // fans out. When parallel, the work is subdivided past the pool
-                        // parallelism because the snapshot probes that dominate classification
-                        // have variable latency, so finer chunks balance the tail. Both paths keep
-                        // each location aligned with the operation resolved for the same filtered
-                        // candidate and yield outcomes in candidate order (the caller flattens).
+                        // Classify each candidate against the pre-raise state. Both branches yield
+                        // outcomes in candidate order (the caller flattens them).
                         let outcomes: Vec<Vec<FloorOutcome<F>>> = strategy.run(
                             read_candidates.len(),
                             || {
@@ -1148,6 +1141,9 @@ where
                                 outcomes
                             },
                             || {
+                                // Chunk finer (by 4x) than the pool parallelism since snapshot
+                                // probes have varying latency. `manual` runs this fixed partition
+                                // without the policy re-chunking.
                                 let manual = strategy.manual();
                                 let target = read_candidates
                                     .len()
