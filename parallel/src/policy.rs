@@ -65,6 +65,7 @@ const EWMA_NEXT_WEIGHT: u64 = 1;
 const EWMA_WEIGHT: u64 = EWMA_PREVIOUS_WEIGHT + EWMA_NEXT_WEIGHT;
 
 type Entries = DashMap<Key, Entry>;
+type SpawnEntries = DashMap<Key, SpawnEntry>;
 
 /// The path the policy chose for a call: the strategy runs the matching serial or parallel body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,10 +74,19 @@ pub(super) enum Execution {
     Parallel,
 }
 
+/// The path the spawn policy chose: run the job inline on the calling task, or offload it to the
+/// pool, which overlaps it with the caller's other work at the cost of a hand-off.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SpawnExecution {
+    Inline,
+    Offload,
+}
+
 /// Adaptive serial-vs-parallel decisions, shared cheaply across [`super::Rayon`] clones.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Policy {
     entries: Arc<Entries>,
+    spawn_entries: Arc<SpawnEntries>,
 }
 
 impl Policy {
@@ -110,6 +120,52 @@ impl Policy {
             entry.record(execution, start.elapsed());
         }
         result
+    }
+
+    /// Chooses whether to run a spawned job inline on the calling task or offload it to the pool,
+    /// and whether the caller should time this run and feed the result back via
+    /// [`record_spawn`](Self::record_spawn).
+    pub(super) fn choose_spawn(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+    ) -> (SpawnExecution, bool) {
+        // A single worker cannot overlap a hand-off, so always inline.
+        if parallelism <= 1 {
+            return (SpawnExecution::Inline, false);
+        }
+        let key = Key::new(caller, len, len, parallelism);
+        self.spawn_entries
+            .entry(key)
+            .or_default()
+            .choose(SERIAL_SAMPLE_BUDGET_NS)
+    }
+
+    /// Records the caller-visible cost of a spawned job. `caller_ns` is the marginal latency the
+    /// chosen path added to the caller. For inline it is the job's wall time. For offload it is
+    /// the hand-off setup plus the residual wait once the caller joined. `job_wall_ns` is the
+    /// job's measured wall time on the pool (offload only). It estimates the inline cost and
+    /// bounds inlining so a long job never blocks the calling task.
+    pub(super) fn record_spawn(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+        execution: SpawnExecution,
+        caller_ns: Duration,
+        job_wall_ns: Option<Duration>,
+    ) {
+        if parallelism <= 1 {
+            return;
+        }
+        let key = Key::new(caller, len, len, parallelism);
+        let caller_ns = u64::try_from(caller_ns.as_nanos()).unwrap_or(u64::MAX);
+        let job_wall_ns = job_wall_ns.map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        self.spawn_entries
+            .entry(key)
+            .or_default()
+            .record(execution, caller_ns, job_wall_ns);
     }
 
     #[cfg(test)]
@@ -259,6 +315,103 @@ impl Entry {
     }
 }
 
+/// Timing state for one spawn [`Key`]: the caller-visible cost of inlining vs offloading, the job's
+/// measured wall time on the pool, and the latest raw inline sample used by the safety gate.
+#[derive(Clone, Copy, Debug, Default)]
+struct SpawnEntry {
+    inline_ns: Option<u64>,
+    offload_ns: Option<u64>,
+    job_wall_ns: Option<u64>,
+    // The most recent inline measurement, kept raw (not blended into `inline_ns`) so the
+    // executor-block gate reacts to a single over-budget run instead of waiting for the EWMA.
+    last_inline_ns: Option<u64>,
+    since_probe: u32,
+}
+
+impl SpawnEntry {
+    // Returns the path to run and whether the caller should time it. Offload is seeded first: it is
+    // the only path that also measures the job's own wall time, which estimates the inline cost.
+    // Once both estimates exist, the cheaper caller-visible cost wins (ties -> inline, which frees a
+    // worker). Inlining is gated on the latest raw inline sample (or the pool wall before we have
+    // one) against `budget`, so a single over-budget inline run switches to offloading at once and
+    // a long job never blocks the calling task. The loser is probed on an interval that doubles
+    // with how badly it lost, so a close race is re-checked often while a blowout is re-checked
+    // rarely.
+    fn choose(&mut self, budget: u64) -> (SpawnExecution, bool) {
+        let Some(offload_ns) = self.offload_ns else {
+            self.since_probe = u32::MAX;
+            return (SpawnExecution::Offload, true);
+        };
+        let job_wall = self.job_wall_ns.unwrap_or(offload_ns);
+        // `inline_est` (an EWMA) drives the cheaper-path preference. The safety gate instead uses
+        // the latest raw inline sample, so a single over-budget run offloads immediately rather
+        // than after the EWMA slowly crosses `budget`. Before any inline sample both fall back to
+        // the offload-measured pool wall, which is also stale once the policy converges to inline.
+        let inline_est = self.inline_ns.unwrap_or(job_wall);
+        let inline_gate = self.last_inline_ns.unwrap_or(job_wall);
+        let inline_safe = inline_gate < budget;
+        let preferred = if inline_safe && inline_est <= offload_ns {
+            SpawnExecution::Inline
+        } else {
+            SpawnExecution::Offload
+        };
+        let (winner_ns, loser_ns) = match preferred {
+            SpawnExecution::Inline => (inline_est, offload_ns),
+            SpawnExecution::Offload => (offload_ns, inline_est),
+        };
+        let slowdown = loser_ns / winner_ns.max(1);
+        let shift = slowdown
+            .saturating_sub(1)
+            .min(u64::from(MAX_RESAMPLE_SHIFT)) as u32;
+        let interval = RESAMPLE_INTERVAL << shift;
+
+        self.since_probe = self.since_probe.saturating_add(1);
+        if self.since_probe >= interval {
+            self.since_probe = 0;
+            let probe = match preferred {
+                SpawnExecution::Inline => SpawnExecution::Offload,
+                // Probe inline whenever fresh offload evidence (`job_wall`, refreshed by the
+                // offloads we are running) says the job is small enough to try safely, even if the
+                // last inline sample was over budget. This lets a transient slow run recover once
+                // the job shrinks again instead of offloading forever.
+                SpawnExecution::Offload if job_wall < budget => SpawnExecution::Inline,
+                SpawnExecution::Offload => SpawnExecution::Offload,
+            };
+            return (probe, true);
+        }
+        (
+            preferred,
+            self.since_probe.is_multiple_of(PREFERRED_SAMPLE_INTERVAL),
+        )
+    }
+
+    fn record(&mut self, execution: SpawnExecution, caller_ns: u64, job_wall_ns: Option<u64>) {
+        match execution {
+            SpawnExecution::Inline => {
+                self.inline_ns = Some(
+                    self.inline_ns
+                        .map_or(caller_ns, |current| update_ewma(current, caller_ns)),
+                );
+                // Keep the raw sample for the safety gate, unblended, so an over-budget run is
+                // seen immediately rather than smoothed away by the EWMA above.
+                self.last_inline_ns = Some(caller_ns);
+            }
+            SpawnExecution::Offload => {
+                self.offload_ns = Some(
+                    self.offload_ns
+                        .map_or(caller_ns, |current| update_ewma(current, caller_ns)),
+                );
+                if let Some(job_wall_ns) = job_wall_ns {
+                    self.job_wall_ns = Some(
+                        self.job_wall_ns
+                            .map_or(job_wall_ns, |current| update_ewma(current, job_wall_ns)),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn update_ewma(current: u64, next: u64) -> u64 {
     let weighted = u128::from(current) * u128::from(EWMA_PREVIOUS_WEIGHT)
         + u128::from(next) * u128::from(EWMA_NEXT_WEIGHT);
@@ -281,6 +434,7 @@ const fn len_bucket(len: usize) -> u8 {
 mod tests {
     use super::{
         Entry, Execution, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL,
+        SERIAL_SAMPLE_BUDGET_NS, SpawnEntry, SpawnExecution,
     };
     use std::{panic::Location, time::Duration};
 
@@ -749,5 +903,134 @@ mod tests {
         }
         let (_, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
         assert_eq!(parallel_ns, parallel_estimate);
+    }
+
+    #[test]
+    fn spawn_seeds_offload_then_inlines_a_tiny_poorly_overlapped_job() {
+        let mut entry = SpawnEntry::default();
+
+        // The first call seeds the offload estimate (and the job's own wall time).
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Offload, true)
+        );
+        // A 2us job whose caller-visible cost was 50us: the overlap did not hide it.
+        entry.record(SpawnExecution::Offload, 50_000, Some(2_000));
+
+        // The seed leaves the entry due for an immediate boundary, which re-probes offload.
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Offload, true)
+        );
+        entry.record(SpawnExecution::Offload, 50_000, Some(2_000));
+
+        // The job (2us) fits the budget and beats its 50us offload cost, so inline wins.
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Inline, false)
+        );
+    }
+
+    #[test]
+    fn spawn_keeps_offloading_a_well_overlapped_job() {
+        let mut entry = SpawnEntry::default();
+
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Offload, true)
+        );
+        // A 50us job whose caller-visible cost was only 3us: the overlap hid almost all of it.
+        entry.record(SpawnExecution::Offload, 3_000, Some(50_000));
+
+        // Offload is preferred (3us beats a 50us inline), so the boundary probes the inline loser.
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Inline, true)
+        );
+        entry.record(SpawnExecution::Inline, 50_000, None);
+
+        // With both estimates known, offload still wins because the overlap makes it cheaper.
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS).0,
+            SpawnExecution::Offload
+        );
+    }
+
+    #[test]
+    fn spawn_never_inlines_a_job_over_the_executor_block_budget() {
+        let mut entry = SpawnEntry::default();
+
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Offload, true)
+        );
+        // A job whose measured wall exceeds the budget must never run inline (it would stall the
+        // async executor), no matter how the caller-visible cost compares.
+        let over_budget = SERIAL_SAMPLE_BUDGET_NS * 2;
+        entry.record(SpawnExecution::Offload, over_budget, Some(over_budget));
+
+        for _ in 0..(2 * RESAMPLE_INTERVAL) {
+            assert_eq!(
+                entry.choose(SERIAL_SAMPLE_BUDGET_NS).0,
+                SpawnExecution::Offload
+            );
+            entry.record(SpawnExecution::Offload, over_budget, Some(over_budget));
+        }
+    }
+
+    #[test]
+    fn spawn_single_worker_always_inlines() {
+        // With one worker a hand-off cannot overlap, so the policy inlines without measuring.
+        let policy = Policy::default();
+        let location = Location::caller();
+        assert_eq!(
+            policy.choose_spawn(location, 64, 1),
+            (SpawnExecution::Inline, false)
+        );
+    }
+
+    #[test]
+    fn spawn_offloads_after_a_single_over_budget_inline_sample() {
+        // Start from a cheap, converged inline estimate: offload is expensive, inline is cheap, and
+        // both sit well under the budget.
+        let mut entry = SpawnEntry {
+            offload_ns: Some(30_000_000), // offloading measured at 30ms
+            inline_ns: Some(2_000),       // established cheap inline EWMA (2us)
+            last_inline_ns: Some(2_000),
+            job_wall_ns: Some(2_000),
+            ..Default::default()
+        };
+        // One inline run now measures 15ms, over the 10ms budget. The blended `inline_ns` stays
+        // ~3ms (still "safe" on its own), but the raw safety gate must offload on this single
+        // sample rather than wait for the EWMA to cross the budget.
+        entry.record(SpawnExecution::Inline, 15_000_000, None);
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS).0,
+            SpawnExecution::Offload
+        );
+    }
+
+    #[test]
+    fn spawn_probes_inline_to_recover_after_a_transient_slow_run() {
+        // A transient slow inline left `last_inline_ns` over budget, so the gate is unsafe and the
+        // entry is offloading. Fresh offloads now show the job is small again (`job_wall` under
+        // budget), and the entry is due for a boundary.
+        let mut entry = SpawnEntry {
+            offload_ns: Some(5_000),          // 5us
+            job_wall_ns: Some(2_000),         // 2us: fresh offload evidence, the job is small
+            inline_ns: Some(3_000_000),       // stale 3ms EWMA from the slow run
+            last_inline_ns: Some(15_000_000), // 15ms: over budget, currently locks out inline
+            since_probe: u32::MAX,
+        };
+        // Rather than offload forever, the boundary schedules a controlled inline probe because the
+        // offload evidence is under budget.
+        assert_eq!(
+            entry.choose(SERIAL_SAMPLE_BUDGET_NS),
+            (SpawnExecution::Inline, true)
+        );
+        // The probe measures the now-tiny job, clearing the raw over-budget gate so the entry can
+        // inline again.
+        entry.record(SpawnExecution::Inline, 2_000, None);
+        assert!(entry.last_inline_ns.unwrap() < SERIAL_SAMPLE_BUDGET_NS);
     }
 }
