@@ -69,9 +69,6 @@ impl FlushTracker {
         {
             self.stale_boundary = None;
         }
-        if !durable {
-            debug!("flush incomplete at shutdown, stopping processing");
-        }
         durable
     }
 
@@ -312,12 +309,12 @@ where
                     // The published snapshot predates this prune and keeps the pruned
                     // storage alive, as do generations staged before it.
                     if !tracker.mark_stale() {
-                        self.processor = self.processor.republish().await;
+                        self.processor = self.processor.publish_durable().await;
                     }
                 }
                 Step::Refresh => {
                     // Every flush drained, so applied state is durable.
-                    self.processor = self.processor.republish().await;
+                    self.processor = self.processor.publish_durable().await;
                     tracker.recaptured();
                 }
             },

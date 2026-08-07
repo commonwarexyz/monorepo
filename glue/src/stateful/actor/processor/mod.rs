@@ -259,9 +259,10 @@ where
 
     /// Capture a snapshot of the database set and publish it immediately.
     ///
-    /// Callers must ensure no finalize flush is pending, because the capture is
-    /// published without waiting for any barrier.
-    pub(super) async fn republish(mut self) -> Self {
+    /// # Invariant
+    ///
+    /// `self.databases` must be durably flushed.
+    pub(super) async fn publish_durable(mut self) -> Self {
         let (databases, snapshots) = self.databases.snapshot().await;
         self.databases = databases;
         self.publisher.publish_durable(snapshots);

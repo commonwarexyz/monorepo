@@ -275,7 +275,7 @@ where
 /// Returns the archived block that covers marshal's durable processed position.
 ///
 /// Glue cannot reopen below this position because marshal will not redeliver acknowledged blocks.
-/// An acknowledgement-derived position retains its own block. Publishing a floor instead records
+/// An acknowledgement-derived position retains its own block. Installing a floor instead records
 /// and prunes the anchor's predecessor so marshal redispatches the anchor, leaving `height.next()`
 /// as the block that covers the processed position.
 async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
@@ -305,7 +305,7 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    // Marshal skips publishing a startup floor whose round is already processed. Its block may
+    // Marshal skips installing a startup floor whose round is already processed. Its block may
     // have been pruned, so apply the same rule before registering a local-only waiter.
     let block = if let Some(height) = floor.height()
         && floor.round() >= finalization.round()
@@ -322,7 +322,7 @@ where
             V::into_inner_shared(block)
         };
 
-        // Marshal does not redeliver acknowledged blocks. A newly published floor is the
+        // Marshal does not redeliver acknowledged blocks. A newly installed floor is the
         // exception: its processed position is the predecessor so the retained anchor is
         // dispatched once.
         match marshal.get_processed_height().await {

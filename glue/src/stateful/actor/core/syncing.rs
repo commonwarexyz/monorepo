@@ -342,7 +342,7 @@ where
             Processor::new(application, databases, publisher, anchor, metrics, pruning);
         // Publish the synced state as generation zero so serving can begin before
         // the first finalization. Synced state is durable by construction.
-        processor = processor.republish().await;
+        processor = processor.publish_durable().await;
 
         let mut pending_prune = None;
 
@@ -388,7 +388,7 @@ where
             // The published snapshot was captured before this prune. Republish so
             // serving stops pinning the pruned state. Every handoff barrier was
             // awaited above, so the capture is already durable.
-            processor = processor.republish().await;
+            processor = processor.publish_durable().await;
         }
 
         for request in held_verify_requests {

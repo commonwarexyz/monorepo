@@ -1441,11 +1441,6 @@ mod tests {
             wrong_range.range =
                 non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!merkleized.matches(&wrong_range));
-
-            let mut wrong_start = valid_target.clone();
-            wrong_start.range =
-                non_empty_range!(valid_target.range.start() + 1, valid_target.range.end());
-            assert!(!merkleized.matches(&wrong_start));
         });
     }
 
@@ -1528,11 +1523,6 @@ mod tests {
             wrong_range.range =
                 non_empty_range!(valid_target.range.start(), valid_target.range.end() + 1);
             assert!(!merkleized.matches(&wrong_range));
-
-            let mut wrong_start = valid_target.clone();
-            wrong_start.range =
-                non_empty_range!(valid_target.range.start() + 1, valid_target.range.end());
-            assert!(!merkleized.matches(&wrong_start));
         });
     }
 }

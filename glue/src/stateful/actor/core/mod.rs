@@ -311,7 +311,7 @@ where
         );
         // Publish the recovered committed state as generation zero so serving can
         // begin before the first finalization.
-        let processor = processor.republish().await;
+        let processor = processor.publish_durable().await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,

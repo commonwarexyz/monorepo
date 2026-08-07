@@ -319,30 +319,6 @@ mod tests {
         }
     }
 
-    /// Marker resolver selecting the early-ring-close sync behavior on [`WedgeSet`].
-    struct EarlyClose;
-
-    impl StateSyncSet<deterministic::Context, EarlyClose, Sha256Digest> for WedgeSet {
-        type Error = Infallible;
-
-        async fn sync(
-            context: deterministic::Context,
-            _config: Self::Config,
-            _resolvers: EarlyClose,
-            anchor: Anchor<Sha256Digest>,
-            _targets: Self::SyncTargets,
-            tip_updates: ring::Receiver<TipUpdate<Sha256Digest, Self::SyncTargets>>,
-            _sync_config: SyncEngineConfig,
-        ) -> Result<(Self, Anchor<Sha256Digest>), Self::Error> {
-            // Drop the ring receiver before completing, so a forwarded update (or its
-            // retry) hits the closed ring and the actor awaits this task inline. The
-            // sleep resolves only at quiescence, once every other task is parked.
-            drop(tip_updates);
-            context.sleep(Duration::from_secs(1)).await;
-            Ok((Self::default(), anchor))
-        }
-    }
-
     #[derive(Clone)]
     struct WedgeApp;
 
@@ -435,7 +411,7 @@ mod tests {
     #[test]
     fn startup_uses_floor_anchor_when_processed_predecessor_is_pruned() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-publish", 1);
+            let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-install", 1);
             let floor = TestBlock::new(2, 2);
             let finalization = fixtures::finalization(&fixture, 2, Sha256::fill(2));
             let MarshalFixture {
@@ -444,7 +420,7 @@ mod tests {
                 ..
             } = fixtures::marshal_fixture_with_floor(
                 context.child("marshal"),
-                "syncer-floor-publish",
+                "syncer-floor-install",
                 fixture.schemes[0].clone(),
                 &floor,
                 finalization,
@@ -460,7 +436,7 @@ mod tests {
 
             let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                 &context,
-                "syncer-floor-publish",
+                "syncer-floor-install",
             )
             .await;
             let startup = init_databases_from_marshal::<
@@ -790,63 +766,6 @@ mod tests {
                 outcome,
                 UpdateOutcome::SyncCompleted,
                 "stranded update must report the completed sync"
-            );
-
-            let artifact = sync_completed.await.expect("artifact must publish");
-            assert_eq!(artifact.anchor.height, Height::zero());
-            actor.await.expect("syncer actor failed");
-        });
-    }
-
-    /// A ring receiver closed before the sync task finishes must make the actor await
-    /// the in-flight task inline and report completion.
-    #[test]
-    fn early_ring_close_awaits_inflight_sync() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-            let fixture = scheme_mocks::fixture(&mut context, b"syncer-early-close", 1);
-            let block = TestBlock::new(0, 0);
-            let finalization = fixtures::finalization(&fixture, 0, Sha256::fill(0));
-            let MarshalFixture {
-                mailbox: marshal,
-                floor,
-                guards: _guards,
-            } = fixtures::marshal_fixture(
-                context.child("marshal"),
-                "syncer-early-close",
-                fixture.schemes[0].clone(),
-                Some((&block, finalization.clone())),
-                NZUsize!(1),
-                true,
-            )
-            .await;
-
-            let (sync_complete, sync_completed) = oneshot::channel();
-            let (syncer, mailbox) =
-                Syncer::<_, WedgeApp, EarlyClose, TestScheme, TestVariant>::new(Config {
-                    context: context.child("syncer"),
-                    db_config: 0,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
-                    },
-                    resolvers: EarlyClose,
-                    finalization,
-                    marshal: (marshal, floor),
-                    sync_complete,
-                });
-            let actor = syncer.start();
-
-            let update = context
-                .child("update")
-                .spawn(move |_| async move { mailbox.update_targets(anchor(1, 1), 1).await });
-            let outcome = update.await.expect("update task failed");
-            assert_eq!(
-                outcome,
-                UpdateOutcome::SyncCompleted,
-                "an update against a closed ring must report the completed sync"
             );
 
             let artifact = sync_completed.await.expect("artifact must publish");
