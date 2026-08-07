@@ -12,9 +12,7 @@ use crate::stateful::{
         processor::{PendingSyncTargets, Processor, Pruning},
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{
-        AttachableResolverSet, DatabaseSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig,
-    },
+    db::{DatabaseSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -130,8 +128,13 @@ where
     /// metadata handle and the startup decision shared with marshal.
     pub plan: SyncPlan<E, S, V>,
 
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolver(s) for state sync fetches.
     pub resolvers: R,
+
+    /// Publisher for the snapshots resolvers serve, created alongside its
+    /// [`Reader`](crate::stateful::db::Reader)s by
+    /// [`channel`](crate::stateful::db::channel) when wiring the resolvers.
+    pub publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
@@ -175,8 +178,11 @@ where
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
 
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolver(s) for state sync fetches.
     resolvers: R,
+
+    /// Publisher for the snapshots resolvers serve.
+    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
@@ -192,7 +198,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Readers>,
+    R: Send + Sync + 'static,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -219,6 +225,7 @@ where
                 db_config: config.db_config,
                 plan: config.plan,
                 resolvers: config.resolvers,
+                publisher: config.publisher,
                 sync_config: config.sync_config,
                 pruning,
             },
@@ -231,26 +238,18 @@ where
     }
 
     async fn run(self) {
-        let (publisher, db_readers) = Publisher::new(self.context.as_present());
-        self.resolvers
-            .attach_readers(A::Databases::readers(db_readers))
-            .await;
         if let Some(floor) = self.plan.floor().cloned() {
-            self.start_state_sync(floor, publisher).await;
+            self.start_state_sync(floor).await;
         } else if self.plan.requires_state_sync_floor() {
             panic!("interrupted state sync is missing its persisted floor");
         } else {
-            self.start_from_marshal(publisher).await;
+            self.start_from_marshal().await;
         }
     }
 
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(
-        self,
-        finalization: Finalization<S, V::Commitment>,
-        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
-    ) {
+    async fn start_state_sync(self, finalization: Finalization<S, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = self
@@ -282,13 +281,13 @@ where
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
-            publisher,
+            publisher: self.publisher,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self, publisher: Publisher<SnapshotsOf<A::Databases, E>>) {
+    async fn start_from_marshal(self) {
         let (marshal, _) = self.marshal;
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
@@ -306,7 +305,7 @@ where
         let processor = Processor::new(
             self.application,
             databases,
-            publisher,
+            self.publisher,
             anchor,
             metrics,
             self.pruning,
@@ -330,7 +329,7 @@ mod tests {
     use super::{Config, Deferred, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        db::{StateSyncDb, SyncEngineConfig, channel},
         tests::{
             fixtures,
             mocks::{TestApp, TestBlock, TestDb},
@@ -351,10 +350,6 @@ mod tests {
 
     #[derive(Clone)]
     struct NoopResolver;
-
-    impl<Src: crate::stateful::db::ServeSource> AttachableResolver<Src> for NoopResolver {
-        async fn attach_reader(&self, _source: Src) {}
-    }
 
     impl<S: Send> StateSyncDb<deterministic::Context, S> for TestDb {
         type SyncError = Infallible;
@@ -396,7 +391,7 @@ mod tests {
             .await;
 
             let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
-            let resolver = crate::stateful::tests::common::CapturingResolver::new(NoopResolver);
+            let (publisher, reader) = channel(&context.child("publication"));
             let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -406,7 +401,8 @@ mod tests {
                     marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
                     plan,
-                    resolvers: resolver.clone(),
+                    resolvers: NoopResolver,
+                    publisher,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -421,13 +417,7 @@ mod tests {
 
             // No block is ever reported: the recovered state alone must publish as
             // generation zero and begin serving.
-            loop {
-                let reader = resolver.reader.lock().clone();
-                if let Some(reader) = reader
-                    && crate::stateful::db::ServeSource::latest(&reader).is_some()
-                {
-                    break;
-                }
+            while reader.generation() != Some(0) {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
@@ -462,6 +452,7 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
+                    publisher: channel(&context.child("publication")).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

@@ -23,9 +23,6 @@ pub(super) struct Metrics {
 
     /// Completed serve requests by outcome.
     pub serve_requests: status::Counter,
-
-    /// Whether a serving source has been attached (never unset).
-    pub has_source: Registered<Gauge>,
 }
 
 impl Metrics {
@@ -49,19 +46,12 @@ impl Metrics {
         let deliveries = context.family("deliveries", "Deliveries from peers by outcome");
         let serve_requests =
             context.family("serve_requests", "Completed serve requests by outcome");
-        let has_source = context.register(
-            "has_source",
-            "Whether a serving source has been attached",
-            Gauge::default(),
-        );
-
         Self {
             pending_requests,
             fetch_requests,
             cancel_requests,
             deliveries,
             serve_requests,
-            has_source,
         }
     }
 }

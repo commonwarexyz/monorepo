@@ -12,7 +12,9 @@
 //! scheduling point.
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
-use crate::stateful::db::{Barrier, DatabaseSet, PendingPublication, Publisher, Single};
+use crate::stateful::db::{
+    Barrier, DatabaseSet, PendingPublication, ServeSource as _, Single, channel,
+};
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::channel::oneshot;
@@ -60,14 +62,14 @@ fn unpublished_generation_stays_invisible() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (set, control) = parked_set();
-        let (mut publisher, source) = Publisher::new(&context);
+        let (mut publisher, reader) = channel(&context);
 
         // The first generation applies but its flush is parked, so it stays
         // staged and no subscriber can see it.
         let (set, snapshot, first) = finalize(set).await;
         let staged = publisher.stage(snapshot);
         assert!(
-            source.latest().is_none(),
+            reader.latest().is_none(),
             "an applied but non-durable generation must not be visible"
         );
 
@@ -86,14 +88,14 @@ fn unpublished_generation_stays_invisible() {
                 .publish_when_durable()
                 .await
         );
-        assert_eq!(source.latest().unwrap().number(), 0);
+        assert_eq!(reader.generation(), Some(0));
         release(&control);
         assert!(
             PendingPublication::new(staged_second, second)
                 .publish_when_durable()
                 .await
         );
-        assert_eq!(source.latest().unwrap().number(), 1);
+        assert_eq!(reader.generation(), Some(1));
     });
 }
 
@@ -104,7 +106,7 @@ fn parked_serve_never_delays_the_writer() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (set, control) = parked_set();
-        let (mut publisher, source) = Publisher::new(&context);
+        let (mut publisher, reader) = channel(&context);
         let (set, snapshot, barrier) = finalize(set).await;
         let staged = publisher.stage(snapshot);
         release(&control);
@@ -114,13 +116,12 @@ fn parked_serve_never_delays_the_writer() {
                 .await
         );
 
-        // A serve clones the published generation and parks mid-assembly.
-        let served = source.latest().unwrap();
+        // A serve takes the published snapshot and parks mid-assembly.
+        assert_eq!(reader.generation(), Some(0));
+        assert!(reader.latest().is_some());
         let (io_done, io_gate) = oneshot::channel();
         let serve = context.child("serve").spawn(move |_| async move {
-            let number = served.number();
             let _ = io_gate.await;
-            (number, served)
         });
 
         // The parked serve shares nothing with the writer, so the next
@@ -138,15 +139,13 @@ fn parked_serve_never_delays_the_writer() {
                 .await
         );
 
-        // The serve completes against its captured generation while the
-        // source already serves the newer one.
+        // The serve completes against its captured snapshot while the
+        // reader already serves the newer generation.
         io_done.send(()).unwrap();
-        let (number, held) = serve.await.unwrap();
-        assert_eq!(number, 0, "the serve captured the first generation");
-        assert_eq!(held.number(), 0, "the held generation never moved");
+        serve.await.unwrap();
         assert_eq!(
-            source.latest().unwrap().number(),
-            1,
+            reader.generation(),
+            Some(1),
             "publication moved on while the serve was parked"
         );
     });

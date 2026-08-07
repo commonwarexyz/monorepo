@@ -364,7 +364,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{Publisher, SetReader, Single},
+        db::{Reader, Single, channel},
         tests::{
             fixtures,
             mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor, served_generation},
@@ -436,7 +436,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, TestApp>,
         FlushControl,
-        SetReader<()>,
+        Reader<()>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -456,7 +456,7 @@ mod tests {
         let databases = Single::from(TestDb::gated(control.clone()));
         let pruning = prune_config
             .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
-        let (publisher, source) = Publisher::new(context);
+        let (publisher, source) = channel(context);
         let processor = Processor::new(
             TestApp,
             databases,

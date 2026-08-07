@@ -498,8 +498,6 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        // For any-databases the sync boundary equals the inactivity floor, which is
-        // what `sync_target` publishes as the range start.
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
             && *target.range.end() == batch.bounds().tip.size
@@ -604,8 +602,6 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        // For any-databases the sync boundary equals the inactivity floor, which is
-        // what `sync_target` publishes as the range start.
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
             && *target.range.end() == batch.bounds().tip.size

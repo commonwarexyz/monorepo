@@ -65,11 +65,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// Serving source projected from the set's published snapshots.
-type SingleSrc<E> = crate::stateful::db::DbReader<
-    SnapshotsOf<SingleDatabaseSet<E>, E>,
-    <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
->;
+/// Serving reader over the set's published snapshots.
+type SingleSrc<E> = crate::stateful::db::Reader<SnapshotsOf<SingleDatabaseSet<E>, E>>;
 
 pub(crate) type SingleDatabaseSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
@@ -491,7 +488,10 @@ impl EngineDefinition for SingleDbEngine {
             .await;
         let sync_floor = plan.floor().cloned();
 
-        // QMDB state-sync resolver.
+        // Snapshot publication channel and the QMDB state-sync resolver serving from it.
+        let (publisher, reader) = crate::stateful::db::channel(&context.child("publication"));
+        let serve_reader =
+            <SingleDatabaseSet<_> as crate::stateful::db::DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor, qmdb_sync_resolver) =
             qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SingleSrc<_>>::new(
                 context.child("qmdb_resolver"),
@@ -507,8 +507,8 @@ impl EngineDefinition for SingleDbEngine {
                     priority_requests: false,
                     priority_responses: false,
                 },
+                serve_reader.clone(),
             );
-        let qmdb_sync_resolver = CapturingResolver::new(qmdb_sync_resolver);
         let _qmdb_resolver_handle = qmdb_resolver_actor.start(qmdb_resolver_network);
 
         // Stateful actor
@@ -523,6 +523,7 @@ impl EngineDefinition for SingleDbEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver.clone(),
+                publisher,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
@@ -533,12 +534,11 @@ impl EngineDefinition for SingleDbEngine {
         );
 
         // Observe the oldest operation QMDB still retains, to assert pruning ran.
-        let prune_observer = qmdb_sync_resolver.reader.clone();
+        let prune_observer = serve_reader;
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let sources = prune_observer.clone();
+            let reader = prune_observer.clone();
             Box::pin(async move {
-                let source = sources.lock().clone().expect("source must be attached");
-                let snapshot = crate::stateful::db::ServeSource::latest(&source)
+                let snapshot = crate::stateful::db::ServeSource::latest(&reader)
                     .expect("a published generation must exist");
                 snapshot.bounds().start
             })
@@ -559,7 +559,7 @@ impl EngineDefinition for SingleDbEngine {
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Attach the marshal to probe, entering service. A syncing node has
-        // already consumed its floor above; a source attaches without ever soliciting peers.
+        // already consumed its floor above; serving needs no peer solicitation.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {

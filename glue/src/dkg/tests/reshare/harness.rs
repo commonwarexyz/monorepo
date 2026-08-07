@@ -889,6 +889,8 @@ impl EngineDefinition for ReshareEngine {
             init_concurrency: (),
         };
 
+        let (publisher, reader) = crate::stateful::db::channel(&context.child("publication"));
+        let serve_reader = <Database<_> as DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {
@@ -903,6 +905,7 @@ impl EngineDefinition for ReshareEngine {
                 priority_requests: false,
                 priority_responses: false,
             },
+            serve_reader,
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
@@ -983,6 +986,7 @@ impl EngineDefinition for ReshareEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
+                publisher,
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),

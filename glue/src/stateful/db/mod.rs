@@ -11,7 +11,7 @@
 //! 3. Finalization: apply the sealed batch and start persisting it via
 //!    [`ManagedDb::finalize`], observing durability via [`Barrier`]. Finalize also
 //!    captures each database's serving snapshot, published for resolver serving (see
-//!    [`SetReader`]) once the barrier proves the generation durable.
+//!    [`Reader`]) once the barrier proves the generation durable.
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -109,8 +109,8 @@ pub mod keyless;
 pub mod p2p;
 mod publication;
 
-pub use publication::{DbReader, ServeSource, SetReader};
-pub(crate) use publication::{Publisher, Staged};
+pub(crate) use publication::Staged;
+pub use publication::{Publisher, Reader, ServeSource, channel};
 
 /// Mutable batch state before merkleization.
 ///
@@ -378,12 +378,12 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// One [`ManagedDb::Snapshot`] per database: one published generation's contents.
     type Snapshots: Send + Sync + 'static;
 
-    /// One [`publication::DbReader`] per database over [`Self::Snapshots`], each
+    /// One [`publication::Reader`] per database over [`Self::Snapshots`], each
     /// reading its database's snapshot out of the latest published generation.
     type Readers: Send + Sync + 'static;
 
-    /// Project `reader` into one reader per database.
-    fn readers(reader: publication::SetReader<Self::Snapshots>) -> Self::Readers;
+    /// One reader per database.
+    fn readers(reader: publication::Reader<Self::Snapshots>) -> Self::Readers;
 
     /// Configuration needed to construct every database in the set: the database's
     /// [`ManagedDb::Config`] under [`Single`], a tuple of per-database configs for
@@ -493,7 +493,7 @@ where
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
     type Snapshots = T::Snapshot;
-    type Readers = publication::DbReader<T::Snapshot, T::Snapshot>;
+    type Readers = publication::Reader<T::Snapshot>;
 
     async fn init(context: E, config: Self::Config) -> Self {
         match T::init(context.child("db"), config).await {
@@ -509,8 +509,8 @@ where
         T::initial_sync_target()
     }
 
-    fn readers(reader: publication::SetReader<Self::Snapshots>) -> Self::Readers {
-        publication::DbReader::new(reader, |snapshot| snapshot)
+    fn readers(reader: publication::Reader<Self::Snapshots>) -> Self::Readers {
+        reader
     }
 
     fn new_batches(&self) -> Self::Unmerkleized {
@@ -861,7 +861,7 @@ macro_rules! impl_database_set {
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
             type Snapshots = ($($T::Snapshot,)+);
-            type Readers = ($(publication::DbReader<Self::Snapshots, $T::Snapshot>,)+);
+            type Readers = ($(publication::Reader<Self::Snapshots, $T::Snapshot>,)+);
 
             async fn init(context: E, config: Self::Config) -> Self {
                 join!($(
@@ -887,10 +887,10 @@ macro_rules! impl_database_set {
             }
 
             fn readers(
-                reader: publication::SetReader<Self::Snapshots>,
+                reader: publication::Reader<Self::Snapshots>,
             ) -> Self::Readers {
                 ($(
-                    publication::DbReader::new(reader.clone(), |snapshot| &snapshot.$idx),
+                    reader.view(|snapshots| &snapshots.$idx),
                 )+)
             }
 
@@ -1759,92 +1759,12 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-/// A resolver that can attach a snapshot reader at runtime.
-///
-/// Implementations receive a reader (a [`publication::ServeSource`]) after startup so
-/// they can serve incoming sync requests from published durable snapshots once the
-/// first generation publishes.
-pub trait AttachableResolver<Reader>: Send + Sync + 'static {
-    /// Attach a reader serving incoming requests.
-    ///
-    /// Await confirms only submission of the attachment, not its processing.
-    /// Implementations must not block on publication.
-    fn attach_reader(&self, reader: Reader) -> impl Future<Output = ()> + Send;
-}
-
-/// Attach a set's readers to a resolver set with matching shape.
-pub trait AttachableResolverSet<Readers>: Send + Sync + 'static {
-    /// Attach each database's reader to its corresponding resolver.
-    fn attach_readers(&self, readers: Readers) -> impl Future<Output = ()> + Send;
-}
-
-impl<R, Reader> AttachableResolverSet<Reader> for R
-where
-    R: AttachableResolver<Reader>,
-    Reader: publication::ServeSource,
-{
-    async fn attach_readers(&self, reader: Reader) {
-        self.attach_reader(reader).await;
-    }
-}
-
-macro_rules! impl_attachable_resolver_set {
-    ($($R:ident : $S:ident : $idx:tt),+) => {
-        impl<$($R, $S),+> AttachableResolverSet<($($S,)+)> for ($($R,)+)
-        where
-            $(
-                $R: AttachableResolver<$S>,
-                $S: publication::ServeSource,
-            )+
-        {
-            async fn attach_readers(&self, readers: ($($S,)+)) {
-                futures::join!($(
-                    self.$idx.attach_reader(readers.$idx),
-                )+);
-            }
-        }
-    };
-}
-
-impl_attachable_resolver_set!(R1: S1: 0, R2: S2: 1);
-impl_attachable_resolver_set!(R1: S1: 0, R2: S2: 1, R3: S3: 2);
-impl_attachable_resolver_set!(R1: S1: 0, R2: S2: 1, R3: S3: 2, R4: S4: 3);
-impl_attachable_resolver_set!(R1: S1: 0, R2: S2: 1, R3: S3: 2, R4: S4: 3, R5: S5: 4);
-impl_attachable_resolver_set!(
-    R1: S1: 0,
-    R2: S2: 1,
-    R3: S3: 2,
-    R4: S4: 3,
-    R5: S5: 4,
-    R6: S6: 5
-);
-impl_attachable_resolver_set!(
-    R1: S1: 0,
-    R2: S2: 1,
-    R3: S3: 2,
-    R4: S4: 3,
-    R5: S5: 4,
-    R6: S6: 5,
-    R7: S7: 6
-);
-impl_attachable_resolver_set!(
-    R1: S1: 0,
-    R2: S2: 1,
-    R3: S3: 2,
-    R4: S4: 3,
-    R5: S5: 4,
-    R6: S6: 5,
-    R7: S7: 6,
-    R8: S8: 7
-);
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
-        CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher,
-        ServeSource as _, Single, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
-        drain_single_tip_updates,
+        Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
+        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, ServeSource as _, Single, StateSyncDb, StateSyncSet,
+        SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
 
@@ -1852,10 +1772,11 @@ mod tests {
     fn tuple_readers_project_their_own_members() {
         deterministic::Runner::default().start(|context| async move {
             type Pair = (NumberedDb, NumberedDb);
-            let (mut publisher, source) = Publisher::<
+            let (mut publisher, reader) = super::channel::<
                 <Pair as DatabaseSet<deterministic::Context>>::Snapshots,
-            >::new(&context);
-            let (first, second) = <Pair as DatabaseSet<deterministic::Context>>::readers(source);
+                _,
+            >(&context);
+            let (first, second) = <Pair as DatabaseSet<deterministic::Context>>::readers(reader);
             publisher.publish_durable((1, 2));
             assert_eq!(first.latest(), Some(1));
             assert_eq!(second.latest(), Some(2));
@@ -4645,60 +4566,6 @@ mod tests {
                 0,
                 "the unchanged-target database should not receive duplicate target updates",
             );
-        });
-    }
-
-    #[derive(Clone)]
-    struct RecordingResolver {
-        id: &'static str,
-        log: Arc<commonware_utils::sync::Mutex<Vec<&'static str>>>,
-    }
-
-    impl RecordingResolver {
-        fn new(
-            id: &'static str,
-            log: Arc<commonware_utils::sync::Mutex<Vec<&'static str>>>,
-        ) -> Self {
-            Self { id, log }
-        }
-    }
-
-    impl<Src: super::ServeSource> AttachableResolver<Src> for RecordingResolver {
-        async fn attach_reader(&self, _source: Src) {
-            self.log.lock().push(self.id);
-        }
-    }
-
-    #[test]
-    fn single_db_attach_calls_single_resolver() {
-        deterministic::Runner::default().start(|context| async move {
-            let log = Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
-            let resolver = RecordingResolver::new("db1", log.clone());
-            let (_publisher, source) = super::Publisher::<u8>::new(&context);
-
-            resolver
-                .attach_readers(super::DbReader::new(source, |member| member))
-                .await;
-            assert_eq!(&*log.lock(), &["db1"]);
-        });
-    }
-
-    #[test]
-    fn tuple_attach_is_index_stable() {
-        deterministic::Runner::default().start(|context| async move {
-            let log = Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
-            let resolvers = (
-                RecordingResolver::new("resolver_0", log.clone()),
-                RecordingResolver::new("resolver_1", log.clone()),
-            );
-            let (_publisher, source) = super::Publisher::<(u8, u16)>::new(&context);
-            let sources = (
-                super::DbReader::new(source.clone(), |members: &(u8, u16)| &members.0),
-                super::DbReader::new(source, |members: &(u8, u16)| &members.1),
-            );
-
-            resolvers.attach_readers(sources).await;
-            assert_eq!(&*log.lock(), &["resolver_0", "resolver_1"]);
         });
     }
 }

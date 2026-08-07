@@ -131,7 +131,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// database handle set.
+    /// The database handle set.
     pub databases: A::Databases,
     /// The anchor at which state sync completed.
     pub anchor: Anchor<BlockDigest<A, E>>,

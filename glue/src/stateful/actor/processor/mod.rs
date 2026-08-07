@@ -967,8 +967,8 @@ mod tests {
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{
-            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, Publisher, SyncTargetsOf,
-            UnmerkleizedOf,
+            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, SyncTargetsOf, UnmerkleizedOf,
+            channel,
         },
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -1406,7 +1406,7 @@ mod tests {
                 TestSet::<deterministic::Context>::init(context.child("db_set"), config.clone())
                     .await;
             let metrics = StatefulMetrics::new(&context);
-            let (publisher, _source) = Publisher::new(&context);
+            let (publisher, _reader) = channel(&context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(

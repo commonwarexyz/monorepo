@@ -84,7 +84,7 @@ impl<F: Family> Policy for EngineMessage<F> {
 ///
 /// Every callback from the resolver engine is converted into an
 /// [`EngineMessage`] and sent to the actor. This keeps all mutable
-/// state (pending subscribers, the attached source) on the actor task,
+/// state (pending subscribers, the serving source) on the actor task,
 /// while the engine runs independently.
 #[derive(Clone)]
 pub(super) struct Handler<F: Family> {

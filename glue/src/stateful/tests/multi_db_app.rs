@@ -77,13 +77,13 @@ type QmdbB<E> =
 /// A full and a compact QMDB as a tuple, owned by value.
 pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
-/// Serving sources projected from the set's published snapshots, one per member.
+/// Serving readers over the set's published snapshots, one per member.
 type MultiSnapshot<E> = SnapshotsOf<MultiDatabaseSet<E>, E>;
-type SrcA<E> = crate::stateful::db::DbReader<
+type SrcA<E> = crate::stateful::db::Reader<
     MultiSnapshot<E>,
     <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
-type SrcB<E> = crate::stateful::db::DbReader<
+type SrcB<E> = crate::stateful::db::Reader<
     MultiSnapshot<E>,
     <QmdbB<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
@@ -582,7 +582,11 @@ impl EngineDefinition for MultiDbEngine {
             .await;
         let sync_floor = plan.floor().cloned();
 
-        // QMDB state-sync resolvers (one per database).
+        // Snapshot publication channel and the QMDB state-sync resolvers (one per
+        // database), each serving from its own reader.
+        let (publisher, reader) = crate::stateful::db::channel(&context.child("publication"));
+        let (reader_a, reader_b) =
+            <MultiDatabaseSet<_> as crate::stateful::db::DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
             qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SrcA<_>>::new(
                 context.child("qmdb_resolver_a"),
@@ -598,6 +602,7 @@ impl EngineDefinition for MultiDbEngine {
                     priority_requests: false,
                     priority_responses: false,
                 },
+                reader_a.clone(),
             );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
@@ -616,9 +621,8 @@ impl EngineDefinition for MultiDbEngine {
                     priority_requests: false,
                     priority_responses: false,
                 },
+                reader_b,
             );
-        let qmdb_sync_resolver_a = CapturingResolver::new(qmdb_sync_resolver_a);
-        let qmdb_sync_resolver_b = CapturingResolver::new(qmdb_sync_resolver_b);
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
@@ -633,6 +637,7 @@ impl EngineDefinition for MultiDbEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a.clone(), qmdb_sync_resolver_b.clone()),
+                publisher,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
@@ -644,12 +649,11 @@ impl EngineDefinition for MultiDbEngine {
 
         // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
         // The compact db keeps no operation history to observe.
-        let prune_observer = qmdb_sync_resolver_a.reader.clone();
+        let prune_observer = reader_a;
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let sources = prune_observer.clone();
+            let reader = prune_observer.clone();
             Box::pin(async move {
-                let source = sources.lock().clone().expect("source must be attached");
-                let snapshot = crate::stateful::db::ServeSource::latest(&source)
+                let snapshot = crate::stateful::db::ServeSource::latest(&reader)
                     .expect("a published generation must exist");
                 snapshot.bounds().start
             })
@@ -670,7 +674,7 @@ impl EngineDefinition for MultiDbEngine {
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Attach the marshal to probe, entering service. A syncing node has
-        // already consumed its floor above; a source attaches without ever soliciting peers.
+        // already consumed its floor above; serving needs no peer solicitation.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {

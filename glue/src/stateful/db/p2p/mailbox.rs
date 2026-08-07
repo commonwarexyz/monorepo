@@ -1,6 +1,6 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
-use crate::stateful::db::{AttachableResolver, ServeSource, p2p::cancel};
+use crate::stateful::db::p2p::cancel;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
@@ -9,7 +9,7 @@ use commonware_storage::{
     qmdb::sync::{FeedbackTx, Request, Response, Source},
 };
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, future::Future};
+use std::collections::VecDeque;
 
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
@@ -21,9 +21,7 @@ pub struct ResponseDropped;
 pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, FeedbackTx)>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
-pub(super) enum Message<Src, F: Family, Op, D: Digest> {
-    /// Provide a serving source so the actor can serve incoming requests.
-    AttachSource(Src),
+pub(super) enum Message<F: Family, Op, D: Digest> {
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: Request<F>,
@@ -33,81 +31,62 @@ pub(super) enum Message<Src, F: Family, Op, D: Digest> {
     CancelOperations { request: Request<F> },
 }
 
-impl<Src, F: Family, Op, D: Digest> Message<Src, F, Op, D> {
+impl<F: Family, Op, D: Digest> Message<F, Op, D> {
     fn response_closed(&self) -> bool {
         match self {
-            Self::AttachSource(_) | Self::CancelOperations { .. } => false,
+            Self::CancelOperations { .. } => false,
             Self::GetOperations { response, .. } => response.is_closed(),
         }
     }
 }
 
-pub(super) struct Pending<Src, F: Family, Op, D: Digest> {
-    source: Option<Src>,
-    messages: VecDeque<Message<Src, F, Op, D>>,
-}
+pub(super) struct Pending<F: Family, Op, D: Digest>(VecDeque<Message<F, Op, D>>);
 
-impl<Src, F: Family, Op, D: Digest> Default for Pending<Src, F, Op, D> {
+impl<F: Family, Op, D: Digest> Default for Pending<F, Op, D> {
     fn default() -> Self {
-        Self {
-            source: None,
-            messages: VecDeque::new(),
-        }
+        Self(VecDeque::new())
     }
 }
 
-impl<Src, F: Family, Op, D: Digest> Overflow<Message<Src, F, Op, D>> for Pending<Src, F, Op, D> {
+impl<F: Family, Op, D: Digest> Overflow<Message<F, Op, D>> for Pending<F, Op, D> {
     fn is_empty(&self) -> bool {
-        self.source.is_none() && self.messages.is_empty()
+        self.0.is_empty()
     }
 
     fn drain<P>(&mut self, mut push: P)
     where
-        P: FnMut(Message<Src, F, Op, D>) -> Option<Message<Src, F, Op, D>>,
+        P: FnMut(Message<F, Op, D>) -> Option<Message<F, Op, D>>,
     {
-        if let Some(source) = self.source.take()
-            && let Some(Message::AttachSource(source)) = push(Message::AttachSource(source))
-        {
-            self.source = Some(source);
-            return;
-        }
-
-        while let Some(message) = self.messages.pop_front() {
+        while let Some(message) = self.0.pop_front() {
             if message.response_closed() {
                 continue;
             }
 
             if let Some(message) = push(message) {
-                self.messages.push_front(message);
+                self.0.push_front(message);
                 break;
             }
         }
     }
 }
 
-impl<Src, F: Family, Op, D: Digest> Policy for Message<Src, F, Op, D> {
-    type Overflow = Pending<Src, F, Op, D>;
+impl<F: Family, Op, D: Digest> Policy for Message<F, Op, D> {
+    type Overflow = Pending<F, Op, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
             return;
         }
-
-        match message {
-            Self::AttachSource(source) => {
-                overflow.source = Some(source);
-            }
-            message => overflow.messages.push_back(message),
-        }
+        overflow.0.push_back(message);
     }
 }
 
 /// Client-facing resolver mailbox used by the QMDB sync engine.
-pub struct Mailbox<Src, F: Family, Op, D: Digest> {
-    sender: Sender<Message<Src, F, Op, D>>,
+pub struct Mailbox<F: Family, Op, D: Digest> {
+    sender: Sender<Message<F, Op, D>>,
 }
 
-impl<Src, F: Family, Op, D: Digest> Clone for Mailbox<Src, F, Op, D> {
+impl<F: Family, Op, D: Digest> Clone for Mailbox<F, Op, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -115,18 +94,17 @@ impl<Src, F: Family, Op, D: Digest> Clone for Mailbox<Src, F, Op, D> {
     }
 }
 
-impl<Src, F: Family, Op, D: Digest> Mailbox<Src, F, Op, D> {
-    pub(super) const fn new(sender: Sender<Message<Src, F, Op, D>>) -> Self {
+impl<F: Family, Op, D: Digest> Mailbox<F, Op, D> {
+    pub(super) const fn new(sender: Sender<Message<F, Op, D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<Src, F, Op, D> Source for Mailbox<Src, F, Op, D>
+impl<F, Op, D> Source for Mailbox<F, Op, D>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
-    Src: Send + Sync + 'static,
 {
     type Family = F;
     type Digest = D;
@@ -151,19 +129,6 @@ where
     }
 }
 
-impl<Src, F, Op, D> AttachableResolver<Src> for Mailbox<Src, F, Op, D>
-where
-    F: Family,
-    Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
-    D: Digest,
-    Src: ServeSource,
-{
-    fn attach_reader(&self, reader: Src) -> impl Future<Output = ()> + Send {
-        let _ = self.sender.enqueue(Message::AttachSource(reader));
-        std::future::ready(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +143,7 @@ mod tests {
     fn dropping_get_operations_sends_cancel_message() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
-            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let mailbox = Mailbox::<mmr::Family, u64, sha256::Digest>::new(sender);
             let size = mmr::Location::new(10);
             let start_loc = mmr::Location::new(3);
             let max_ops = NZU64!(2);
@@ -201,7 +166,6 @@ mod tests {
                     assert_eq!(request.max_ops(), max_ops);
                     assert!(matches!(request, Request::Operations { .. }));
                 }
-                Message::AttachSource(_) => panic!("unexpected attach message"),
                 Message::CancelOperations { .. } => panic!("cancel should come after request"),
             }
 
@@ -212,7 +176,6 @@ mod tests {
                     assert_eq!(request.max_ops(), max_ops);
                     assert!(matches!(request, Request::Operations { .. }));
                 }
-                Message::AttachSource(_) => panic!("unexpected attach message"),
                 Message::GetOperations { .. } => panic!("unexpected duplicate request"),
             }
         });
@@ -223,7 +186,7 @@ mod tests {
     fn completed_get_operations_sends_no_cancel() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
-            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let mailbox = Mailbox::<mmr::Family, u64, sha256::Digest>::new(sender);
             let get = mailbox.serve(Request::Operations {
                 size: mmr::Location::new(10),
                 start: mmr::Location::new(3),

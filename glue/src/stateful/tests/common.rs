@@ -1,7 +1,4 @@
-use crate::{
-    simulate::processed::ProcessedHeight,
-    stateful::db::{AttachableResolver, ServeSource},
-};
+use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
     simplex::mocks::scheme::Scheme as MockScheme,
@@ -9,12 +6,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, ed25519, sha256};
 use commonware_runtime::{Quota, buffer::paged::CacheRef};
-use commonware_storage::{
-    archive::prunable,
-    qmdb::sync::{FeedbackTx, Request, Response, Source},
-    translator::TwoCap,
-};
-use commonware_utils::{NZU16, NZU64, NZUsize, sync::Mutex};
+use commonware_storage::{archive::prunable, translator::TwoCap};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::{
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -29,52 +22,6 @@ use std::{
 /// historical operations through the live actor.
 pub(crate) type OldestRetained =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;
-
-/// Wraps one sync resolver and captures the reader the stateful actor attaches,
-/// so tests can observe published durable snapshots without a production read API.
-#[derive(Clone)]
-pub(crate) struct CapturingResolver<R, Reader> {
-    inner: R,
-    pub(crate) reader: Arc<Mutex<Option<Reader>>>,
-}
-
-impl<R, Reader> CapturingResolver<R, Reader> {
-    pub(crate) fn new(inner: R) -> Self {
-        Self {
-            inner,
-            reader: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-impl<R, Reader> AttachableResolver<Reader> for CapturingResolver<R, Reader>
-where
-    R: AttachableResolver<Reader>,
-    Reader: ServeSource,
-{
-    async fn attach_reader(&self, reader: Reader) {
-        *self.reader.lock() = Some(reader.clone());
-        self.inner.attach_reader(reader).await;
-    }
-}
-
-impl<R, Reader> Source for CapturingResolver<R, Reader>
-where
-    R: Source,
-    Reader: Send + Sync + 'static,
-{
-    type Family = R::Family;
-    type Digest = R::Digest;
-    type Op = R::Op;
-    type Error = R::Error;
-
-    async fn serve(
-        &self,
-        request: Request<Self::Family>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
-        self.inner.serve(request).await
-    }
-}
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";

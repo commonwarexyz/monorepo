@@ -1,8 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{
-        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, SetReader, Unmerkleized, UnmerkleizedOf,
-    },
+    db::{DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Unmerkleized, UnmerkleizedOf},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -20,8 +18,8 @@ use std::{convert::Infallible, sync::Arc};
 
 /// The generation served by `reader`, or `None` before the first publish and
 /// after the publisher drops.
-pub(crate) fn served_generation(reader: &SetReader<()>) -> Option<u64> {
-    reader.latest().map(|generation| generation.number())
+pub(crate) fn served_generation(reader: &Reader<()>) -> Option<u64> {
+    reader.generation()
 }
 
 pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;

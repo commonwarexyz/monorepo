@@ -209,7 +209,7 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed,
         actor::syncer::{StateSyncMetadata, UpdateOutcome, init_databases_from_marshal},
-        db::{Anchor, Barrier, DatabaseSet, SetReader, StateSyncSet, SyncEngineConfig, TipUpdate},
+        db::{Anchor, Barrier, DatabaseSet, Reader, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor},
@@ -250,7 +250,7 @@ mod tests {
         type Config = u64;
         type SyncTargets = u64;
 
-        fn readers(_source: SetReader<Self::Snapshots>) -> Self::Readers {}
+        fn readers(_reader: Reader<Self::Snapshots>) -> Self::Readers {}
 
         async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
             Self(config)
