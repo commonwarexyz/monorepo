@@ -371,6 +371,17 @@ mod tests {
     }
 
     #[test]
+    fn addressable_provider_delegates() {
+        deterministic::Runner::default().start(|_| async move {
+            let inner = TestManager::new(Feedback::Ok);
+            let mut manager = AddressableManager::new(AddressableTestManager(inner));
+
+            assert!(manager.peer_set(7).await.is_none());
+            assert!(manager.subscribe().await.is_closed());
+        });
+    }
+
+    #[test]
     fn key_only_directory_matches_any_peer_set() {
         let (peers, _) = peers();
         assert!(Directory::matches(&Unit, &peers.union()));
