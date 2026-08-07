@@ -231,7 +231,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
-    let (publisher, reader) = Publisher::new(&context.child("publication"));
+    let (snapshot_publisher, snapshot_reader) = Publisher::new(&context.child("publication"));
     let (qmdb_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
         context.child("qmdb_resolver"),
         qmdb_resolver::Config {
@@ -246,7 +246,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             priority_requests: false,
             priority_responses: false,
         },
-        reader,
+        snapshot_reader,
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 
@@ -309,7 +309,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             mailbox_size: MAILBOX_SIZE,
             plan,
             resolvers: qmdb_sync_resolver,
-            publisher,
+            snapshot_publisher,
             sync_config: types::sync_config(),
             prune_config: None,
         },

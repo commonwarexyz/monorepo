@@ -1,0 +1,409 @@
+//! Serving the latest durable generation of database snapshots.
+//!
+//! [`Publisher::new`] creates a [`Publisher`] and a [`Reader`] over a shared
+//! cell containing the latest durable generation of snapshots.
+//!
+//! Snapshots are staged as blocks apply, but their flushes finish in any order,
+//! and a snapshot may only be served once everything in it is on disk. So the
+//! publisher publishes the newest staged snapshot whose flush, and every flush
+//! before it, has finished. If one completion makes several snapshots
+//! publishable at once, only the newest publishes. The rest are dropped without
+//! ever serving.
+//!
+//! Pruning has one wrinkle: the served snapshot was captured before the prune,
+//! so it still holds the pruned storage, and so does everything staged before
+//! the prune. The space frees once a snapshot captured after the prune
+//! publishes, a later block's own publish, or a fresh capture published once
+//! every flush has finished.
+
+use commonware_consensus::types::Height;
+use commonware_runtime::{Metrics as RuntimeMetrics, telemetry::metrics::Registered};
+use commonware_utils::sync::Mutex;
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use std::{collections::BTreeMap, sync::Arc};
+
+enum State<S> {
+    Empty,
+    Published(Arc<S>),
+    Closed,
+}
+
+/// Shared between the [`Publisher`] and its [`Reader`]s.
+struct Cell<S> {
+    state: Mutex<State<S>>,
+    metrics: Metrics,
+}
+
+/// Publication metrics.
+struct Metrics {
+    /// Height of the latest published generation.
+    height: Registered<Gauge>,
+    /// Generations published since startup.
+    published: Registered<Counter>,
+}
+
+impl Metrics {
+    fn register<E: RuntimeMetrics>(context: &E) -> Self {
+        let height = context.register(
+            "published_height",
+            "Height of the latest published generation, or -1 when nothing is servable",
+            Gauge::default(),
+        );
+        height.set(-1);
+        Self {
+            height,
+            published: context.register(
+                "publications",
+                "Generations published since startup",
+                Counter::default(),
+            ),
+        }
+    }
+}
+
+/// A staged snapshot awaiting the durable frontier.
+struct Staged<S> {
+    snapshots: S,
+    durable: bool,
+}
+
+/// Publishes each durable generation of snapshots to its [`Reader`]s.
+///
+/// Dropping it closes the cell: readers decline instead of serving ever-older
+/// state. Applications only move it into the stateful actor's configuration.
+/// Staging and publishing are crate-internal.
+pub struct Publisher<S> {
+    cell: Arc<Cell<S>>,
+    staged: BTreeMap<Height, Staged<S>>,
+    stale_boundary: Option<Height>,
+}
+
+impl<S> Publisher<S> {
+    /// Create a [`Publisher`] and a [`Reader`] over one cell.
+    ///
+    /// Publication metrics register under `context`.
+    pub fn new<E: RuntimeMetrics>(context: &E) -> (Self, Reader<S>) {
+        let cell = Arc::new(Cell {
+            state: Mutex::new(State::Empty),
+            metrics: Metrics::register(context),
+        });
+        (
+            Self {
+                cell: cell.clone(),
+                staged: BTreeMap::new(),
+                stale_boundary: None,
+            },
+            Reader {
+                cell,
+                view: |snapshots| snapshots,
+            },
+        )
+    }
+
+    /// Hold `snapshots`, captured at `height`, until its flush finishes.
+    ///
+    /// Stage in apply order.
+    pub(crate) fn stage(&mut self, height: Height, snapshots: S) {
+        let replaced = self.staged.insert(
+            height,
+            Staged {
+                snapshots,
+                durable: false,
+            },
+        );
+        assert!(replaced.is_none(), "staged height must be unique");
+    }
+
+    /// Record that `height`'s flush finished. Returns whether it was durable
+    /// (`false` means the runtime shut down mid-flush, so the caller must stop).
+    ///
+    /// A durable completion publishes the newest snapshot that is now fully on
+    /// disk, dropping any older ones still held.
+    pub(crate) fn complete(&mut self, height: Height, durable: bool) -> bool {
+        let staged = self
+            .staged
+            .get_mut(&height)
+            .expect("completed flush must be staged");
+        if !durable {
+            return false;
+        }
+        staged.durable = true;
+
+        // The newest staged height whose flush, and every flush before it,
+        // has finished.
+        let Some(frontier) = self
+            .staged
+            .iter()
+            .take_while(|(_, staged)| staged.durable)
+            .map(|(height, _)| *height)
+            .last()
+        else {
+            return true;
+        };
+        let pending = self.staged.split_off(&next(frontier));
+        let (height, staged) = std::mem::replace(&mut self.staged, pending)
+            .pop_last()
+            .expect("frontier must be staged");
+        self.publish(height, staged.snapshots);
+        true
+    }
+
+    /// Publish `snapshots`, captured at `height`, immediately.
+    ///
+    /// Only for state that is already on disk: recovered at startup, synced at
+    /// transition, or captured after every flush finished.
+    pub(crate) fn publish_now(&mut self, height: Height, snapshots: S) {
+        assert!(
+            self.staged.is_empty(),
+            "immediate publication requires every staged flush to have drained",
+        );
+        self.publish(height, snapshots);
+        // A fresh capture never predates a prune, even at the same height.
+        self.stale_boundary = None;
+    }
+
+    fn publish(&mut self, height: Height, snapshots: S) {
+        let mut state = self.cell.state.lock();
+        let _replaced = std::mem::replace(&mut *state, State::Published(Arc::new(snapshots)));
+        // Update metrics under the lock so the gauge matches what readers see.
+        self.cell.metrics.height.set(height.get() as i64);
+        self.cell.metrics.published.inc();
+        // Release the lock before `_replaced` drops at end of scope, so freeing
+        // the displaced generation never blocks readers.
+        drop(state);
+
+        // Only a snapshot captured after the prune serves post-prune state.
+        if self
+            .stale_boundary
+            .is_some_and(|boundary| height > boundary)
+        {
+            self.stale_boundary = None;
+        }
+    }
+
+    /// Whether a flush at or below `barrier` is still running, blocking a prune.
+    pub(crate) fn blocks_prune(&self, barrier: Height) -> bool {
+        self.staged
+            .iter()
+            .find(|(_, staged)| !staged.durable)
+            .is_some_and(|(height, _)| *height <= barrier)
+    }
+
+    /// Mark the served snapshot stale after a prune. Returns false when nothing
+    /// is staged, so the caller must publish a fresh capture immediately.
+    pub(crate) fn mark_stale(&mut self) -> bool {
+        self.stale_boundary = self.staged.keys().last().copied();
+        self.stale_boundary.is_some()
+    }
+
+    /// A refresh is due once the served snapshot is stale and every flush has
+    /// finished.
+    pub(crate) fn refresh_due(&self) -> bool {
+        self.stale_boundary.is_some() && self.staged.is_empty()
+    }
+}
+
+impl<S> Drop for Publisher<S> {
+    fn drop(&mut self) {
+        // Without a publisher the last generation would only grow staler, so
+        // close the cell: reads decline rather than serve unboundedly old state.
+        let mut state = self.cell.state.lock();
+        let _replaced = std::mem::replace(&mut *state, State::Closed);
+        self.cell.metrics.height.set(-1);
+        // Release the lock before `_replaced` drops at end of scope.
+        drop(state);
+    }
+}
+
+/// The height after `height`.
+const fn next(height: Height) -> Height {
+    Height::new(height.get() + 1)
+}
+
+/// Reads the latest published generation.
+///
+/// The reader from [`Publisher::new`] reads the whole snapshot set, and
+/// [`view`](Reader::view) derives readers for parts of it, typically one
+/// database's snapshot. Cloned freely. Each read takes one generation and
+/// selects from it, so a read never mixes two generations.
+pub struct Reader<S, M = S> {
+    cell: Arc<Cell<S>>,
+    view: fn(&S) -> &M,
+}
+
+impl<S, M> Clone for Reader<S, M> {
+    fn clone(&self) -> Self {
+        Self {
+            cell: self.cell.clone(),
+            view: self.view,
+        }
+    }
+}
+
+impl<S> Reader<S> {
+    /// Derive a reader for the part of each generation that `view` returns.
+    /// Typically one database's snapshot out of the set.
+    pub fn view<M>(&self, view: fn(&S) -> &M) -> Reader<S, M> {
+        Reader {
+            cell: self.cell.clone(),
+            view,
+        }
+    }
+}
+
+impl<S, M> Reader<S, M> {
+    /// The latest published generation, or `None` before the first publish or
+    /// after the publisher drops.
+    ///
+    /// The returned snapshot is owned, so reads never touch the live database.
+    pub fn latest(&self) -> Option<M>
+    where
+        M: Clone,
+    {
+        let generation = match &*self.cell.state.lock() {
+            State::Published(generation) => generation.clone(),
+            State::Empty | State::Closed => return None,
+        };
+        Some((self.view)(&generation).clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{Runner as _, deterministic};
+
+    /// The value of the `published_height` gauge.
+    fn published_height(context: &deterministic::Context) -> i64 {
+        context
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix("published_height "))
+            .expect("gauge must be registered")
+            .parse()
+            .expect("gauge must be an integer")
+    }
+
+    #[test]
+    fn empty_then_live_then_closed() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            assert!(reader.latest().is_none());
+            assert_eq!(published_height(&context), -1);
+
+            publisher.publish_now(Height::new(1), 7);
+            assert_eq!(reader.latest(), Some(7));
+            assert_eq!(published_height(&context), 1);
+
+            publisher.publish_now(Height::new(2), 8);
+            assert_eq!(reader.latest(), Some(8));
+            assert_eq!(published_height(&context), 2);
+
+            // A snapshot taken before the publisher drops keeps working.
+            let held = reader.latest().unwrap();
+            drop(publisher);
+            assert!(reader.latest().is_none());
+            assert_eq!(held, 8);
+            assert_eq!(published_height(&context), -1);
+        });
+    }
+
+    #[test]
+    fn viewed_reader_serves_its_part_of_the_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, reader) = Publisher::<(u32, u32)>::new(&context);
+            let first_db = reader.view(|set| &set.0);
+            assert!(first_db.latest().is_none());
+            publisher.publish_now(Height::new(1), (1, 10));
+            assert_eq!(first_db.latest(), Some(1));
+            publisher.publish_now(Height::new(2), (2, 20));
+            assert_eq!(first_db.latest(), Some(2));
+        });
+    }
+
+    #[test]
+    fn publishes_at_the_durable_frontier() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            publisher.stage(Height::new(5), 50);
+            publisher.stage(Height::new(6), 60);
+            publisher.stage(Height::new(7), 70);
+            assert!(reader.latest().is_none());
+
+            // Height 6 lands first: the frontier is stuck behind 5.
+            assert!(publisher.complete(Height::new(6), true));
+            assert!(reader.latest().is_none());
+
+            // Height 5 lands: the frontier jumps to 6, superseding 5 unseen.
+            assert!(publisher.complete(Height::new(5), true));
+            assert_eq!(reader.latest(), Some(60));
+
+            assert!(publisher.complete(Height::new(7), true));
+            assert_eq!(reader.latest(), Some(70));
+        });
+    }
+
+    #[test]
+    fn non_durable_completion_publishes_nothing() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            publisher.stage(Height::new(1), 10);
+            assert!(!publisher.complete(Height::new(1), false));
+            assert!(reader.latest().is_none());
+        });
+    }
+
+    #[test]
+    fn prune_blocks_on_pending_flushes_only() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, _reader) = Publisher::<u32>::new(&context);
+            publisher.stage(Height::new(1), 10);
+            publisher.stage(Height::new(2), 20);
+            assert!(publisher.blocks_prune(Height::new(1)));
+            assert!(publisher.complete(Height::new(1), true));
+            assert!(!publisher.blocks_prune(Height::new(1)));
+            assert!(publisher.blocks_prune(Height::new(2)));
+        });
+    }
+
+    #[test]
+    fn staleness_clears_only_above_the_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            publisher.stage(Height::new(1), 10);
+            publisher.stage(Height::new(2), 20);
+            assert!(publisher.complete(Height::new(1), true));
+
+            // Prune with height 2 still pending: its capture predates the prune,
+            // so its publish must not clear the staleness.
+            assert!(publisher.mark_stale());
+            assert!(!publisher.refresh_due());
+            assert!(publisher.complete(Height::new(2), true));
+            assert_eq!(reader.latest(), Some(20));
+            assert!(publisher.refresh_due());
+
+            // The refresh publishes a fresh capture at the same height.
+            publisher.publish_now(Height::new(2), 21);
+            assert_eq!(reader.latest(), Some(21));
+            assert!(!publisher.refresh_due());
+        });
+    }
+
+    #[test]
+    fn later_flush_satisfies_the_refresh() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            publisher.stage(Height::new(2), 20);
+            assert!(publisher.mark_stale());
+
+            // Height 3's capture postdates the prune, so its publish clears the
+            // staleness without a separate refresh.
+            publisher.stage(Height::new(3), 30);
+            assert!(publisher.complete(Height::new(2), true));
+            assert!(!publisher.refresh_due());
+            assert!(publisher.complete(Height::new(3), true));
+            assert_eq!(reader.latest(), Some(30));
+            assert!(!publisher.refresh_due());
+        });
+    }
+}

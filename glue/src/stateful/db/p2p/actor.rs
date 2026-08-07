@@ -1,7 +1,7 @@
 //! Resolver service actor for QMDB sync over P2P.
 
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
-use crate::stateful::db::ServeSource;
+use crate::stateful::db::Reader;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -26,13 +26,11 @@ use std::{
 };
 use tracing::debug;
 
-type Serve<Src> = <Src as ServeSource>::Serve;
-type Op<Src> = <Serve<Src> as Source>::Op;
-type SourceRoot<Src> = <Serve<Src> as Source>::Digest;
-type SyncMailbox<F, Src> = Mailbox<F, Op<Src>, SourceRoot<Src>>;
-type SyncMessage<F, Src> = mailbox::Message<F, Op<Src>, SourceRoot<Src>>;
-type PendingSubs<F, Src> =
-    BTreeMap<Request<F>, Vec<mailbox::ResponseTx<F, Op<Src>, SourceRoot<Src>>>>;
+type Op<M> = <M as Source>::Op;
+type SnapshotRoot<M> = <M as Source>::Digest;
+type SyncMailbox<F, M> = Mailbox<F, Op<M>, SnapshotRoot<M>>;
+type SyncMessage<F, M> = mailbox::Message<F, Op<M>, SnapshotRoot<M>>;
+type PendingSubs<F, M> = BTreeMap<Request<F>, Vec<mailbox::ResponseTx<F, Op<M>, SnapshotRoot<M>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B>
@@ -80,38 +78,42 @@ enum MailboxAction<F: Family> {
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
-pub struct Actor<E, P, D, B, F, Src>
+pub struct Actor<E, P, D, B, F, S, M>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Src: ServeSource,
-    Serve<Src>: Source<Family = F>,
-    Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
+    S: Send + Sync + 'static,
+    M: Source<Family = F> + Clone + Send + Sync + 'static,
+    Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B>,
-    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, Src>>,
-    source: Src,
+    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, M>>,
+    snapshot_reader: Reader<S, M>,
     metrics: ResolverMetrics,
-    pending: PendingSubs<F, Src>,
+    pending: PendingSubs<F, M>,
 }
 
-impl<E, P, D, B, F, Src> Actor<E, P, D, B, F, Src>
+impl<E, P, D, B, F, S, M> Actor<E, P, D, B, F, S, M>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Src: ServeSource,
-    Serve<Src>: Source<Family = F>,
-    Op<Src>: Codec<Cfg = ()> + Send + Clone + 'static,
+    S: Send + Sync + 'static,
+    M: Source<Family = F> + Clone + Send + Sync + 'static,
+    Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
-    /// Create a new resolver actor and mailbox, serving from `source`.
-    pub fn new(context: E, cfg: Config<P, D, B>, source: Src) -> (Self, SyncMailbox<F, Src>) {
+    /// Create a new resolver actor and mailbox, serving from `reader`.
+    pub fn new(
+        context: E,
+        cfg: Config<P, D, B>,
+        snapshot_reader: Reader<S, M>,
+    ) -> (Self, SyncMailbox<F, M>) {
         let metrics = ResolverMetrics::new(&context);
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -120,7 +122,7 @@ where
             context: ContextCell::new(context),
             config: cfg,
             mailbox_rx,
-            source,
+            snapshot_reader,
             metrics,
             pending: BTreeMap::new(),
         };
@@ -210,7 +212,7 @@ where
     }
 
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
-    fn handle_mailbox_message(&mut self, message: SyncMessage<F, Src>) -> MailboxAction<F> {
+    fn handle_mailbox_message(&mut self, message: SyncMessage<F, M>) -> MailboxAction<F> {
         match message {
             mailbox::Message::GetOperations { request, response } => {
                 if let Some(subscribers) = self.pending.get_mut(&request) {
@@ -267,7 +269,7 @@ where
         let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
         let cfg = (key.max_ops().get() as usize, ());
-        let response = match Response::<F, Op<Src>, SourceRoot<Src>>::decode_cfg(value, &cfg) {
+        let response = match Response::<F, Op<M>, SnapshotRoot<M>>::decode_cfg(value, &cfg) {
             Ok(response)
                 if matches!(
                     (&key, &response),
@@ -332,7 +334,7 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let Some(source) = self.source.latest() else {
+        let Some(source) = self.snapshot_reader.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -351,7 +353,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::Publisher;
     use bytes::Bytes;
+    use commonware_consensus::types::Height;
     use commonware_cryptography::{Sha256, ed25519, sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
@@ -405,48 +409,20 @@ mod tests {
     >;
     type TestOp = <TestDb as Source>::Op;
 
-    /// A source that always serves the same frozen database handle.
-    #[derive(Clone)]
-    struct StaticSource(Arc<TestDb>);
-
-    impl ServeSource for StaticSource {
-        type Serve = Arc<TestDb>;
-
-        fn latest(&self) -> Option<Arc<TestDb>> {
-            Some(self.0.clone())
-        }
-    }
-
-    /// A source with nothing to serve yet.
-    #[derive(Clone)]
-    struct EmptySource;
-
-    impl ServeSource for EmptySource {
-        type Serve = Arc<TestDb>;
-
-        fn latest(&self) -> Option<Arc<TestDb>> {
-            None
-        }
-    }
-
     type TestActor = Actor<
         deterministic::Context,
         ed25519::PublicKey,
         DummyProvider,
         DummyBlocker,
         mmr::Family,
-        StaticSource,
+        Arc<TestDb>,
+        Arc<TestDb>,
     >;
 
-    /// [`TestActor`] with nothing to serve; deliver-path tests never produce.
-    type EmptyActor = Actor<
-        deterministic::Context,
-        ed25519::PublicKey,
-        DummyProvider,
-        DummyBlocker,
-        mmr::Family,
-        EmptySource,
-    >;
+    /// A reader over a closed cell. Deliver-path tests never produce.
+    fn closed_reader(context: &deterministic::Context) -> Reader<Arc<TestDb>> {
+        Publisher::<Arc<TestDb>>::new(context).1
+    }
 
     fn test_config() -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker> {
         Config {
@@ -505,15 +481,17 @@ mod tests {
         }
     }
 
-    async fn init_source(
+    async fn init_reader(
         context: deterministic::Context,
         suffix: &str,
-    ) -> (StaticSource, Location) {
+    ) -> (Publisher<Arc<TestDb>>, Reader<Arc<TestDb>>, Location) {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");
         let size = db.bounds().end;
-        (StaticSource(Arc::new(db)), size)
+        let (mut publisher, reader) = Publisher::new(&context);
+        publisher.publish_now(Height::new(0), Arc::new(db));
+        (publisher, reader, size)
     }
 
     fn encoded_fetch_payload() -> Bytes {
@@ -531,8 +509,9 @@ mod tests {
     #[test]
     fn produce_denied_when_source_is_empty() {
         deterministic::Runner::default().start(|context| async move {
+            let (_publisher, reader) = Publisher::<Arc<TestDb>>::new(&context);
             let (mut actor, _mailbox) =
-                EmptyActor::new(context.child("actor"), test_config(), EmptySource);
+                TestActor::new(context.child("actor"), test_config(), reader);
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -545,9 +524,10 @@ mod tests {
     #[test]
     fn produce_serves_from_the_source() {
         deterministic::Runner::default().start(|context| async move {
-            let (source, size) = init_source(context.child("resolver_db"), "resolver-serves").await;
+            let (_publisher, reader, size) =
+                init_reader(context.child("resolver_db"), "resolver-serves").await;
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(), source);
+                TestActor::new(context.child("actor"), test_config(), reader);
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -562,10 +542,10 @@ mod tests {
     #[test]
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
-            let (source, size) =
-                init_source(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
+            let (_publisher, reader, size) =
+                init_reader(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(), source);
+                TestActor::new(context.child("actor"), test_config(), reader);
 
             let request = Request::Operations {
                 size,
@@ -582,7 +562,8 @@ mod tests {
     #[test]
     fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
@@ -601,7 +582,8 @@ mod tests {
     #[test]
     fn deliver_with_rejected_subscriber_blocks_peer() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -634,7 +616,8 @@ mod tests {
     #[test]
     fn deliver_ignores_dropped_subscriber_approval() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -664,7 +647,8 @@ mod tests {
     #[test]
     fn failed_then_deliver_clears_pending_and_allows_retry() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
@@ -683,7 +667,8 @@ mod tests {
     #[test]
     fn get_operations_refetches_when_pending_subscribers_are_closed() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = test_request_at(Location::new(1));
 
             let (stale_tx, stale_rx) = test_subscriber();
@@ -706,7 +691,8 @@ mod tests {
     #[test]
     fn deliver_rejects_answer_shaped_unlike_its_question() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = Request::Boundary {
                 size: Location::new(1),
                 start: Location::new(0),
@@ -729,7 +715,8 @@ mod tests {
     #[test]
     fn cancel_operations_cancels_pruned_request() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = EmptyActor::new(context, test_config(), EmptySource);
+            let reader = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
             let request = test_request_at(Location::new(1));
 
             let action =

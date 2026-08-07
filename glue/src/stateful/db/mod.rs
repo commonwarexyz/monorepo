@@ -107,10 +107,9 @@ pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
-mod publication;
+mod snapshot;
 
-pub(crate) use publication::PendingPublication;
-pub use publication::{Publisher, Reader, ServeSource};
+pub use snapshot::{Publisher, Reader};
 
 /// Mutable batch state before merkleization.
 ///
@@ -229,9 +228,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ) -> impl Future<Output = Result<(Self, Self::Snapshot, Handle<()>), Self::Error>> + Send;
 
     /// Capture a snapshot of the current applied state.
-    ///
-    /// The capture reflects batches whose flushes may still be pending. Callers must
-    /// prove the captured state durable before publishing it for serving.
     fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Snapshot), Self::Error>> + Send;
 
     /// Prune the database to a previously finalized sync target.
@@ -334,14 +330,7 @@ impl Barrier {
     }
 }
 
-/// A collection of [`ManagedDb`] instances owned as plain values.
-///
-/// The owning actor holds the set directly. Mutating methods consume the set and return
-/// it, so only the owner can ever mutate. Cancelling a consuming method's future
-/// mid-flight drops the set, which is fatal to the owning actor.
-///
-/// `E` is a trait generic (not an associated type), so one set type can work
-/// across runtimes that satisfy the bounds.
+/// A collection of [`ManagedDb`] instances.
 pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// One [`ManagedDb::Unmerkleized`] per database: scalar under [`Single`], a tuple
     /// for tuple sets.
@@ -381,9 +370,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
 
     /// Return sync targets for the set's currently applied state.
     ///
-    /// Applied state may be ahead of durable state while a flush is pending. Call this
-    /// only when no flush is pending (startup alignment or post-sync verification), so
-    /// applied state is durable by construction.
+    /// Applied state may be ahead of durable state while a flush is pending.
     fn applied_targets(&self) -> Self::SyncTargets;
 
     /// Apply each merkleized batch's changeset to its underlying database, capture the
@@ -398,10 +385,6 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     ) -> impl Future<Output = (Self, Self::Snapshots, Barrier)> + Send;
 
     /// Capture a snapshot of every database's current applied state.
-    ///
-    /// The capture reflects batches whose flushes may still be pending. Callers must
-    /// prove the captured state durable before publishing it for serving. A single
-    /// capture failure is fatal for the set and therefore panics.
     fn snapshot(self) -> impl Future<Output = (Self, Self::Snapshots)> + Send;
 
     /// Prune each database to the provided per-database targets (see

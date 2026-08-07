@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Unmerkleized, UnmerkleizedOf},
+    db::{DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Unmerkleized, UnmerkleizedOf},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -15,12 +15,6 @@ use commonware_cryptography::{
 use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{convert::Infallible, sync::Arc};
-
-/// The generation served by `reader`, or `None` before the first publish and
-/// after the publisher drops.
-pub(crate) fn served_generation(reader: &Reader<()>) -> Option<u64> {
-    reader.generation()
-}
 
 pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -71,6 +65,8 @@ pub(crate) struct FlushControl {
 pub(crate) struct TestDb {
     finalize: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
+    /// Finalizes applied so far. Snapshots carry it as their identity.
+    finalized: u64,
 }
 
 impl TestDb {
@@ -78,6 +74,7 @@ impl TestDb {
         Self {
             finalize: Mutex::new(Some(handle)),
             control: None,
+            finalized: 0,
         }
     }
 
@@ -87,6 +84,7 @@ impl TestDb {
         Self {
             finalize: Mutex::new(None),
             control: Some(control),
+            finalized: 0,
         }
     }
 }
@@ -97,10 +95,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Error = Infallible;
     type Config = ();
     type SyncTarget = u64;
-    type Snapshot = ();
+    type Snapshot = u64;
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
-        Ok((self, ()))
+        let snapshot = self.finalized;
+        Ok((self, snapshot))
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -120,20 +119,22 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn finalize(
-        self,
+        mut self,
         _batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+        self.finalized += 1;
+        let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
-            return Ok((self, (), Handle::from_receiver(released)));
+            return Ok((self, snapshot, Handle::from_receiver(released)));
         }
         let handle = self
             .finalize
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));
-        Ok((self, (), handle))
+        Ok((self, snapshot, handle))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {

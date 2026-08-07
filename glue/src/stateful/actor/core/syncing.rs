@@ -87,8 +87,8 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// Publisher for serving snapshots, handed to the [`Processor`] at transition.
-    pub(super) publisher: Publisher<SnapshotsOf<A::Databases, E>>,
+    /// Publishes each durable generation of snapshots for serving.
+    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
@@ -328,7 +328,7 @@ where
             syncer: _,
             held_verify_requests,
             artifact,
-            publisher,
+            mut snapshot_publisher,
             sync_completed: _,
             pending_finalizations: _,
             pruning,
@@ -338,8 +338,10 @@ where
         let mut completed_height = anchor.height;
 
         let _ = metrics.sync_done.try_set(1);
-        let mut processor =
-            Processor::new(application, databases, publisher, anchor, metrics, pruning).await;
+        let mut processor = Processor::new(application, databases, anchor, metrics, pruning);
+        let snapshots;
+        (processor, snapshots) = processor.snapshot().await;
+        snapshot_publisher.publish_now(anchor.height, snapshots);
 
         let mut pending_prune = None;
 
@@ -357,15 +359,19 @@ where
                     (processor, applied) = processor
                         .finalize(context.as_present(), block.as_ref())
                         .await;
-                    let Applied { publication, prune } =
-                        applied.expect("sync handoff block cannot be a duplicate");
+                    let Applied {
+                        snapshots,
+                        barrier,
+                        prune,
+                    } = applied.expect("sync handoff block cannot be a duplicate");
 
                     // The processing loop's flush pool does not exist yet, so observe the
                     // deferred flush inline. Keep state-sync metadata in progress until every
                     // handoff block is durable.
-                    if !publication.publish_when_durable().await {
+                    if !barrier.durable().await {
                         return;
                     }
+                    snapshot_publisher.publish_now(block.height(), snapshots);
                     acknowledgement.acknowledge();
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -385,7 +391,9 @@ where
             // The published snapshot was captured before this prune. Republish so
             // serving stops pinning the pruned state. Every handoff barrier was
             // awaited above, so the capture is already durable.
-            processor = processor.publish_durable().await;
+            let snapshots;
+            (processor, snapshots) = processor.snapshot().await;
+            snapshot_publisher.publish_now(processor.processed_height(), snapshots);
         }
 
         for request in held_verify_requests {
@@ -408,6 +416,7 @@ where
             provider,
             marshal,
             processor,
+            snapshot_publisher,
             skip_finalized_until: Some(completed_height),
         }
         .start()
@@ -432,7 +441,7 @@ mod tests {
             fixtures::{self, MarshalFixture},
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor,
-                served_generation, test_databases,
+                test_databases,
             },
         },
     };
@@ -466,7 +475,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
-        reader: Reader<()>,
+        reader: Reader<u64>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -568,7 +577,7 @@ mod tests {
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
-            let (publisher, reader) = Publisher::new(&syncing_context);
+            let (snapshot_publisher, snapshot_reader) = Publisher::new(&syncing_context);
 
             let harness = Self {
                 syncing: Syncing {
@@ -581,13 +590,13 @@ mod tests {
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
                     artifact: None,
-                    publisher,
+                    snapshot_publisher,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
-                reader,
+                reader: snapshot_reader,
             };
             (
                 harness,
@@ -623,7 +632,7 @@ mod tests {
             let (syncer_sender, _syncer_receiver) =
                 actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
             let (_sync_complete, sync_completed) = oneshot::channel();
-            let (publisher, reader) = Publisher::new(&syncing_context);
+            let (snapshot_publisher, snapshot_reader) = Publisher::new(&syncing_context);
 
             Self {
                 syncing: Syncing {
@@ -639,13 +648,13 @@ mod tests {
                         databases: test_databases(),
                         anchor,
                     }),
-                    publisher,
+                    snapshot_publisher,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
-                reader,
+                reader: snapshot_reader,
             }
         }
     }
@@ -787,7 +796,7 @@ mod tests {
                 "completion metadata must not be written before the handoff is durable",
             );
             assert_eq!(
-                served_generation(&reader),
+                reader.latest(),
                 Some(0),
                 "the synced state must serve as generation zero before any handoff flush",
             );
@@ -801,7 +810,7 @@ mod tests {
             assert!(poll!(&mut first_waiter).is_ready());
             assert!(poll!(&mut second_waiter).is_pending());
             assert_eq!(
-                served_generation(&reader),
+                reader.latest(),
                 Some(1),
                 "each handoff generation must serve once its flush is durable",
             );
@@ -859,7 +868,7 @@ mod tests {
                 "an aborted handoff must leave marshal's acknowledgement pending",
             );
             assert!(
-                served_generation(&harness.reader).is_none(),
+                harness.reader.latest().is_none(),
                 "the aborted generation must never serve, and the reader must decline \
                  once the writer is gone",
             );

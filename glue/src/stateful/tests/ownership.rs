@@ -1,8 +1,8 @@
 //! Causal ownership tests for the by-value database set: readers and the writer
 //! share nothing that can block either side.
 //!
-//! - a generation whose flush is still parked is never published, and does not
-//!   hold the writer back ([`unpublished_generation_stays_invisible`])
+//! - a staged generation is never visible before its flush proves durable, and
+//!   does not hold the writer back ([`staged_generation_stays_invisible`])
 //! - a serve holding a published snapshot across parked I/O cannot delay the
 //!   writer, and its snapshot stays frozen while publication moves on
 //!   ([`parked_serve_never_delays_the_writer`])
@@ -12,7 +12,8 @@
 //! scheduling point.
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
-use crate::stateful::db::{Barrier, DatabaseSet, Publisher, ServeSource as _, Single};
+use crate::stateful::db::{Barrier, DatabaseSet, Publisher, Single};
+use commonware_consensus::types::Height;
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::channel::oneshot;
@@ -29,7 +30,7 @@ fn parked_set() -> (Single<TestDb>, FlushControl) {
 
 /// Finalize an empty batch, pinning the set's environment to the
 /// deterministic runtime ([`TestDb`] works in any environment).
-async fn finalize(set: Single<TestDb>) -> (Single<TestDb>, (), Barrier) {
+async fn finalize(set: Single<TestDb>) -> (Single<TestDb>, u64, Barrier) {
     DatabaseSet::<deterministic::Context>::finalize(set, TestMerkleized).await
 }
 
@@ -52,40 +53,40 @@ fn release(control: &FlushControl) {
 }
 
 /// Staging alone publishes nothing: a staged generation stays invisible until
-/// published, and an unpublished generation does not hold the writer back.
-/// The actor publishes only after durability, which the processing-loop and
-/// publication tests pin.
+/// its flush proves durable, and does not hold the writer back.
 #[test_traced]
-fn unpublished_generation_stays_invisible() {
+fn staged_generation_stays_invisible() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (set, control) = parked_set();
         let (mut publisher, reader) = Publisher::new(&context);
 
         // The first generation applies but its flush is parked, so it stays
-        // staged and no subscriber can see it.
+        // staged and no reader can see it.
         let (set, snapshot, first) = finalize(set).await;
-        let staged = publisher.stage(snapshot, first);
+        publisher.stage(Height::new(1), snapshot);
         assert!(
             reader.latest().is_none(),
             "an applied but non-durable generation must not be visible"
         );
 
-        // The unpublished generation does not hold the writer back.
+        // The staged generation does not hold the writer back.
         let next = context.child("finalize").spawn(move |_| finalize(set));
         let (_, snapshot, second) = blocked_on(&context, next)
             .await
-            .unwrap_or_else(|_| panic!("an unpublished generation delayed the writer"))
+            .unwrap_or_else(|_| panic!("a staged generation delayed the writer"))
             .unwrap();
-        let staged_second = publisher.stage(snapshot, second);
+        publisher.stage(Height::new(2), snapshot);
 
         // Durability publishes, in order.
         release(&control);
-        assert!(staged.publish_when_durable().await);
-        assert_eq!(reader.generation(), Some(0));
+        assert!(first.durable().await);
+        assert!(publisher.complete(Height::new(1), true));
+        assert_eq!(reader.latest(), Some(1));
         release(&control);
-        assert!(staged_second.publish_when_durable().await);
-        assert_eq!(reader.generation(), Some(1));
+        assert!(second.durable().await);
+        assert!(publisher.complete(Height::new(2), true));
+        assert_eq!(reader.latest(), Some(2));
     });
 }
 
@@ -98,20 +99,17 @@ fn parked_serve_never_delays_the_writer() {
         let (set, control) = parked_set();
         let (mut publisher, reader) = Publisher::new(&context);
         let (set, snapshot, barrier) = finalize(set).await;
+        publisher.stage(Height::new(1), snapshot);
         release(&control);
-        assert!(
-            publisher
-                .stage(snapshot, barrier)
-                .publish_when_durable()
-                .await
-        );
+        assert!(barrier.durable().await);
+        assert!(publisher.complete(Height::new(1), true));
 
         // A serve takes the published snapshot and parks mid-assembly.
-        assert_eq!(reader.generation(), Some(0));
-        assert!(reader.latest().is_some());
+        let served = reader.latest().unwrap();
         let (io_done, io_gate) = oneshot::channel();
         let serve = context.child("serve").spawn(move |_| async move {
             let _ = io_gate.await;
+            served
         });
 
         // The parked serve shares nothing with the writer, so the next
@@ -121,21 +119,19 @@ fn parked_serve_never_delays_the_writer() {
             .await
             .unwrap_or_else(|_| panic!("a parked serve delayed the writer"))
             .unwrap();
+        publisher.stage(Height::new(2), snapshot);
         release(&control);
-        assert!(
-            publisher
-                .stage(snapshot, barrier)
-                .publish_when_durable()
-                .await
-        );
+        assert!(barrier.durable().await);
+        assert!(publisher.complete(Height::new(2), true));
 
-        // The serve completes against its captured snapshot while the
-        // reader already serves the newer generation.
+        // The serve completes against its captured snapshot while the reader
+        // already serves the newer generation.
         io_done.send(()).unwrap();
-        serve.await.unwrap();
+        let held = serve.await.unwrap();
+        assert_eq!(held, 1, "the held snapshot never moved");
         assert_eq!(
-            reader.generation(),
-            Some(1),
+            reader.latest(),
+            Some(2),
             "publication moved on while the serve was parked"
         );
     });

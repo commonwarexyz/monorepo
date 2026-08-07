@@ -131,8 +131,8 @@ where
     /// Resolver(s) for state sync fetches.
     pub resolvers: R,
 
-    /// Publishes snapshots of the database set.
-    pub publisher: Publisher<SnapshotsOf<A::Databases, E>>,
+    /// Publishes each durable generation of snapshots.
+    pub snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
@@ -179,8 +179,8 @@ where
     /// Resolver(s) for state sync fetches.
     resolvers: R,
 
-    /// Publishes snapshots of the database set.
-    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
+    /// Publishes each durable generation of snapshots.
+    snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
@@ -223,7 +223,7 @@ where
                 db_config: config.db_config,
                 plan: config.plan,
                 resolvers: config.resolvers,
-                publisher: config.publisher,
+                snapshot_publisher: config.snapshot_publisher,
                 sync_config: config.sync_config,
                 pruning,
             },
@@ -279,7 +279,7 @@ where
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
-            publisher: self.publisher,
+            snapshot_publisher: self.snapshot_publisher,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -300,21 +300,17 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(
-            self.application,
-            databases,
-            self.publisher,
-            anchor,
-            metrics,
-            self.pruning,
-        )
-        .await;
+        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let mut snapshot_publisher = self.snapshot_publisher;
+        let (processor, snapshots) = processor.snapshot().await;
+        snapshot_publisher.publish_now(anchor.height, snapshots);
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
             processor,
+            snapshot_publisher,
             skip_finalized_until,
         }
         .start()
@@ -389,7 +385,8 @@ mod tests {
             .await;
 
             let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
-            let (publisher, reader) = Publisher::new(&context.child("publication"));
+            let (snapshot_publisher, snapshot_reader) =
+                Publisher::new(&context.child("publication"));
             let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -400,7 +397,7 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     plan,
                     resolvers: NoopResolver,
-                    publisher,
+                    snapshot_publisher,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -415,7 +412,7 @@ mod tests {
 
             // No block is ever reported: the recovered state alone must publish as
             // generation zero and begin serving.
-            while reader.generation() != Some(0) {
+            while snapshot_reader.latest() != Some(0) {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
@@ -450,7 +447,7 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
-                    publisher: Publisher::new(&context.child("publication")).0,
+                    snapshot_publisher: Publisher::new(&context.child("publication")).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

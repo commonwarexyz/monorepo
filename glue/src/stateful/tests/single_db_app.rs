@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotsOf, SyncEngineConfig,
-            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, MerkleizedOf, SyncEngineConfig, Unmerkleized as _,
+            UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -64,9 +64,6 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 /// The QMDB database type used by the single-db e2e tests.
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-
-/// Serving reader over the set's published snapshots.
-type SingleSrc<E> = crate::stateful::db::Reader<SnapshotsOf<SingleDatabaseSet<E>, E>>;
 
 pub(crate) type SingleDatabaseSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
@@ -489,25 +486,24 @@ impl EngineDefinition for SingleDbEngine {
         let sync_floor = plan.floor().cloned();
 
         // Snapshot publication channel and the QMDB state-sync resolver serving from it.
-        let (publisher, serve_reader) =
+        let (snapshot_publisher, snapshot_reader) =
             crate::stateful::db::Publisher::new(&context.child("publication"));
-        let (qmdb_resolver_actor, qmdb_sync_resolver) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SingleSrc<_>>::new(
-                context.child("qmdb_resolver"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-                serve_reader.clone(),
-            );
+        let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
+            context.child("qmdb_resolver"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            snapshot_reader.clone(),
+        );
         let _qmdb_resolver_handle = qmdb_resolver_actor.start(qmdb_resolver_network);
 
         // Stateful actor
@@ -522,7 +518,7 @@ impl EngineDefinition for SingleDbEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver.clone(),
-                publisher,
+                snapshot_publisher,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
@@ -534,10 +530,9 @@ impl EngineDefinition for SingleDbEngine {
 
         // Observe the oldest operation QMDB still retains, to assert pruning ran.
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let reader = serve_reader.clone();
+            let reader = snapshot_reader.clone();
             Box::pin(async move {
-                let snapshot = crate::stateful::db::ServeSource::latest(&reader)
-                    .expect("a published generation must exist");
+                let snapshot = reader.latest().expect("a published generation must exist");
                 snapshot.bounds().start
             })
         });
@@ -557,7 +552,7 @@ impl EngineDefinition for SingleDbEngine {
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Attach the marshal to probe, entering service. A syncing node has
-        // already consumed its floor above; serving needs no peer solicitation.
+        // already consumed its floor above, so serving needs no peer solicitation.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {

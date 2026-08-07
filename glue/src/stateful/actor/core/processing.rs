@@ -3,17 +3,12 @@
 //! Each finalized block is applied to the databases, its flush deferred to a
 //! pool, and a snapshot of the applied state staged for publication. The loop
 //! publishes the snapshot and acknowledges the block to marshal only once the
-//! flush proves durable, so readers and marshal's floor never get ahead of disk.
+//! flush is durable, so readers and marshal's floor never get ahead of disk.
 //!
 //! Pruning and publication refresh are maintenance, run only while the mailbox
-//! is idle. A prune waits until the pruned range is durable. Pruning does not
-//! immediately reclaim space: the published snapshot, captured before the
-//! prune, still references the pruned storage, and so does every generation
-//! staged before it. The staleness clears only when a snapshot captured after
-//! the prune publishes. [`FlushTracker`] records how: if flushes were pending
-//! at prune time, the first durable publish above its stale boundary is such a
-//! capture; otherwise the loop refreshes (captures and publishes) as soon as
-//! every flush has drained, since publishing requires durable state.
+//! is idle. A prune waits until the pruned range is durable, and a prune leaves
+//! publication stale until a post-prune capture publishes (see
+//! [`Publisher`].
 
 use crate::stateful::{
     Application, Input,
@@ -21,6 +16,7 @@ use crate::stateful::{
         core::mailbox::Message,
         processor::{Applied, Processor},
     },
+    db::{Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -40,7 +36,7 @@ use futures::{
     future::{Either, ready},
 };
 use rand_core::Rng;
-use std::{collections::BTreeSet, sync::mpsc::TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: a mailbox message to handle,
@@ -50,69 +46,6 @@ enum Step<M, P> {
     Message(M),
     Prune(P),
     Refresh,
-}
-
-/// Pending finalize flushes, plus whether a prune left publication serving
-/// pre-prune state (see the module docs).
-#[derive(Default)]
-struct FlushTracker {
-    /// Heights of finalize flushes still running.
-    pending: BTreeSet<Height>,
-    /// The highest flush pending at the last prune. Generations at or below it
-    /// were captured pre-prune.
-    stale_boundary: Option<Height>,
-}
-
-impl FlushTracker {
-    /// Track a started finalize flush.
-    fn track(&mut self, height: Height) {
-        assert!(
-            self.pending.insert(height),
-            "finalize flush height must be unique",
-        );
-    }
-
-    /// Record a flush completion and return whether it was durable (`false`
-    /// means the runtime shut down mid-flush, so the caller must stop).
-    fn complete(&mut self, height: Height, durable: bool) -> bool {
-        assert!(
-            self.pending.remove(&height),
-            "completed flush must have a pending height",
-        );
-        // Only a generation captured after the prune serves post-prune state.
-        if durable
-            && self
-                .stale_boundary
-                .is_some_and(|boundary| height > boundary)
-        {
-            self.stale_boundary = None;
-        }
-        durable
-    }
-
-    /// Whether a flush at or below `barrier` is still pending, blocking a prune.
-    fn blocks_prune(&self, barrier: Height) -> bool {
-        self.pending
-            .first()
-            .is_some_and(|height| *height <= barrier)
-    }
-
-    /// Mark publication stale after a prune. Returns false when no flush is
-    /// pending, so the caller must refresh immediately.
-    fn mark_stale(&mut self) -> bool {
-        self.stale_boundary = self.pending.last().copied();
-        self.stale_boundary.is_some()
-    }
-
-    /// A refresh is due once publication is stale and every flush has drained.
-    fn refresh_due(&self) -> bool {
-        self.stale_boundary.is_some() && self.pending.is_empty()
-    }
-
-    /// Publication was refreshed.
-    const fn refreshed(&mut self) {
-        self.stale_boundary = None;
-    }
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -137,6 +70,9 @@ where
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
+    /// Publishes each durable generation of snapshots for serving.
+    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
+
     /// Finalized marshal blocks at or below this height were already reflected
     /// in the selected database anchor and should be acknowledged only.
     pub(super) skip_finalized_until: Option<Height>,
@@ -156,7 +92,6 @@ where
         // Deferred finalize flushes, each releasing its block's marshal
         // acknowledgement once the flush completes (see `Barrier`).
         let mut syncs = Pool::<(Height, bool)>::default();
-        let mut tracker = FlushTracker::default();
         select_loop! {
             self.context,
             on_start => {
@@ -165,7 +100,7 @@ where
                 // acknowledgements keep flowing even while the mailbox is
                 // never idle.
                 while let Some((height, durable)) = syncs.next_completed().now_or_never() {
-                    if !tracker.complete(height, durable) {
+                    if !self.snapshot_publisher.complete(height, durable) {
                         return;
                     }
                 }
@@ -179,7 +114,7 @@ where
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         // Publication is stale and every flush drained: refresh.
-                        None if tracker.refresh_due() => {
+                        None if self.snapshot_publisher.refresh_due() => {
                             Either::Left(ready(Some(Step::Refresh)))
                         }
                         // No message and nothing to prune: wait on the mailbox, driving flush
@@ -187,7 +122,7 @@ where
                         None => {
                             let mailbox = &mut self.mailbox;
                             let syncs = &mut syncs;
-                            let tracker = &mut tracker;
+                            let snapshot_publisher = &mut self.snapshot_publisher;
                             Either::Right(async move {
                                 loop {
                                     select! {
@@ -195,10 +130,10 @@ where
                                             break message.map(Step::Message);
                                         },
                                         (height, durable) = syncs.next_completed() => {
-                                            if !tracker.complete(height, durable) {
+                                            if !snapshot_publisher.complete(height, durable) {
                                                 return None;
                                             }
-                                            if tracker.refresh_due() {
+                                            if snapshot_publisher.refresh_due() {
                                                 break Some(Step::Refresh);
                                             }
                                         },
@@ -283,21 +218,26 @@ where
                             .await;
                         // Keep the publication bookkeeping under the same span.
                         let _process = process.entered();
-                        if let Some(Applied { publication, prune }) = applied {
+                        if let Some(Applied {
+                            snapshots,
+                            barrier,
+                            prune,
+                        }) = applied
+                        {
                             debug!(
                                 height = block.height().get(),
                                 "applied finalized database batch"
                             );
 
-                            // Publish the snapshot and acknowledge marshal together
+                            // The snapshot publishes and marshal is acknowledged only
                             // once the flush completes, so neither served state nor
                             // marshal's processed floor gets ahead of what is on
                             // disk. Marshal's ack window bounds the flush backlog,
                             // and unacknowledged blocks are redelivered on restart.
                             let height = block.height();
-                            tracker.track(height);
+                            self.snapshot_publisher.stage(height, snapshots);
                             syncs.push(async move {
-                                let durable = publication.publish_when_durable().await;
+                                let durable = barrier.durable().await;
                                 if durable {
                                     acknowledgement.acknowledge();
                                 }
@@ -317,25 +257,30 @@ where
                 Step::Prune(prune) => {
                     // The prune target must be durable, but later blocks remain available in
                     // marshal for replay and do not delay maintenance.
-                    while tracker.blocks_prune(prune.barrier_height) {
+                    while self.snapshot_publisher.blocks_prune(prune.barrier_height) {
                         let (height, durable) = syncs.next_completed().await;
-                        if !tracker.complete(height, durable) {
+                        if !self.snapshot_publisher.complete(height, durable) {
                             return;
                         }
                     }
                     self.processor = self.processor.prune(prune, &self.marshal).await;
                     // The published snapshot predates this prune and keeps the pruned
-                    // storage alive, as do generations staged before it.
-                    if !tracker.mark_stale() {
-                        self.processor = self.processor.publish_durable().await;
+                    // storage alive, as do snapshots staged before it.
+                    if !self.snapshot_publisher.mark_stale() {
+                        let snapshots;
+                        (self.processor, snapshots) = self.processor.snapshot().await;
+                        self.snapshot_publisher
+                            .publish_now(self.processor.processed_height(), snapshots);
                     }
                 }
                 Step::Refresh => {
                     // Publication went stale at the last prune and no later flush
                     // refreshed it. Every flush has drained, so the applied state
                     // is durable and can publish directly.
-                    self.processor = self.processor.publish_durable().await;
-                    tracker.refreshed();
+                    let snapshots;
+                    (self.processor, snapshots) = self.processor.snapshot().await;
+                    self.snapshot_publisher
+                        .publish_now(self.processor.processed_height(), snapshots);
                 }
             },
         }
@@ -358,7 +303,7 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushTracker, Processing, skip_finalized_block};
+    use super::{Processing, skip_finalized_block};
     use crate::stateful::{
         PruneConfig,
         actor::{
@@ -369,7 +314,7 @@ mod tests {
         db::{Publisher, Reader, Single},
         tests::{
             fixtures,
-            mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor, served_generation},
+            mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor},
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
@@ -377,8 +322,8 @@ mod tests {
         Reporter as _, marshal::Update, simplex::mocks::scheme as scheme_mocks, types::Height,
     };
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _, deterministic,
+        Clock as _, ContextCell, Error as RuntimeError, Handle, Metrics as _, Runner as _,
+        Spawner as _, Supervisor as _, deterministic,
     };
     use commonware_utils::{
         NZUsize,
@@ -387,50 +332,6 @@ mod tests {
     use futures::poll;
     use std::{sync::Arc, time::Duration};
 
-    /// Only a publish strictly above the stale boundary satisfies the refresh.
-    #[test]
-    fn tracker_clears_stale_only_above_boundary() {
-        let mut tracker = FlushTracker::default();
-        tracker.track(Height::new(1));
-        tracker.track(Height::new(2));
-        assert!(tracker.complete(Height::new(1), true));
-        assert!(tracker.mark_stale());
-        tracker.track(Height::new(3));
-
-        // An publish at the boundary carries a pre-prune capture: still stale.
-        assert!(tracker.complete(Height::new(2), true));
-        assert!(!tracker.refresh_due());
-
-        // An publish above the boundary carries a post-prune capture: refreshed.
-        assert!(tracker.complete(Height::new(3), true));
-        assert!(!tracker.refresh_due());
-    }
-
-    #[test]
-    fn tracker_defers_refresh_until_flushes_drain() {
-        let mut tracker = FlushTracker::default();
-        tracker.track(Height::new(1));
-        tracker.track(Height::new(2));
-        assert!(tracker.complete(Height::new(1), true));
-        assert!(tracker.mark_stale());
-        assert!(!tracker.refresh_due());
-        assert!(tracker.complete(Height::new(2), true));
-        assert!(tracker.refresh_due());
-        tracker.refreshed();
-        assert!(!tracker.refresh_due());
-    }
-
-    #[test]
-    fn tracker_requests_immediate_refresh_when_drained() {
-        let mut tracker = FlushTracker::default();
-        assert!(!tracker.mark_stale());
-        assert!(!tracker.refresh_due());
-    }
-
-    /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
-    /// mailbox, flush controls, the publication source, a guard keeping the
-    /// (never-started) marshal actor's mailbox open, and the processing actor
-    /// handle.
     async fn spawn_processing(
         context: &deterministic::Context,
         prefix: &str,
@@ -438,7 +339,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, TestApp>,
         FlushControl,
-        Reader<()>,
+        Reader<u64>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -458,16 +359,16 @@ mod tests {
         let databases = Single::from(TestDb::gated(control.clone()));
         let pruning = prune_config
             .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
-        let (publisher, source) = Publisher::new(context);
         let processor = Processor::new(
             TestApp,
             databases,
-            publisher,
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
-        )
-        .await;
+        );
+        let (mut publisher, reader) = Publisher::new(context);
+        let (processor, snapshots) = processor.snapshot().await;
+        publisher.publish_now(anchor(0, 0).height, snapshots);
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -475,10 +376,22 @@ mod tests {
             provider: (),
             marshal: marshal.mailbox,
             processor,
+            snapshot_publisher: publisher,
             skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
-        (Mailbox::new(sender), control, source, marshal.guards, actor)
+        (Mailbox::new(sender), control, reader, marshal.guards, actor)
+    }
+
+    /// The value of the `publications` counter.
+    fn publications(context: &deterministic::Context) -> u64 {
+        context
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix("publications_total "))
+            .expect("counter must be registered")
+            .parse()
+            .expect("counter must be an integer")
     }
 
     /// Pruning waits for the flush that covers its target without waiting for newer state.
@@ -517,7 +430,7 @@ mod tests {
                 "acknowledgements must wait for pending flushes",
             );
             assert_eq!(
-                served_generation(&source),
+                source.latest(),
                 Some(0),
                 "only the initial generation may serve before a block flush is durable",
             );
@@ -537,7 +450,7 @@ mod tests {
             let _ = release.send(Ok(()));
             waiter1.await.expect("block 1 acknowledgement");
             assert_eq!(
-                served_generation(&source),
+                source.latest(),
                 Some(1),
                 "block 1's generation must serve once durable",
             );
@@ -555,7 +468,7 @@ mod tests {
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
             assert!(
-                served_generation(&source).is_some_and(|generation| generation > 1),
+                source.latest().is_some_and(|generation| generation > 1),
                 "block 2's generation must serve once durable",
             );
         });
@@ -600,19 +513,21 @@ mod tests {
             }
             assert_eq!(control.pruned.lock().clone(), vec![1]);
 
-            // Block 2's generation was captured before the prune, so its publish must
-            // not satisfy the refresh: with no later block, the loop itself refreshes
-            // once every flush drains.
+            // Block 2's snapshot was captured before the prune, so its publish must
+            // not satisfy the refresh: with no later block, the loop itself captures
+            // and publishes again once every flush drains. The refresh carries the
+            // same content as block 2's publish, so count publications instead:
+            // startup, block 1, block 2, then the refresh.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
-            while served_generation(&source) < Some(3) {
+            while publications(&context) < 4 {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert_eq!(
-                served_generation(&source),
-                Some(3),
-                "the post-prune refresh must serve",
+                source.latest(),
+                Some(2),
+                "the refresh must serve block 2's state"
             );
         });
     }
@@ -676,12 +591,12 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter3.await.expect("block 3 acknowledgement");
-            while served_generation(&source) < Some(3) {
+            while source.latest() < Some(3) {
                 context.sleep(Duration::from_millis(10)).await;
             }
             context.sleep(Duration::from_millis(50)).await;
             assert_eq!(
-                served_generation(&source),
+                source.latest(),
                 Some(3),
                 "block 3's own publish must satisfy the refresh without a separate refresh publication",
             );
@@ -728,7 +643,7 @@ mod tests {
                 "aborted flush must prevent pruning",
             );
             assert!(
-                served_generation(&source).is_none(),
+                source.latest().is_none(),
                 "an aborted generation must never serve",
             );
         });
@@ -767,7 +682,7 @@ mod tests {
             ));
             waiter1.await.expect("block 1 acknowledgement");
             assert_eq!(
-                served_generation(&source),
+                source.latest(),
                 Some(1),
                 "the durable generation must serve while the loop idles",
             );
@@ -786,7 +701,7 @@ mod tests {
                 "unflushed block acknowledgement must remain pending",
             );
             assert!(
-                served_generation(&source).is_none(),
+                source.latest().is_none(),
                 "sources must decline after the loop stops",
             );
         });
@@ -846,7 +761,7 @@ mod tests {
                 "shutdown must leave in-flight acknowledgements pending",
             );
             assert!(
-                served_generation(&source).is_none(),
+                source.latest().is_none(),
                 "a generation whose flush never completed must never serve",
             );
         });

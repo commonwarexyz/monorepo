@@ -79,14 +79,6 @@ pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
 /// Serving readers over the set's published snapshots, one per member.
 type MultiSnapshot<E> = SnapshotsOf<MultiDatabaseSet<E>, E>;
-type SrcA<E> = crate::stateful::db::Reader<
-    MultiSnapshot<E>,
-    <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
->;
-type SrcB<E> = crate::stateful::db::Reader<
-    MultiSnapshot<E>,
-    <QmdbB<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
->;
 
 /// A block carrying state from two QMDB databases.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -584,46 +576,44 @@ impl EngineDefinition for MultiDbEngine {
 
         // Snapshot publication channel and the QMDB state-sync resolvers (one per
         // database), each serving from its own reader.
-        let (publisher, reader) =
+        let (snapshot_publisher, snapshot_reader) =
             crate::stateful::db::Publisher::<MultiSnapshot<_>>::new(&context.child("publication"));
-        let reader_a = reader.view(|snapshots| &snapshots.0);
-        let reader_b = reader.view(|snapshots| &snapshots.1);
-        let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SrcA<_>>::new(
-                context.child("qmdb_resolver_a"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-                reader_a.clone(),
-            );
+        let snapshot_reader_a = snapshot_reader.view(|snapshots| &snapshots.0);
+        let snapshot_reader_b = snapshot_reader.view(|snapshots| &snapshots.1);
+        let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) = qmdb_resolver::Actor::new(
+            context.child("qmdb_resolver_a"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            snapshot_reader_a.clone(),
+        );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
-        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SrcB<_>>::new(
-                context.child("qmdb_resolver_b"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-                reader_b,
-            );
+        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) = qmdb_resolver::Actor::new(
+            context.child("qmdb_resolver_b"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            snapshot_reader_b,
+        );
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
@@ -638,7 +628,7 @@ impl EngineDefinition for MultiDbEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a.clone(), qmdb_sync_resolver_b.clone()),
-                publisher,
+                snapshot_publisher,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
@@ -650,12 +640,11 @@ impl EngineDefinition for MultiDbEngine {
 
         // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
         // The compact db keeps no operation history to observe.
-        let prune_observer = reader_a;
+        let prune_observer = snapshot_reader_a;
         let oldest_retained: OldestRetained = Arc::new(move || {
             let reader = prune_observer.clone();
             Box::pin(async move {
-                let snapshot = crate::stateful::db::ServeSource::latest(&reader)
-                    .expect("a published generation must exist");
+                let snapshot = reader.latest().expect("a published generation must exist");
                 snapshot.bounds().start
             })
         });
@@ -675,7 +664,7 @@ impl EngineDefinition for MultiDbEngine {
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Attach the marshal to probe, entering service. A syncing node has
-        // already consumed its floor above; serving needs no peer solicitation.
+        // already consumed its floor above, so serving needs no peer solicitation.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {
