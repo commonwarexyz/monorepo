@@ -2483,6 +2483,7 @@ mod tests {
     /// tombstone cannot self-clean (only ordinal zero resumes the frontier) and there is no global
     /// startup scan, so its name lingers. Reopening it by name must yield a fresh generation, not
     /// the committed-root fallback that `State::recover` keeps for already-open handles.
+    #[cfg(not(feature = "iouring-storage"))]
     #[tokio::test]
     async fn nonanchor_tombstone_does_not_resurrect_on_open() {
         use crate::AtomicStorage as _;
@@ -2531,6 +2532,7 @@ mod tests {
     /// the ordinary (non-atomic) `open`. Its create path uses `create_new`, which requires the
     /// lingering tombstone name to be unlinked first, so it must recreate a fresh blob rather than
     /// failing with `AlreadyExists`.
+    #[cfg(not(feature = "iouring-storage"))]
     #[tokio::test]
     async fn nonanchor_tombstone_ordinary_open_creates_fresh() {
         use crate::Storage as _;
@@ -2565,6 +2567,7 @@ mod tests {
     /// ordinal-zero frontier walk (it stops at the recreated incarnation). A later scan must still
     /// not enumerate a higher tombstone whose deletion `start_apply` already reported durable:
     /// partition recovery has to clean every removed verdict, not rely on the ring staying intact.
+    #[cfg(not(feature = "iouring-storage"))]
     #[tokio::test]
     async fn scan_does_not_return_a_stranded_non_anchor_tombstone() {
         use crate::{AtomicStorage as _, Storage as _};

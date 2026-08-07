@@ -347,6 +347,13 @@ type SharedV2State = Arc<super::preflush::Context>;
 #[cfg(unix)]
 type V2StateEntry = (Weak<Generation>, Weak<super::preflush::Context>);
 
+#[cfg(all(unix, test))]
+#[derive(Default)]
+struct RemoveAfterUnlinkHook {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
 struct Namespace {
     lock: Arc<Mutex<()>>,
     #[cfg(unix)]
@@ -358,6 +365,12 @@ struct Namespace {
     embedded_batch_decision: SyncMutex<Option<Arc<super::batch::EmbeddedBatch>>>,
     #[cfg(unix)]
     v2_states: SyncMutex<BTreeMap<(String, Vec<u8>), V2StateEntry>>,
+    #[cfg(all(unix, test))]
+    remove_after_unlink: SyncMutex<Option<Arc<RemoveAfterUnlinkHook>>>,
+    #[cfg(all(unix, test))]
+    publish_materialization: SyncMutex<Option<Arc<super::tests::BlockingTestHook>>>,
+    #[cfg(all(unix, test))]
+    recovery_resize: SyncMutex<Option<Arc<super::tests::BlockingTestHook>>>,
 }
 
 impl Namespace {
@@ -446,6 +459,25 @@ impl Namespace {
             (partition.to_string(), name.to_vec()),
             (Arc::downgrade(generation), Arc::downgrade(state)),
         );
+    }
+
+    #[cfg(all(unix, test))]
+    async fn pause_after_remove_unlink(&self) {
+        let hook = self.remove_after_unlink.lock().take();
+        if let Some(hook) = hook {
+            hook.entered.notify_one();
+            hook.resume.notified().await;
+        }
+    }
+
+    #[cfg(all(unix, test))]
+    fn take_publish_materialization_hook(&self) -> Option<Arc<super::tests::BlockingTestHook>> {
+        self.publish_materialization.lock().take()
+    }
+
+    #[cfg(all(unix, test))]
+    fn take_recovery_resize_hook(&self) -> Option<Arc<super::tests::BlockingTestHook>> {
+        self.recovery_resize.lock().take()
     }
 
     #[cfg(test)]
@@ -550,6 +582,12 @@ impl Storage {
                 embedded_batch_decision: SyncMutex::new(None),
                 #[cfg(unix)]
                 v2_states: SyncMutex::new(BTreeMap::new()),
+                #[cfg(all(unix, test))]
+                remove_after_unlink: SyncMutex::new(None),
+                #[cfg(all(unix, test))]
+                publish_materialization: SyncMutex::new(None),
+                #[cfg(all(unix, test))]
+                recovery_resize: SyncMutex::new(None),
             }),
             cfg,
             pool,
@@ -1137,8 +1175,34 @@ impl Storage {
             return Err(unsupported_atomic(partition, name));
         }
 
+        let guard = self.lock_recovered().await?;
+        let storage = self.clone();
+        let partition = partition.to_string();
+        let name = name.to_vec();
+        let worker = tokio::spawn(async move {
+            storage
+                .open_versioned_guarded(partition, name, versions, require_atomic, guard)
+                .await
+        });
+        match worker.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(Error::Closed),
+        }
+    }
+
+    async fn open_versioned_guarded(
+        &self,
+        partition: String,
+        name: Vec<u8>,
+        versions: RangeInclusive<u16>,
+        require_atomic: bool,
+        guard: OwnedMutexGuard<()>,
+    ) -> Result<(Blob, u64, u16), Error> {
+        let partition = partition.as_str();
+        let name = name.as_slice();
         #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut guard = self.lock_recovered().await?;
+        let mut guard = guard;
         let requested_parent = self.cfg.storage_directory.join(partition);
         fs::create_dir_all(&requested_parent)
             .await
@@ -1488,6 +1552,13 @@ impl Storage {
                     generation.clone(),
                     None,
                 );
+                #[cfg(test)]
+                let recovery_blob = {
+                    let mut recovery_blob = recovery_blob;
+                    recovery_blob
+                        .set_recovery_resize_hook(self.namespace.take_recovery_resize_hook());
+                    recovery_blob
+                };
                 let backing = recovery_blob.atomic_backing();
                 let backing_len = file
                     .metadata()
@@ -1569,25 +1640,15 @@ impl Storage {
         }
         Ok((blob, logical_size, blob_version))
     }
-}
 
-impl crate::Storage for Storage {
-    type Blob = Blob;
-
-    async fn open_versioned(
+    async fn remove_guarded(
         &self,
-        partition: &str,
-        name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.open_versioned_inner(partition, name, versions, false)
-            .await
-    }
-
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        super::validate_partition_name(partition)?;
-
-        let _guard = self.lock_recovered().await?;
+        partition: String,
+        name: Option<Vec<u8>>,
+        _guard: OwnedMutexGuard<()>,
+    ) -> Result<(), Error> {
+        let partition = partition.as_str();
+        let name = name.as_deref();
         #[cfg(unix)]
         let stored_partition = {
             let root = self.cfg.storage_directory.clone();
@@ -1636,6 +1697,8 @@ impl crate::Storage for Storage {
             fs::remove_file(path.join(hex(name)))
                 .await
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            #[cfg(all(unix, test))]
+            self.namespace.pause_after_remove_unlink().await;
             #[cfg(unix)]
             sync_dir(&path).await?;
             super::batch::Operation::Remove(crate::RemoveTarget::Blob {
@@ -1646,6 +1709,8 @@ impl crate::Storage for Storage {
             fs::remove_dir_all(&path)
                 .await
                 .map_err(|_| Error::PartitionMissing(partition.into()))?;
+            #[cfg(all(unix, test))]
+            self.namespace.pause_after_remove_unlink().await;
             #[cfg(unix)]
             sync_dir(&self.cfg.storage_directory).await?;
             super::batch::Operation::Remove(crate::RemoveTarget::Partition(
@@ -1676,12 +1741,13 @@ impl crate::Storage for Storage {
         Ok(())
     }
 
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        super::validate_partition_name(partition)?;
-
-        // Acquire the filesystem lock
-        let _guard = self.lock_recovered().await?;
-
+    async fn scan_guarded(
+        &self,
+        partition: String,
+        _guard: OwnedMutexGuard<()>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let partition = partition.as_str();
+        // Complete namespace repairs before reporting the directory contents.
         #[cfg(unix)]
         {
             let root = self.cfg.storage_directory.clone();
@@ -1697,7 +1763,7 @@ impl crate::Storage for Storage {
             }
         }
 
-        // Scan the partition directory
+        // Scan the partition directory.
         let path = self.cfg.storage_directory.join(partition);
         let mut entries = fs::read_dir(path)
             .await
@@ -1722,9 +1788,8 @@ impl crate::Storage for Storage {
                 }
             }
             if let Some(name) = file_name.to_str() {
-                // Reject anything that isn't canonical lowercase hex (no `0x`
-                // prefix, no whitespace) since `from_hex` is lenient and
-                // storage only ever writes the canonical form via `hex()`.
+                // Storage writes canonical lowercase hex. Reject every other spelling because
+                // `from_hex` intentionally accepts a broader input language.
                 let decoded = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
                 if hex(&decoded) != name {
                     return Err(Error::PartitionCorrupt(partition.into()));
@@ -1740,6 +1805,52 @@ impl crate::Storage for Storage {
             }
         }
         Ok(blobs)
+    }
+}
+
+impl crate::Storage for Storage {
+    type Blob = Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.open_versioned_inner(partition, name, versions, false)
+            .await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        super::validate_partition_name(partition)?;
+
+        let guard = self.lock_recovered().await?;
+        let storage = self.clone();
+        let partition = partition.to_string();
+        let name = name.map(<[u8]>::to_vec);
+        let worker = tokio::spawn(async move {
+            storage.remove_guarded(partition, name, guard).await
+        });
+        match worker.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(Error::Closed),
+        }
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        super::validate_partition_name(partition)?;
+
+        let guard = self.lock_recovered().await?;
+        let storage = self.clone();
+        let partition = partition.to_string();
+        let worker =
+            tokio::spawn(async move { storage.scan_guarded(partition, guard).await });
+        match worker.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(Error::Closed),
+        }
     }
 }
 
@@ -1850,7 +1961,10 @@ mod tests {
         BatchStorage as _, Blob, BufferPoolConfig, Storage as _,
         storage::{
             Layout,
-            tests::{run_batch_storage_tests, run_storage_foreign_handle_test, run_storage_tests},
+            tests::{
+                BlockingTestHook, cancel_while_blocking_pool_saturated,
+                run_batch_storage_tests, run_storage_foreign_handle_test, run_storage_tests,
+            },
         },
         telemetry::metrics::Registry,
     };
@@ -2016,6 +2130,85 @@ mod tests {
             std::fs::remove_dir_all(directory).unwrap();
         }
         std::fs::remove_dir_all(source_directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_canceled_recovery_resize_retains_namespace_until_state_install() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_recovery_resize_cancel_{}",
+            random_suffix()
+        ));
+        let initial = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (blob, _) = initial
+            .open_atomic("recovery_resize", b"blob")
+            .await
+            .unwrap();
+        blob.write_at_sync(0, b"old").await.unwrap();
+        let live_path = storage_directory
+            .join("recovery_resize")
+            .join(commonware_formatting::hex(b"blob"));
+        let committed_len = std::fs::metadata(&live_path).unwrap().len();
+        blob.append(b"discarded").await.unwrap();
+        assert!(std::fs::metadata(&live_path).unwrap().len() > committed_len);
+        drop((blob, initial));
+
+        let recovered = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let hook = Arc::new(BlockingTestHook::default());
+        *recovered.namespace.recovery_resize.lock() = Some(hook.clone());
+        let opening = recovered.clone();
+        let observer = tokio::spawn(async move {
+            opening
+                .open_atomic("recovery_resize", b"blob")
+                .await
+        });
+        hook.wait_until_entered().await;
+        observer.abort();
+        assert!(matches!(observer.await, Err(error) if error.is_cancelled()));
+
+        let guard_retained = recovered
+            .namespace
+            .lock
+            .clone()
+            .try_lock_owned()
+            .is_err();
+        hook.release();
+
+        let (reopened, len) = tokio::time::timeout(
+            Duration::from_secs(10),
+            recovered.open_atomic("recovery_resize", b"blob"),
+        )
+        .await
+        .expect("reopen remained blocked after recovery resize completed")
+        .unwrap();
+        assert_eq!(len, 3);
+        reopened.write_at_sync(3, b"new").await.unwrap();
+        drop((reopened, recovered));
+
+        let fresh = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (blob, len) = fresh
+            .open_atomic("recovery_resize", b"blob")
+            .await
+            .unwrap();
+        let bytes = blob.read_at(0, len as usize).await.unwrap().coalesce();
+        drop((blob, fresh));
+        std::fs::remove_dir_all(storage_directory).unwrap();
+
+        assert!(
+            guard_retained,
+            "canceled open released namespace ownership during recovery resize"
+        );
+        assert_eq!(len, 6);
+        assert_eq!(bytes, b"oldnew");
     }
 
     #[cfg(unix)]
@@ -2604,6 +2797,186 @@ mod tests {
         assert_eq!(new.read_at(0, 3).await.unwrap().coalesce(), b"new");
 
         let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_canceled_namespace_operations_retain_guard() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let storage_directory = env::temp_dir().join(format!(
+                "storage_tokio_namespace_cancel_{}",
+                random_suffix()
+            ));
+            let storage = Storage::new(
+                Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+                test_pool(),
+            );
+            let (blob, _) = storage
+                .open_atomic("namespace_cancel", b"blob")
+                .await
+                .unwrap();
+
+            let open_retained = cancel_while_blocking_pool_saturated(
+                storage.namespace.lock.clone(),
+                storage.open_atomic("namespace_cancel", b"blob"),
+            )
+            .await;
+            let scan_retained = cancel_while_blocking_pool_saturated(
+                storage.namespace.lock.clone(),
+                storage.scan("namespace_cancel"),
+            )
+            .await;
+            let remove_retained = cancel_while_blocking_pool_saturated(
+                storage.namespace.lock.clone(),
+                storage.remove("namespace_cancel", Some(b"blob")),
+            )
+            .await;
+
+            drop((blob, storage));
+            let _ = std::fs::remove_dir_all(storage_directory);
+            assert!(open_retained, "canceled open released namespace ownership");
+            assert!(scan_retained, "canceled scan released namespace ownership");
+            assert!(
+                remove_retained,
+                "canceled remove released namespace ownership"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_canceled_remove_after_unlink_rotates_atomic_state() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_remove_unlink_cancel_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (old, _) = storage
+            .open_atomic("remove_cancel", b"blob")
+            .await
+            .unwrap();
+        old.write_at_sync(0, b"old").await.unwrap();
+
+        let hook = Arc::new(RemoveAfterUnlinkHook::default());
+        *storage.namespace.remove_after_unlink.lock() = Some(hook.clone());
+        let removing = storage.clone();
+        let task = tokio::spawn(async move {
+            removing
+                .remove("remove_cancel", Some(b"blob"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), hook.entered.notified())
+            .await
+            .expect("remove did not reach the post-unlink boundary");
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+
+        let guard_retained = storage
+            .namespace
+            .lock
+            .clone()
+            .try_lock_owned()
+            .is_err();
+        hook.resume.notify_one();
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(10),
+            storage.open_atomic("remove_cancel", b"blob"),
+        )
+        .await
+        .expect("recreate remained blocked after remove completed");
+        let reopened_size = reopened.as_ref().ok().map(|(_, size)| *size);
+
+        drop((old, reopened, storage));
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            guard_retained,
+            "post-unlink cancellation released namespace ownership"
+        );
+        assert_eq!(
+            reopened_size,
+            Some(0),
+            "replacement inode reused the removed generation's V2 state"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_canceled_direct_publish_retains_namespace_until_materialized() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_publish_cancel_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (first, _) = storage
+            .open_atomic("publish_cancel", b"first")
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("publish_cancel", b"second")
+            .await
+            .unwrap();
+        first.append(b"old").await.unwrap();
+        second.append(b"old").await.unwrap();
+        storage
+            .apply(vec![
+                BatchOperation::Publish(first.clone()),
+                BatchOperation::Publish(second.clone()),
+            ])
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .namespace
+                .carried_batch_decision
+                .load(Ordering::Acquire)
+        );
+
+        let hook = Arc::new(BlockingTestHook::default());
+        *storage.namespace.publish_materialization.lock() = Some(hook.clone());
+        let publishing = first.clone();
+        let task = tokio::spawn(async move { publishing.write_at_sync(3, b"new").await });
+        hook.wait_until_entered().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+
+        let guard_retained = storage
+            .namespace
+            .lock
+            .clone()
+            .try_lock_owned()
+            .is_err();
+        hook.release();
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(10),
+            storage.open_atomic("publish_cancel", b"first"),
+        )
+        .await
+        .expect("reopen remained blocked after publication completed");
+        let reopened_size = reopened.as_ref().ok().map(|(_, size)| *size);
+
+        drop((first, second, reopened, storage));
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            guard_retained,
+            "canceled publication released namespace ownership"
+        );
+        assert_eq!(
+            reopened_size,
+            Some(6),
+            "canceled observer abandoned its admitted direct publication"
+        );
     }
 
     /// A committed batch no longer depends on its completion observer being retained or polled.

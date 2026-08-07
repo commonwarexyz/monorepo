@@ -433,6 +433,21 @@ where
         Ok(state)
     }
 
+    /// Drive an admitted publication independently of the caller observing its completion.
+    fn start_publication(&self, operation: MutationGuard) -> Handle<()> {
+        let core = self.core.clone();
+        let publisher = self.publisher.clone();
+        let (sender, receiver) = oneshot::channel();
+        let task = Box::pin(async move {
+            let result = publisher.publish(core, operation).await;
+            let _ = sender.send(result);
+        });
+        match self.publisher.spawn(task) {
+            Ok(()) => Handle::from_receiver(receiver),
+            Err(error) => Handle::ready(Err(error)),
+        }
+    }
+
     async fn append_inner(
         &self,
         data: IoBufs,
@@ -482,9 +497,7 @@ where
         }
         if publish {
             let token = operation.integrity_token();
-            self.publisher
-                .publish(self.core.clone(), operation)
-                .await?;
+            self.start_publication(operation).await?;
             return Ok((result_offset, token));
         }
         let result = (result_offset, operation.integrity_token());
@@ -679,18 +692,7 @@ where
             Ok(state) => state,
             Err(error) => return Handle::ready(Err(error)),
         };
-        let core = self.core.clone();
-        let publisher = self.publisher.clone();
-        let (sender, receiver) = oneshot::channel();
-        let task = Box::pin(async move {
-            let operation = MutationGuard::new(state);
-            let result = publisher.publish(core, operation).await;
-            let _ = sender.send(result);
-        });
-        match self.publisher.spawn(task) {
-            Ok(()) => Handle::from_receiver(receiver),
-            Err(error) => Handle::ready(Err(error)),
-        }
+        self.start_publication(MutationGuard::new(state))
     }
 }
 

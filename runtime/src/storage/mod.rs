@@ -149,7 +149,82 @@ pub(crate) mod tests {
         Storage, WriteOptions,
     };
     use futures::FutureExt;
-    use std::num::NonZeroU32;
+    use std::{num::NonZeroU32, time::Duration};
+
+    /// One-shot blocking-worker gate for cancellation tests at a precise admitted-I/O boundary.
+    #[derive(Default)]
+    pub(crate) struct BlockingTestHook {
+        entered: tokio::sync::Notify,
+        released: commonware_utils::sync::Mutex<bool>,
+        resume: commonware_utils::sync::Condvar,
+    }
+
+    impl BlockingTestHook {
+        pub(crate) fn pause(&self) {
+            self.entered.notify_one();
+            let mut released = self.released.lock();
+            while !*released {
+                self.resume.wait(&mut released);
+            }
+        }
+
+        pub(crate) async fn wait_until_entered(&self) {
+            tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
+                .await
+                .expect("blocking operation did not reach test hook");
+        }
+
+        pub(crate) fn release(&self) {
+            *self.released.lock() = true;
+            self.resume.notify_all();
+        }
+    }
+
+    /// Cancel an operation after it has queued work on the only blocking worker, then report
+    /// whether the operation kept its namespace lock while that admitted work was outstanding.
+    #[cfg(all(unix, not(feature = "iouring-storage")))]
+    pub(crate) async fn cancel_while_blocking_pool_saturated<T>(
+        namespace: std::sync::Arc<tokio::sync::Mutex<()>>,
+        operation: impl std::future::Future<Output = T>,
+    ) -> bool {
+        let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = blocked_tx.send(());
+            release_rx.recv().expect("test releases blocking worker");
+        });
+        blocked_rx.await.expect("blocking worker started");
+
+        {
+            futures::pin_mut!(operation);
+            assert!(
+                futures::poll!(operation.as_mut()).is_pending(),
+                "operation must reach blocking admission before cancellation"
+            );
+        }
+
+        let retained = namespace.clone().try_lock_owned().is_err();
+        release_tx.send(()).expect("blocking worker is waiting");
+        blocker.await.expect("blocking worker completed");
+
+        // The sentinel is queued behind the operation's admitted blocking job. A self-driving
+        // operation may enqueue more work afterward, so also wait for its namespace lock to drop.
+        tokio::task::spawn_blocking(|| {})
+            .await
+            .expect("blocking sentinel completed");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(guard) = namespace.clone().try_lock_owned() {
+                    drop(guard);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("canceled operation did not release namespace lock");
+        retained
+    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)

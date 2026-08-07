@@ -124,6 +124,8 @@ struct Namespace {
     storage_directory: PathBuf,
     generations: super::generation::Registry,
     atomic_states: SyncMutex<BTreeMap<(String, Vec<u8>), AtomicStateEntry>>,
+    #[cfg(test)]
+    publish_materialization: SyncMutex<Option<Arc<super::tests::BlockingTestHook>>>,
 }
 
 struct AtomicStateEntry {
@@ -264,6 +266,11 @@ impl Namespace {
             }
         }
     }
+
+    #[cfg(test)]
+    fn take_publish_materialization_hook(&self) -> Option<Arc<super::tests::BlockingTestHook>> {
+        self.publish_materialization.lock().take()
+    }
 }
 
 impl Storage {
@@ -292,6 +299,8 @@ impl Storage {
                 storage_directory: storage_directory.clone(),
                 generations: super::generation::Registry::default(),
                 atomic_states: SyncMutex::new(BTreeMap::new()),
+                #[cfg(test)]
+                publish_materialization: SyncMutex::new(None),
             }),
             storage_directory,
             io_handle,
@@ -1779,7 +1788,13 @@ impl uno::Publisher<AtomicBacking> for V2Publisher {
             if !supersedes {
                 let root = namespace.storage_directory.clone();
                 let previous = previous.clone();
+                #[cfg(test)]
+                let materialization_hook = namespace.take_publish_materialization_hook();
                 match tokio::task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = materialization_hook {
+                        hook.pause();
+                    }
                     super::batch::materialize_embedded(&root, &previous)
                 })
                 .await
@@ -2172,8 +2187,8 @@ mod tests {
         storage::{
             Layout,
             tests::{
-                run_atomic_blob_tests, run_atomic_storage_tests, run_batch_storage_tests,
-                run_storage_foreign_handle_test, run_storage_tests,
+                BlockingTestHook, run_atomic_blob_tests, run_atomic_storage_tests,
+                run_batch_storage_tests, run_storage_foreign_handle_test, run_storage_tests,
             },
         },
         telemetry::metrics::Registry,
@@ -2655,6 +2670,69 @@ mod tests {
         assert!(state.upgrade().is_none());
         assert!(generation.upgrade().is_none());
         let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_canceled_direct_publish_retains_namespace_until_materialized() {
+        let (storage, storage_directory) = create_test_storage();
+        let (first, _) = storage
+            .open_atomic("publish_cancel", b"first")
+            .await
+            .unwrap();
+        let (second, _) = storage
+            .open_atomic("publish_cancel", b"second")
+            .await
+            .unwrap();
+        first.append(b"old").await.unwrap();
+        second.append(b"old").await.unwrap();
+        storage
+            .apply(vec![
+                BatchOperation::Publish(first.clone()),
+                BatchOperation::Publish(second.clone()),
+            ])
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .namespace
+                .carried_batch_decision
+                .load(Ordering::Acquire)
+        );
+
+        let hook = Arc::new(BlockingTestHook::default());
+        *storage.namespace.publish_materialization.lock() = Some(hook.clone());
+        let publishing = first.clone();
+        let task = tokio::spawn(async move { publishing.write_at_sync(3, b"new").await });
+        hook.wait_until_entered().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+
+        let guard_retained = storage
+            .namespace
+            .lock
+            .clone()
+            .try_lock_owned()
+            .is_err();
+        hook.release();
+        let reopened = tokio::time::timeout(
+            Duration::from_secs(10),
+            storage.open_atomic("publish_cancel", b"first"),
+        )
+        .await
+        .expect("reopen remained blocked after publication completed");
+        let reopened_size = reopened.as_ref().ok().map(|(_, size)| *size);
+
+        drop((first, second, reopened, storage));
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            guard_retained,
+            "canceled publication released namespace ownership"
+        );
+        assert_eq!(
+            reopened_size,
+            Some(6),
+            "canceled observer abandoned its admitted direct publication"
+        );
     }
 
     #[tokio::test]

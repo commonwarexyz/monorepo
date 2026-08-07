@@ -99,6 +99,8 @@ pub struct Blob {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted write.
     dont_cache_supported: Arc<AtomicBool>,
+    #[cfg(test)]
+    recovery_resize_hook: Option<Arc<super::super::tests::BlockingTestHook>>,
 }
 
 /// Direct ordinary-blob view used beneath UNO.
@@ -137,7 +139,17 @@ impl Blob {
             data_offset,
             atomic,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            recovery_resize_hook: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_recovery_resize_hook(
+        &mut self,
+        hook: Option<Arc<super::super::tests::BlockingTestHook>>,
+    ) {
+        self.recovery_resize_hook = hook;
     }
 
     #[commonware_macros::stability(ALPHA)]
@@ -507,11 +519,17 @@ impl Blob {
         retained: Option<Arc<BackingRetention>>,
     ) -> Result<(), Error> {
         let file = self.file.clone();
+        #[cfg(test)]
+        let recovery_resize_hook = self.recovery_resize_hook.clone();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || {
             let _retained = retained;
+            #[cfg(test)]
+            if let Some(hook) = recovery_resize_hook {
+                hook.pause();
+            }
             file.set_len(len)
         })
             .await
@@ -633,7 +651,13 @@ impl uno::Publisher<BackingBlob> for V2Publisher {
             if !supersedes {
                 let directory = atomic.storage_directory.clone();
                 let previous = previous.clone();
+                #[cfg(test)]
+                let materialization_hook = atomic.namespace.take_publish_materialization_hook();
                 task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = materialization_hook {
+                        hook.pause();
+                    }
                     super::super::batch::materialize_embedded(&directory, &previous)
                 })
                 .await
