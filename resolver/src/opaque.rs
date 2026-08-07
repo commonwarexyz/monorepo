@@ -4,8 +4,8 @@
 //! requires asking an application-provided source for raw bytes or objects.
 //! Implementations provide [`Fetcher::fetch`]; this module handles request
 //! coalescing, retain pruning, retry scheduling, consumer delivery, and
-//! accepted-response redelivery.
-//! An ignored consumer outcome retires the key without accepting the value or retrying the source.
+//! accepted-response redelivery. An ignored consumer outcome retires the key
+//! without accepting the value or retrying the source.
 //!
 //! Target hints supplied through [`crate::TargetedResolver::fetch_targeted`] and
 //! [`crate::TargetedResolver::fetch_all_targeted`] are ignored because opaque
