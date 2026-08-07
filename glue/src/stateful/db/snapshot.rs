@@ -61,8 +61,8 @@ impl Metrics {
     }
 }
 
-/// A generation of snapshots held back from serving until it is safe to
-/// publish: its own flush and every earlier one have finished.
+/// A generation of snapshots held back from serving until it is safe to publish.
+/// That is, it and all earlier generations have been durably flushed.
 struct Staged<S> {
     /// The snapshots of each database.
     snapshots: S,
@@ -73,8 +73,14 @@ struct Staged<S> {
 
 /// Publishes each durable generation of snapshots to its [`Reader`]s.
 pub struct Publisher<S> {
+    /// The cell readers take the served generation from.
     cell: Arc<Cell<S>>,
+    /// Generations awaiting publication, keyed by height.
     staged: BTreeMap<Height, Staged<S>>,
+    /// When a prune runs, this records the highest height staged at that
+    /// moment. Every generation at or below it was captured before the prune,
+    /// so serving one still pins the pruned storage. Cleared once a generation
+    /// captured after the prune publishes.
     stale_boundary: Option<Height>,
 }
 
@@ -98,9 +104,8 @@ impl<S> Publisher<S> {
         )
     }
 
-    /// Hold `snapshots`, captured at `height`, until its flush finishes.
-    ///
-    /// Stage in apply order.
+    /// Hold `snapshots`, captured at `height`, until it is safe to publish when
+    /// it and all earlier generations have been durably flushed.
     pub(crate) fn stage(&mut self, height: Height, snapshots: S) {
         let replaced = self.staged.insert(
             height,
@@ -194,8 +199,9 @@ impl<S> Publisher<S> {
         self.stale_boundary.is_some()
     }
 
-    /// A fresh capture is needed once the served snapshot is stale and every
-    /// flush has finished.
+    /// Whether the caller must capture a new snapshot of the databases and
+    /// [`publish_now`](Self::publish_now): the served generation is stale from
+    /// a prune, and nothing staged remains to replace it.
     pub(crate) fn capture_needed(&self) -> bool {
         self.stale_boundary.is_some() && self.staged.is_empty()
     }

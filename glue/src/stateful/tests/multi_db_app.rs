@@ -74,10 +74,10 @@ type QmdbA<E> =
 type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
-/// A full and a compact QMDB as a tuple, owned by value.
+/// A full and a compact QMDB as a tuple.
 pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
-/// Serving readers over the set's published snapshots, one per member.
+/// Readers over the set's published snapshots.
 type MultiSnapshot<E> = SnapshotsOf<MultiDatabaseSet<E>, E>;
 
 /// A block carrying state from two QMDB databases.

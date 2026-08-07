@@ -20,11 +20,9 @@ pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
-/// No-op batch for mock databases. Merkleizes against any database type.
 #[derive(Clone, Copy)]
 pub(crate) struct TestUnmerkleized;
 
-/// Merkleized counterpart of [`TestUnmerkleized`].
 #[derive(Clone, Copy)]
 pub(crate) struct TestMerkleized;
 
@@ -65,7 +63,6 @@ pub(crate) struct FlushControl {
 pub(crate) struct TestDb {
     finalize: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
-    /// Finalizes applied so far. Snapshots carry it as their identity.
     finalized: u64,
 }
 
