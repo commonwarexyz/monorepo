@@ -2,8 +2,7 @@ use crate::stateful::{
     Application,
     actor::{
         core::{
-            Deferred, mailbox::Message, processing::Processing,
-            verifications::Request as VerificationRequest,
+            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
@@ -23,16 +22,20 @@ use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use commonware_utils::{
+    Acknowledgement as _,
+    acknowledgement::Exact,
+    channel::{fallible::OneshotExt, oneshot},
+};
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Instrument as _, debug, error, info_span};
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
-    Covered(B, Deferred),
-    Reflected(B, Deferred),
-    Apply(B, Deferred),
+    Covered(B, Exact),
+    Reflected(B, Exact),
+    Apply(B, Exact),
 }
 
 /// A finalized block retained with its marshal acknowledgement while state sync is active.
@@ -41,7 +44,7 @@ enum FinalizedHandoff<B> {
 /// is recorded or the block is durably handed off after state sync completes.
 pub(super) struct PendingFinalization<B> {
     block: B,
-    acknowledgement: Deferred,
+    acknowledgement: Exact,
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
@@ -200,7 +203,7 @@ where
     async fn process_finalized(
         mut self,
         block: Arc<A::Block>,
-        acknowledgement: Deferred,
+        acknowledgement: Exact,
     ) -> (Self, Option<VecDeque<FinalizedHandoff<Arc<A::Block>>>>) {
         assert!(
             self.artifact.is_none(),
@@ -432,7 +435,7 @@ mod tests {
         let (acknowledgement, _waiter) = Exact::handle();
         PendingFinalization {
             block: Arc::new(block),
-            acknowledgement: acknowledgement.into(),
+            acknowledgement,
         }
     }
 
@@ -480,10 +483,11 @@ mod tests {
             let mut waiters = Vec::new();
             for (height, digest) in [(8, 10), (9, 11)] {
                 let (acknowledgement, mut waiter) = Exact::handle();
-                let mut process = Box::pin(self.syncing.process_finalized(
-                    Arc::new(TestBlock::new(height, digest)),
-                    acknowledgement.into(),
-                ));
+                let mut process =
+                    Box::pin(self.syncing.process_finalized(
+                        Arc::new(TestBlock::new(height, digest)),
+                        acknowledgement,
+                    ));
                 let std::task::Poll::Ready((syncing, handoff)) = poll!(process.as_mut()) else {
                     panic!("a partial acknowledgement window must not retarget");
                 };
@@ -497,7 +501,7 @@ mod tests {
             let (acknowledgement, mut newest_waiter) = Exact::handle();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
-                    .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement.into())
+                    .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
             });
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -739,15 +743,12 @@ mod tests {
                 harness.syncing.transition([
                     FinalizedHandoff::Reflected(
                         Arc::new(TestBlock::new(7, 9)),
-                        reflected_acknowledgement.into(),
+                        reflected_acknowledgement,
                     ),
-                    FinalizedHandoff::Apply(
-                        Arc::new(TestBlock::new(8, 10)),
-                        first_acknowledgement.into(),
-                    ),
+                    FinalizedHandoff::Apply(Arc::new(TestBlock::new(8, 10)), first_acknowledgement),
                     FinalizedHandoff::Apply(
                         Arc::new(TestBlock::new(9, 11)),
-                        second_acknowledgement.into(),
+                        second_acknowledgement,
                     ),
                 ])
             });
@@ -799,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn aborted_handoff_flush_keeps_ack_pending_and_sync_incomplete() {
+    fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let databases = Shared::new(
@@ -813,18 +814,18 @@ mod tests {
                 .expect("harness must contain a sync artifact")
                 .databases = databases;
 
-            let (acknowledgement, mut waiter) = Exact::handle();
+            let (acknowledgement, waiter) = Exact::handle();
             harness
                 .syncing
                 .transition(Some(FinalizedHandoff::Apply(
                     Arc::new(TestBlock::new(8, 10)),
-                    acknowledgement.into(),
+                    acknowledgement,
                 )))
                 .await;
 
             assert!(
-                poll!(&mut waiter).is_pending(),
-                "an aborted handoff must leave marshal's acknowledgement pending",
+                waiter.await.is_err(),
+                "an aborted handoff must cancel marshal's acknowledgement",
             );
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
@@ -859,7 +860,7 @@ mod tests {
             let process = context.child("process_finalized").spawn(move |_| {
                 harness
                     .syncing
-                    .process_finalized(Arc::new(block), acknowledgement.into())
+                    .process_finalized(Arc::new(block), acknowledgement)
             });
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -1171,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn target_observation_shutdown_keeps_floor_and_ack_pending() {
+    fn target_observation_shutdown_keeps_floor_and_cancels_ack() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let initial = fixtures::finalization(&fixture, 7, Sha256::fill(9));
@@ -1202,7 +1203,7 @@ mod tests {
             let process = context.child("process_finalized").spawn(move |_| {
                 harness
                     .syncing
-                    .process_finalized(Arc::new(block), acknowledgement.into())
+                    .process_finalized(Arc::new(block), acknowledgement)
             });
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -1230,8 +1231,8 @@ mod tests {
             drop(syncing);
             drop(pending_update);
             assert!(
-                poll!(&mut waiter).is_pending(),
-                "shutdown must leave the retained acknowledgement pending",
+                waiter.await.is_err(),
+                "shutdown must cancel the retained acknowledgement",
             );
             stop.await.expect("stop task should finish");
         });

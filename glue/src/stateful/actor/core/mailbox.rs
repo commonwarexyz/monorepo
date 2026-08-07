@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::core::Deferred};
+use crate::stateful::Application;
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -14,7 +14,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use commonware_utils::{
+    acknowledgement::Exact,
+    channel::{fallible::OneshotExt, oneshot},
+};
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
@@ -67,7 +70,7 @@ where
     Finalized {
         span: Span,
         block: Arc<A::Block>,
-        acknowledgement: Deferred,
+        acknowledgement: Exact,
         retry_mailbox: RetryMailbox<E, A>,
     },
 
@@ -302,7 +305,7 @@ where
                 Message::Finalized {
                     span,
                     block,
-                    acknowledgement: acknowledgement.into(),
+                    acknowledgement,
                     retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
