@@ -61,17 +61,17 @@ impl Metrics {
     }
 }
 
-/// A staged snapshot awaiting the durable frontier.
+/// A generation of snapshots held back from serving until it is safe to
+/// publish: its own flush and every earlier one have finished.
 struct Staged<S> {
+    /// The snapshots of each database.
     snapshots: S,
-    durable: bool,
+    /// Whether this generation's own flush has finished. That alone is not
+    /// enough to serve it. Publishing also waits for every earlier flush.
+    flushed: bool,
 }
 
 /// Publishes each durable generation of snapshots to its [`Reader`]s.
-///
-/// Dropping it closes the cell: readers decline instead of serving ever-older
-/// state. Applications only move it into the stateful actor's configuration.
-/// Staging and publishing are crate-internal.
 pub struct Publisher<S> {
     cell: Arc<Cell<S>>,
     staged: BTreeMap<Height, Staged<S>>,
@@ -79,9 +79,7 @@ pub struct Publisher<S> {
 }
 
 impl<S> Publisher<S> {
-    /// Create a [`Publisher`] and a [`Reader`] over one cell.
-    ///
-    /// Publication metrics register under `context`.
+    /// Create a [`Publisher`] and a [`Reader`] of database set snapshots.
     pub fn new<E: RuntimeMetrics>(context: &E) -> (Self, Reader<S>) {
         let cell = Arc::new(Cell {
             state: Mutex::new(State::Empty),
@@ -108,7 +106,7 @@ impl<S> Publisher<S> {
             height,
             Staged {
                 snapshots,
-                durable: false,
+                flushed: false,
             },
         );
         assert!(replaced.is_none(), "staged height must be unique");
@@ -127,14 +125,14 @@ impl<S> Publisher<S> {
         if !durable {
             return false;
         }
-        staged.durable = true;
+        staged.flushed = true;
 
         // The newest staged height whose flush, and every flush before it,
         // has finished.
         let Some(frontier) = self
             .staged
             .iter()
-            .take_while(|(_, staged)| staged.durable)
+            .take_while(|(_, staged)| staged.flushed)
             .map(|(height, _)| *height)
             .last()
         else {
@@ -185,7 +183,7 @@ impl<S> Publisher<S> {
     pub(crate) fn blocks_prune(&self, barrier: Height) -> bool {
         self.staged
             .iter()
-            .find(|(_, staged)| !staged.durable)
+            .find(|(_, staged)| !staged.flushed)
             .is_some_and(|(height, _)| *height <= barrier)
     }
 
@@ -196,9 +194,9 @@ impl<S> Publisher<S> {
         self.stale_boundary.is_some()
     }
 
-    /// A refresh is due once the served snapshot is stale and every flush has
-    /// finished.
-    pub(crate) fn refresh_due(&self) -> bool {
+    /// A fresh capture is needed once the served snapshot is stale and every
+    /// flush has finished.
+    pub(crate) fn capture_needed(&self) -> bool {
         self.stale_boundary.is_some() && self.staged.is_empty()
     }
 }
@@ -220,14 +218,11 @@ const fn next(height: Height) -> Height {
     Height::new(height.get() + 1)
 }
 
-/// Reads the latest published generation.
-///
-/// The reader from [`Publisher::new`] reads the whole snapshot set, and
-/// [`view`](Reader::view) derives readers for parts of it, typically one
-/// database's snapshot. Cloned freely. Each read takes one generation and
-/// selects from it, so a read never mixes two generations.
+/// Reads the latest published generation of snapshots.
 pub struct Reader<S, M = S> {
+    /// The cell containing the latest published generation of snapshots.
     cell: Arc<Cell<S>>,
+    /// A function to select a part of the snapshot set.
     view: fn(&S) -> &M,
 }
 
@@ -242,7 +237,6 @@ impl<S, M> Clone for Reader<S, M> {
 
 impl<S> Reader<S> {
     /// Derive a reader for the part of each generation that `view` returns.
-    /// Typically one database's snapshot out of the set.
     pub fn view<M>(&self, view: fn(&S) -> &M) -> Reader<S, M> {
         Reader {
             cell: self.cell.clone(),
@@ -254,8 +248,6 @@ impl<S> Reader<S> {
 impl<S, M> Reader<S, M> {
     /// The latest published generation, or `None` before the first publish or
     /// after the publisher drops.
-    ///
-    /// The returned snapshot is owned, so reads never touch the live database.
     pub fn latest(&self) -> Option<M>
     where
         M: Clone,
@@ -377,33 +369,33 @@ mod tests {
             // Prune with height 2 still pending: its capture predates the prune,
             // so its publish must not clear the staleness.
             assert!(publisher.mark_stale());
-            assert!(!publisher.refresh_due());
+            assert!(!publisher.capture_needed());
             assert!(publisher.complete(Height::new(2), true));
             assert_eq!(reader.latest(), Some(20));
-            assert!(publisher.refresh_due());
+            assert!(publisher.capture_needed());
 
-            // The refresh publishes a fresh capture at the same height.
+            // The fresh capture publishes at the same height.
             publisher.publish_now(Height::new(2), 21);
             assert_eq!(reader.latest(), Some(21));
-            assert!(!publisher.refresh_due());
+            assert!(!publisher.capture_needed());
         });
     }
 
     #[test]
-    fn later_flush_satisfies_the_refresh() {
+    fn later_flush_publishes_a_post_prune_capture() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, reader) = Publisher::<u32>::new(&context);
             publisher.stage(Height::new(2), 20);
             assert!(publisher.mark_stale());
 
             // Height 3's capture postdates the prune, so its publish clears the
-            // staleness without a separate refresh.
+            // staleness without a separate capture.
             publisher.stage(Height::new(3), 30);
             assert!(publisher.complete(Height::new(2), true));
-            assert!(!publisher.refresh_due());
+            assert!(!publisher.capture_needed());
             assert!(publisher.complete(Height::new(3), true));
             assert_eq!(reader.latest(), Some(30));
-            assert!(!publisher.refresh_due());
+            assert!(!publisher.capture_needed());
         });
     }
 }

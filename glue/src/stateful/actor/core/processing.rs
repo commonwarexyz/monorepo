@@ -5,9 +5,9 @@
 //! publishes the snapshot and acknowledges the block to marshal only once the
 //! flush is durable, so readers and marshal's floor never get ahead of disk.
 //!
-//! Pruning and publication refresh are maintenance, run only while the mailbox
-//! is idle. A prune waits until the pruned range is durable, and a prune leaves
-//! publication stale until a post-prune capture publishes (see
+//! Pruning and fresh post-prune captures are maintenance, run only while the
+//! mailbox is idle. A prune waits until the pruned range is durable, and leaves
+//! the served snapshot stale until a post-prune capture publishes (see
 //! [`Publisher`].
 
 use crate::stateful::{
@@ -40,12 +40,12 @@ use std::sync::mpsc::TryRecvError;
 use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: a mailbox message to handle,
-/// or deferred maintenance (a prune, or a post-prune publication refresh) run
-/// while the mailbox is idle.
+/// or deferred maintenance (a prune, or a fresh post-prune capture) run while
+/// the mailbox is idle.
 enum Step<M, P> {
     Message(M),
     Prune(P),
-    Refresh,
+    Capture,
 }
 
 pub(super) struct Processing<E, A, S, V>
@@ -105,7 +105,7 @@ where
                     }
                 }
 
-                // Pruning and publication refresh are non-critical work, run only when the
+                // Pruning and fresh captures are non-critical work, run only when the
                 // mailbox is idle. If a message is ready, it is always processed immediately.
                 let next = match self.mailbox.try_recv() {
                     // A message is ready: handle it now, regardless of any queued prune.
@@ -113,9 +113,9 @@ where
                     Err(TryRecvError::Empty) => match pending_prune.take() {
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                        // Publication is stale and every flush drained: refresh.
-                        None if self.snapshot_publisher.refresh_due() => {
-                            Either::Left(ready(Some(Step::Refresh)))
+                        // The served snapshot is stale and every flush drained.
+                        None if self.snapshot_publisher.capture_needed() => {
+                            Either::Left(ready(Some(Step::Capture)))
                         }
                         // No message and nothing to prune: wait on the mailbox, driving flush
                         // completions while idle.
@@ -133,8 +133,8 @@ where
                                             if !snapshot_publisher.complete(height, durable) {
                                                 return None;
                                             }
-                                            if snapshot_publisher.refresh_due() {
-                                                break Some(Step::Refresh);
+                                            if snapshot_publisher.capture_needed() {
+                                                break Some(Step::Capture);
                                             }
                                         },
                                     }
@@ -273,10 +273,10 @@ where
                             .publish_now(self.processor.processed_height(), snapshots);
                     }
                 }
-                Step::Refresh => {
-                    // Publication went stale at the last prune and no later flush
-                    // refreshed it. Every flush has drained, so the applied state
-                    // is durable and can publish directly.
+                Step::Capture => {
+                    // The served snapshot went stale at the last prune and no later
+                    // flush replaced it. Every flush has drained, so the applied
+                    // state is durable and can publish directly.
                     let snapshots;
                     (self.processor, snapshots) = self.processor.snapshot().await;
                     self.snapshot_publisher
@@ -474,14 +474,14 @@ mod tests {
         });
     }
 
-    /// A prune with no later finalization must refresh publication, so serving
+    /// A prune with no later finalization must publish a fresh capture, so serving
     /// stops pinning the pruned state.
     #[test]
-    fn prune_without_later_block_refreshes_publication() {
+    fn prune_without_later_block_publishes_a_fresh_capture() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, source, _marshal, _actor) = spawn_processing(
                 &context,
-                "gated-prune-refresh",
+                "gated-prune-capture",
                 Some(PruneConfig {
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 0,
@@ -514,10 +514,10 @@ mod tests {
             assert_eq!(control.pruned.lock().clone(), vec![1]);
 
             // Block 2's snapshot was captured before the prune, so its publish must
-            // not satisfy the refresh: with no later block, the loop itself captures
-            // and publishes again once every flush drains. The refresh carries the
-            // same content as block 2's publish, so count publications instead:
-            // startup, block 1, block 2, then the refresh.
+            // not replace the stale snapshot: with no later block, the loop itself captures
+            // and publishes again once every flush drains. The fresh capture
+            // carries the same content as block 2's publish, so count
+            // publications instead: startup, block 1, block 2, then the capture.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
@@ -527,15 +527,15 @@ mod tests {
             assert_eq!(
                 source.latest(),
                 Some(2),
-                "the refresh must serve block 2's state"
+                "the fresh capture must serve block 2's state"
             );
         });
     }
 
     /// A post-prune generation publishing on its own satisfies the publication
-    /// refresh: the loop must not refresh redundantly.
+    /// stale snapshot: the loop must not capture redundantly.
     #[test]
-    fn post_prune_publish_clears_publication_refresh() {
+    fn post_prune_publish_replaces_the_stale_snapshot() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, source, _marshal, _actor) = spawn_processing(
                 &context,
@@ -583,8 +583,8 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            // Block 2's pre-prune publish must not satisfy the refresh. Block 3's
-            // post-prune publish must, so no refresh generation ever appears.
+            // Block 2's pre-prune publish must not replace the stale snapshot. Block 3's
+            // post-prune publish must, so no extra capture ever publishes.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
@@ -598,7 +598,7 @@ mod tests {
             assert_eq!(
                 source.latest(),
                 Some(3),
-                "block 3's own publish must satisfy the refresh without a separate refresh publication",
+                "block 3's own publish must replace the stale snapshot without a separate capture",
             );
         });
     }
