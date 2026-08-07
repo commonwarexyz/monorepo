@@ -896,8 +896,6 @@ impl<F: Family> Blueprint<F> {
     }
 
     /// Return active after-peaks that are collapsed into a backward-folded suffix accumulator.
-    // Only the `std`-gated `verification` module consults this accessor; `build_proof` reads the
-    // `suffix_peaks` field directly.
     #[cfg(feature = "std")]
     pub(crate) fn suffix_peaks(&self) -> Option<&[Position<F>]> {
         (!self.suffix_peaks.is_empty()).then_some(&self.suffix_peaks)
