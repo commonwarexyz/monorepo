@@ -24,10 +24,7 @@ use commonware_actor::Feedback;
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{
-    Address, AddressableManager as P2pAddressableManager, AddressableTrackedPeers,
-    Manager as P2pManager, Provider, TrackedPeers,
-};
+use commonware_p2p::{self as p2p, Address, AddressableTrackedPeers, Provider, TrackedPeers};
 use commonware_utils::{
     ordered::{Map, Set},
     sequence::Unit,
@@ -50,12 +47,17 @@ use thiserror::Error;
 pub trait Directory<P: PublicKey>:
     Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Read + Write + EncodeSize
 {
+    /// Derives codec configuration for a directory containing exactly `peers`.
+    fn codec_config(peers: &Set<P>) -> Self::Cfg;
+
     /// Returns whether the directory contains exactly `peers`.
     fn matches(&self, peers: &Set<P>) -> bool;
 }
 
 /// Key-only directory for transports that dial by public key alone.
 impl<P: PublicKey> Directory<P> for Unit {
+    fn codec_config(_: &Set<P>) -> Self::Cfg {}
+
     fn matches(&self, _: &Set<P>) -> bool {
         true
     }
@@ -104,9 +106,8 @@ impl<P: PublicKey> EncodeSize for Addresses<P> {
 impl<P: PublicKey> Read for Addresses<P> {
     /// Number of address entries accepted by the decoder.
     ///
-    /// When decoding an [`EpochInfo`](crate::dkg::types::EpochInfo), this bound
-    /// must accept the union of its dealers, players, and next players and
-    /// reject larger directories.
+    /// An [`EpochInfo`](crate::dkg::types::EpochInfo) derives an exact bound
+    /// from the union of its dealers, players, and next players.
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -115,6 +116,10 @@ impl<P: PublicKey> Read for Addresses<P> {
 }
 
 impl<P: PublicKey> Directory<P> for Addresses<P> {
+    fn codec_config(peers: &Set<P>) -> Self::Cfg {
+        RangeCfg::exact(peers.len())
+    }
+
     fn matches(&self, peers: &Set<P>) -> bool {
         self.0.len() == peers.len() && peers.iter().all(|peer| self.0.get_value(peer).is_some())
     }
@@ -153,7 +158,7 @@ pub trait Manager: Provider {
     ) -> Result<Feedback, Self::Error>;
 }
 
-impl<M: P2pManager> Manager for M {
+impl<M: p2p::Manager> Manager for M {
     type Directory = Unit;
     type Error = Infallible;
 
@@ -163,7 +168,7 @@ impl<M: P2pManager> Manager for M {
         peers: TrackedPeers<Self::PublicKey>,
         _directory: &Self::Directory,
     ) -> Result<Feedback, Self::Error> {
-        Ok(P2pManager::track(self, epoch.get(), peers))
+        Ok(p2p::Manager::track(self, epoch.get(), peers))
     }
 }
 
@@ -194,7 +199,7 @@ impl<M> fmt::Debug for AddressableManager<M> {
 
 impl<M> Provider for AddressableManager<M>
 where
-    M: P2pAddressableManager,
+    M: p2p::AddressableManager,
 {
     type PublicKey = M::PublicKey;
 
@@ -202,7 +207,7 @@ where
         self.manager.peer_set(id).await
     }
 
-    async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
+    async fn subscribe(&mut self) -> p2p::PeerSetSubscription<Self::PublicKey> {
         self.manager.subscribe().await
     }
 }
@@ -214,7 +219,7 @@ pub struct MissingAddress<P: PublicKey>(pub P);
 
 impl<M> Manager for AddressableManager<M>
 where
-    M: P2pAddressableManager,
+    M: p2p::AddressableManager,
 {
     type Directory = Addresses<M::PublicKey>;
     type Error = MissingAddress<M::PublicKey>;
@@ -301,7 +306,7 @@ mod tests {
         }
     }
 
-    impl P2pManager for TestManager {
+    impl p2p::Manager for TestManager {
         fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send,
@@ -326,7 +331,7 @@ mod tests {
         }
     }
 
-    impl P2pAddressableManager for AddressableTestManager {
+    impl p2p::AddressableManager for AddressableTestManager {
         fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
             R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
@@ -385,6 +390,17 @@ mod tests {
     fn key_only_directory_matches_any_peer_set() {
         let (peers, _) = peers();
         assert!(Directory::matches(&Unit, &peers.union()));
+    }
+
+    #[test]
+    fn directory_provides_codec_config() {
+        let (peers, _) = peers();
+        let peers = peers.union();
+        assert_eq!(<Unit as Directory<PublicKey>>::codec_config(&peers), ());
+        assert_eq!(
+            <Addresses<PublicKey> as Directory<PublicKey>>::codec_config(&peers),
+            RangeCfg::exact(peers.len())
+        );
     }
 
     #[test]

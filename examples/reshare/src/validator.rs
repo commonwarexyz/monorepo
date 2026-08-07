@@ -268,7 +268,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             partition_prefix: partition_prefix.to_string(),
             max_participants: MAX_PARTICIPANTS,
             max_supported_mode: MAX_SUPPORTED_MODE,
-            directory_codec_config: (),
         },
         state_sync,
     )

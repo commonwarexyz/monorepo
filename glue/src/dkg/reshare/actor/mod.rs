@@ -181,11 +181,15 @@ where
     P: PublicKey,
     D: Directory<P>,
 {
+    /// Participants in the one-shot ceremony.
     pub(crate) participants: Set<P>,
+
     /// Transport directory for the one-shot ceremony's participants, embedded
     /// verbatim in the emitted epoch-zero artifact. Every participant must
     /// configure the same directory.
     pub(crate) directory: D,
+
+    /// Callback invoked with the ceremony's epoch-zero artifact.
     pub(crate) completion: DkgCompletion<V, P, D>,
 }
 
