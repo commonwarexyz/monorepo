@@ -513,7 +513,13 @@ where
     type Readers = publication::DbReader<T::Snapshot, T::Snapshot>;
 
     async fn init(context: E, config: Self::Config) -> Self {
-        Self(init_or_panic(context.child("db"), config, None).await)
+        match T::init(context.child("db"), config).await {
+            Ok(database) => Self(database),
+            Err(err) => panic!(
+                "database init failed (type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+        }
     }
 
     fn initial_sync_targets() -> Self::SyncTargets {
@@ -674,41 +680,6 @@ impl<D: Digest, T> TipUpdate<D, T> {
     }
 }
 
-/// Error returned by the [`StateSyncSet`] implementations in this module.
-#[derive(Clone, Debug, thiserror::Error)]
-pub enum SetSyncError {
-    /// A member database failed state sync.
-    #[error(
-        "state sync failed ({}type {db_type}): {message}",
-        .index.map_or_else(String::new, |index| format!("index {index}, "))
-    )]
-    Member {
-        /// The member's position in a tuple set, or [`None`] for [`Single`].
-        index: Option<usize>,
-        /// The member's type name.
-        db_type: &'static str,
-        /// The member's rendered sync error.
-        message: String,
-    },
-    /// The synced set's targets do not match the coordinator's converged target set.
-    #[error("state sync database targets do not match the coordinator target set")]
-    TargetMismatch,
-    /// The coordinator exited without reporting a converged anchor.
-    #[error("state sync coordinator did not report a converged anchor")]
-    NoAnchor,
-}
-
-impl SetSyncError {
-    /// A [`SetSyncError::Member`] wrapping `err` for the member type `T`.
-    fn member<T: ?Sized>(index: Option<usize>, err: impl Debug) -> Self {
-        Self::Member {
-            index,
-            db_type: core::any::type_name::<T>(),
-            message: format!("{err:?}"),
-        }
-    }
-}
-
 /// A [`DbSet`] that can run one-time state sync.
 ///
 /// `D` is the block digest type. Each set of sync targets is paired
@@ -742,7 +713,7 @@ where
     S: Send + 'static,
     D: Digest,
 {
-    type Error = SetSyncError;
+    type Error = T::SyncError;
 
     #[allow(clippy::too_many_arguments)]
     async fn sync(
@@ -837,10 +808,11 @@ where
         };
 
         let (db_result, (converged_anchor, converged_target)) = join!(sync, coordinator);
-        let database = db_result.map_err(|err| SetSyncError::member::<T>(None, err))?;
-        if T::sync_target(&database) != converged_target {
-            return Err(SetSyncError::TargetMismatch);
-        }
+        let database = db_result?;
+        assert!(
+            T::sync_target(&database) == converged_target,
+            "state sync database target does not match the coordinator target",
+        );
         Ok((Self(database), converged_anchor))
     }
 }
@@ -910,11 +882,20 @@ macro_rules! impl_database_set {
 
             async fn init(context: E, config: Self::Config) -> Self {
                 join!($(
-                    init_or_panic::<E, $T>(
-                        context.child(concat!("db_", stringify!($idx))),
-                        config.$idx,
-                        Some($idx),
-                    ),
+                    async {
+                        $T::init(
+                                context.child(concat!("db_", stringify!($idx))),
+                                config.$idx,
+                            )
+                            .await
+                            .expect(concat!(
+                                "database init failed (index ",
+                                stringify!($idx),
+                                ", type ",
+                                stringify!($T),
+                                ")",
+                            ))
+                    },
                 )+)
             }
 
@@ -1047,7 +1028,7 @@ macro_rules! impl_state_sync_set {
                 $S: Send + 'static,
             )+
         {
-            type Error = SetSyncError;
+            type Error = String;
 
             #[allow(clippy::too_many_arguments)]
             async fn sync(
@@ -1083,7 +1064,7 @@ macro_rules! impl_state_sync_set {
                 let db_count = [$($idx,)+].len();
                 let coordinator_targets = targets.clone();
                 let initial_targets = targets.clone();
-                let first_db_error: Arc<commonware_utils::sync::Mutex<Option<SetSyncError>>> =
+                let first_db_error: Arc<commonware_utils::sync::Mutex<Option<String>>> =
                     Arc::new(commonware_utils::sync::Mutex::new(None));
                 let coordinator_handle = context.child("coordinator").spawn({
                     move |_context| async move {
@@ -1285,8 +1266,13 @@ macro_rules! impl_state_sync_set {
                                     }
                                 };
                                 let (sync_result, _) = join!(sync, forward_reached);
-                                let result = sync_result
-                                    .map_err(|err| SetSyncError::member::<$T>(Some($idx), err));
+                                let result = sync_result.map_err(|err| {
+                                    format!(
+                                        "state sync failed (index {}, db {}): {err:?}",
+                                        $idx,
+                                        core::any::type_name::<$T>(),
+                                    )
+                                });
                                 if let Err(err) = &result {
                                     let mut first = first_db_error.lock();
                                     if first.is_none() {
@@ -1319,10 +1305,13 @@ macro_rules! impl_state_sync_set {
 
                 let synced = ($(synced.$idx?,)+);
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
-                    return Err(SetSyncError::NoAnchor);
+                    return Err("state sync coordinator did not report a converged anchor".into());
                 };
                 if <Self as DbSet<E>>::applied_targets(&synced) != converged_targets {
-                    return Err(SetSyncError::TargetMismatch);
+                    return Err(
+                        "state sync database targets do not match the coordinator target set"
+                            .into(),
+                    );
                 }
 
                 Ok((synced, converged_anchor))
@@ -1590,6 +1579,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
 }
 
 /// Sync a database that durably persists an operation log.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_standard_db<E, DB, S>(
     context: E,
     config: DB::Config,
@@ -1631,6 +1621,7 @@ impl Drop for Forwarder {
 }
 
 /// Sync a database that does not durably persist an operation log.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_compact_db<E, DB, S>(
     context: E,
     config: DB::Config,
@@ -1704,25 +1695,6 @@ where
     .await;
     drop(update_forwarder);
     result
-}
-
-#[tracing::instrument(name = "stateful.db.init_or_panic", level = "info", skip_all, fields(index = index))]
-async fn init_or_panic<E, T: ManagedDb<E>>(
-    context: E,
-    config: T::Config,
-    index: Option<usize>,
-) -> T {
-    // Init failures are fatal by design: the actor cannot run without its set.
-    match T::init(context, config).await {
-        Ok(database) => database,
-        Err(err) => {
-            let index = index.map_or(String::new(), |i| format!("index {i}, "));
-            panic!(
-                "database init failed ({index}type {}): {err:?}",
-                core::any::type_name::<T>(),
-            );
-        }
-    }
 }
 
 #[tracing::instrument(name = "stateful.db.snapshot_or_panic", level = "info", skip_all, fields(index = index))]
@@ -1814,13 +1786,13 @@ pub trait AttachableResolver<Src>: Send + Sync + 'static {
     ///
     /// Await confirms only submission of the attachment, not its processing.
     /// Implementations must not block on publication.
-    fn attach_source(&self, source: Src) -> impl Future<Output = ()> + Send;
+    fn attach_reader(&self, source: Src) -> impl Future<Output = ()> + Send;
 }
 
 /// Attach a set's member sources to a resolver set with matching shape.
 pub trait AttachableResolverSet<Readers>: Send + Sync + 'static {
     /// Attach each database's reader to its corresponding resolver.
-    fn attach_sources(&self, readers: Readers) -> impl Future<Output = ()> + Send;
+    fn attach_readers(&self, readers: Readers) -> impl Future<Output = ()> + Send;
 }
 
 impl<R, Src> AttachableResolverSet<Src> for R
@@ -1828,8 +1800,8 @@ where
     R: AttachableResolver<Src>,
     Src: publication::ServeSource,
 {
-    async fn attach_sources(&self, source: Src) {
-        self.attach_source(source).await;
+    async fn attach_readers(&self, source: Src) {
+        self.attach_reader(source).await;
     }
 }
 
@@ -1842,9 +1814,9 @@ macro_rules! impl_attachable_resolver_set {
                 $S: publication::ServeSource,
             )+
         {
-            async fn attach_sources(&self, sources: ($($S,)+)) {
+            async fn attach_readers(&self, sources: ($($S,)+)) {
                 futures::join!($(
-                    self.$idx.attach_source(sources.$idx),
+                    self.$idx.attach_reader(sources.$idx),
                 )+);
             }
         }
@@ -1887,9 +1859,9 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
-        CoordinatorState, DbSet, Digest, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher,
-        ServeSource as _, SetSyncError, Single, StateSyncDb, StateSyncSet, SyncEngineConfig,
-        TipUpdate, drain_single_tip_updates,
+        CoordinatorState, DbSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher,
+        ServeSource as _, Single, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
+        drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
 
@@ -1906,32 +1878,6 @@ mod tests {
         });
     }
 
-    /// A [`TipUpdate`] with no observation barrier.
-    fn tip_update<D: Digest, T>(anchor: Anchor<D>, targets: T) -> TipUpdate<D, T> {
-        TipUpdate {
-            anchor,
-            targets,
-            observed: None,
-        }
-    }
-
-    /// Assert `err` identifies the failing member by index and type name.
-    #[track_caller]
-    fn assert_member_error(err: &SetSyncError, index: usize, db_type_fragment: &str) {
-        let SetSyncError::Member {
-            index: got,
-            db_type,
-            ..
-        } = err
-        else {
-            panic!("error should identify the failing member, got: {err}");
-        };
-        assert_eq!(*got, Some(index), "error should include the failing index");
-        assert!(
-            db_type.contains(db_type_fragment),
-            "error should include the failing database type, got: {db_type}"
-        );
-    }
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
@@ -3903,7 +3849,7 @@ mod tests {
     fn single_state_sync_preserves_db_error_when_target_channel_closes() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let _ = tip_tx.send(tip_update(anchor(1), 1u64)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
 
             let result = <Single<FailingStateSyncDb> as StateSyncSet<
                 deterministic::Context,
@@ -3926,10 +3872,7 @@ mod tests {
             )
             .await;
 
-            assert!(matches!(
-                result,
-                Err(SetSyncError::Member { index: None, .. })
-            ));
+            assert!(matches!(result, Err(TestSyncError)));
         });
     }
 
@@ -3968,8 +3911,8 @@ mod tests {
                     .expect("single state sync should succeed")
                 });
 
-            let _ = tip_tx.send(tip_update(anchor(2), 2)).await;
-            let _ = tip_tx.send(tip_update(anchor(1), 1)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), 2)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), 1)).await;
             drop(tip_tx);
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4068,7 +4011,7 @@ mod tests {
                         .expect("single state sync should succeed")
                     });
 
-            let _ = tip_tx.send(tip_update(anchor(2), 2)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), 2)).await;
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
             let final_target = database.final_target;
@@ -4122,8 +4065,8 @@ mod tests {
             while !fast_done.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
-            let _ = tip_tx.send(tip_update(anchor(1), (1, 1))).await;
-            let _ = tip_tx.send(tip_update(anchor(2), (2, 2))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 
@@ -4182,8 +4125,8 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send(tip_update(anchor(2), (2, 2))).await;
-            let _ = tip_tx.send(tip_update(anchor(1), (1, 1))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
             drop(tip_tx);
             context.sleep(Duration::from_millis(1)).await;
             slow_release.store(true, Ordering::SeqCst);
@@ -4239,7 +4182,7 @@ mod tests {
                 Err(err) => err,
             };
             assert!(
-                matches!(err, SetSyncError::TargetMismatch),
+                err.contains("database targets do not match"),
                 "error should identify the target mismatch, got: {err}"
             );
         });
@@ -4275,7 +4218,14 @@ mod tests {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
                 Err(err) => err,
             };
-            assert_member_error(&err, 1, "FailingStateSyncDb");
+            assert!(
+                err.contains("state sync failed (index 1, db"),
+                "error should include failing database index: {err}"
+            );
+            assert!(
+                err.contains("FailingStateSyncDb"),
+                "error should include failing database type: {err}"
+            );
         });
     }
 
@@ -4310,7 +4260,14 @@ mod tests {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
                 Err(err) => err,
             };
-            assert_member_error(&err, 1, "FailingStateSyncDb");
+            assert!(
+                err.contains("state sync failed (index 1, db"),
+                "error should include failing database index: {err}"
+            );
+            assert!(
+                err.contains("FailingStateSyncDb"),
+                "error should include failing database type: {err}"
+            );
         });
     }
 
@@ -4344,7 +4301,14 @@ mod tests {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
                 Err(err) => err,
             };
-            assert_member_error(&err, 1, "FailingStateSyncDb");
+            assert!(
+                err.contains("state sync failed (index 1, db"),
+                "error should include failing database index: {err}"
+            );
+            assert!(
+                err.contains("FailingStateSyncDb"),
+                "error should include failing database type: {err}"
+            );
         });
     }
 
@@ -4474,7 +4438,7 @@ mod tests {
             }
 
             for target in 1..=16u64 {
-                let _ = tip_tx.send(tip_update(anchor(target), (target, target))).await;
+                let _ = tip_tx.send(TipUpdate::new(anchor(target), (target, target))).await;
             }
             drop(tip_tx);
 
@@ -4605,7 +4569,7 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send(tip_update(anchor(9), (9, 7))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
             context.sleep(Duration::from_millis(1)).await;
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
@@ -4641,7 +4605,7 @@ mod tests {
     }
 
     impl<Src: super::ServeSource> AttachableResolver<Src> for RecordingResolver {
-        async fn attach_source(&self, _source: Src) {
+        async fn attach_reader(&self, _source: Src) {
             self.log.lock().push(self.id);
         }
     }
@@ -4654,7 +4618,7 @@ mod tests {
             let (_publisher, source) = super::Publisher::<u8>::new(&context);
 
             resolver
-                .attach_sources(super::DbReader::new(source, |member| member))
+                .attach_readers(super::DbReader::new(source, |member| member))
                 .await;
             assert_eq!(&*log.lock(), &["db1"]);
         });
@@ -4674,7 +4638,7 @@ mod tests {
                 super::DbReader::new(source, |members: &(u8, u16)| &members.1),
             );
 
-            resolvers.attach_sources(sources).await;
+            resolvers.attach_readers(sources).await;
             assert_eq!(&*log.lock(), &["resolver_0", "resolver_1"]);
         });
     }

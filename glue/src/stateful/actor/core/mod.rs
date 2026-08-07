@@ -231,7 +231,7 @@ where
     async fn run(self) {
         let (publisher, db_readers) = Publisher::new(self.context.as_present());
         self.resolvers
-            .attach_sources(A::Databases::readers(db_readers))
+            .attach_readers(A::Databases::readers(db_readers))
             .await;
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor, publisher).await;
@@ -353,7 +353,7 @@ mod tests {
     struct NoopResolver;
 
     impl<Src: crate::stateful::db::ServeSource> AttachableResolver<Src> for NoopResolver {
-        async fn attach_source(&self, _source: Src) {}
+        async fn attach_reader(&self, _source: Src) {}
     }
 
     impl<S: Send> StateSyncDb<deterministic::Context, S> for TestDb {

@@ -38,10 +38,8 @@ type HeldVerifyRequest<E, A> =
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
-    /// At or below the sync anchor: already reflected in the synced state, so the
-    /// application is only notified.
+    Covered(B, Deferred),
     Reflected(B, Deferred),
-    /// Above the sync anchor: applied against the synced databases.
     Apply(B, Deferred),
 }
 
@@ -293,7 +291,7 @@ where
         } in finalized
         {
             if block.height() < artifact.anchor.height {
-                handoffs.push_back(FinalizedHandoff::Reflected(block, acknowledgement));
+                handoffs.push_back(FinalizedHandoff::Covered(block, acknowledgement));
                 continue;
             }
             if block.height() == artifact.anchor.height {
@@ -350,7 +348,8 @@ where
 
         for handoff in handoffs {
             match handoff {
-                FinalizedHandoff::Reflected(block, acknowledgement) => {
+                FinalizedHandoff::Covered(block, acknowledgement)
+                | FinalizedHandoff::Reflected(block, acknowledgement) => {
                     processor
                         .notify_finalized(context.as_present(), block.as_ref())
                         .await;
@@ -672,7 +671,7 @@ mod tests {
             let mut handoffs = harness.syncing.prepare_handoffs(finalized);
             assert!(matches!(
                 handoffs.pop_front(),
-                Some(FinalizedHandoff::Reflected(block, _))
+                Some(FinalizedHandoff::Covered(block, _))
                     if block.height() == Height::new(u64::MAX - 3)
             ));
             assert!(matches!(
@@ -722,7 +721,7 @@ mod tests {
                 .prepare_handoffs([pending(TestBlock::new(6, 8))]);
             assert!(matches!(
                 handoffs.front(),
-                Some(FinalizedHandoff::Reflected(block, _)) if block.height() == Height::new(6)
+                Some(FinalizedHandoff::Covered(block, _)) if block.height() == Height::new(6)
             ));
         });
     }

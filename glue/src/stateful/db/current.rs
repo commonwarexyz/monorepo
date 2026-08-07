@@ -1402,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_merkleized_matches_rejects_wrong_ops_root_and_range() {
+    fn ordered_managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-matches-sync-target", &context);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
@@ -1490,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn unordered_merkleized_matches_rejects_wrong_ops_root_and_range() {
+    fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config.clone())

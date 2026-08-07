@@ -83,9 +83,6 @@ where
     }
 
     /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    ///
-    /// If unset, the batch carries forward the floor it forked from. The floor must never
-    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
@@ -577,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn merkleized_matches_rejects_wrong_replay_range() {
+    fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();

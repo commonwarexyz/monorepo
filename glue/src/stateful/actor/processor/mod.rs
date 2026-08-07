@@ -62,6 +62,7 @@ type PendingBatches<A, E> = <<A as Application<E>>::Databases as DbSet<E>>::Merk
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 pub(super) type PendingSyncTargets<A, E> =
     <<A as Application<E>>::Databases as DbSet<E>>::SyncTargets;
+type DeferredPrune<T> = Option<Prune<T>>;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -92,7 +93,7 @@ pub(super) struct Applied<T, S> {
     pub(super) publication: PendingPublication<S>,
 
     /// Prune made due by this finalization.
-    pub(super) prune: Option<Prune<T>>,
+    pub(super) prune: DeferredPrune<T>,
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -157,7 +158,7 @@ impl<T: Clone> Pruning<T> {
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
     /// matches the selected phase of the configured maintenance interval.
-    fn observe_finalized(&mut self, height: Height, targets: T) -> Option<Prune<T>> {
+    fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
             self.retained_targets.pop_front();
@@ -1781,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalization_defers_prune_until_window_full() {
+    fn execution_finalization_returns_deferred_prune() {
         deterministic::Runner::default().start(|context| async move {
             let provider = MapProvider::default();
             let config = qmdb_config("db_config", &context);

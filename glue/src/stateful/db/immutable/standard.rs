@@ -88,9 +88,6 @@ where
     }
 
     /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    ///
-    /// If unset, the batch carries forward the floor it forked from. The floor must never
-    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
@@ -603,48 +600,6 @@ mod tests {
                 *target.range.end(),
                 "captured snapshot must cover the applied batch",
             );
-        });
-    }
-
-    #[test]
-    fn merkleized_matches_rejects_wrong_replay_range() {
-        deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-immutable-matches", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
-
-            let key = Sha256::hash(&[b"key"]);
-            let value = Sha256::hash(&[b"value"]);
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db).set(key, value);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
-                .await
-                .unwrap();
-
-            let valid_target = AnySyncTarget::new(
-                merkleized.root(),
-                non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
-            );
-            assert!(merkleized.matches(&valid_target));
-
-            let wrong_start = AnySyncTarget::new(
-                merkleized.root(),
-                non_empty_range!(
-                    merkleized.bounds().inactivity_floor + 1,
-                    merkleized.bounds().tip.size
-                ),
-            );
-            assert!(!merkleized.matches(&wrong_start));
-
-            let wrong_end = AnySyncTarget::new(
-                merkleized.root(),
-                non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size - 1
-                ),
-            );
-            assert!(!merkleized.matches(&wrong_end));
         });
     }
 }

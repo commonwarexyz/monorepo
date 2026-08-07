@@ -12,7 +12,6 @@ use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
-use commonware_utils::channel::mpsc;
 use commonware_storage::{
     Context,
     merkle::{Family, Location},
@@ -27,6 +26,7 @@ use commonware_storage::{
         sync,
     },
 };
+use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps an unjournaled keyless batch before merkleization.
@@ -73,9 +73,6 @@ where
     }
 
     /// Set the inactivity floor included in the next merkleization.
-    ///
-    /// If unset, the batch carries forward the floor it forked from. The floor must never
-    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
@@ -562,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn merkleized_matches_rejects_wrong_size() {
+    fn managed_db_matches_sync_target_rejects_wrong_size() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();

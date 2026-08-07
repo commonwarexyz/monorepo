@@ -158,7 +158,7 @@ where
     D: Digest,
     Src: ServeSource,
 {
-    fn attach_source(&self, source: Src) -> impl Future<Output = ()> + Send {
+    fn attach_reader(&self, source: Src) -> impl Future<Output = ()> + Send {
         let _ = self.sender.enqueue(Message::AttachSource(source));
         std::future::ready(())
     }

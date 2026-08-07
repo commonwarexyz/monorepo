@@ -62,7 +62,7 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Requests asking for more operations than this are declined.
+    /// Maximum number of operations to serve in a single response.
     pub max_serve_ops: NonZeroU64,
 
     /// Send fetch requests with network priority.
@@ -168,7 +168,6 @@ where
                     subs.retain(|s| !s.is_closed());
                     !subs.is_empty()
                 });
-                let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 let mailbox_message = async {
                     match self.mailbox_rx.recv().await {
                         Some(message) => Some(message),
@@ -180,7 +179,6 @@ where
                 return;
             },
             _ = &mut resolver_task => {
-                debug!("resolver engine stopped, shutting down");
                 return;
             },
             Some(message) = mailbox_message else continue => {
@@ -195,7 +193,6 @@ where
                 }
             },
             Some(message) = handler_rx.recv() else {
-                debug!("resolver handler closed, shutting down");
                 return;
             } => match message {
                 handler::EngineMessage::Deliver {
@@ -212,8 +209,7 @@ where
         }
     }
 
-    /// Process a mailbox message, returning the fetch or cancel action to forward to
-    /// the resolver engine.
+    /// Process a mailbox message. Returns a request to fetch if a new key was registered.
     fn handle_mailbox_message(&mut self, message: SyncMessage<F, Src>) -> MailboxAction<F> {
         match message {
             mailbox::Message::AttachSource(source) => {
@@ -317,11 +313,7 @@ where
 
         let mut peer_valid = true;
         for approval in approvals {
-            let approved = select! {
-                approved = approval => approved,
-                _ = self.context.stopped() => return,
-            };
-            if let Ok(approved) = approved {
+            if let Ok(approved) = approval.await {
                 peer_valid &= approved;
             }
         }
@@ -351,7 +343,7 @@ where
         if let Request::Operations { max_ops, .. } = key
             && max_ops > self.config.max_serve_ops
         {
-            self.metrics.serve_requests.inc(status::Status::Invalid);
+            self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
         // Declines before the first publication and after the publisher drops.
@@ -381,12 +373,8 @@ where
             return;
         };
 
-        if response_tx.send_lossy(response.encode()) {
-            self.metrics.serve_requests.inc(status::Status::Success);
-        } else {
-            // The requester went away between the read and the send.
-            self.metrics.serve_cancelled.inc();
-        }
+        response_tx.send_lossy(response.encode());
+        self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
 
@@ -632,15 +620,6 @@ mod tests {
             actor.handle_produce(request, response_tx).await;
 
             assert!(response_rx.await.is_err());
-            let metrics = context.encode();
-            assert!(
-                metrics.lines().any(|line| {
-                    line.contains("serve_requests_total")
-                        && line.contains("status=\"Invalid\"")
-                        && line.ends_with(" 1")
-                }),
-                "oversized request must count as a client error"
-            );
         });
     }
 

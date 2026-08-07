@@ -77,9 +77,6 @@ where
     }
 
     /// Set the inactivity floor included in the next merkleization.
-    ///
-    /// If unset, the batch carries forward the floor it forked from. The floor must never
-    /// decrease across commits.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
