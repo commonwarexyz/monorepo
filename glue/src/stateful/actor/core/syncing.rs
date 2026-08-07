@@ -427,7 +427,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, Reader, Single, channel},
+        db::{Anchor, Publisher, Reader, Single},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -568,7 +568,7 @@ mod tests {
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
-            let (publisher, reader) = channel(&syncing_context);
+            let (publisher, reader) = Publisher::new(&syncing_context);
 
             let harness = Self {
                 syncing: Syncing {
@@ -623,7 +623,7 @@ mod tests {
             let (syncer_sender, _syncer_receiver) =
                 actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
             let (_sync_complete, sync_completed) = oneshot::channel();
-            let (publisher, reader) = channel(&syncing_context);
+            let (publisher, reader) = Publisher::new(&syncing_context);
 
             Self {
                 syncing: Syncing {

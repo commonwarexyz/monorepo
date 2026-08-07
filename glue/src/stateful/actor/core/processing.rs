@@ -364,7 +364,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{Reader, Single, channel},
+        db::{Publisher, Reader, Single},
         tests::{
             fixtures,
             mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor, served_generation},
@@ -456,7 +456,7 @@ mod tests {
         let databases = Single::from(TestDb::gated(control.clone()));
         let pruning = prune_config
             .map(|config| Pruning::build(config, marshal.mailbox.max_pending_acks(), 0));
-        let (publisher, source) = channel(context);
+        let (publisher, source) = Publisher::new(context);
         let processor = Processor::new(
             TestApp,
             databases,

@@ -584,7 +584,8 @@ impl EngineDefinition for MultiDbEngine {
 
         // Snapshot publication channel and the QMDB state-sync resolvers (one per
         // database), each serving from its own reader.
-        let (publisher, reader) = crate::stateful::db::channel(&context.child("publication"));
+        let (publisher, reader) =
+            crate::stateful::db::Publisher::new(&context.child("publication"));
         let (reader_a, reader_b) =
             <MultiDatabaseSet<_> as crate::stateful::db::DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =

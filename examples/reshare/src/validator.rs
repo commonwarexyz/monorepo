@@ -31,7 +31,7 @@ use commonware_glue::{
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
-        db::{DatabaseSet, channel, p2p as qmdb_resolver},
+        db::{DatabaseSet, Publisher, p2p as qmdb_resolver},
     },
 };
 use commonware_macros::boxed;
@@ -231,7 +231,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
-    let (publisher, reader) = channel(&context.child("publication"));
+    let (publisher, reader) = Publisher::new(&context.child("publication"));
     let (qmdb_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
         context.child("qmdb_resolver"),
         qmdb_resolver::Config {

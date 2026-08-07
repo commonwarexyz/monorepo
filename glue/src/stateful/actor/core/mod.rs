@@ -133,7 +133,7 @@ where
 
     /// Publisher for the snapshots resolvers serve, created alongside its
     /// [`Reader`](crate::stateful::db::Reader)s by
-    /// [`channel`](crate::stateful::db::channel) when wiring the resolvers.
+    /// [`Publisher::new`](crate::stateful::db::Publisher::new) when wiring the resolvers.
     pub publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
@@ -329,7 +329,7 @@ mod tests {
     use super::{Config, Deferred, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{StateSyncDb, SyncEngineConfig, channel},
+        db::{Publisher, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
             mocks::{TestApp, TestBlock, TestDb},
@@ -391,7 +391,7 @@ mod tests {
             .await;
 
             let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
-            let (publisher, reader) = channel(&context.child("publication"));
+            let (publisher, reader) = Publisher::new(&context.child("publication"));
             let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -452,7 +452,7 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
-                    publisher: channel(&context.child("publication")).0,
+                    publisher: Publisher::new(&context.child("publication")).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

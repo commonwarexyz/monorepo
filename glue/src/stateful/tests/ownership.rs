@@ -13,7 +13,7 @@
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
 use crate::stateful::db::{
-    Barrier, DatabaseSet, PendingPublication, ServeSource as _, Single, channel,
+    Barrier, DatabaseSet, PendingPublication, Publisher, ServeSource as _, Single,
 };
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
@@ -62,7 +62,7 @@ fn unpublished_generation_stays_invisible() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (set, control) = parked_set();
-        let (mut publisher, reader) = channel(&context);
+        let (mut publisher, reader) = Publisher::new(&context);
 
         // The first generation applies but its flush is parked, so it stays
         // staged and no subscriber can see it.
@@ -106,7 +106,7 @@ fn parked_serve_never_delays_the_writer() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let (set, control) = parked_set();
-        let (mut publisher, reader) = channel(&context);
+        let (mut publisher, reader) = Publisher::new(&context);
         let (set, snapshot, barrier) = finalize(set).await;
         let staged = publisher.stage(snapshot);
         release(&control);

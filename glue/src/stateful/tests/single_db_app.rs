@@ -489,7 +489,8 @@ impl EngineDefinition for SingleDbEngine {
         let sync_floor = plan.floor().cloned();
 
         // Snapshot publication channel and the QMDB state-sync resolver serving from it.
-        let (publisher, reader) = crate::stateful::db::channel(&context.child("publication"));
+        let (publisher, reader) =
+            crate::stateful::db::Publisher::new(&context.child("publication"));
         let serve_reader =
             <SingleDatabaseSet<_> as crate::stateful::db::DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor, qmdb_sync_resolver) =
@@ -534,9 +535,8 @@ impl EngineDefinition for SingleDbEngine {
         );
 
         // Observe the oldest operation QMDB still retains, to assert pruning ran.
-        let prune_observer = serve_reader;
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let reader = prune_observer.clone();
+            let reader = serve_reader.clone();
             Box::pin(async move {
                 let snapshot = crate::stateful::db::ServeSource::latest(&reader)
                     .expect("a published generation must exist");

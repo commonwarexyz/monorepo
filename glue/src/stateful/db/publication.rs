@@ -1,13 +1,13 @@
 //! Publishing database snapshots from the writer to readers.
 //!
-//! [`channel`] creates a [`Publisher`] and a [`Reader`] over one shared slot. The
-//! writer stages each generation of snapshots (numbered in apply order) and
+//! [`Publisher::new`] creates a [`Publisher`] and a [`Reader`] over one shared
+//! slot. The writer stages each generation of snapshots (numbered in apply order) and
 //! publishes it once its flush proves durable, so readers only ever see durable
 //! state. Publication is monotonic: flushes finishing out of order never move
 //! readers backward.
 //!
 //! A [`Reader`] takes the latest published generation once per request. The reader
-//! from [`channel`] sees the whole snapshot set; [`view`](Reader::view) makes
+//! from [`Publisher::new`] sees the whole snapshot set; [`view`](Reader::view) makes
 //! readers for its parts, one per database. A take never mixes generations and
 //! never changes afterward. A reader yields nothing before the first publish and
 //! nothing after the publisher drops (crash and clean shutdown look the same to
@@ -88,24 +88,6 @@ impl Metrics {
     }
 }
 
-/// Create a snapshot [`Publisher`] and a [`Reader`] connected to it.
-pub fn channel<S, E: RuntimeMetrics>(context: &E) -> (Publisher<S>, Reader<S>) {
-    let slot = Arc::new(Slot {
-        state: Mutex::new(State::Empty),
-        metrics: Metrics::register(context),
-    });
-    (
-        Publisher {
-            slot: slot.clone(),
-            next_generation: 0,
-        },
-        Reader {
-            slot,
-            view: |snapshots| snapshots,
-        },
-    )
-}
-
 /// The writer's handle: stages generations and publishes them.
 ///
 /// Dropping it detaches every reader.
@@ -115,6 +97,26 @@ pub struct Publisher<S> {
 }
 
 impl<S> Publisher<S> {
+    /// Create a snapshot [`Publisher`] and a [`Reader`] connected to it.
+    ///
+    /// Publication metrics register under `context`.
+    pub fn new<E: RuntimeMetrics>(context: &E) -> (Self, Reader<S>) {
+        let slot = Arc::new(Slot {
+            state: Mutex::new(State::Empty),
+            metrics: Metrics::register(context),
+        });
+        (
+            Self {
+                slot: slot.clone(),
+                next_generation: 0,
+            },
+            Reader {
+                slot,
+                view: |snapshots| snapshots,
+            },
+        )
+    }
+
     /// Stage `snapshots` as the next generation.
     ///
     /// Stage in apply order, and publish only once the generation is durable.
@@ -135,6 +137,8 @@ impl<S> Publisher<S> {
 
 impl<S> Drop for Publisher<S> {
     fn drop(&mut self) {
+        // Without a writer the last generation would only grow staler, so mark
+        // the slot detached: reads decline rather than serve unboundedly old state.
         let mut state = self.slot.state.lock();
         let _replaced = std::mem::replace(&mut *state, State::Detached);
         self.slot.metrics.generation.set(-1);
@@ -146,7 +150,8 @@ impl<S> Drop for Publisher<S> {
 
 /// A staged generation, not yet published.
 ///
-/// Dropping it skips the generation. Later ones still publish.
+/// Dropping it (at shutdown, or when its flush never proves durable) abandons the
+/// generation: readers keep what they have, and later generations publish as usual.
 pub(crate) struct Staged<S> {
     slot: Arc<Slot<S>>,
     generation: Arc<Generation<S>>,
@@ -245,7 +250,7 @@ mod tests {
     #[test]
     fn empty_then_live_then_detached() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = channel::<u32, _>(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             assert!(reader.latest().is_none());
             assert_eq!(published_generation(&context), -1);
 
@@ -268,7 +273,7 @@ mod tests {
     #[test]
     fn pipelined_publication_is_monotone() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = channel::<u32, _>(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // Two generations staged before either publishes, as pipelined flushes allow.
             let first = publisher.stage(1);
             let second = publisher.stage(2);
@@ -285,7 +290,7 @@ mod tests {
     #[test]
     fn publish_after_publisher_drop_stays_detached() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = channel::<u32, _>(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // A pool future can outlive the publisher, so its publish must not
             // resurrect a live state.
             let staged = publisher.stage(1);
@@ -298,7 +303,7 @@ mod tests {
     #[test]
     fn dropped_stage_skips_a_generation() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = channel::<u32, _>(&context);
+            let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // A shutdown drop of one staged generation must not block later ones.
             drop(publisher.stage(1));
             publisher.publish_durable(2);
@@ -310,7 +315,7 @@ mod tests {
     #[test]
     fn viewed_reader_serves_its_part_of_the_snapshot() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = channel::<(u32, u32), _>(&context);
+            let (mut publisher, reader) = Publisher::<(u32, u32)>::new(&context);
             let first_db = reader.view(|set| &set.0);
             assert!(first_db.latest().is_none());
             publisher.publish_durable((1, 10));

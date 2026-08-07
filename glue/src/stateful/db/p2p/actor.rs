@@ -320,7 +320,7 @@ where
         feedback_tx.send_lossy(peer_valid);
     }
 
-    /// Serve a peer's request from the latest published snapshot.
+    /// Serve a peer's request from `self.source`.
     async fn handle_produce(
         &mut self,
         key: Request<F>,
@@ -332,11 +332,11 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let Some(handle) = self.source.latest() else {
+        let Some(source) = self.source.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
-        let result = handle.serve(key).await;
+        let result = source.serve(key).await;
 
         let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);

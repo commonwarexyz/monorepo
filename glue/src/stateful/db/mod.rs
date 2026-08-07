@@ -110,7 +110,7 @@ pub mod p2p;
 mod publication;
 
 pub(crate) use publication::Staged;
-pub use publication::{Publisher, Reader, ServeSource, channel};
+pub use publication::{Publisher, Reader, ServeSource};
 
 /// Mutable batch state before merkleization.
 ///
@@ -1763,8 +1763,8 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
 mod tests {
     use super::{
         Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
-        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, ServeSource as _, Single, StateSyncDb, StateSyncSet,
-        SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher, ServeSource as _, Single, StateSyncDb,
+        StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
 
@@ -1772,10 +1772,9 @@ mod tests {
     fn tuple_readers_project_their_own_members() {
         deterministic::Runner::default().start(|context| async move {
             type Pair = (NumberedDb, NumberedDb);
-            let (mut publisher, reader) = super::channel::<
+            let (mut publisher, reader) = Publisher::<
                 <Pair as DatabaseSet<deterministic::Context>>::Snapshots,
-                _,
-            >(&context);
+            >::new(&context);
             let (first, second) = <Pair as DatabaseSet<deterministic::Context>>::readers(reader);
             publisher.publish_durable((1, 2));
             assert_eq!(first.latest(), Some(1));
