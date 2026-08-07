@@ -1,87 +1,79 @@
-//! Publication of durable snapshots: how state moves from the writer to serving.
+//! Publishing database snapshots from the writer to readers.
 //!
-//! [`super::DatabaseSet::finalize`] captures one snapshot per member database as it
-//! applies a batch and returns it with the generation's [`super::Barrier`]. The owning
-//! actor stages the capture through a [`Publisher`] and installs it once the barrier
-//! proves every member flush durable. Resolver actors serve the latest installed
-//! generation through cloned [`MemberSource`]s. One [`SetSnapshot`] carries every
-//! member, so a single [`ServeSource::latest`] call always sees members from the same
-//! generation. Two separate calls may straddle an installation and see different
-//! generations. While a generation's flush is pending, sources keep serving the
-//! previous installed generation.
+//! A generation is one [`SetSnapshot`]: every database's snapshot, captured at
+//! the same apply boundary. The writer stages each generation through its
+//! [`Publisher`], which numbers them in apply order, and installs it once its flush
+//! proves durable, so readers only ever see durable state. Installs are monotonic:
+//! flushes finishing out of order never move readers backward.
 //!
-//! Flushes may be pipelined, so several staged generations can await durability at once.
-//! Staging assigns generation numbers and installation is monotone: a slow flush that
-//! finishes after a newer one can never move serving backward.
-//!
-//! A source serves nothing before the first installation (the node is still starting)
-//! and nothing after the [`Publisher`] drops (writer failure and clean shutdown look
-//! the same to readers). Snapshots already handed out keep working until dropped.
-//! Serving code sees only [`ServeSource::latest`]'s `Option`. The states behind it,
-//! like the generation numbers, stay internal.
+//! Readers hold a [`SetReader`], or a [`DbReader`] narrowed to one database, and
+//! take the latest installed generation once per request. A take never mixes
+//! generations and never changes afterward. A reader yields nothing before the first
+//! install and nothing after the publisher drops (crash and clean shutdown look the
+//! same to readers), but generations already taken keep working.
 
 use commonware_runtime::{Metrics as RuntimeMetrics, telemetry::metrics::Registered};
 use commonware_utils::sync::Mutex;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::sync::Arc;
 
-/// One installed generation of a database set, every member's snapshot captured at the same
-/// apply boundary and proven durable before installation.
+/// One generation: every database's snapshot, captured at the same apply boundary.
 #[derive(Debug)]
 pub(crate) struct SetSnapshot<S> {
     generation: u64,
-    members: S,
+    snapshots: S,
 }
 
 impl<S> SetSnapshot<S> {
-    /// Monotonically increasing installation identifier, assigned in staging order.
+    /// The generation number, assigned in staging order.
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// The member snapshots.
-    pub(crate) const fn members(&self) -> &S {
-        &self.members
+    /// The databases' snapshots.
+    pub(crate) const fn snapshots(&self) -> &S {
+        &self.snapshots
     }
 }
 
 enum State<S> {
     Empty,
-    Live(Arc<SetSnapshot<S>>),
+    Installed(Arc<SetSnapshot<S>>),
     Detached,
 }
 
-/// Shared between the [`Publisher`], its [`Staged`] tokens, and every source.
+/// Shared between the [`Publisher`], its [`Staged`] tokens, and every [`SetReader`].
 struct Slot<S> {
     state: Mutex<State<S>>,
     metrics: Metrics,
 }
 
 impl<S> Slot<S> {
-    /// Install `snapshot` unless a newer generation is already live.
+    /// Install `snapshot` unless a newer generation is already installed.
     fn install(&self, snapshot: Arc<SetSnapshot<S>>) {
         let generation = snapshot.generation();
-        // Metrics update under the lock so the gauge can never trail a newer install.
-        // The replaced snapshot is dropped only after the guard: its destructor may
-        // free a whole generation and must not stall serving.
         let mut state = self.state.lock();
         let replaced = match &*state {
             State::Detached => return,
-            State::Live(live) if live.generation() > generation => return,
-            State::Empty | State::Live(_) => std::mem::replace(&mut *state, State::Live(snapshot)),
+            State::Installed(installed) if installed.generation() > generation => return,
+            State::Empty | State::Installed(_) => {
+                std::mem::replace(&mut *state, State::Installed(snapshot))
+            }
         };
+        // Update metrics under the lock so the gauge matches what readers see.
         self.metrics.generation.set(generation as i64);
         self.metrics.installed.inc();
         drop(state);
+        // Free the displaced generation outside the lock so readers never wait on it.
         drop(replaced);
     }
 }
 
-/// Publication metrics, registered on the publishing actor's context.
+/// Publication metrics.
 struct Metrics {
     /// Generation of the latest installed snapshot.
     generation: Registered<Gauge>,
-    /// Installations since startup.
+    /// Number of installations since startup.
     installed: Registered<Counter>,
 }
 
@@ -102,18 +94,17 @@ impl Metrics {
     }
 }
 
-/// The writer-side handle that stages captured generations for installation.
+/// The writer's handle: stages generations and installs them.
 ///
-/// Owned by actor orchestration. Dropping it detaches every source.
+/// Dropping it detaches every reader.
 pub(crate) struct Publisher<S> {
     slot: Arc<Slot<S>>,
     next_generation: u64,
 }
 
 impl<S> Publisher<S> {
-    /// Create a publisher and its source. The source serves nothing until the first staged
-    /// generation installs.
-    pub(crate) fn new<E: RuntimeMetrics>(context: &E) -> (Self, SetSource<S>) {
+    /// Create a publisher and its reader.
+    pub(crate) fn new<E: RuntimeMetrics>(context: &E) -> (Self, SetReader<S>) {
         let slot = Arc::new(Slot {
             state: Mutex::new(State::Empty),
             metrics: Metrics::register(context),
@@ -122,37 +113,33 @@ impl<S> Publisher<S> {
             slot: slot.clone(),
             next_generation: 0,
         };
-        (publisher, SetSource { slot })
+        (publisher, SetReader { slot })
     }
 
-    /// Stage `members` as the next generation, returning the token that installs it.
+    /// Stage `snapshots` as the next generation.
     ///
-    /// Staging assigns the next generation number, so callers must stage in apply order.
-    /// Install the token only once the generation is durable.
-    pub(crate) fn stage(&mut self, members: S) -> Staged<S> {
+    /// Stage in apply order, and install only once the generation is durable.
+    pub(crate) fn stage(&mut self, snapshots: S) -> Staged<S> {
         let generation = self.next_generation;
         self.next_generation += 1;
         Staged {
             slot: self.slot.clone(),
             snapshot: Arc::new(SetSnapshot {
                 generation,
-                members,
+                snapshots,
             }),
         }
     }
 
-    /// Stage and immediately install `members`, for state whose durability is
-    /// already proven.
-    pub(crate) fn install_durable(&mut self, members: S) {
-        self.stage(members).install();
+    /// Stage and install in one step, for state that is already durable.
+    pub(crate) fn install_durable(&mut self, snapshots: S) {
+        self.stage(snapshots).install();
     }
 }
 
 impl<S> Drop for Publisher<S> {
     fn drop(&mut self) {
-        // Detach serving: new requests get nothing, while snapshots already handed
-        // out keep working until dropped. Drop the displaced snapshot outside the
-        // lock.
+        // Free the displaced generation outside the lock.
         let mut state = self.slot.state.lock();
         let replaced = std::mem::replace(&mut *state, State::Detached);
         drop(state);
@@ -160,10 +147,9 @@ impl<S> Drop for Publisher<S> {
     }
 }
 
-/// A staged generation waiting to be proven durable.
+/// A staged generation, not yet installed.
 ///
-/// Dropping the token without installing simply skips this generation, as when the
-/// runtime shuts down before its flush completes. Later generations still install.
+/// Dropping it skips the generation. Later ones still install.
 pub(crate) struct Staged<S> {
     slot: Arc<Slot<S>>,
     snapshot: Arc<SetSnapshot<S>>,
@@ -176,17 +162,15 @@ impl<S> Staged<S> {
     }
 }
 
-/// A reader-side handle to the latest installed generation.
+/// A reader's handle to the latest installed generation.
 ///
-/// Cloned freely. Each request clones the current generation's Arc once and keeps
-/// using that generation even if a newer one installs mid-request. Public only so set
-/// implementations can name it in [`super::DatabaseSet::member_sources`]. Everything
-/// it can do is crate-internal.
-pub struct SetSource<S> {
+/// Cloned freely. Public only so set implementations can name it in
+/// [`super::DatabaseSet::readers`]. Everything it can do is crate-internal.
+pub struct SetReader<S> {
     slot: Arc<Slot<S>>,
 }
 
-impl<S> Clone for SetSource<S> {
+impl<S> Clone for SetReader<S> {
     fn clone(&self) -> Self {
         Self {
             slot: self.slot.clone(),
@@ -194,60 +178,59 @@ impl<S> Clone for SetSource<S> {
     }
 }
 
-impl<S> SetSource<S> {
-    /// The latest installed generation, or `None` before the first installation and after
+impl<S> SetReader<S> {
+    /// The latest installed generation, or `None` before the first install or after
     /// the publisher drops.
     pub(crate) fn latest(&self) -> Option<Arc<SetSnapshot<S>>> {
         match &*self.slot.state.lock() {
-            State::Live(snapshot) => Some(snapshot.clone()),
+            State::Installed(snapshot) => Some(snapshot.clone()),
             State::Empty | State::Detached => None,
         }
     }
 }
 
-/// A source narrowed to one member of the set.
+/// A [`SetReader`] narrowed to one database.
 ///
-/// Loads the whole set once, then clones out one member's snapshot, so even per-member
-/// reads always come from a single generation.
-pub struct MemberSource<S, M> {
-    source: SetSource<S>,
+/// Takes the whole set once, so even per-database reads come from a single generation.
+pub struct DbReader<S, M> {
+    reader: SetReader<S>,
     project: fn(&S) -> &M,
 }
 
-impl<S, M> Clone for MemberSource<S, M> {
+impl<S, M> Clone for DbReader<S, M> {
     fn clone(&self) -> Self {
         Self {
-            source: self.source.clone(),
+            reader: self.reader.clone(),
             project: self.project,
         }
     }
 }
 
-impl<S, M> MemberSource<S, M> {
-    /// Create a projection of `source` via `project`.
+impl<S, M> DbReader<S, M> {
+    /// Narrow `reader` to the database `project` selects.
     ///
-    /// Public so [`super::DatabaseSet::member_sources`] is implementable outside this
-    /// crate. The source only reads installed generations, so it exposes nothing that
-    /// can mutate the database.
-    pub fn new(source: SetSource<S>, project: fn(&S) -> &M) -> Self {
-        Self { source, project }
+    /// Public so [`super::DatabaseSet::readers`] is implementable outside this
+    /// crate. Sources only read installed generations, so nothing here can mutate the
+    /// database.
+    pub fn new(reader: SetReader<S>, project: fn(&S) -> &M) -> Self {
+        Self { reader, project }
     }
 }
 
-/// A source of per-request serving handles backed by the latest installed generation.
+/// Per-request read handles backed by the latest installed generation.
 ///
-/// Serving actors hold a source and take one handle per request. The handle is an owned
-/// snapshot, so serving never touches the live database.
+/// Readers take one handle per request. The handle is an owned snapshot, so reads
+/// never touch the live database.
 pub trait ServeSource: Clone + Send + Sync + 'static {
-    /// The per-request serving handle.
+    /// The per-request read handle.
     type Serve: Send + Sync + 'static;
 
-    /// The serving handle for the latest installed generation, or `None` when there is
-    /// nothing to serve (before the node finishes starting, or after writer shutdown).
+    /// The handle for the latest installed generation, or `None` before the first
+    /// install or after the publisher drops.
     fn latest(&self) -> Option<Self::Serve>;
 }
 
-impl<S, M> ServeSource for MemberSource<S, M>
+impl<S, M> ServeSource for DbReader<S, M>
 where
     S: Send + Sync + 'static,
     M: Clone + Send + Sync + 'static,
@@ -255,8 +238,8 @@ where
     type Serve = M;
 
     fn latest(&self) -> Option<M> {
-        let set = self.source.latest()?;
-        Some((self.project)(set.members()).clone())
+        let set = self.reader.latest()?;
+        Some((self.project)(set.snapshots()).clone())
     }
 }
 
@@ -274,17 +257,17 @@ mod tests {
             publisher.install_durable(7);
             let first = source.latest().unwrap();
             assert_eq!(first.generation(), 0);
-            assert_eq!(*first.members(), 7);
+            assert_eq!(*first.snapshots(), 7);
 
             publisher.install_durable(8);
             let held = source.latest().unwrap();
             assert_eq!(held.generation(), 1);
-            assert_eq!(*held.members(), 8);
+            assert_eq!(*held.snapshots(), 8);
 
             drop(publisher);
             // New requests decline while the held Arc still serves.
             assert!(source.latest().is_none());
-            assert_eq!(*held.members(), 8);
+            assert_eq!(*held.snapshots(), 8);
         });
     }
 
@@ -298,11 +281,11 @@ mod tests {
 
             // The newer generation resolving first must win and stay won.
             second.install();
-            assert_eq!(*source.latest().unwrap().members(), 2);
+            assert_eq!(*source.latest().unwrap().snapshots(), 2);
             first.install();
             let live = source.latest().unwrap();
             assert_eq!(live.generation(), 1);
-            assert_eq!(*live.members(), 2);
+            assert_eq!(*live.snapshots(), 2);
         });
     }
 
@@ -328,20 +311,20 @@ mod tests {
             publisher.install_durable(2);
             let live = source.latest().unwrap();
             assert_eq!(live.generation(), 1);
-            assert_eq!(*live.members(), 2);
+            assert_eq!(*live.snapshots(), 2);
         });
     }
 
     #[test]
-    fn member_source_projects_installed_member() {
+    fn db_reader_projects_installed_snapshot() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, source) = Publisher::<(u32, u32)>::new(&context);
-            let member: MemberSource<(u32, u32), u32> = MemberSource::new(source, |set| &set.0);
-            assert!(member.latest().is_none());
+            let reader: DbReader<(u32, u32), u32> = DbReader::new(source, |set| &set.0);
+            assert!(reader.latest().is_none());
             publisher.install_durable((1, 10));
-            assert_eq!(member.latest(), Some(1));
+            assert_eq!(reader.latest(), Some(1));
             publisher.install_durable((2, 20));
-            assert_eq!(member.latest(), Some(2));
+            assert_eq!(reader.latest(), Some(2));
         });
     }
 }

@@ -349,7 +349,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{Publisher, SetSource, Single},
+        db::{Publisher, SetReader, Single},
         tests::{
             fixtures,
             mocks::{FlushControl, TestApp, TestBlock, TestDb, anchor, served_generation},
@@ -421,7 +421,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, TestApp>,
         FlushControl,
-        SetSource<()>,
+        SetReader<()>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {

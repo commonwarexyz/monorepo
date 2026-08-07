@@ -10,8 +10,8 @@
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
 //! 3. Finalization: apply the sealed batch and start persisting it via
 //!    [`ManagedDb::finalize`], observing durability via [`Barrier`]. Finalize also
-//!    captures each member's serving snapshot, installed for resolver serving (see
-//!    [`SetSource`]) once the barrier proves the generation durable.
+//!    captures each database's serving snapshot, installed for resolver serving (see
+//!    [`SetReader`]) once the barrier proves the generation durable.
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -112,7 +112,7 @@ pub mod keyless;
 pub mod p2p;
 mod publication;
 
-pub use publication::{MemberSource, ServeSource, SetSource};
+pub use publication::{DbReader, ServeSource, SetReader};
 pub(crate) use publication::{Publisher, Staged};
 
 /// Mutable batch state before merkleization.
@@ -393,15 +393,15 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// One [`ManagedDb::Merkleized`] per database, shaped like [`Self::Unmerkleized`].
     type Merkleized: Send + Sync;
 
-    /// One [`ManagedDb::Snapshot`] per database: one published generation's members.
+    /// One [`ManagedDb::Snapshot`] per database: one published generation's contents.
     type Snapshot: Send + Sync + 'static;
 
-    /// One [`publication::MemberSource`] per database over [`Self::Snapshot`], each
-    /// reading its member out of the latest published generation.
-    type Sources: Send + Sync + 'static;
+    /// One [`publication::DbReader`] per database over [`Self::Snapshot`], each
+    /// reading its database's snapshot out of the latest published generation.
+    type Readers: Send + Sync + 'static;
 
-    /// Project `source` into one serving source per member.
-    fn member_sources(source: publication::SetSource<Self::Snapshot>) -> Self::Sources;
+    /// Project `reader` into one reader per database.
+    fn readers(source: publication::SetReader<Self::Snapshot>) -> Self::Readers;
 
     /// Configuration needed to construct every database in the set: the database's
     /// [`ManagedDb::Config`] under [`Single`], a tuple of per-database configs for
@@ -447,10 +447,10 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
         batches: Self::Merkleized,
     ) -> impl Future<Output = (Self, Self::Snapshot, Barrier)> + Send;
 
-    /// Capture a snapshot of every member's current applied state.
+    /// Capture a snapshot of every database's current applied state.
     ///
     /// The capture reflects batches whose flushes may still be pending. Callers must
-    /// prove the captured state durable before publishing it for serving. A member
+    /// prove the captured state durable before publishing it for serving. A single
     /// capture failure is fatal for the set and therefore panics.
     fn snapshot(self) -> impl Future<Output = (Self, Self::Snapshot)> + Send;
 
@@ -511,7 +511,7 @@ where
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
     type Snapshot = T::Snapshot;
-    type Sources = publication::MemberSource<T::Snapshot, T::Snapshot>;
+    type Readers = publication::DbReader<T::Snapshot, T::Snapshot>;
 
     async fn init(context: E, config: Self::Config) -> Self {
         Self(init_or_panic(context.child("db"), config, None).await)
@@ -521,8 +521,8 @@ where
         T::initial_sync_target()
     }
 
-    fn member_sources(source: publication::SetSource<Self::Snapshot>) -> Self::Sources {
-        publication::MemberSource::new(source, |snapshot| snapshot)
+    fn readers(source: publication::SetReader<Self::Snapshot>) -> Self::Readers {
+        publication::DbReader::new(source, |snapshot| snapshot)
     }
 
     fn new_batches(&self) -> Self::Unmerkleized {
@@ -914,7 +914,7 @@ macro_rules! impl_database_set {
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
             type Snapshot = ($($T::Snapshot,)+);
-            type Sources = ($(publication::MemberSource<Self::Snapshot, $T::Snapshot>,)+);
+            type Readers = ($(publication::DbReader<Self::Snapshot, $T::Snapshot>,)+);
 
             async fn init(context: E, config: Self::Config) -> Self {
                 join!($(
@@ -930,11 +930,11 @@ macro_rules! impl_database_set {
                 ($($T::initial_sync_target(),)+)
             }
 
-            fn member_sources(
-                source: publication::SetSource<Self::Snapshot>,
-            ) -> Self::Sources {
+            fn readers(
+                source: publication::SetReader<Self::Snapshot>,
+            ) -> Self::Readers {
                 ($(
-                    publication::MemberSource::new(source.clone(), |snapshot| &snapshot.$idx),
+                    publication::DbReader::new(source.clone(), |snapshot| &snapshot.$idx),
                 )+)
             }
 
@@ -955,7 +955,7 @@ macro_rules! impl_database_set {
             }
 
             async fn finalize(self, batches: Self::Merkleized) -> (Self, Self::Snapshot, Barrier) {
-                // Every member captures at its own apply boundary inside this call, so the
+                // Every database captures at its own apply boundary inside this call, so the
                 // captured snapshots form one generation.
                 let results = join!($(
                     finalize_or_panic(self.$idx, batches.$idx, Some($idx)),
@@ -1839,9 +1839,9 @@ pub trait AttachableResolver<Src>: Send + Sync + 'static {
 }
 
 /// Attach a set's member sources to a resolver set with matching shape.
-pub trait AttachableResolverSet<Sources>: Send + Sync + 'static {
-    /// Attach every member source to its corresponding resolver.
-    fn attach_sources(&self, sources: Sources) -> impl Future<Output = ()> + Send;
+pub trait AttachableResolverSet<Readers>: Send + Sync + 'static {
+    /// Attach each database's reader to its corresponding resolver.
+    fn attach_sources(&self, readers: Readers) -> impl Future<Output = ()> + Send;
 }
 
 impl<R, Src> AttachableResolverSet<Src> for R
@@ -1915,13 +1915,12 @@ mod tests {
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
 
     #[test]
-    fn tuple_member_sources_project_their_own_members() {
+    fn tuple_readers_project_their_own_members() {
         deterministic::Runner::default().start(|context| async move {
             type Pair = (NumberedDb, NumberedDb);
             let (mut publisher, source) =
                 Publisher::<<Pair as DatabaseSet<deterministic::Context>>::Snapshot>::new(&context);
-            let (first, second) =
-                <Pair as DatabaseSet<deterministic::Context>>::member_sources(source);
+            let (first, second) = <Pair as DatabaseSet<deterministic::Context>>::readers(source);
             publisher.install_durable((1, 2));
             assert_eq!(first.latest(), Some(1));
             assert_eq!(second.latest(), Some(2));
@@ -4713,7 +4712,7 @@ mod tests {
             let (_publisher, source) = super::Publisher::<u8>::new(&context);
 
             resolver
-                .attach_sources(super::MemberSource::new(source, |member| member))
+                .attach_sources(super::DbReader::new(source, |member| member))
                 .await;
             assert_eq!(&*log.lock(), &["db1"]);
         });
@@ -4729,8 +4728,8 @@ mod tests {
             );
             let (_publisher, source) = super::Publisher::<(u8, u16)>::new(&context);
             let sources = (
-                super::MemberSource::new(source.clone(), |members: &(u8, u16)| &members.0),
-                super::MemberSource::new(source, |members: &(u8, u16)| &members.1),
+                super::DbReader::new(source.clone(), |members: &(u8, u16)| &members.0),
+                super::DbReader::new(source, |members: &(u8, u16)| &members.1),
             );
 
             resolvers.attach_sources(sources).await;

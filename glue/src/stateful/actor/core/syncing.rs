@@ -434,7 +434,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, Publisher, SetSource, Single},
+        db::{Anchor, Publisher, SetReader, Single},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -473,7 +473,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
-        source: SetSource<()>,
+        source: SetReader<()>,
     }
 
     impl TestHarness<deterministic::Context> {

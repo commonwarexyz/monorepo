@@ -785,7 +785,7 @@ where
 
         // Staging inside finalize makes serving generations follow apply order. The
         // caller installs the staged snapshot only after the barrier proves every
-        // member flush durable, so serving never exposes state a crash could lose.
+        // database flush durable, so readers never see state a crash could lose.
         let (databases, snapshot, barrier) = self.databases.finalize(batch).await;
         self.databases = databases;
         let publication = PendingPublication::new(self.publisher.stage(snapshot), barrier);

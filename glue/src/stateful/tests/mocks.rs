@@ -1,7 +1,7 @@
 use crate::stateful::{
     Application, Input, Proposed,
     db::{
-        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, SetSource, Unmerkleized, UnmerkleizedOf,
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, SetReader, Unmerkleized, UnmerkleizedOf,
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -20,7 +20,7 @@ use std::{convert::Infallible, marker::PhantomData, sync::Arc};
 
 /// The generation served by `source`, or `None` before the first install and
 /// after the publisher drops.
-pub(crate) fn served_generation(source: &SetSource<()>) -> Option<u64> {
+pub(crate) fn served_generation(source: &SetReader<()>) -> Option<u64> {
     source.latest().map(|snapshot| snapshot.generation())
 }
 

@@ -66,7 +66,7 @@ type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
 /// Serving source projected from the set's published snapshots.
-type SingleSrc<E> = crate::stateful::db::MemberSource<
+type SingleSrc<E> = crate::stateful::db::DbReader<
     SnapshotOf<SingleDatabaseSet<E>, E>,
     <Qmdb<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;

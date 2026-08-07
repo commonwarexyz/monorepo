@@ -79,11 +79,11 @@ pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
 
 /// Serving sources projected from the set's published snapshots, one per member.
 type MultiSnapshot<E> = SnapshotOf<MultiDatabaseSet<E>, E>;
-type SrcA<E> = crate::stateful::db::MemberSource<
+type SrcA<E> = crate::stateful::db::DbReader<
     MultiSnapshot<E>,
     <QmdbA<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;
-type SrcB<E> = crate::stateful::db::MemberSource<
+type SrcB<E> = crate::stateful::db::DbReader<
     MultiSnapshot<E>,
     <QmdbB<E> as crate::stateful::db::ManagedDb<E>>::Snapshot,
 >;

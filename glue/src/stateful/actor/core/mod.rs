@@ -195,7 +195,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Sources>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::Readers>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -234,11 +234,10 @@ where
     }
 
     async fn run(self) {
-        // One publisher spans the actor's whole life: its member sources attach to the
-        // resolvers here, once, and serve nothing until the first installation.
-        let (publisher, set_source) = Publisher::new(self.context.as_present());
+        // Readers attach once, and both startup paths publish through this publisher.
+        let (publisher, set_reader) = Publisher::new(self.context.as_present());
         self.resolvers
-            .attach_sources(A::Databases::member_sources(set_source))
+            .attach_sources(A::Databases::readers(set_reader))
             .await;
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor, publisher).await;
