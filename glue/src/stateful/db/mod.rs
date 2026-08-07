@@ -409,8 +409,7 @@ pub type SnapshotsOf<D, E> = <D as DatabaseSet<E>>::Snapshots;
 /// Syntactic sugar for the type of sync targets used by a given [DatabaseSet] D.
 pub type SyncTargetsOf<D, E> = <D as DatabaseSet<E>>::SyncTargets;
 
-/// The one-database set: the single spelling for applications that own exactly one
-/// database. Every associated value stays scalar, and reads reach the database through
+/// A one-database set.
 /// [`Deref`].
 pub struct Single<T>(T);
 

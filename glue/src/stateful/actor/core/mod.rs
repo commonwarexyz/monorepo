@@ -385,8 +385,8 @@ mod tests {
             .await;
 
             let plan = SyncPlan::init(&context, "startup-serve-stateful".to_string()).await;
-            let (snapshot_publisher, snapshot_reader) =
-                Publisher::new(&context.child("publication"));
+            let publication = context.child("publication");
+            let (snapshot_publisher, snapshot_reader) = Publisher::new(&publication);
             let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -437,6 +437,7 @@ mod tests {
             .await;
 
             let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let publication = context.child("publication");
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -447,7 +448,7 @@ mod tests {
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
-                    snapshot_publisher: Publisher::new(&context.child("publication")).0,
+                    snapshot_publisher: Publisher::new(&publication).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

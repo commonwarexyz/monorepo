@@ -231,7 +231,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
-    let (snapshot_publisher, snapshot_reader) = Publisher::new(&context.child("publication"));
+    let publication = context.child("publication");
+    let (snapshot_publisher, snapshot_reader) = Publisher::new(&publication);
     let (qmdb_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
         context.child("qmdb_resolver"),
         qmdb_resolver::Config {
