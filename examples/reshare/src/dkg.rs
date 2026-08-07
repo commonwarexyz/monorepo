@@ -80,7 +80,6 @@ pub async fn run(context: tokio::Context, args: Dkg) {
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
             max_supported_mode: MAX_SUPPORTED_MODE,
-            directory_codec_config: (),
             partition_prefix: "bootstrap".to_string(),
             participants: participants.get(Epoch::zero()),
             directory: Unit,

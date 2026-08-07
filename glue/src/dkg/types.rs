@@ -300,11 +300,7 @@ mod tests {
         let decoded =
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(
-                    NZU32!(4),
-                    crate::dkg::tests::max_supported_mode(),
-                    RangeCfg::exact(4),
-                ),
+                &(NZU32!(4), crate::dkg::tests::max_supported_mode()),
             )
             .expect("decode addressed epoch info");
         assert_eq!(decoded, info);
@@ -340,11 +336,7 @@ mod tests {
         let decoded =
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(
-                    NZU32!(4),
-                    crate::dkg::tests::max_supported_mode(),
-                    RangeCfg::exact(12),
-                ),
+                &(NZU32!(4), crate::dkg::tests::max_supported_mode()),
             )
             .expect("decode addressed epoch info");
         assert_eq!(decoded, info);
@@ -357,11 +349,7 @@ mod tests {
         assert!(
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(
-                    NZU32!(1),
-                    crate::dkg::tests::max_supported_mode(),
-                    RangeCfg::new(0..=2),
-                ),
+                &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
             )
             .is_err()
         );
@@ -374,11 +362,7 @@ mod tests {
         assert!(
             EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
                 info.encode(),
-                &(
-                    NZU32!(1),
-                    crate::dkg::tests::max_supported_mode(),
-                    RangeCfg::new(0..=1),
-                ),
+                &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
             )
             .is_err()
         );
@@ -543,17 +527,13 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for EpochInfo<V, P, D
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
-    /// Maximum entries accepted in each participant set, maximum supported
-    /// sharing mode version, and directory codec configuration.
-    ///
-    /// The first value bounds each set independently. A collection bound in
-    /// the directory configuration must accept their union, which may contain
-    /// up to three times as many distinct peers, and reject larger directories.
-    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
+    /// Maximum entries accepted in each participant set and maximum supported
+    /// sharing mode version.
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
         buf: &mut impl Buf,
-        (max_participants, max_supported_mode, directory_cfg): &Self::Cfg,
+        (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         let outcome = EpochOutcome::read(buf)?;
         let epoch = Epoch::read(buf)?;
@@ -574,7 +554,7 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
                 .chain(next_players.iter())
                 .cloned(),
         );
-        let directory = D::read_cfg(buf, directory_cfg)?;
+        let directory = D::read_cfg(buf, &D::codec_config(&peers))?;
         if !directory.matches(&peers) {
             return Err(CodecError::Invalid(
                 "EpochInfo",
@@ -671,13 +651,9 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V
 }
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
-    /// Maximum entries accepted in each participant set, maximum supported
-    /// sharing mode version, and directory codec configuration.
-    ///
-    /// The first value bounds each set independently. A collection bound in
-    /// the directory configuration must accept their union, which may contain
-    /// up to three times as many distinct peers, and reject larger directories.
-    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
+    /// Maximum entries accepted in each participant set and maximum supported
+    /// sharing mode version.
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {

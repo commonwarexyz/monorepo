@@ -170,7 +170,7 @@ impl Read for Block {
             range: NonEmptyRange::read(buf)?,
             payload: Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
                 buf,
-                &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, ()),
+                &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
         })
     }
@@ -567,11 +567,8 @@ mod epoch_info_hex {
     ) -> Result<dkg::types::EpochInfo<MinSig, ed25519::PublicKey>, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        dkg::types::EpochInfo::decode_cfg(
-            bytes.as_slice(),
-            &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, ()),
-        )
-        .map_err(D::Error::custom)
+        dkg::types::EpochInfo::decode_cfg(bytes.as_slice(), &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
+            .map_err(D::Error::custom)
     }
 }
 

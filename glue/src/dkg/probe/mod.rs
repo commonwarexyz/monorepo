@@ -17,19 +17,23 @@
 //! tracks identical contents if it later enters that epoch, so the registrations never
 //! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
 //! dealers: the epoch's active committee of share holders and certificate signers.
-//! Addressable deployments seed the snapshot's transport
-//! [`Directory`] alongside this weak-subjectivity checkpoint
-//! through [`Bootstrap::directory`]. The actor activates the snapshot only when its first
-//! subscriber appears. If activation fails, the actor shuts down before sending a request and
-//! drops all pending subscribers. The discovered [`Artifact`] carries the target epoch's own
-//! directory in its [`EpochInfo`], so the joining node needs no out-of-band address source for
-//! the epoch it syncs into.
+//! Addressable deployments seed the snapshot's transport [`Directory`]
+//! alongside this weak-subjectivity checkpoint through
+//! [`Bootstrap::directory`]. The actor activates the snapshot only when its
+//! first subscriber appears. If activation fails, the actor shuts down before
+//! sending a request and drops all pending subscribers. The discovered
+//! [`Artifact`] carries the target epoch's own directory in its [`EpochInfo`],
+//! so the joining node needs no out-of-band address source for the epoch it
+//! syncs into.
 //!
 //! # Trust Model
 //!
-//! The configured peers and constant verifier are the weakly subjective checkpoint for startup.
-//! For `n` configured members, `f` is the maximum fault count under the `3f + 1` model and the
-//! discovery sample threshold is `f + 1`.
+//! In this context, weak subjectivity means the operator must obtain a recent,
+//! complete participant snapshot from a trusted source. Certificates prevent
+//! forgery, but cannot distinguish a valid stale view served by former members
+//! from the current chain. The configured peers and constant verifier form the
+//! startup checkpoint. For `n` configured members, `f` is the maximum fault
+//! count under the `3f + 1` model and the discovery sample threshold is `f + 1`.
 //!
 //! Rotation out of the active committee is not what the budgets bound: a rotated-out member that
 //! keeps running an honest, chain-following node at its configured identity costs nothing. What

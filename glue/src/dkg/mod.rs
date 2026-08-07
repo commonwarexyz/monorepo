@@ -173,12 +173,6 @@ pub trait ReshareBlock: Block {
     type Signer: Signer;
 
     /// Transport directory type carried by this block's epoch artifacts.
-    ///
-    /// Block decoders typically use the same per-set `max_participants` bound
-    /// for dealers, players, and next players. A collection bound in the
-    /// directory's codec configuration must accept their union, which may
-    /// contain up to three times as many distinct peers, and reject larger
-    /// directories.
     type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
 
     /// Retrieves the [`Payload`](types::Payload) carried by this block, if any.

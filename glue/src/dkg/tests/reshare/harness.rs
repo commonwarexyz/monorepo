@@ -165,34 +165,29 @@ pub(super) struct TestDirectory(Option<Addresses<PublicKey>>);
 
 impl Write for TestDirectory {
     fn write(&self, buf: &mut impl BufMut) {
-        if let Some(addresses) = &self.0 {
-            addresses.write(buf);
-        }
+        self.0.write(buf);
     }
 }
 
 impl EncodeSize for TestDirectory {
     fn encode_size(&self) -> usize {
-        self.0.as_ref().map_or(0, EncodeSize::encode_size)
+        self.0.encode_size()
     }
 }
 
 impl Read for TestDirectory {
-    type Cfg = Network;
+    type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, network: &Self::Cfg) -> Result<Self, CodecError> {
-        match network {
-            Network::Discovery => Ok(Self(None)),
-            Network::Lookup => {
-                let max = (MAX_PARTICIPANTS.get() as usize).saturating_mul(3);
-                Addresses::read_cfg(buf, &RangeCfg::new(0..=max))
-                    .map(|addresses| Self(Some(addresses)))
-            }
-        }
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Option::<Addresses<PublicKey>>::read_cfg(buf, cfg).map(Self)
     }
 }
 
 impl Directory<PublicKey> for TestDirectory {
+    fn codec_config(peers: &Set<PublicKey>) -> Self::Cfg {
+        RangeCfg::exact(peers.len())
+    }
+
     fn matches(&self, peers: &Set<PublicKey>) -> bool {
         self.0
             .as_ref()
@@ -280,9 +275,9 @@ impl EncodeSize for Block {
 }
 
 impl Read for Block {
-    type Cfg = Network;
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, network: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,
@@ -291,7 +286,7 @@ impl Read for Block {
             range: NonEmptyRange::read(buf)?,
             payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
                 buf,
-                &(MAX_PARTICIPANTS, max_supported_mode(), *network),
+                &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
         })
     }
@@ -854,7 +849,7 @@ impl EngineDefinition for ReshareEngine {
             mailbox_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
-            codec_config: self.network,
+            codec_config: (),
             peer_provider: oracle.manager(),
         };
         let (broadcast_engine, buffer) =
@@ -869,12 +864,7 @@ impl EngineDefinition for ReshareEngine {
         .expect("finalizations archive");
         let finalized_blocks = prunable::Archive::init(
             context.child("finalized_blocks"),
-            archive_config(
-                &partition_prefix,
-                "blocks",
-                page_cache.clone(),
-                self.network,
-            ),
+            archive_config(&partition_prefix, "blocks", page_cache.clone(), ()),
         )
         .await
         .expect("blocks archive");
@@ -898,7 +888,7 @@ impl EngineDefinition for ReshareEngine {
             blocks_per_epoch: EPOCH_LENGTH,
             retry_timeout: NZDuration!(Duration::from_millis(500)),
             mailbox_size: NZUsize!(100),
-            block_codec_config: self.network,
+            block_codec_config: (),
         });
         let probe_handle = probe_actor.start(probe_boundary_network);
 
@@ -998,7 +988,7 @@ impl EngineDefinition for ReshareEngine {
                 replay_buffer: IO_BUFFER_SIZE,
                 key_write_buffer: IO_BUFFER_SIZE,
                 value_write_buffer: IO_BUFFER_SIZE,
-                block_codec_config: self.network,
+                block_codec_config: (),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
                 strategy: Sequential,
@@ -1076,7 +1066,6 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
-                directory_codec_config: self.network,
             },
             state_sync,
         )

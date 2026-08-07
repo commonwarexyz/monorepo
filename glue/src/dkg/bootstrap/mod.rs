@@ -66,10 +66,7 @@ const ARCHIVE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 type ConsensusScheme = simplex::scheme::ed25519::Scheme;
 
 /// Configuration for [`Engine`].
-pub struct Config<M, X, SS, T, D = Unit>
-where
-    D: Read,
-{
+pub struct Config<M, X, SS, T, D = Unit> {
     /// Ed25519 signer used for the one-shot consensus chain and DKG protocol messages.
     pub signer: ed25519::PrivateKey,
 
@@ -93,12 +90,6 @@ where
 
     /// Maximum sharing mode version accepted when decoding blocks.
     pub max_supported_mode: ModeVersion,
-
-    /// Codec configuration for transport directories embedded in blocks.
-    ///
-    /// Collection limits MUST reject directories containing more than
-    /// [`Self::participants`] entries.
-    pub directory_codec_config: D::Cfg,
 
     /// Runtime-storage partition prefix.
     pub partition_prefix: String,
@@ -177,7 +168,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> EncodeSize for Block<V, D> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
-    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
@@ -231,7 +222,6 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 pub struct Engine<E, V, M, X, SS, T, D = Unit>
 where
     V: Variant,
-    D: Read,
 {
     context: ContextCell<E>,
     config: Config<M, X, SS, T, D>,
@@ -241,7 +231,6 @@ where
 impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
     V: Variant,
-    D: Read,
 {
     /// Creates a new engine.
     pub const fn new(context: E, config: Config<M, X, SS, T, D>) -> Self {
@@ -360,11 +349,7 @@ where
             .try_into()
             .expect("too many DKG participants");
         let max_participants = NZU32!(participants);
-        let block_codec_config = (
-            max_participants,
-            self.config.max_supported_mode,
-            self.config.directory_codec_config.clone(),
-        );
+        let block_codec_config = (max_participants, self.config.max_supported_mode);
 
         let context = self.context.into_present();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_PAGES);
@@ -393,7 +378,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: 16,
                 priority: false,
-                codec_config: block_codec_config.clone(),
+                codec_config: block_codec_config,
                 peer_provider: self.config.manager.clone(),
             },
         );
@@ -432,7 +417,7 @@ where
                 &self.config.partition_prefix,
                 "blocks",
                 page_cache.clone(),
-                block_codec_config.clone(),
+                block_codec_config,
             ),
         )
         .await
@@ -669,7 +654,6 @@ mod tests {
             namespace: b"test",
             sharing_mode: SharingMode::RootsOfUnity,
             max_supported_mode: ModeVersion::v0(),
-            directory_codec_config: (),
             partition_prefix: "test".into(),
             participants: Set::default(),
             directory: Unit,
