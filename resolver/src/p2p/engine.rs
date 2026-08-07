@@ -152,21 +152,6 @@ where
         spawn_cell!(self.context, self.run(network))
     }
 
-    #[cfg(test)]
-    /// Seeds a logical fetch directly into retry-pending state.
-    pub(super) fn seed_retry(&mut self, key: Key, subscriber: Con::Subscriber) {
-        assert!(!self.inflight.contains(&key));
-        self.subscribers.insert(
-            key.clone(),
-            commonware_utils::vec::NonEmptyVec::new((subscriber, tracing::Span::none())),
-        );
-        self.inflight.insert(
-            key.clone(),
-            self.metrics.fetch_duration.timer(self.context.as_ref()),
-        );
-        self.fetcher.add_retry(key);
-    }
-
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
         // Wrap channel
@@ -236,11 +221,9 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Retain or shutdown) before the consumer finished validating.
-                let (peer, elapsed, delivery, result) = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(_) => continue,
-                };
-                self.handle_delivery(peer, elapsed, delivery, result);
+                if let Ok((peer, elapsed, delivery, result)) = delivery {
+                    self.handle_delivery(peer, elapsed, delivery, result);
+                }
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox.recv() else {
@@ -259,9 +242,6 @@ where
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
-                            let adds_subscriber = subscribers.iter().any(|(subscriber, _)| {
-                                !self.subscribers.contains_subscriber(&key, subscriber)
-                            });
                             self.subscribers.insert(key.clone(), subscribers);
 
                             // Update targets
@@ -284,8 +264,6 @@ where
                                     self.metrics.fetch_duration.timer(self.context.as_ref()),
                                 );
                                 self.fetcher.add_ready(key);
-                            } else if adds_subscriber && self.fetcher.promote(&key) {
-                                trace!(?key, "promoted retry for new subscriber");
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
                             }
@@ -302,24 +280,10 @@ where
                         self.record_cancellations(count);
                     }
                 }
-
-                // Mailbox work is selected ahead of an elapsed retry deadline so
-                // freshly admitted requests can take precedence. Attempt one
-                // ready send here to keep sustained ingress from starving the
-                // outbound path.
-                if self
-                    .fetcher
-                    .get_pending_deadline()
-                    .is_some_and(|deadline| deadline <= self.context.current())
-                {
-                    self.fetcher.fetch(&mut sender);
-                }
             },
-            // The select is biased, so accept queued fresh work before
-            // spending capacity on a retry whose deadline has elapsed.
-            _ = deadline_pending => {
-                self.fetcher.fetch(&mut sender);
-            },
+            // Wake the loop when pending work becomes ready. The send is
+            // performed in `on_end` after the selected event is handled.
+            _ = deadline_pending => {},
             // Handle completed server requests
             serve = self.serves.next_completed() => {
                 let Serve {
@@ -355,21 +319,31 @@ where
                     }
                 };
 
-                // Skip if there is a decoding error
-                let msg = match msg {
-                    Ok(msg) => msg,
+                match msg {
+                    Ok(msg) => match msg.payload {
+                        wire::Payload::Request(key) => {
+                            self.handle_network_request(peer, msg.id, key)
+                        }
+                        wire::Payload::Response(response) => {
+                            self.handle_network_response(peer, msg.id, response)
+                        }
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
+                    },
                     Err(err) => {
                         trace!(?err, ?peer, "decode failed");
-                        continue;
                     }
                 };
-                match msg.payload {
-                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
-                    wire::Payload::Response(response) => {
-                        self.handle_network_response(peer, msg.id, response)
-                    }
-                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
-                };
+            },
+            on_end => {
+                // Attempt at most one due outbound request after each selected
+                // event so sustained event traffic cannot starve pending work.
+                if self
+                    .fetcher
+                    .get_pending_deadline()
+                    .is_some_and(|deadline| deadline <= self.context.current())
+                {
+                    self.fetcher.fetch(&mut sender);
+                }
             },
         }
     }
@@ -496,17 +470,10 @@ where
             Outcome::Ambiguous => {
                 // The peer served valid data for the wire key, but local
                 // subscribers still need different evidence. Do not cache the
-                // response or penalize the peer. A subscriber that joined
-                // during validation never saw this response, so its next
-                // attempt is fresh rather than a retry.
-                let has_fresh_subscriber = self.subscribers.has_subscriber_not_in(&key, &delivered);
+                // response or penalize the peer; retry the same key.
                 self.metrics.fetch.inc(Status::Ambiguous);
                 self.inflight.discard_response(&key);
-                if has_fresh_subscriber {
-                    self.fetcher.add_ready(key);
-                } else {
-                    self.fetcher.add_retry(key);
-                }
+                self.fetcher.add_retry(key);
             }
             Outcome::Invalid => {
                 // A previously accepted response is only redelivered locally to subscribers that
@@ -526,18 +493,12 @@ where
                 }
 
                 // If the data is invalid, block the peer and try again. Blocking the
-                // peer also removes any targets associated with it. Preserve fresh
-                // priority for subscribers that joined during validation.
-                let has_fresh_subscriber = self.subscribers.has_subscriber_not_in(&key, &delivered);
+                // peer also removes any targets associated with it.
                 commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
                 self.fetcher.block(peer);
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
-                if has_fresh_subscriber {
-                    self.fetcher.add_ready(key);
-                } else {
-                    self.fetcher.add_retry(key);
-                }
+                self.fetcher.add_retry(key);
             }
             Outcome::Ignored => {
                 // The consumer no longer needs the key. Retire the entire fetch without

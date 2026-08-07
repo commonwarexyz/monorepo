@@ -16,6 +16,7 @@ use rand_core::Rng;
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
+    mem,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
@@ -253,19 +254,17 @@ where
     pub fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         self.waiter = None;
 
-        // Collect keys to try (need to clone since we mutate self during iteration)
-        let pending_keys: Vec<(Key, bool)> = self
-            .pending
-            .iter()
-            .map(|(k, (retry, _))| (k.clone(), *retry))
-            .collect();
-
         // Try each pending key until one succeeds
         let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut found_eligible_peers = false;
-        for (key, retry) in pending_keys {
+
+        // Detach the queue to leave skipped entries untouched and remove only the
+        // successfully sent key.
+        let pending = mem::replace(&mut self.pending, PrioritySet::new());
+        let mut sent = None;
+        'pending: for (key, &(retry, _)) in pending.iter() {
             // Skip keys with no eligible peers
-            let peers = self.get_eligible_peers(&key, retry);
+            let peers = self.get_eligible_peers(key, retry);
             if peers.is_empty() {
                 self.requests_created.inc(Status::Dropped);
                 continue;
@@ -297,20 +296,9 @@ where
                     Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
-                        self.pending.remove(&key);
                         let now = self.context.current();
-                        let deadline = now.checked_add(self.timeout).expect("time overflowed");
-                        self.active.put(id, deadline);
-                        self.requests.insert(
-                            id,
-                            ActiveRequest {
-                                key: key.clone(),
-                                peer,
-                                start: now,
-                            },
-                        );
-                        self.key_to_id.insert(key, id);
-                        return;
+                        sent = Some((key.clone(), id, peer, now));
+                        break 'pending;
                     }
                     feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
                         // Send was not handled, try next peer
@@ -320,6 +308,24 @@ where
                     }
                 }
             }
+        }
+
+        // Restore the pending queue before moving a successful request to active tracking.
+        self.pending = pending;
+        if let Some((key, id, peer, start)) = sent {
+            assert!(self.pending.remove(&key));
+            let deadline = start.checked_add(self.timeout).expect("time overflowed");
+            self.active.put(id, deadline);
+            self.requests.insert(
+                id,
+                ActiveRequest {
+                    key: key.clone(),
+                    peer,
+                    start,
+                },
+            );
+            self.key_to_id.insert(key, id);
+            return;
         }
 
         // Set waiter for next fetch attempt
@@ -365,20 +371,6 @@ where
         // fetchable, so wake pending processing immediately.
         self.waiter = None;
         self.pending.put(key, (false, self.context.current()));
-    }
-
-    /// Promotes a pending retry to a fresh request.
-    ///
-    /// Returns `true` if the key was waiting as a retry. Active requests and
-    /// keys already classified as fresh are unchanged.
-    pub fn promote(&mut self, key: &Key) -> bool {
-        let Some((true, _)) = self.pending.get(key) else {
-            return false;
-        };
-        self.waiter = None;
-        self.pending
-            .put(key.clone(), (false, self.context.current()));
-        true
     }
 
     /// Adds a key to the pending queue.
@@ -1276,19 +1268,6 @@ mod tests {
             let keys: Vec<_> =
                 std::iter::from_fn(|| fetcher.pending.pop().map(|(key, _)| key)).collect();
             assert_eq!(keys, vec![MockKey(3), MockKey(4), MockKey(1), MockKey(2)]);
-        });
-    }
-
-    #[test]
-    fn test_new_demand_promotes_pending_retry() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context.child("fetcher"));
-
-            fetcher.add_retry(MockKey(1));
-            assert!(fetcher.promote(&MockKey(1)));
-            assert!(!fetcher.promote(&MockKey(1)));
-            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
         });
     }
 
