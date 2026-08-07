@@ -837,11 +837,10 @@ where
     } else {
         let grafted_parent = Arc::clone(grafted_parent);
         let grafted_tree = Arc::clone(&current_db.grafted_tree);
-        let graft_len = graft_inputs.len();
         current_db
             .strategy
             .clone()
-            .spawn(graft_len, move |strategy| {
+            .spawn(graft_inputs.len(), move |strategy| {
                 let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
                 let mut grafted_batch = grafted_parent.new_batch();
                 let old_grafted_leaves = *grafted_parent.leaves() as usize;

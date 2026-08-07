@@ -259,8 +259,7 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let decode_len = bytes.len();
-                let handle = self.strategy.spawn(decode_len, move |_| {
+                let handle = self.strategy.spawn(bytes.len(), move |_| {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result)
                 });
