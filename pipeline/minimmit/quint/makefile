@@ -14,9 +14,9 @@ typecheck:
 	quint typecheck main_n7f1b1.qnt
 
 test:
-	cd tests && quint test tests_n6f1b0.qnt
-	cd tests && quint test tests_n6f1b1.qnt
-	cd tests && quint test tests_n7f1b1.qnt
+	cd tests && quint test --backend typescript tests_n6f1b0.qnt
+	cd tests && quint test --backend typescript tests_n6f1b1.qnt
+	cd tests && quint test --backend typescript tests_n7f1b1.qnt
 
 repl:
 	echo "init\n step\n step\n step" | quint -r main_n6f0.qnt::main

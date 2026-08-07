@@ -123,6 +123,48 @@ module replica {
             are_views_nullified(view_parent, view, certificates)
     }
 
+    // The parent view claimed for `block` in `view`. If several proposals for the same
+    // (block, view) claim different parents, the link is undetermined and we return None,
+    // which leaves the committed chain unable to grow past that point.
+    def claimed_view_parent(block: Block, view: ViewNumber): Option[ViewNumber] = {
+        val parents = sent_proposal
+            .filter(p => p.block == block and p.view == view)
+            .map(p => p.view_parent)
+        if (parents.size() == 1)
+            parents.fold(None, (_acc, p) => Some(p))
+        else
+            None
+    }
+
+    // The unique finalized block that extends the committed chain rooted at `parent_view`,
+    // provided every view skipped in between is nullified.
+    def next_committable_cert(parent_view: ViewNumber, certificates: Set[Certificate]): Option[Certificate] = {
+        val candidates = certificates.filter(c => and {
+            c.kind == FinalizationKind,
+            c.view > parent_view,
+            claimed_view_parent(c.block, c.view).option_has(p => p == parent_view),
+            are_views_nullified(parent_view, c.view, certificates),
+        })
+        if (candidates.size() == 1)
+            candidates.fold(None, (_acc, c) => Some(c))
+        else
+            None
+    }
+
+    // Rebuild the committed chain from the locally stored certificates, walking forward
+    // from genesis. This is how "finalize `c` and all of its ancestors" (minimmit.md 8.4)
+    // is realized: a replica that never learned an ancestor's finalization, or that is
+    // missing a nullification covering a gap, simply cannot commit past it.
+    // Folding over VIEWS is enough, since the chain grows by at most one block per step.
+    def rebuild_committed_chain(certificates: Set[Certificate]): List[Block] = {
+        VIEWS.fold((List(), GENESIS_VIEW), (acc, _view) =>
+            match next_committable_cert(acc._2, certificates) {
+                | Some(c) => (acc._1.append(c.block), c.view)
+                | None => acc
+            }
+        )._1
+    }
+
     // Create a nullify certificate from a set of votes.
     def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
@@ -546,6 +588,10 @@ module replica {
 
     action _process_certificate(id: ReplicaId, cert: Certificate, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
+        val next_certs = if (is_new_cert)
+            store_certificate.get(id).union(Set(cert))
+        else
+            store_certificate.get(id)
         val should_send_notarize_vote = and {
             self.view == cert.view,
             not(self.has_notarized()),
@@ -558,18 +604,20 @@ module replica {
             cert.signatures.size() >= M,
 
             if (is_new_cert) all {
-                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
+                store_certificate' = store_certificate.set(id, next_certs),
                 sent_certificate' = sent_certificate.union(Set(cert)),
             } else all {
                 store_certificate' = store_certificate,
                 sent_certificate' = sent_certificate,
             },
-        
-            if (cert.kind == FinalizationKind and cert.view > self.last_finalized and is_new_cert)
-                ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert.block))
-            else 
-                ghost_committed_blocks' = ghost_committed_blocks
-            ,
+
+            // The committed chain is derived from the stored certificates rather than
+            // accumulated, so it cannot drift from them: it never depends on the order
+            // certificates arrive in, and never records a block whose ancestry is missing.
+            ghost_committed_blocks' = if (is_new_cert)
+                ghost_committed_blocks.set(id, rebuild_committed_chain(next_certs))
+            else
+                ghost_committed_blocks,
 
             val new_self = enter_new_view(self, cert)
             
@@ -825,6 +873,18 @@ module replica {
         no_nullification_in_finalized_view
     }
 
+    // Every committed block must come from a finalization certificate stored locally.
+    // This pins down the derived chain: it catches a `rebuild_committed_chain` that
+    // invents links the replica cannot justify.
+    val committed_blocks_are_finalized = CORRECT.forall(id => {
+        val chain = ghost_committed_blocks.get(id)
+        val certs = store_certificate.get(id)
+        chain.indices().forall(i => certs.exists(c => and {
+            c.kind == FinalizationKind,
+            c.block == chain[i],
+        }))
+    })
+
     val all_invariants = all {
         no_proposal_equivocation,
         agreement,
@@ -835,6 +895,7 @@ module replica {
         certificates_are_valid_inv,
         notarized_consistency,
         safe_finalization,
+        committed_blocks_are_finalized,
     }
 
     val safe = all_invariants
