@@ -246,7 +246,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             priority_requests: false,
             priority_responses: false,
         },
-        types::Database::readers(reader),
+        reader,
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 

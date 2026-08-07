@@ -131,9 +131,7 @@ where
     /// Resolver(s) for state sync fetches.
     pub resolvers: R,
 
-    /// Publisher for the snapshots resolvers serve, created alongside its
-    /// [`Reader`](crate::stateful::db::Reader)s by
-    /// [`Publisher::new`](crate::stateful::db::Publisher::new) when wiring the resolvers.
+    /// Publishes snapshots of the database set.
     pub publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
@@ -181,7 +179,7 @@ where
     /// Resolver(s) for state sync fetches.
     resolvers: R,
 
-    /// Publisher for the snapshots resolvers serve.
+    /// Publishes snapshots of the database set.
     publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.

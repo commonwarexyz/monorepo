@@ -489,10 +489,8 @@ impl EngineDefinition for SingleDbEngine {
         let sync_floor = plan.floor().cloned();
 
         // Snapshot publication channel and the QMDB state-sync resolver serving from it.
-        let (publisher, reader) =
+        let (publisher, serve_reader) =
             crate::stateful::db::Publisher::new(&context.child("publication"));
-        let serve_reader =
-            <SingleDatabaseSet<_> as crate::stateful::db::DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor, qmdb_sync_resolver) =
             qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, SingleSrc<_>>::new(
                 context.child("qmdb_resolver"),

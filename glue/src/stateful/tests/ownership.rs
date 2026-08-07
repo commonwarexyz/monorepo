@@ -12,9 +12,7 @@
 //! scheduling point.
 
 use super::mocks::{FlushControl, TestDb, TestMerkleized};
-use crate::stateful::db::{
-    Barrier, DatabaseSet, PendingPublication, Publisher, ServeSource as _, Single,
-};
+use crate::stateful::db::{Barrier, DatabaseSet, Publisher, ServeSource as _, Single};
 use commonware_macros::test_traced;
 use commonware_runtime::{Clock, Runner as _, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::channel::oneshot;
@@ -67,7 +65,7 @@ fn unpublished_generation_stays_invisible() {
         // The first generation applies but its flush is parked, so it stays
         // staged and no subscriber can see it.
         let (set, snapshot, first) = finalize(set).await;
-        let staged = publisher.stage(snapshot);
+        let staged = publisher.stage(snapshot, first);
         assert!(
             reader.latest().is_none(),
             "an applied but non-durable generation must not be visible"
@@ -79,22 +77,14 @@ fn unpublished_generation_stays_invisible() {
             .await
             .unwrap_or_else(|_| panic!("an unpublished generation delayed the writer"))
             .unwrap();
-        let staged_second = publisher.stage(snapshot);
+        let staged_second = publisher.stage(snapshot, second);
 
         // Durability publishes, in order.
         release(&control);
-        assert!(
-            PendingPublication::new(staged, first)
-                .publish_when_durable()
-                .await
-        );
+        assert!(staged.publish_when_durable().await);
         assert_eq!(reader.generation(), Some(0));
         release(&control);
-        assert!(
-            PendingPublication::new(staged_second, second)
-                .publish_when_durable()
-                .await
-        );
+        assert!(staged_second.publish_when_durable().await);
         assert_eq!(reader.generation(), Some(1));
     });
 }
@@ -108,10 +98,10 @@ fn parked_serve_never_delays_the_writer() {
         let (set, control) = parked_set();
         let (mut publisher, reader) = Publisher::new(&context);
         let (set, snapshot, barrier) = finalize(set).await;
-        let staged = publisher.stage(snapshot);
         release(&control);
         assert!(
-            PendingPublication::new(staged, barrier)
+            publisher
+                .stage(snapshot, barrier)
                 .publish_when_durable()
                 .await
         );
@@ -131,10 +121,10 @@ fn parked_serve_never_delays_the_writer() {
             .await
             .unwrap_or_else(|_| panic!("a parked serve delayed the writer"))
             .unwrap();
-        let staged = publisher.stage(snapshot);
         release(&control);
         assert!(
-            PendingPublication::new(staged, barrier)
+            publisher
+                .stage(snapshot, barrier)
                 .publish_when_durable()
                 .await
         );

@@ -889,9 +889,8 @@ impl EngineDefinition for ReshareEngine {
             init_concurrency: (),
         };
 
-        let (publisher, reader) =
+        let (publisher, serve_reader) =
             crate::stateful::db::Publisher::new(&context.child("publication"));
-        let serve_reader = <Database<_> as DatabaseSet<_>>::readers(reader);
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {

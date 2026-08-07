@@ -789,7 +789,7 @@ where
         // flush durable, so readers never see state a crash could lose.
         let (snapshot, barrier);
         (self.databases, snapshot, barrier) = self.databases.finalize(batch).await;
-        let publication = PendingPublication::new(self.publisher.stage(snapshot), barrier);
+        let publication = self.publisher.stage(snapshot, barrier);
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning

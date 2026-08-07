@@ -13,6 +13,7 @@
 //! nothing after the publisher drops (crash and clean shutdown look the same to
 //! readers), but snapshots already taken keep working.
 
+use super::Barrier;
 use commonware_runtime::{Metrics as RuntimeMetrics, telemetry::metrics::Registered};
 use commonware_utils::sync::Mutex;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -117,21 +118,30 @@ impl<S> Publisher<S> {
         )
     }
 
-    /// Stage `snapshots` as the next generation.
+    /// Stage `snapshots` as the next generation, paired with the [`Barrier`]
+    /// that proves it durable.
     ///
-    /// Stage in apply order, and publish only once the generation is durable.
-    pub(crate) fn stage(&mut self, snapshots: S) -> Staged<S> {
-        let number = self.next_generation;
-        self.next_generation += 1;
-        Staged {
+    /// Stage in apply order; the returned publication is the only path to
+    /// serving, so a snapshot can never publish ahead of the state it captures.
+    pub(crate) fn stage(&mut self, snapshots: S, barrier: Barrier) -> PendingPublication<S> {
+        PendingPublication {
             slot: self.slot.clone(),
-            generation: Arc::new(Generation { number, snapshots }),
+            generation: self.next(snapshots),
+            barrier,
         }
     }
 
     /// Stage and publish in one step, for state that is already durable.
     pub(crate) fn publish_durable(&mut self, snapshots: S) {
-        self.stage(snapshots).publish();
+        let generation = self.next(snapshots);
+        self.slot.publish(generation);
+    }
+
+    /// Number `snapshots` as the next generation.
+    fn next(&mut self, snapshots: S) -> Arc<Generation<S>> {
+        let number = self.next_generation;
+        self.next_generation += 1;
+        Arc::new(Generation { number, snapshots })
     }
 }
 
@@ -148,19 +158,24 @@ impl<S> Drop for Publisher<S> {
     }
 }
 
-/// A staged generation, not yet published.
+/// A staged generation paired with the barrier that proves it durable.
 ///
 /// Dropping it (at shutdown, or when its flush never proves durable) abandons the
 /// generation: readers keep what they have, and later generations publish as usual.
-pub(crate) struct Staged<S> {
+pub(crate) struct PendingPublication<S> {
     slot: Arc<Slot<S>>,
     generation: Arc<Generation<S>>,
+    barrier: Barrier,
 }
 
-impl<S> Staged<S> {
-    /// Publish the staged generation unless a newer one already published.
-    pub(super) fn publish(self) {
-        self.slot.publish(self.generation);
+impl<S> PendingPublication<S> {
+    /// Await the barrier and publish only if all state is durably flushed.
+    pub(crate) async fn publish_when_durable(self) -> bool {
+        let durable = self.barrier.durable().await;
+        if durable {
+            self.slot.publish(self.generation);
+        }
+        durable
     }
 }
 
@@ -270,18 +285,23 @@ mod tests {
         });
     }
 
+    /// An empty [`Barrier`] is immediately durable.
+    fn durable() -> Barrier {
+        Barrier::from_handles::<()>([])
+    }
+
     #[test]
     fn pipelined_publication_is_monotone() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // Two generations staged before either publishes, as pipelined flushes allow.
-            let first = publisher.stage(1);
-            let second = publisher.stage(2);
+            let first = publisher.stage(1, durable());
+            let second = publisher.stage(2, durable());
 
             // The newer generation resolving first must win and stay won.
-            second.publish();
+            assert!(second.publish_when_durable().await);
             assert_eq!(reader.latest(), Some(2));
-            first.publish();
+            assert!(first.publish_when_durable().await);
             assert_eq!(reader.latest(), Some(2));
             assert_eq!(reader.generation(), Some(1));
         });
@@ -293,9 +313,9 @@ mod tests {
             let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // A pool future can outlive the publisher, so its publish must not
             // resurrect a live state.
-            let staged = publisher.stage(1);
+            let staged = publisher.stage(1, durable());
             drop(publisher);
-            staged.publish();
+            assert!(staged.publish_when_durable().await);
             assert!(reader.latest().is_none());
         });
     }
@@ -305,7 +325,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, reader) = Publisher::<u32>::new(&context);
             // A shutdown drop of one staged generation must not block later ones.
-            drop(publisher.stage(1));
+            drop(publisher.stage(1, durable()));
             publisher.publish_durable(2);
             assert_eq!(reader.latest(), Some(2));
             assert_eq!(reader.generation(), Some(1));

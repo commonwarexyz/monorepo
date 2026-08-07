@@ -331,7 +331,9 @@ where
                     }
                 }
                 Step::Refresh => {
-                    // Every flush drained, so applied state is durable.
+                    // Publication went stale at the last prune and no later flush
+                    // refreshed it. Every flush has drained, so the applied state
+                    // is durable and can publish directly.
                     self.processor = self.processor.publish_durable().await;
                     tracker.refreshed();
                 }

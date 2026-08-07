@@ -109,7 +109,7 @@ pub mod keyless;
 pub mod p2p;
 mod publication;
 
-pub(crate) use publication::Staged;
+pub(crate) use publication::PendingPublication;
 pub use publication::{Publisher, Reader, ServeSource};
 
 /// Mutable batch state before merkleization.
@@ -334,31 +334,6 @@ impl Barrier {
     }
 }
 
-/// A staged generation paired with the barrier that proves it durable.
-///
-/// This is the only path from a staged generation to serving, so a snapshot can never
-/// be published ahead of the state it captures. Dropping the pair skips the generation.
-pub(crate) struct PendingPublication<S> {
-    staged: Staged<S>,
-    barrier: Barrier,
-}
-
-impl<S> PendingPublication<S> {
-    /// Pair `staged` with the barrier covering its capture.
-    pub(crate) const fn new(staged: Staged<S>, barrier: Barrier) -> Self {
-        Self { staged, barrier }
-    }
-
-    /// Await the barrier and publish only if all state is durably flushed.
-    pub(crate) async fn publish_when_durable(self) -> bool {
-        let durable = self.barrier.durable().await;
-        if durable {
-            self.staged.publish();
-        }
-        durable
-    }
-}
-
 /// A collection of [`ManagedDb`] instances owned as plain values.
 ///
 /// The owning actor holds the set directly. Mutating methods consume the set and return
@@ -377,13 +352,6 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
 
     /// One [`ManagedDb::Snapshot`] per database: one published generation's contents.
     type Snapshots: Send + Sync + 'static;
-
-    /// One [`publication::Reader`] per database over [`Self::Snapshots`], each
-    /// reading its database's snapshot out of the latest published generation.
-    type Readers: Send + Sync + 'static;
-
-    /// One reader per database.
-    fn readers(reader: publication::Reader<Self::Snapshots>) -> Self::Readers;
 
     /// Configuration needed to construct every database in the set: the database's
     /// [`ManagedDb::Config`] under [`Single`], a tuple of per-database configs for
@@ -493,7 +461,6 @@ where
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
     type Snapshots = T::Snapshot;
-    type Readers = publication::Reader<T::Snapshot>;
 
     async fn init(context: E, config: Self::Config) -> Self {
         match T::init(context.child("db"), config).await {
@@ -507,10 +474,6 @@ where
 
     fn initial_sync_targets() -> Self::SyncTargets {
         T::initial_sync_target()
-    }
-
-    fn readers(reader: publication::Reader<Self::Snapshots>) -> Self::Readers {
-        reader
     }
 
     fn new_batches(&self) -> Self::Unmerkleized {
@@ -861,7 +824,6 @@ macro_rules! impl_database_set {
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
             type Snapshots = ($($T::Snapshot,)+);
-            type Readers = ($(publication::Reader<Self::Snapshots, $T::Snapshot>,)+);
 
             async fn init(context: E, config: Self::Config) -> Self {
                 join!($(
@@ -884,14 +846,6 @@ macro_rules! impl_database_set {
 
             fn initial_sync_targets() -> Self::SyncTargets {
                 ($($T::initial_sync_target(),)+)
-            }
-
-            fn readers(
-                reader: publication::Reader<Self::Snapshots>,
-            ) -> Self::Readers {
-                ($(
-                    reader.view(|snapshots| &snapshots.$idx),
-                )+)
             }
 
             fn new_batches(&self) -> Self::Unmerkleized {
@@ -1763,25 +1717,10 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
 mod tests {
     use super::{
         Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
-        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher, ServeSource as _, Single, StateSyncDb,
-        StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Single, StateSyncDb, StateSyncSet, SyncEngineConfig,
+        TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
-
-    #[test]
-    fn tuple_readers_project_their_own_members() {
-        deterministic::Runner::default().start(|context| async move {
-            type Pair = (NumberedDb, NumberedDb);
-            let (mut publisher, reader) = Publisher::<
-                <Pair as DatabaseSet<deterministic::Context>>::Snapshots,
-            >::new(&context);
-            let (first, second) = <Pair as DatabaseSet<deterministic::Context>>::readers(reader);
-            publisher.publish_durable((1, 2));
-            assert_eq!(first.latest(), Some(1));
-            assert_eq!(second.latest(), Some(2));
-        });
-    }
-
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
@@ -2246,50 +2185,6 @@ mod tests {
         }
 
         ready_finalize!();
-
-        fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
-    }
-
-    /// A mock whose snapshots are plain numbers, so projection tests can tell
-    /// members apart.
-    struct NumberedDb;
-
-    impl<E: Send> ManagedDb<E> for NumberedDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = ();
-        type Snapshot = u32;
-
-        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
-            Ok((self, 0))
-        }
-
-        fn initial_sync_target() -> Self::SyncTarget {}
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            Ok(Self)
-        }
-
-        fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(
-            self,
-            _batch: Self::Merkleized,
-        ) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
-            Ok((self, 0, Handle::ready(Ok(()))))
-        }
 
         fn sync_target(&self) -> Self::SyncTarget {}
 
