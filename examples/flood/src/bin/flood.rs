@@ -9,12 +9,11 @@ use commonware_flood::Config;
 use commonware_formatting::from_hex;
 use commonware_p2p::{Manager as _, Receiver, Recipients, Sender, authenticated::discovery};
 use commonware_runtime::{
-    Buf, Quota, Runner, Spawner, Supervisor as _,
+    Buf, Handle, Quota, Runner, Spawner, Supervisor as _,
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
 use commonware_utils::{TryCollect, ordered::Set, union};
-use futures::future::try_join_all;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
@@ -197,8 +196,8 @@ fn main() {
                 }
             });
 
-        // Wait for any task to error
-        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver]).await {
+        // Stop the process when any long-lived task exits.
+        if let Err(e) = Handle::select([p2p, flood_sender, flood_receiver]).await {
             error!(?e, "task failed");
         }
     });

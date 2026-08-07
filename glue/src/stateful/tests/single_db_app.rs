@@ -62,19 +62,43 @@ use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
-type Qmdb<E> =
+pub(super) type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
 pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
+/// Builds the QMDB configuration used by single-database tests.
+pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
+    FixedConfig {
+        merkle_config: MmrJournalConfig {
+            journal_partition: format!("{prefix}-qmdb-mmr-journal"),
+            metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
+            items_per_blob: NZU64!(11),
+            write_buffer: IO_BUFFER_SIZE,
+            strategy: Sequential,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: FixedLogConfig {
+            partition: format!("{prefix}-qmdb-log-journal"),
+            items_per_blob: NZU64!(7),
+            page_cache,
+            write_buffer: IO_BUFFER_SIZE,
+        },
+        translator: TwoCap,
+        init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
+    }
+}
+
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Block {
-    context: Context<sha256::Digest, ed25519::PublicKey>,
-    parent: sha256::Digest,
-    height: Height,
-    state_root: sha256::Digest,
-    range: NonEmptyRange<Location>,
+    pub(super) context: Context<sha256::Digest, ed25519::PublicKey>,
+    pub(super) parent: sha256::Digest,
+    pub(super) height: Height,
+    pub(super) state_root: sha256::Digest,
+    pub(super) range: NonEmptyRange<Location>,
 }
 
 impl Write for Block {
@@ -140,7 +164,7 @@ impl CertifiableBlock for Block {
 }
 
 impl Block {
-    fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
+    pub(super) fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
         Self {
             context: Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -157,17 +181,17 @@ impl Block {
 
 /// A stateful application that increments a counter each block.
 #[derive(Clone)]
-struct App {
+pub(super) struct App {
     genesis: Block,
 }
 
 impl App {
-    fn new(genesis: Block) -> Self {
+    pub(super) fn new(genesis: Block) -> Self {
         Self { genesis }
     }
 
     /// Execute a block: increment "counter" and write `height -> height_val`.
-    async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
@@ -348,26 +372,7 @@ impl EngineDefinition for SingleDbEngine {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
         // QMDB database config (created by Stateful::start)
-        let db_config = FixedConfig {
-            merkle_config: MmrJournalConfig {
-                journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
-                metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
-                strategy: Sequential,
-                page_cache: page_cache.clone(),
-            },
-            journal_config: FixedLogConfig {
-                partition: format!("{partition_prefix}-qmdb-log-journal"),
-                items_per_blob: NZU64!(7),
-                page_cache: page_cache.clone(),
-                write_buffer: IO_BUFFER_SIZE,
-            },
-            translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
-        };
+        let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 
         // Destructure the 7 channels.
         let mut channels = channels.into_iter();

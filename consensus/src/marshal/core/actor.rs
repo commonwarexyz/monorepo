@@ -482,9 +482,21 @@ where
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
-                self = self
+                let next = match self
                     .handle_ack(result, &mut application, &mut buffer, &mut resolver)
-                    .await;
+                    .await
+                {
+                    Ok(next) => next,
+                    Err((height, e)) => {
+                        debug!(
+                            ?e,
+                            %height,
+                            "application acknowledgement dropped, stopping marshal"
+                        );
+                        return;
+                    }
+                };
+                self = next;
             },
             // Handle consensus inputs before backfill or resolver traffic
             Some(message) = self.mailbox.recv() else {
@@ -535,7 +547,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
         resolver: &mut R,
-    ) -> Box<Self>
+    ) -> Result<Box<Self>, (Height, A::Error)>
     where
         Buf: Buffer<V>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -552,10 +564,7 @@ where
                     self.update_processed_height(height, resolver);
                     self = self.update_processed_round(height, resolver).await;
                 }
-                Err(e) => {
-                    // Ack failures are fatal for marshal/application coordination.
-                    panic!("application did not acknowledge block at height {height}: {e:?}");
-                }
+                Err(e) => return Err((height, e)),
             }
             processed_commitments.push(commitment);
 
@@ -582,7 +591,7 @@ where
         });
 
         // Refill the application dispatch pipeline.
-        self.try_dispatch_blocks(application).await
+        Ok(self.try_dispatch_blocks(application).await)
     }
 
     /// Handles a single mailbox message from local consensus/application callers.

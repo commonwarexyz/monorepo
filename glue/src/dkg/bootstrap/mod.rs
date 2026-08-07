@@ -36,7 +36,6 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
-use commonware_macros::select;
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -513,41 +512,14 @@ where
         );
         let simplex_handle = simplex.start(votes, certificates, resolver_network);
 
-        BootstrapActors {
+        Handle::select([
             buffer_handle,
             reshare_handle,
             marshal_handle,
             simplex_handle,
-        }
-        .supervise()
-        .await;
-    }
-}
-
-struct BootstrapActors {
-    buffer_handle: Handle<()>,
-    reshare_handle: Handle<()>,
-    marshal_handle: Handle<()>,
-    simplex_handle: Handle<()>,
-}
-
-impl BootstrapActors {
-    async fn supervise(mut self) {
-        select! {
-            result = &mut self.buffer_handle => result.expect("failed dkg"),
-            result = &mut self.reshare_handle => result.expect("failed dkg"),
-            result = &mut self.marshal_handle => result.expect("failed dkg"),
-            result = &mut self.simplex_handle => result.expect("failed dkg"),
-        }
-    }
-}
-
-impl Drop for BootstrapActors {
-    fn drop(&mut self) {
-        self.buffer_handle.abort();
-        self.reshare_handle.abort();
-        self.marshal_handle.abort();
-        self.simplex_handle.abort();
+        ])
+        .await
+        .expect("failed dkg");
     }
 }
 

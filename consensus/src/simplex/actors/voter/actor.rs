@@ -1,7 +1,7 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{Config as StateConfig, State},
+    state::{Config as StateConfig, State, Verify},
 };
 use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
@@ -68,9 +68,7 @@ struct Staged<S: Scheme<D>, D: Digest> {
     certification: Option<(bool, Notarization<S, D>)>,
     notarize: Option<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
-    /// A nullification certificate, with the parent certificate of our proposal
-    /// (the "floor") if we were the leader of the nullified view.
-    nullification: Option<(Nullification<S>, Option<Certificate<S, D>>)>,
+    nullification: Option<Nullification<S>>,
     finalize: Option<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
 }
@@ -372,9 +370,24 @@ impl<
 
     /// Attempt to verify a proposed block.
     #[allow(clippy::async_yields_async)]
-    async fn try_verify(&mut self) -> Option<Request<Context<D, S::PublicKey>, bool>> {
+    async fn try_verify(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<Request<Context<D, S::PublicKey>, bool>> {
         // Check if we are ready to verify
-        let (context, proposal) = self.state.try_verify()?;
+        let (context, proposal) = match self.state.try_verify() {
+            Verify::Ready(context, proposal) => (context, proposal),
+            Verify::Resolve {
+                proposal,
+                view,
+                kind,
+                target,
+            } => {
+                resolver.resolve(proposal, view, kind, target);
+                return None;
+            }
+            Verify::Wait => return None,
+        };
 
         // Request verification
         let span = info_span!(
@@ -548,16 +561,12 @@ impl<
     }
 
     /// Builds and records a nullification certificate if the round provides a candidate.
-    ///
-    /// Also returns the best notarization or finalization we know of (i.e. the "floor")
-    /// if we were the leader in the provided view (regardless of whether we built a proposal).
-    #[allow(clippy::type_complexity)]
     async fn prepare_nullification(
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
         resolved: Resolved,
-    ) -> (Self, Option<(Nullification<S>, Option<Certificate<S, D>>)>) {
+    ) -> (Self, Option<Nullification<S>>) {
         // Construct the nullification certificate.
         let Some(nullification) = self.state.broadcast_nullification(view) else {
             return (self, None);
@@ -570,14 +579,7 @@ impl<
         }
         // Track the certificate locally to avoid rebuilding it.
         self = self.handle_nullification(nullification.clone()).await;
-        // If we were the leader, emit the parent certificate (a notarization or
-        // finalization) of our proposal so peers can catch up.
-        let floor = self
-            .state
-            .leader_index(view)
-            .filter(|&leader| self.state.is_me(leader))
-            .and_then(|_| self.state.parent_certificate(view));
-        (self, Some((nullification, floor)))
+        (self, Some(nullification))
     }
 
     /// Builds and records a finalize vote if the round provides a candidate.
@@ -857,7 +859,7 @@ impl<
             // after a nullification for the same view because certification is
             // asynchronous; finalization is the boundary that cancels in-flight
             // certification and suppresses late reporting.
-            resolver.certified(notarization.round(), certified);
+            resolver.certified(notarization.view(), certified);
             if certified {
                 self.reporter.report(Activity::Certification(notarization));
             }
@@ -884,11 +886,7 @@ impl<
             );
             self.reporter.report(Activity::Notarization(notarization));
         }
-        if let Some((nullification, floor)) = staged.nullification {
-            if let Some(floor) = floor {
-                warn!(?floor, "broadcasting nullification floor");
-                self.broadcast_certificate(certificate_sender, floor);
-            }
+        if let Some(nullification) = staged.nullification {
             debug!(round=?nullification.round(), "broadcasting nullification");
             self.broadcast_certificate(
                 certificate_sender,
@@ -1010,7 +1008,7 @@ impl<
                         let Some(notarization) = notarization else {
                             continue;
                         };
-                        resolver.certified(round, success);
+                        resolver.certified(round.view(), success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
                         }
@@ -1098,7 +1096,7 @@ impl<
 
                 // If needed, verify current view
                 if pending_verify.is_none() {
-                    pending_verify = self.try_verify().await;
+                    pending_verify = self.try_verify(&mut resolver).await;
                 }
 
                 // Attempt to certify any views that we have notarizations for.
