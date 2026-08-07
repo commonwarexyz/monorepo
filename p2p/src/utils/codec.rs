@@ -259,7 +259,8 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.strategy.spawn(move |_| {
+                let decode_len = bytes.len();
+                let handle = self.strategy.spawn(decode_len, move |_| {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result)
                 });
@@ -428,7 +429,11 @@ mod tests {
             Manual::new(self.clone(), self.parallelism)
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        fn spawn<F, T>(
+            &self,
+            _len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
