@@ -4228,11 +4228,13 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_application_shutdown_with_pending_ack_stops_cleanly() {
+    fn test_standard_application_shutdown_redelivers_pending_ack_after_restart() {
+        const PARTITION_PREFIX: &str = "application-shutdown-with-pending-ack";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
+        let first_run = |mut context: deterministic::Context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
 
             // Model an application that handles genesis normally, then owns the first
@@ -4262,12 +4264,12 @@ mod tests {
                 }
             });
 
-            // Retain marshal's mailbox, buffer, and resolver until the final assertion so no
-            // other input closing can account for the actor's exit.
+            // Retain marshal's mailbox, buffer, and resolver until the exit assertion so no other
+            // input closing can account for the actor's exit.
             let (mut mailbox, _buffer, _resolver, marshal_handle) = start_standard_actor(
                 context.child("validator"),
-                "application-shutdown-with-pending-ack",
-                ConstantProvider::new(schemes[0].clone()),
+                PARTITION_PREFIX,
+                provider.clone(),
                 ApplicationReporter { updates },
                 Some(RecordingBuffer::default()),
                 Start::Genesis(genesis.clone()),
@@ -4278,6 +4280,7 @@ mod tests {
             // acknowledgement before beginning shutdown.
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_digest = block.digest();
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
@@ -4296,6 +4299,41 @@ mod tests {
             marshal_handle
                 .await
                 .expect("application shutdown should stop marshal cleanly");
+
+            (provider, genesis, block_digest)
+        };
+
+        // Shut down with a pending acknowledgement, then recover the runtime.
+        let ((provider, genesis, block_digest), checkpoint) = runner.start_and_recover(first_run);
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            // The canceled acknowledgement must leave the processed floor behind the block so the
+            // recovered application receives the same finalized block again.
+            let restart_application = Application::<B>::manual_ack();
+            let (_mailbox, _buffer, _resolver, _marshal_handle) = start_standard_actor(
+                context.child("validator").with_attribute("restart", 0),
+                PARTITION_PREFIX,
+                provider,
+                restart_application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis),
+            )
+            .await;
+            select! {
+                height = restart_application.acknowledged() => {
+                    assert_eq!(height, Height::new(1));
+                    assert_eq!(
+                        restart_application
+                            .blocks()
+                            .get(&height)
+                            .expect("redelivered block must be recorded")
+                            .digest(),
+                        block_digest,
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("unacknowledged block was not redelivered after restart");
+                },
+            }
         });
     }
 
