@@ -580,6 +580,35 @@ mod tests {
         });
     }
 
+    /// A rewind that lands at a valid position but does not match the target's
+    /// root must be rejected.
+    #[test]
+    fn rewind_to_target_rejects_forged_root() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-keyless-forged-rewind", &context);
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+                .await
+                .unwrap();
+            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
+                .await
+                .unwrap();
+            durability.await.expect("finalize flush failed");
+
+            let mut forged = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            forged.root =
+                <FixedDb as ManagedDb<deterministic::Context>>::initial_sync_target().root;
+            assert!(matches!(
+                <FixedDb as ManagedDb<_>>::rewind_to_target(db, forged).await,
+                Err(Error::RewindTargetMismatch)
+            ));
+        });
+    }
+
     /// A batch that does not set the floor must carry the parent's floor forward,
     /// not regress it to zero.
     #[test]

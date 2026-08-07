@@ -163,7 +163,7 @@ pub trait Merkleized: Sized + Send + Sync {
     /// In QMDB, this maps to `merkleized_batch.new_batch()`.
     fn new_batch(&self) -> Self::Unmerkleized;
 
-    /// Return true if this batch's root and operation range are the ones
+    /// Return true if this batch carries the state commitment and operation range
     /// `target` commits to.
     fn matches(&self, target: &Self::SyncTarget) -> bool;
 }
@@ -1832,9 +1832,13 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
 /// A resolver that can attach a serving source at runtime.
 ///
 /// Implementations receive a [`publication::ServeSource`] after startup so they can serve
-/// incoming sync requests from published durable snapshots once the database is initialized.
+/// incoming sync requests from published durable snapshots once the first generation
+/// installs.
 pub trait AttachableResolver<Src>: Send + Sync + 'static {
     /// Attach a serving source for incoming requests.
+    ///
+    /// Await confirms only submission of the attachment, not its processing.
+    /// Implementations must not block on publication.
     fn attach_source(&self, source: Src) -> impl Future<Output = ()> + Send;
 }
 

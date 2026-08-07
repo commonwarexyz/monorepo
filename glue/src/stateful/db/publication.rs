@@ -79,12 +79,14 @@ struct Metrics {
 
 impl Metrics {
     fn register<E: RuntimeMetrics>(context: &E) -> Self {
+        let generation = context.register(
+            "installed_generation",
+            "Number of the latest installed generation, or -1 when nothing is servable",
+            Gauge::default(),
+        );
+        generation.set(-1);
         Self {
-            generation: context.register(
-                "installed_generation",
-                "Number of the latest installed generation",
-                Gauge::default(),
-            ),
+            generation,
             installed: context.register(
                 "installations",
                 "Generations installed since startup",
@@ -139,6 +141,7 @@ impl<S> Drop for Publisher<S> {
         // Free the displaced generation outside the lock.
         let mut state = self.slot.state.lock();
         let replaced = std::mem::replace(&mut *state, State::Detached);
+        self.slot.metrics.generation.set(-1);
         drop(state);
         drop(replaced);
     }
@@ -245,26 +248,41 @@ mod tests {
     use super::*;
     use commonware_runtime::{Runner as _, deterministic};
 
+    /// The value of the `installed_generation` gauge.
+    fn installed_generation(context: &deterministic::Context) -> i64 {
+        context
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix("installed_generation "))
+            .expect("gauge must be registered")
+            .parse()
+            .expect("gauge must be an integer")
+    }
+
     #[test]
     fn empty_then_live_then_detached() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, source) = Publisher::<u32>::new(&context);
             assert!(source.latest().is_none());
+            assert_eq!(installed_generation(&context), -1);
 
             publisher.install_durable(7);
             let first = source.latest().unwrap();
             assert_eq!(first.number(), 0);
             assert_eq!(*first.snapshots(), 7);
+            assert_eq!(installed_generation(&context), 0);
 
             publisher.install_durable(8);
             let held = source.latest().unwrap();
             assert_eq!(held.number(), 1);
             assert_eq!(*held.snapshots(), 8);
+            assert_eq!(installed_generation(&context), 1);
 
             drop(publisher);
             // New requests decline while the held Arc still serves.
             assert!(source.latest().is_none());
             assert_eq!(*held.snapshots(), 8);
+            assert_eq!(installed_generation(&context), -1);
         });
     }
 

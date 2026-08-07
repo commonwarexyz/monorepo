@@ -382,8 +382,12 @@ where
             return;
         };
 
-        response_tx.send_lossy(response.encode());
-        self.metrics.serve_requests.inc(status::Status::Success);
+        if response_tx.send_lossy(response.encode()) {
+            self.metrics.serve_requests.inc(status::Status::Success);
+        } else {
+            // The requester went away between the read and the send.
+            self.metrics.serve_cancelled.inc();
+        }
     }
 }
 
