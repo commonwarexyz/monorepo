@@ -1391,7 +1391,7 @@ where
             v.extend(parent.ancestors());
             v
         });
-        let db_state = batch_chain::effective_db_boundary(
+        let db_state = batch_chain::effective_boundary(
             self.base.db(),
             ancestors.last().map(|oldest| oldest.bounds.base),
         );

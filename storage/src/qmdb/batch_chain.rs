@@ -171,7 +171,7 @@ where
 
 /// Advance the inherited DB boundary past applied ancestors no longer reachable
 /// through the weak parent chain.
-pub(crate) fn effective_db_boundary<F: Family, D: Digest>(
+pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
     oldest_live_base: Option<Commitment<F, D>>,
 ) -> Commitment<F, D> {

@@ -227,7 +227,7 @@ where
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_db_boundary(
+        let boundary = batch_chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
