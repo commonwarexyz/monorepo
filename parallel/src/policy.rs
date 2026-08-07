@@ -315,8 +315,14 @@ impl Entry {
     }
 }
 
-/// Timing state for one spawn [`Key`]: the caller-visible cost of inlining vs offloading, the job's
-/// measured wall time on the pool, and the latest raw inline sample used by the safety gate.
+/// Timing state for one spawn [`Key`].
+///
+/// Offloading never makes the job itself run faster. What it buys is overlap: the calling task can
+/// do other work while the job runs on the pool, so the caller waits only for whatever is left when
+/// it finally awaits the result. `choose` therefore compares the caller's *wait*, not the job's
+/// runtime: the whole job if inlined, versus the hand-off plus that leftover if offloaded (measured
+/// in [`crate::Strategy::spawn`]). Offloading wins when the caller has enough of its own work to
+/// overlap the job behind.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnEntry {
     inline_ns: Option<u64>,
