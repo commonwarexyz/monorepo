@@ -261,9 +261,9 @@ where
     /// Callers must ensure no finalize flush is pending, because the capture is
     /// published without waiting for any barrier.
     pub(super) async fn republish(mut self) -> Self {
-        let (databases, snapshot) = self.databases.snapshot().await;
+        let (databases, snapshots) = self.databases.snapshot().await;
         self.databases = databases;
-        self.publisher.publish_durable(snapshot);
+        self.publisher.publish_durable(snapshots);
         self
     }
 

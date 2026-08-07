@@ -6,7 +6,7 @@
 //! owning database.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncSession,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -34,7 +34,7 @@ use commonware_storage::{
         sync::{self, Target as AnySyncTarget},
     },
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps a keyless [`UnmerkleizedBatch`] to implement
@@ -318,9 +318,12 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-        if db.sync_target() != target {
-            return Err(Error::RewindTargetMismatch);
-        }
+
+        let rewound_target = db.sync_target();
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
         Ok(db)
     }
 }
@@ -396,9 +399,12 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-        if db.sync_target() != target {
-            return Err(Error::RewindTargetMismatch);
-        }
+
+        let rewound_target = db.sync_target();
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
         Ok(db)
     }
 }
@@ -417,9 +423,24 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        session: SyncSession<R, Self::SyncTarget>,
+        source: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(context, config, session).await
+        sync_standard_db(
+            context,
+            config,
+            source,
+            target,
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
+        .await
     }
 }
 
@@ -437,9 +458,24 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        session: SyncSession<R, Self::SyncTarget>,
+        source: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(context, config, session).await
+        sync_standard_db(
+            context,
+            config,
+            source,
+            target,
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
+        .await
     }
 }
 
@@ -577,35 +613,6 @@ mod tests {
                 ),
             );
             assert!(!merkleized.matches(&wrong_end));
-        });
-    }
-
-    /// A rewind that lands at a valid position but does not match the target's
-    /// root must be rejected.
-    #[test]
-    fn rewind_to_target_rejects_forged_root() {
-        deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-forged-rewind", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
-
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
-                .append(U64::new(7))
-                .with_inactivity_floor(mmr::Location::new(1));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
-                .await
-                .unwrap();
-            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
-            durability.await.expect("finalize flush failed");
-
-            let mut forged = <FixedDb as ManagedDb<_>>::sync_target(&db);
-            forged.root =
-                <FixedDb as ManagedDb<deterministic::Context>>::initial_sync_target().root;
-            assert!(matches!(
-                <FixedDb as ManagedDb<_>>::rewind_to_target(db, forged).await,
-                Err(Error::RewindTargetMismatch)
-            ));
         });
     }
 

@@ -269,8 +269,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Rewind committed state to `target`.
     ///
     /// Implementations must ensure rewind effects are durable before returning
-    /// the database (for example by committing after rewind), and must verify
-    /// the rewound state matches `target`, returning an error on divergence.
+    /// the database (for example by committing after rewind).
     fn rewind_to_target(
         self,
         target: Self::SyncTarget,
@@ -587,32 +586,22 @@ pub struct SyncEngineConfig {
     pub max_retained_roots: usize,
 }
 
-/// Channels and configuration for one database's state-sync run.
-pub struct SyncSession<S, T> {
-    /// Serves fetched operations.
-    pub source: S,
-    /// The initial sync target.
-    pub target: T,
-    /// Later target updates, applied in order.
-    pub tip_updates: mpsc::Receiver<T>,
-    /// When present, the engine finishes only once this channel yields.
-    pub finish: Option<mpsc::Receiver<()>>,
-    /// When present, receives each target the engine reaches.
-    pub reached_target: Option<mpsc::Sender<T>>,
-    /// Engine tuning.
-    pub sync_config: SyncEngineConfig,
-}
-
 /// A [`ManagedDb`] with a state-sync entrypoint.
 pub trait StateSyncDb<E, S>: ManagedDb<E> {
     /// Error returned by the state-sync engine for this database.
     type SyncError: Debug + Send;
 
     /// Run state-sync for this database and return a fully-initialized instance.
+    #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
         config: Self::Config,
-        session: SyncSession<S, Self::SyncTarget>,
+        source: S,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> impl Future<Output = Result<Self, Self::SyncError>> + Send;
 }
 
@@ -655,6 +644,14 @@ pub struct TipUpdate<D: Digest, T> {
 }
 
 impl<D: Digest, T> TipUpdate<D, T> {
+    pub const fn new(anchor: Anchor<D>, targets: T) -> Self {
+        Self {
+            anchor,
+            targets,
+            observed: None,
+        }
+    }
+
     pub(crate) fn with_observation(anchor: Anchor<D>, targets: T) -> (Self, oneshot::Receiver<()>) {
         let (observed, receiver) = oneshot::channel();
         (
@@ -667,11 +664,8 @@ impl<D: Digest, T> TipUpdate<D, T> {
         )
     }
 
-    /// Record the update, then release its observation barrier.
-    ///
-    /// [`StateSyncSet::sync`] implementations must record every update they receive:
-    /// the sender blocks until the barrier releases.
-    pub fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
+    /// Record the update before releasing its observation barrier.
+    pub(crate) fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
         let result = record(self.anchor, self.targets);
         if let Some(observed) = self.observed {
             let _ = observed.send(());
@@ -767,14 +761,12 @@ where
         let sync = T::sync_db(
             context,
             config,
-            SyncSession {
-                source,
-                target,
-                tip_updates: target_rx,
-                finish: Some(finish_rx),
-                reached_target: Some(reached_tx),
-                sync_config,
-            },
+            source,
+            target,
+            target_rx,
+            Some(finish_rx),
+            Some(reached_tx),
+            sync_config,
         );
 
         let coordinator = async {
@@ -1214,14 +1206,12 @@ macro_rules! impl_state_sync_set {
                                 let sync = $T::sync_db(
                                     context,
                                     config,
-                                    SyncSession {
-                                        source,
-                                        target,
-                                        tip_updates: target_rx,
-                                        finish: Some(finish_rx),
-                                        reached_target: Some(reached_tx),
-                                        sync_config,
-                                    },
+                                    source,
+                                    target,
+                                    target_rx,
+                                    Some(finish_rx),
+                                    Some(reached_tx),
+                                    sync_config,
                                 );
                                 let forward_reached = async move {
                                     loop {
@@ -1603,21 +1593,18 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
 pub(crate) async fn sync_standard_db<E, DB, S>(
     context: E,
     config: DB::Config,
-    session: SyncSession<S, sync::Target<DB::Family, DB::Digest>>,
+    source: S,
+    target: sync::Target<DB::Family, DB::Digest>,
+    tip_updates: mpsc::Receiver<sync::Target<DB::Family, DB::Digest>>,
+    finish: Option<mpsc::Receiver<()>>,
+    reached_target: Option<mpsc::Sender<sync::Target<DB::Family, DB::Digest>>>,
+    sync_config: SyncEngineConfig,
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
     DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
-    let SyncSession {
-        source,
-        target,
-        tip_updates,
-        finish,
-        reached_target,
-        sync_config,
-    } = session;
     sync::sync(sync::engine::Config {
         context,
         source,
@@ -1647,7 +1634,12 @@ impl Drop for Forwarder {
 pub(crate) async fn sync_compact_db<E, DB, S>(
     context: E,
     config: DB::Config,
-    session: SyncSession<S, sync::CompactTarget<DB::Family, DB::Digest>>,
+    source: S,
+    target: sync::CompactTarget<DB::Family, DB::Digest>,
+    mut tip_updates: mpsc::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
+    finish: Option<mpsc::Receiver<()>>,
+    reached_target: Option<mpsc::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
+    sync_config: SyncEngineConfig,
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     E: Metrics + Spawner,
@@ -1655,14 +1647,6 @@ where
     DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
-    let SyncSession {
-        source,
-        target,
-        mut tip_updates,
-        finish,
-        reached_target,
-        sync_config,
-    } = session;
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
     // Start at the newest target already queued.
     while let Ok(update) = tip_updates.try_recv() {
@@ -1788,7 +1772,7 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
 ) -> T {
     // Mutable rewind failures are fatal by design because the database handle
     // may be internally diverged after a failed rewind.
-    let database = match database.rewind_to_target(target.clone()).await {
+    match database.rewind_to_target(target).await {
         Ok(database) => database,
         Err(err) => {
             let index = index.map_or(String::new(), |i| format!("index {i}, "));
@@ -1797,16 +1781,7 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
                 core::any::type_name::<T>(),
             );
         }
-    };
-    // A mismatch after a successful rewind means local history diverged from the target.
-    if database.sync_target() != target {
-        let index = index.map_or(String::new(), |i| format!("index {i}, "));
-        panic!(
-            "database rewind produced a mismatched target ({index}type {})",
-            core::any::type_name::<T>(),
-        );
     }
-    database
 }
 
 #[tracing::instrument(name = "stateful.db.prune_or_panic", level = "info", skip_all, fields(index = index))]
@@ -1914,7 +1889,7 @@ mod tests {
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, CoordinatorAction,
         CoordinatorState, DbSet, Digest, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Publisher,
         ServeSource as _, SetSyncError, Single, StateSyncDb, StateSyncSet, SyncEngineConfig,
-        SyncSession, TipUpdate, drain_single_tip_updates,
+        TipUpdate, drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
 
@@ -3135,16 +3110,13 @@ mod tests {
         async fn sync_db(
             context: E,
             _config: Self::Config,
-            session: SyncSession<Arc<AtomicBool>, Self::SyncTarget>,
+            release: Arc<AtomicBool>,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: release,
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             while !release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -3204,16 +3176,13 @@ mod tests {
         async fn sync_db(
             context: E,
             _config: Self::Config,
-            session: SyncSession<Arc<AtomicBool>, Self::SyncTarget>,
+            release: Arc<AtomicBool>,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: release,
-                target,
-                mut tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             let mut final_target = target;
             while !release.load(Ordering::SeqCst) {
                 match tip_updates.try_recv() {
@@ -3285,16 +3254,13 @@ mod tests {
         async fn sync_db(
             context: E,
             _config: Self::Config,
-            session: SyncSession<(), Self::SyncTarget>,
+            _resolver: (),
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: _resolver,
-                target,
-                mut tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             let update = tip_updates.recv().await.expect("expected forwarded tip");
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
@@ -3329,16 +3295,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<Arc<AtomicBool>, Self::SyncTarget>,
+            done: Arc<AtomicBool>,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: done,
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             done.store(true, Ordering::SeqCst);
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
@@ -3397,16 +3360,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<(), Self::SyncTarget>,
+            _resolver: (),
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: _resolver,
-                target: _target,
-                tip_updates: _tip_updates,
-                finish: _finish,
-                reached_target: _reached_target,
-                sync_config: _sync_config,
-            } = session;
             Err(TestSyncError)
         }
     }
@@ -3417,16 +3377,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<(), Self::SyncTarget>,
+            _resolver: (),
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: _resolver,
-                target: _target,
-                tip_updates: _tip_updates,
-                finish: _finish,
-                reached_target: _reached_target,
-                sync_config: _sync_config,
-            } = session;
             Ok(Self)
         }
     }
@@ -3437,16 +3394,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<(), Self::SyncTarget>,
+            _resolver: (),
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: _resolver,
-                target,
-                tip_updates: _tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
             }
@@ -3465,16 +3419,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<(), Self::SyncTarget>,
+            _resolver: (),
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: _resolver,
-                target,
-                tip_updates: _tip_updates,
-                mut finish,
-                reached_target: _reached_target,
-                sync_config: _sync_config,
-            } = session;
             let Some(finish_rx) = finish.as_mut() else {
                 panic!("finish receiver should be provided");
             };
@@ -3496,16 +3447,13 @@ mod tests {
         async fn sync_db(
             context: E,
             _config: Self::Config,
-            session: SyncSession<SlowSyncController, Self::SyncTarget>,
+            controller: SlowSyncController,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: controller,
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             while !controller.release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -3591,16 +3539,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<FastSyncObserver, Self::SyncTarget>,
+            observer: FastSyncObserver,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: observer,
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;
@@ -3659,16 +3604,13 @@ mod tests {
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            session: SyncSession<FastSyncObserver, Self::SyncTarget>,
+            observer: FastSyncObserver,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let SyncSession {
-                source: observer,
-                target,
-                tip_updates,
-                mut finish,
-                reached_target,
-                sync_config: _sync_config,
-            } = session;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;

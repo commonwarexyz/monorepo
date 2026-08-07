@@ -330,7 +330,7 @@ mod tests {
     use super::{Config, Deferred, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig, SyncSession},
+        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
             mocks::{TestApp, TestBlock, TestDb},
@@ -343,7 +343,9 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact};
+    use commonware_utils::{
+        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
+    };
     use futures::FutureExt as _;
     use std::{convert::Infallible, time::Duration};
 
@@ -360,7 +362,12 @@ mod tests {
         async fn sync_db(
             _context: deterministic::Context,
             _config: Self::Config,
-            _session: SyncSession<S, Self::SyncTarget>,
+            _source: S,
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
         }

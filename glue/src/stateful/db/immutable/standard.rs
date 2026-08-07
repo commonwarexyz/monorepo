@@ -6,7 +6,7 @@
 //! immutable proof snapshot carries no keyed index.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncSession,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -36,7 +36,7 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, non_empty_range};
+use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps an immutable [`UnmerkleizedBatch`] to implement
@@ -336,9 +336,12 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-        if db.sync_target() != target {
-            return Err(Error::RewindTargetMismatch);
-        }
+
+        let rewound_target = db.sync_target();
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
         Ok(db)
     }
 }
@@ -417,9 +420,12 @@ where
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
         let db = db.sync().await?;
-        if db.sync_target() != target {
-            return Err(Error::RewindTargetMismatch);
-        }
+
+        let rewound_target = db.sync_target();
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
         Ok(db)
     }
 }
@@ -440,9 +446,24 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        session: SyncSession<R, Self::SyncTarget>,
+        source: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(context, config, session).await
+        sync_standard_db(
+            context,
+            config,
+            source,
+            target,
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
+        .await
     }
 }
 
@@ -463,9 +484,24 @@ where
     async fn sync_db(
         context: E,
         config: Self::Config,
-        session: SyncSession<R, Self::SyncTarget>,
+        source: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(context, config, session).await
+        sync_standard_db(
+            context,
+            config,
+            source,
+            target,
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
+        .await
     }
 }
 

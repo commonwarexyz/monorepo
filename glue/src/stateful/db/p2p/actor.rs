@@ -94,7 +94,6 @@ where
     context: ContextCell<E>,
     config: Config<P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, Src>>,
-    /// The serving source, attached after startup.
     source: Option<Src>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, Src>,
