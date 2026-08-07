@@ -310,10 +310,8 @@ where
             anchor,
             metrics,
             self.pruning,
-        );
-        // Publish the recovered state as generation zero so serving can
-        // begin before the first finalization.
-        let processor = processor.publish_durable().await;
+        )
+        .await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,

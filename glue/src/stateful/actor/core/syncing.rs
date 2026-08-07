@@ -339,10 +339,7 @@ where
 
         let _ = metrics.sync_done.try_set(1);
         let mut processor =
-            Processor::new(application, databases, publisher, anchor, metrics, pruning);
-        // Publish the synced state as generation zero so serving can begin before
-        // the first finalization. Synced state is durable by construction.
-        processor = processor.publish_durable().await;
+            Processor::new(application, databases, publisher, anchor, metrics, pruning).await;
 
         let mut pending_prune = None;
 
@@ -384,7 +381,7 @@ where
         // pruning.
         let _ = sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
-            processor = processor.prune_databases(prune, &marshal).await;
+            processor = processor.prune(prune, &marshal).await;
             // The published snapshot was captured before this prune. Republish so
             // serving stops pinning the pruned state. Every handoff barrier was
             // awaited above, so the capture is already durable.

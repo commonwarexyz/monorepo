@@ -2,7 +2,7 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. Keyed batch reads borrow the owning database because the
+//! deletions. Keyed batch reads borrow the database because the
 //! immutable proof snapshot carries no keyed index.
 
 use crate::stateful::db::{

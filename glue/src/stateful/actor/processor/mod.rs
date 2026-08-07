@@ -20,7 +20,7 @@
 //!   database set for publication (returned in [`Applied`]), then prune all
 //!   pending entries at or below the finalized round.
 //!
-//! - Maintenance: [`Processor::prune_databases`] runs due prunes and
+//! - Maintenance: [`Processor::prune`] runs due prunes and
 //!   [`Processor::publish_durable`] refreshes the published snapshot afterwards.
 //!
 //! All propose/verify paths are cancellation-aware: if the caller drops the
@@ -88,8 +88,7 @@ pub(super) enum PrepareBatchesError {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T, S> {
-    /// A snapshot of the database set, ready to publish once its flush proves
-    /// durable.
+    /// A snapshot of the database set, ready to publish once it's durably flushed.
     pub(super) publication: PendingPublication<S>,
 
     /// Prune made due by this finalization.
@@ -219,7 +218,7 @@ where
 {
     /// Create a new processor with the given application, databases, the last
     /// finalized block's anchor, and the publisher its snapshots are served through.
-    pub(super) const fn new(
+    pub(super) async fn new(
         app: A,
         databases: A::Databases,
         publisher: Publisher<SnapshotsOf<A::Databases, E>>,
@@ -236,6 +235,8 @@ where
             metrics,
             pruning,
         }
+        .publish_durable()
+        .await
     }
 
     /// Prune `self.databases` and `marshal` to the `prune` target.
@@ -243,7 +244,7 @@ where
     /// # Invariant
     ///
     /// Databases must be durable through `prune.barrier_height`.
-    pub(super) async fn prune_databases<S, V>(
+    pub(super) async fn prune<S, V>(
         mut self,
         prune: Prune<PendingSyncTargets<A, E>>,
         marshal: &MarshalMailbox<S, V>,
@@ -1419,7 +1420,8 @@ mod tests {
                     },
                     metrics,
                     prune_config.map(|config| Pruning::build(config, 1, 0)),
-                ),
+                )
+                .await,
                 provider,
                 db_config: config,
             }

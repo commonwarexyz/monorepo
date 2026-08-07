@@ -328,9 +328,6 @@ where
     }
 
     /// Serve a peer's request from the latest published snapshot.
-    ///
-    /// Serves run one at a time in the actor loop. Spawning them per-request is a
-    /// possible follow-up now that the handle is an owned snapshot.
     async fn handle_produce(
         &mut self,
         key: Request<F>,
@@ -346,14 +343,11 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        // Declines before the first publication and after the publisher drops.
-        let Some(handle) = source.latest() else {
+        let Some(source) = source.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
-        // The handle is an owned snapshot, so serving reads frozen state and never
-        // touches the live database.
-        let result = handle.serve(key).await;
+        let result = source.serve(key).await;
 
         let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);

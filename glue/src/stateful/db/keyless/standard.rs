@@ -3,7 +3,7 @@
 //!
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key. Positional batch reads borrow the
-//! owning database.
+//! database.
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,

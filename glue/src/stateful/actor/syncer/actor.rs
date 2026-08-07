@@ -165,8 +165,6 @@ where
             } => match message {
                 Message::UpdateTargets { update, response } => {
                     if self.sync_complete.is_none() {
-                        // Sync already completed. The artifact went out on the
-                        // completion channel.
                         response.send_lossy(UpdateOutcome::SyncCompleted);
                         continue;
                     }

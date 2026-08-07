@@ -13,13 +13,14 @@ use rand_core::Rng;
 type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Result of forwarding a target update to the state-sync coordinator.
+/// Reply to [`Mailbox::update_targets`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpdateOutcome {
-    /// The update was forwarded to the live coordinator. The observation barrier
-    /// confirms recording.
+    /// The live sync coordinator recorded the update, so the eventual sync
+    /// artifact reflects this target or a newer one.
     Observed,
-    /// State sync completed and published its artifact on the completion channel.
+    /// State sync already completed, so no coordinator remains to record the
+    /// update. The artifact is on the completion channel.
     SyncCompleted,
 }
 
@@ -30,7 +31,7 @@ where
 {
     UpdateTargets {
         update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
-        /// Reports whether the update was forwarded or sync already completed.
+        /// Reports whether the update was recorded or sync already completed.
         response: oneshot::Sender<UpdateOutcome>,
     },
 }

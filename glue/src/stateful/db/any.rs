@@ -2,7 +2,7 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to applied state. The wrapper types here keep that shape: reads and
-//! merkleization borrow the owning database at each call, so batches hold no database
+//! merkleization borrow the database at each call, so batches hold no database
 //! handle and dropping one never drops the database.
 
 use crate::stateful::db::{

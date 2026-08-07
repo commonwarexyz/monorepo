@@ -16,9 +16,6 @@
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
 //!
-//! Batches hold no database handle. Reads and merkleization take the database as an
-//! argument, and callers must pass the database the batch was created from.
-//!
 //! # State Sync
 //!
 //! State sync orchestration is expressed by two traits:
@@ -163,7 +160,7 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Implementations create new batches from applied state and apply finalized
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
-/// Batches hold no database handle: reads take the owning database at each call and
+/// Batches hold no database handle. Reads borrow the database at each call and
 /// fall back from pending batch state to applied state through that reference.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
@@ -352,7 +349,7 @@ impl<S> PendingPublication<S> {
         Self { staged, barrier }
     }
 
-    /// Await the barrier and publish only if every flush proves durable.
+    /// Await the barrier and publish only if all state is durably flushed.
     pub(crate) async fn publish_when_durable(self) -> bool {
         let durable = self.barrier.durable().await;
         if durable {

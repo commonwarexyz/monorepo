@@ -1,3 +1,20 @@
+//! The post-sync processing loop of the stateful actor.
+//!
+//! Each finalized block is applied to the databases, its flush deferred to a
+//! pool, and a snapshot of the applied state staged for publication. The loop
+//! publishes the snapshot and acknowledges the block to marshal only once the
+//! flush proves durable, so readers and marshal's floor never get ahead of disk.
+//!
+//! Pruning and publication refresh are maintenance, run only while the mailbox
+//! is idle. A prune waits until the pruned range is durable. Pruning does not
+//! immediately reclaim space: the published snapshot, captured before the
+//! prune, still references the pruned storage, and so does every generation
+//! staged before it. The staleness clears only when a snapshot captured after
+//! the prune publishes. [`FlushTracker`] records how: if flushes were pending
+//! at prune time, the first durable publish above its stale boundary is such a
+//! capture; otherwise the loop refreshes (captures and publishes) as soon as
+//! every flush has drained, since publishing requires durable state.
+
 use crate::stateful::{
     Application, Input,
     actor::{
@@ -35,19 +52,19 @@ enum Step<M, P> {
     Refresh,
 }
 
-/// Pending finalize flushes, plus whether a prune left publication stale.
-///
-/// After a prune, the published snapshot still holds pre-prune state. A durable
-/// publish above the stale boundary refreshes it on its own. Otherwise the loop
-/// must refresh once every flush drains.
+/// Pending finalize flushes, plus whether a prune left publication serving
+/// pre-prune state (see the module docs).
 #[derive(Default)]
 struct FlushTracker {
+    /// Heights of finalize flushes still running.
     pending: BTreeSet<Height>,
+    /// The highest flush pending at the last prune. Generations at or below it
+    /// were captured pre-prune.
     stale_boundary: Option<Height>,
 }
 
 impl FlushTracker {
-    /// Track a started flush.
+    /// Track a started finalize flush.
     fn track(&mut self, height: Height) {
         assert!(
             self.pending.insert(height),
@@ -55,13 +72,14 @@ impl FlushTracker {
         );
     }
 
-    /// Record a completion and return whether it was durable.
-    fn complete(&mut self, (height, durable): (Height, bool)) -> bool {
+    /// Record a flush completion and return whether it was durable (`false`
+    /// means the runtime shut down mid-flush, so the caller must stop).
+    fn complete(&mut self, height: Height, durable: bool) -> bool {
         assert!(
             self.pending.remove(&height),
             "completed flush must have a pending height",
         );
-        // Only a durable publish above the boundary satisfies a pending refresh.
+        // Only a generation captured after the prune serves post-prune state.
         if durable
             && self
                 .stale_boundary
@@ -146,8 +164,8 @@ where
                 // acknowledgement) before taking the next unit of work, so
                 // acknowledgements keep flowing even while the mailbox is
                 // never idle.
-                while let Some(completion) = syncs.next_completed().now_or_never() {
-                    if !tracker.complete(completion) {
+                while let Some((height, durable)) = syncs.next_completed().now_or_never() {
+                    if !tracker.complete(height, durable) {
                         return;
                     }
                 }
@@ -176,8 +194,8 @@ where
                                         message = mailbox.recv() => {
                                             break message.map(Step::Message);
                                         },
-                                        completion = syncs.next_completed() => {
-                                            if !tracker.complete(completion) {
+                                        (height, durable) = syncs.next_completed() => {
+                                            if !tracker.complete(height, durable) {
                                                 return None;
                                             }
                                             if tracker.refresh_due() {
@@ -300,12 +318,12 @@ where
                     // The prune target must be durable, but later blocks remain available in
                     // marshal for replay and do not delay maintenance.
                     while tracker.blocks_prune(prune.barrier_height) {
-                        let completion = syncs.next_completed().await;
-                        if !tracker.complete(completion) {
+                        let (height, durable) = syncs.next_completed().await;
+                        if !tracker.complete(height, durable) {
                             return;
                         }
                     }
-                    self.processor = self.processor.prune_databases(prune, &self.marshal).await;
+                    self.processor = self.processor.prune(prune, &self.marshal).await;
                     // The published snapshot predates this prune and keeps the pruned
                     // storage alive, as do generations staged before it.
                     if !tracker.mark_stale() {
@@ -373,16 +391,16 @@ mod tests {
         let mut tracker = FlushTracker::default();
         tracker.track(Height::new(1));
         tracker.track(Height::new(2));
-        assert!(tracker.complete((Height::new(1), true)));
+        assert!(tracker.complete(Height::new(1), true));
         assert!(tracker.mark_stale());
         tracker.track(Height::new(3));
 
         // An publish at the boundary carries a pre-prune capture: still stale.
-        assert!(tracker.complete((Height::new(2), true)));
+        assert!(tracker.complete(Height::new(2), true));
         assert!(!tracker.refresh_due());
 
         // An publish above the boundary carries a post-prune capture: refreshed.
-        assert!(tracker.complete((Height::new(3), true)));
+        assert!(tracker.complete(Height::new(3), true));
         assert!(!tracker.refresh_due());
     }
 
@@ -391,10 +409,10 @@ mod tests {
         let mut tracker = FlushTracker::default();
         tracker.track(Height::new(1));
         tracker.track(Height::new(2));
-        assert!(tracker.complete((Height::new(1), true)));
+        assert!(tracker.complete(Height::new(1), true));
         assert!(tracker.mark_stale());
         assert!(!tracker.refresh_due());
-        assert!(tracker.complete((Height::new(2), true)));
+        assert!(tracker.complete(Height::new(2), true));
         assert!(tracker.refresh_due());
         tracker.refreshed();
         assert!(!tracker.refresh_due());
@@ -446,7 +464,8 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
-        );
+        )
+        .await;
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -495,9 +514,10 @@ mod tests {
                 poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
                 "acknowledgements must wait for pending flushes",
             );
-            assert!(
-                served_generation(&source).is_none(),
-                "no generation may serve before its flush is durable",
+            assert_eq!(
+                served_generation(&source),
+                Some(0),
+                "only the initial generation may serve before a block flush is durable",
             );
 
             // Block 2 filled the retention window, but pruning must remain blocked behind the
@@ -516,7 +536,7 @@ mod tests {
             waiter1.await.expect("block 1 acknowledgement");
             assert_eq!(
                 served_generation(&source),
-                Some(0),
+                Some(1),
                 "block 1's generation must serve once durable",
             );
             while control.pruned.lock().is_empty() {
@@ -533,7 +553,7 @@ mod tests {
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
             assert!(
-                served_generation(&source).is_some_and(|generation| generation > 0),
+                served_generation(&source).is_some_and(|generation| generation > 1),
                 "block 2's generation must serve once durable",
             );
         });
@@ -584,12 +604,12 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
-            while served_generation(&source) < Some(2) {
+            while served_generation(&source) < Some(3) {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert_eq!(
                 served_generation(&source),
-                Some(2),
+                Some(3),
                 "the post-prune refresh must serve",
             );
         });
@@ -654,13 +674,13 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter3.await.expect("block 3 acknowledgement");
-            while served_generation(&source) < Some(2) {
+            while served_generation(&source) < Some(3) {
                 context.sleep(Duration::from_millis(10)).await;
             }
             context.sleep(Duration::from_millis(50)).await;
             assert_eq!(
                 served_generation(&source),
-                Some(2),
+                Some(3),
                 "block 3's own publish must satisfy the refresh without a separate refresh publication",
             );
         });
@@ -746,7 +766,7 @@ mod tests {
             waiter1.await.expect("block 1 acknowledgement");
             assert_eq!(
                 served_generation(&source),
-                Some(0),
+                Some(1),
                 "the durable generation must serve while the loop idles",
             );
             while control.flushes.lock().is_empty() {
