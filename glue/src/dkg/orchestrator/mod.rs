@@ -109,7 +109,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        ordered::Set,
+        ordered::Set, sequence::Unit,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -343,7 +343,7 @@ mod tests {
             manager: M,
         ) -> Self
         where
-            M: Manager<PublicKey = mocks::TestPublicKey, Directory = ()>,
+            M: Manager<PublicKey = mocks::TestPublicKey, Directory = Unit>,
         {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
@@ -608,7 +608,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
-            directory: (),
+            directory: Unit,
         }
     }
 

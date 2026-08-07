@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_glue::dkg::types::{EpochInfo, EpochOutcome};
 use commonware_math::algebra::Random;
-use commonware_utils::{Faults as _, N3f1, ordered::Map};
+use commonware_utils::{Faults as _, N3f1, ordered::Map, sequence::Unit};
 use rand::rngs::StdRng;
 use std::{
     fs,
@@ -140,7 +140,7 @@ fn trusted_bootstrap(network: &NetworkConfig) -> anyhow::Result<TrustedBootstrap
         output,
         players,
         next_players: participants.get(Epoch::new(1)),
-        directory: (),
+        directory: Unit,
     };
     Ok((genesis, shares))
 }

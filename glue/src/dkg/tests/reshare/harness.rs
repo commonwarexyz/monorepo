@@ -82,6 +82,7 @@ use commonware_utils::{
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Set},
     range::NonEmptyRange,
+    sequence::Unit,
     sync::Mutex,
     test_rng,
 };
@@ -235,7 +236,7 @@ impl DkgManager for TestManager {
     ) -> Result<Feedback, Self::Error> {
         match (self, &directory.0) {
             (Self::Discovery(manager), None) => {
-                let result = DkgManager::track(manager, epoch, peers, &());
+                let result = DkgManager::track(manager, epoch, peers, &Unit);
                 Ok(result.unwrap_or_else(|error| match error {}))
             }
             (Self::Lookup(manager), Some(addresses)) => {

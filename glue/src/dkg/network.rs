@@ -28,7 +28,10 @@ use commonware_p2p::{
     Address, AddressableManager as P2pAddressableManager, AddressableTrackedPeers,
     Manager as P2pManager, Provider, TrackedPeers,
 };
-use commonware_utils::ordered::{Map, Set};
+use commonware_utils::{
+    ordered::{Map, Set},
+    sequence::Unit,
+};
 use std::{convert::Infallible, fmt, fmt::Debug};
 use thiserror::Error;
 
@@ -52,7 +55,7 @@ pub trait Directory<P: PublicKey>:
 }
 
 /// Key-only directory for transports that dial by public key alone.
-impl<P: PublicKey> Directory<P> for () {
+impl<P: PublicKey> Directory<P> for Unit {
     fn matches(&self, _: &Set<P>) -> bool {
         true
     }
@@ -151,7 +154,7 @@ pub trait Manager: Provider {
 }
 
 impl<M: P2pManager> Manager for M {
-    type Directory = ();
+    type Directory = Unit;
     type Error = Infallible;
 
     fn track(
@@ -360,7 +363,7 @@ mod tests {
         for feedback in [Feedback::Ok, Feedback::Backoff, Feedback::Closed] {
             let mut manager = TestManager::new(feedback);
             assert_eq!(
-                Manager::track(&mut manager, Epoch::new(7), peers.clone(), &()),
+                Manager::track(&mut manager, Epoch::new(7), peers.clone(), &Unit),
                 Ok(feedback)
             );
             assert_eq!(manager.tracked.lock()[0], (7, peers.clone()));
@@ -370,7 +373,7 @@ mod tests {
     #[test]
     fn key_only_directory_matches_any_peer_set() {
         let (peers, _) = peers();
-        assert!(Directory::matches(&(), &peers.union()));
+        assert!(Directory::matches(&Unit, &peers.union()));
     }
 
     #[test]

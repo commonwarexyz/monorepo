@@ -42,7 +42,10 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64,
+    Acknowledgement, NZU32, NZU64, NZUsize,
+    ordered::Set,
+    range::NonEmptyRange,
+    sequence::{U64, Unit},
     sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -204,7 +207,7 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MinSig;
     type Signer = ed25519::PrivateKey;
-    type Directory = ();
+    type Directory = Unit;
 
     fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
         self.payload.clone()
@@ -304,13 +307,15 @@ impl Participants {
 
 impl ParticipantsProvider for Participants {
     type PublicKey = ed25519::PublicKey;
-    type Directory = ();
+    type Directory = Unit;
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         self.get(epoch)
     }
 
-    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {}
+    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {
+        Unit
+    }
 }
 
 /// Reporter that logs every finalized block.
@@ -635,7 +640,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
-            directory: (),
+            directory: Unit,
         };
 
         write_genesis(&path, &info).unwrap();
@@ -665,7 +670,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
-            directory: (),
+            directory: Unit,
         };
 
         write_genesis(&path, &info).unwrap();

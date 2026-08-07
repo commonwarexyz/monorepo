@@ -16,7 +16,7 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{Faults as _, N3f1, ordered::Set};
+use commonware_utils::{Faults as _, N3f1, ordered::Set, sequence::Unit};
 use std::num::{NonZeroU32, NonZeroU64};
 use thiserror::Error;
 
@@ -493,7 +493,7 @@ where
 /// [`state_sync`](crate::dkg::state_sync) material) can activate the epoch's
 /// peers without access to application state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = ()> {
+pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// Whether or not the reshare ceremony in this epoch was successful.
     pub outcome: EpochOutcome,
     /// Epoch this artifact describes.
@@ -617,7 +617,7 @@ where
 /// finalized dealer logs. The final block of an epoch instead carries the
 /// canonical [`EpochInfo`] for the following epoch.
 #[allow(clippy::large_enum_variant)]
-pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = ()> {
+pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// A finalized signed dealer log for inclusion mid-epoch.
     DealerLog(SignedDealerLog<V, C>),
     /// The canonical public epoch artifact for the next epoch, carried by the

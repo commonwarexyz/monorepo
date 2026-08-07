@@ -25,7 +25,11 @@ use commonware_storage::{
     Context,
     metadata::{self, Metadata},
 };
-use commonware_utils::{fixed_bytes, sequence::FixedBytes, sync::AsyncMutex};
+use commonware_utils::{
+    fixed_bytes,
+    sequence::{FixedBytes, Unit},
+    sync::AsyncMutex,
+};
 use std::{fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
@@ -61,7 +65,7 @@ pub struct Config<C = ()> {
 ///
 /// The probe fixes the floor and the epoch info atomically, so the info
 /// always describes the epoch containing the floor.
-pub struct StateSync<S, D, V, Dir = ()>
+pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
@@ -233,7 +237,7 @@ where
 /// and before starting either DKG actor. Clones share the resolution decision,
 /// so both actors observe the same material while using one durable partition.
 /// Use [`Plan::disabled`] for deployments that never use application state sync.
-pub struct Plan<S, D, V, Dir = ()>
+pub struct Plan<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
@@ -451,7 +455,7 @@ mod tests {
                 output,
                 players: participants.clone(),
                 next_players: participants,
-                directory: (),
+                directory: Unit,
             },
             floor,
         }

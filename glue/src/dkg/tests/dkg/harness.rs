@@ -39,7 +39,8 @@ use commonware_runtime::{
     telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sync::Mutex, test_rng,
+    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sequence::Unit,
+    sync::Mutex, test_rng,
 };
 use futures::future::pending;
 use std::{
@@ -207,7 +208,7 @@ impl EngineDefinition for DkgEngine {
                 directory_codec_config: (),
                 partition_prefix: format!("dkg-{index}"),
                 participants: self.participants_set(),
-                directory: (),
+                directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );
@@ -396,7 +397,7 @@ pub(super) fn run_closed_network_receiver() {
                 directory_codec_config: (),
                 partition_prefix: "dkg-closed-receiver".into(),
                 participants: engine.participants_set(),
-                directory: (),
+                directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );
@@ -469,7 +470,7 @@ pub(super) fn run_activation_failure_completes_empty() {
                 directory_codec_config: (),
                 partition_prefix: "dkg-activation-failure".into(),
                 participants: engine.participants_set(),
-                directory: (),
+                directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );

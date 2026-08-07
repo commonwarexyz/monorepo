@@ -42,7 +42,7 @@ use commonware_storage::journal::{
     self,
     segmented::variable::{Config as JournalConfig, Journal},
 };
-use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind};
+use commonware_utils::{Faults, N3f1, NZU16, NZUsize, futures::rebind, sequence::Unit};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -152,7 +152,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// boundary blocks or the separate state-sync store, not this journal. All
 /// secret material (shares, private dealings, and the dealer RNG seed) is held only through
 /// [`SecretStore`], never in plaintext.
-pub struct Store<E, SS, V, P, D = ()>
+pub struct Store<E, SS, V, P, D = Unit>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
@@ -726,7 +726,7 @@ mod tests {
             output,
             players: Set::default(),
             next_players: Set::default(),
-            directory: (),
+            directory: Unit,
         }
     }
 

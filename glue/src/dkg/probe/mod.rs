@@ -152,6 +152,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest, PublicKey, bls12381::primitives::variant::Variant as BlsVariant,
 };
+use commonware_utils::sequence::Unit;
 
 mod actor;
 pub use actor::{Actor, Config};
@@ -163,7 +164,7 @@ mod wire;
 
 /// The weakly subjective checkpoint a joining node bootstraps from.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bootstrap<P: PublicKey, D: Directory<P> = ()> {
+pub struct Bootstrap<P: PublicKey, D: Directory<P> = Unit> {
     /// Epoch whose participant snapshot is [`Bootstrap::participants`].
     ///
     /// Latest-finalization replies below this epoch are ignored, so the
@@ -203,7 +204,7 @@ pub(crate) type ActorArtifact<S, V> = Artifact<
 
 /// Public epoch material discovered during bootstrap.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Artifact<S, D, V, Dir = ()>
+pub struct Artifact<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
@@ -267,6 +268,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
+        sequence::Unit,
     };
     use std::{num::NonZeroU64, time::Duration};
 
@@ -385,7 +387,7 @@ mod tests {
                 bootstrap: Bootstrap {
                     epoch: bootstrap_epoch,
                     participants: genesis.participants(),
-                    directory: (),
+                    directory: Unit,
                 },
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
@@ -410,7 +412,7 @@ mod tests {
                 bootstrap: Bootstrap {
                     epoch: bootstrap_epoch,
                     participants: genesis.participants(),
-                    directory: (),
+                    directory: Unit,
                 },
                 verifier: fixture.schemes[1].clone(),
                 genesis,
@@ -712,7 +714,7 @@ mod tests {
                 output,
                 players: participants.clone(),
                 next_players: participants,
-                directory: (),
+                directory: Unit,
             }),
         );
         (block, sharing)
@@ -752,7 +754,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
-            directory: (),
+            directory: Unit,
         }
     }
 
@@ -1491,7 +1493,7 @@ mod tests {
                 bootstrap: Bootstrap {
                     epoch: Epoch::zero(),
                     participants: genesis.participants(),
-                    directory: (),
+                    directory: Unit,
                 },
                 verifier: fixture.schemes[0].clone(),
                 genesis,

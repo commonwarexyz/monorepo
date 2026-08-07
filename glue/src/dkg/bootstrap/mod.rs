@@ -48,6 +48,7 @@ use commonware_utils::{
     NZU16, NZU32, NZU64, NZUsize,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
+    sequence::Unit,
 };
 use rand_core::{CryptoRng, Rng};
 use std::{
@@ -65,7 +66,7 @@ const ARCHIVE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 type ConsensusScheme = simplex::scheme::ed25519::Scheme;
 
 /// Configuration for [`Engine`].
-pub struct Config<M, X, SS, T, D = ()>
+pub struct Config<M, X, SS, T, D = Unit>
 where
     D: Read,
 {
@@ -117,7 +118,7 @@ where
 }
 
 /// Completion produced when the one-shot DKG chain finalizes its final block.
-pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = ()> {
+pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     /// Final DKG artifact, if the ceremony succeeded.
     ///
     /// Carries the configured transport directory, so it can seed the genesis
@@ -127,7 +128,7 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = ()> {
 
 /// Block type used by the one-shot DKG chain.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = ()> {
+pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
@@ -227,7 +228,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 }
 
 /// Self-contained DKG engine.
-pub struct Engine<E, V, M, X, SS, T, D = ()>
+pub struct Engine<E, V, M, X, SS, T, D = Unit>
 where
     V: Variant,
     D: Read,
@@ -671,7 +672,7 @@ mod tests {
             directory_codec_config: (),
             partition_prefix: "test".into(),
             participants: Set::default(),
-            directory: (),
+            directory: Unit,
             blocks_per_epoch: NZU64!(1),
         };
 

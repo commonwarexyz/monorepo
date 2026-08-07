@@ -11,6 +11,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_utils::sequence::Unit;
 use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
@@ -20,7 +21,7 @@ use tracing::{debug, field};
 /// Carries the wrapper's upstream input alongside the reshare `payload` selected
 /// and fetched for the block being proposed. The wrapped application attaches
 /// `payload` to the block it builds and uses `upstream` for its own purposes.
-pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = ()> {
+pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// Input forwarded from the application wrapping the reshare wrapper.
     pub upstream: Upstream,
 
@@ -501,7 +502,7 @@ mod tests {
             output,
             players: Set::default(),
             next_players: Set::default(),
-            directory: (),
+            directory: Unit,
         })
     }
 

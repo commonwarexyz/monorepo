@@ -42,6 +42,7 @@ use commonware_runtime::deterministic;
 use commonware_utils::{
     Acknowledgement, NZU16, NZUsize,
     channel::{fallible::OneshotExt, oneshot},
+    sequence::Unit,
     sync::Mutex,
 };
 use std::{
@@ -76,7 +77,7 @@ trait TestDirectory<P: CryptoPublicKey>: DkgDirectory<P> {
     fn codec_config(max_participants: NonZeroU32) -> Self::Cfg;
 }
 
-impl<P: CryptoPublicKey> TestDirectory<P> for () {
+impl<P: CryptoPublicKey> TestDirectory<P> for Unit {
     fn codec_config(_: NonZeroU32) -> Self::Cfg {}
 }
 
@@ -102,7 +103,7 @@ impl<M: Provider> Provider for FailingManager<M> {
 }
 
 impl<M: Provider> DkgManager for FailingManager<M> {
-    type Directory = ();
+    type Directory = Unit;
     type Error = TrackFailed;
 
     fn track(
@@ -149,7 +150,7 @@ impl<M: Provider<PublicKey = PublicKey>> Provider for DirectoryManager<M> {
 
 impl<M> DkgManager for DirectoryManager<M>
 where
-    M: DkgManager<PublicKey = PublicKey, Directory = ()>,
+    M: DkgManager<PublicKey = PublicKey, Directory = Unit>,
 {
     type Directory = Addresses<PublicKey>;
     type Error = M::Error;
@@ -163,7 +164,7 @@ where
         self.tracked
             .lock()
             .push((epoch, peers.clone(), directory.clone()));
-        self.inner.track(epoch, peers, &())
+        self.inner.track(epoch, peers, &Unit)
     }
 }
 
@@ -243,7 +244,7 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub(crate) struct MockBlock<D: Digest, C, Dir = ()> {
+pub(crate) struct MockBlock<D: Digest, C, Dir = Unit> {
     context: C,
     parent: D,
     height: Height,

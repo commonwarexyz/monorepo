@@ -305,6 +305,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
+        sequence::Unit,
     };
     use std::{
         collections::VecDeque,
@@ -339,13 +340,15 @@ mod tests {
 
     impl ParticipantsProvider for StaticParticipants {
         type PublicKey = mocks::TestPublicKey;
-        type Directory = ();
+        type Directory = Unit;
 
         async fn participants(&mut self, _epoch: Epoch) -> Set<Self::PublicKey> {
             self.0.clone()
         }
 
-        async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {}
+        async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {
+            Unit
+        }
     }
 
     #[derive(Debug)]
