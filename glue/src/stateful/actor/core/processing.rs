@@ -20,7 +20,7 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, futures::Pool};
+use commonware_utils::{Acknowledgement as _, channel::fallible::OneshotExt, futures::Pool};
 use futures::{
     FutureExt as _,
     future::{Either, ready},
@@ -2370,12 +2370,12 @@ mod tests {
             )
             .await;
 
-            let (acknowledgement, mut waiter1) = Exact::handle();
+            let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
-            let (acknowledgement, mut waiter2) = Exact::handle();
+            let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(2, 2)),
                 acknowledgement,
@@ -2387,8 +2387,12 @@ mod tests {
             drop(control.flushes.lock().remove(0));
             actor.await.expect("processing actor should stop");
             assert!(
-                poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
-                "aborted target flush must leave acknowledgements pending",
+                waiter1.await.is_err(),
+                "aborted target flush must cancel the first acknowledgement",
+            );
+            assert!(
+                waiter2.await.is_err(),
+                "aborted target flush must cancel the second acknowledgement",
             );
             assert!(
                 control.pruned.lock().is_empty(),
@@ -2398,8 +2402,8 @@ mod tests {
     }
 
     /// While the loop is idle, a completed flush must release its acknowledgement without
-    /// displacing a simultaneously reported block, while an incomplete flush must leave its block
-    /// unacknowledged.
+    /// displacing a simultaneously reported block, while an incomplete flush must cancel its
+    /// acknowledgement when processing stops.
     #[test]
     fn idle_acks_follow_flush_outcome() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
@@ -2423,7 +2427,7 @@ mod tests {
             // without displacing the new message.
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
-            let (acknowledgement, mut waiter2) = Exact::handle();
+            let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(2, 2)),
                 acknowledgement,
@@ -2435,13 +2439,13 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Dropping block 2's release resolves its flush as shutdown. The
-            // acknowledgement must be withheld so marshal's floor cannot pass
-            // unflushed state.
+            // acknowledgement is canceled so marshal stops without advancing
+            // its floor past unflushed state.
             drop(control.flushes.lock().remove(0));
             actor.await.expect("processing actor should stop");
             assert!(
-                poll!(&mut waiter2).is_pending(),
-                "unflushed block acknowledgement must remain pending",
+                waiter2.await.is_err(),
+                "unflushed block acknowledgement must be canceled",
             );
         });
     }
@@ -2452,7 +2456,7 @@ mod tests {
             let (mut mailbox, control, _marshal, actor) =
                 spawn_processing(&context, "gated-ready-abort", None).await;
 
-            let (acknowledgement, mut waiter1) = Exact::handle();
+            let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(1, 1)),
                 acknowledgement,
@@ -2461,7 +2465,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let (acknowledgement, mut waiter2) = Exact::handle();
+            let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(2, 2)),
                 acknowledgement,
@@ -2471,20 +2475,24 @@ mod tests {
             actor.await.expect("processing actor should stop");
             assert_eq!(control.flushes.lock().len(), 1);
             assert!(
-                poll!(&mut waiter1).is_pending() && poll!(&mut waiter2).is_pending(),
-                "unflushed acknowledgements must remain pending",
+                waiter1.await.is_err(),
+                "the active unflushed acknowledgement must be canceled",
+            );
+            assert!(
+                waiter2.await.is_err(),
+                "the queued unflushed acknowledgement must be canceled",
             );
         });
     }
 
-    /// Stopping processing with a flush in flight must not cancel marshal's acknowledgement.
+    /// Stopping processing with a flush in flight must cancel marshal's acknowledgement.
     #[test]
-    fn shutdown_keeps_pending_flush_ack_pending() {
+    fn shutdown_cancels_pending_flush_ack() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, _marshal, actor) =
                 spawn_processing(&context, "gated-shutdown", None).await;
 
-            let (acknowledgement, mut waiter) = Exact::handle();
+            let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(
                 Arc::new(TestBlock::new(1, 1)),
                 acknowledgement,
@@ -2496,8 +2504,8 @@ mod tests {
             drop(mailbox);
             actor.await.expect("processing actor should stop");
             assert!(
-                poll!(&mut waiter).is_pending(),
-                "shutdown must leave in-flight acknowledgements pending",
+                waiter.await.is_err(),
+                "shutdown must cancel in-flight acknowledgements",
             );
         });
     }

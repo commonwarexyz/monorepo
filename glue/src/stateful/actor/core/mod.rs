@@ -25,7 +25,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::{Acknowledgement as _, acknowledgement::Exact, channel::oneshot};
+use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
@@ -39,32 +39,6 @@ mod syncing;
 mod verifications;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
-
-/// Defers marshal's acknowledgement until finalized work completes.
-pub(crate) struct Deferred(Option<Exact>);
-
-impl Deferred {
-    fn acknowledge(mut self) {
-        self.0
-            .take()
-            .expect("pending acknowledgement must exist")
-            .acknowledge();
-    }
-}
-
-impl From<Exact> for Deferred {
-    fn from(acknowledgement: Exact) -> Self {
-        Self(Some(acknowledgement))
-    }
-}
-
-impl Drop for Deferred {
-    fn drop(&mut self) {
-        if let Some(acknowledgement) = self.0.take() {
-            acknowledgement.abandon();
-        }
-    }
-}
 
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -319,7 +293,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Deferred, Stateful};
+    use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
@@ -335,10 +309,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{
-        Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::mpsc,
-    };
-    use futures::FutureExt as _;
+    use commonware_utils::{NZU64, NZUsize, channel::mpsc};
     use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
@@ -363,13 +334,6 @@ mod tests {
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
         }
-    }
-
-    #[test]
-    fn dropped_deferred_keeps_waiter_pending() {
-        let (acknowledgement, waiter) = Exact::handle();
-        drop(Deferred::from(acknowledgement));
-        assert!(waiter.now_or_never().is_none());
     }
 
     #[test]
