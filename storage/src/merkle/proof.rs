@@ -231,10 +231,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
             .map(|(&pos, digest)| (pos, *digest))
             .collect();
 
-        // Verify each element by reconstructing its sub-proof in the canonical layout (via the
-        // shared `build_proof`) and checking its root. Every required position was collected above
-        // and matched against `digests.len()`, so `node_digests` is complete and `build_proof`
-        // cannot fail here.
+        // Verify each element by reconstructing its sub-proof in the canonical layout and checking
+        // its root. Every required position was collected above and matched against `digests.len()`,
+        // so `node_digests` is complete and `build_proof` cannot fail here.
         for (element, loc) in elements {
             let bp = &blueprints[loc];
             let proof = bp
@@ -244,7 +243,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                     |pos| node_digests.get(&pos).copied(),
                     |_pos| (),
                 )
-                .expect("build_proof cannot fail: every node is present by construction");
+                .expect("every node is present by construction");
 
             match proof.reconstruct_root_inner(hasher, &[element.as_ref()], *loc, None) {
                 Ok(reconstructed_root) if &reconstructed_root == root => {}
