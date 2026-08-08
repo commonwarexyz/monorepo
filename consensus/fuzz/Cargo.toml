@@ -133,3 +133,10 @@ path = "fuzz_targets/simplex_secp256r1.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ordered_broadcast_messages"
+path = "fuzz_targets/ordered_broadcast_messages.rs"
+test = false
+doc = false
+bench = false
