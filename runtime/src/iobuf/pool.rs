@@ -208,8 +208,9 @@ impl BufferPoolConfig {
             pool_min_size: 0,
             class_limits: BTreeMap::new(),
             prefill: false,
-            // TODO (#2960): this needs to be page/block aligned for O_DIRECT
-            alignment: NZUsize!(1),
+            // Page-align storage buffers (equal to the smallest size class) so reads and
+            // writes are ready for direct I/O and DMA.
+            alignment: NZUsize!(page_size()),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
@@ -2707,7 +2708,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(None)
         );
         assert!(!config.prefill);
-        assert_eq!(config.alignment.get(), 1);
+        assert_eq!(config.alignment.get(), page_size());
     }
 
     #[test]
@@ -2744,7 +2745,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(Some(NZUsize!(8)))
         );
         assert!(config.prefill);
-        assert_eq!(config.alignment.get(), 1);
+        assert_eq!(config.alignment.get(), page_size());
 
         // Alignment can be tuned explicitly as long as the smallest class is
         // also adjusted.
