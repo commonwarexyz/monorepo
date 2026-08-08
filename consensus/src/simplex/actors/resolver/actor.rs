@@ -1198,6 +1198,33 @@ mod tests {
         });
     }
 
+    /// A resolve without a target (no tracked round in the term knows the
+    /// leader) must fall back to an untargeted fetch, not be dropped.
+    #[test_async]
+    async fn resolve_without_target_falls_back_to_untargeted_fetch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { verifier, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let actor = build_actor(context, verifier, TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let requested = View::new(9);
+
+            actor.resolve(
+                &mut resolver,
+                View::new(10),
+                requested,
+                Kind::Notarization,
+                None,
+            );
+            assert!(resolver.targeted().is_empty());
+            assert_eq!(resolver.outstanding(), vec![9]);
+            assert_eq!(
+                resolver.subscriptions(9),
+                vec![Ask::ancestry(Kind::Notarization)]
+            );
+        });
+    }
+
     #[test_async]
     async fn targeted_fetches_drop_only_when_ask_is_satisfied() {
         let runtime = deterministic::Runner::default();

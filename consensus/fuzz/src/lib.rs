@@ -125,6 +125,7 @@ pub struct FuzzInput {
     pub required_containers: u64,
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
+    pub heterogeneous_optimism: bool,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -157,6 +158,7 @@ impl Arbitrary<'_> for FuzzInput {
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
+        let heterogeneous_optimism = u.arbitrary()?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -189,6 +191,7 @@ impl Arbitrary<'_> for FuzzInput {
             required_containers,
             term_length,
             optimistic_views,
+            heterogeneous_optimism,
             strategy,
         })
     }
@@ -197,9 +200,14 @@ impl Arbitrary<'_> for FuzzInput {
 /// Derive a per-validator optimistic-view budget from the fuzzed base value.
 ///
 /// Mismatched values across validators are safe (see
-/// [`commonware_consensus::simplex::elector::Terms::stable`]), so varying them
-/// deterministically exercises heterogeneous deployments.
+/// [`commonware_consensus::simplex::elector::Terms::stable`]), so a
+/// heterogeneous run varies them deterministically per validator. A
+/// homogeneous run gives every validator the base value, covering uniform
+/// deployments (including optimism disabled everywhere).
 fn validator_optimistic_views(input: &FuzzInput, validator: usize) -> ViewDelta {
+    if !input.heterogeneous_optimism {
+        return input.optimistic_views;
+    }
     ViewDelta::new(
         (input.optimistic_views.get() + validator as u64)
             % (max_optimistic_views(input.term_length) + 1),

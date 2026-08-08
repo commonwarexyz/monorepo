@@ -2848,8 +2848,9 @@ mod tests {
         finalize_resumes_after_same_term_heal::<_, _>(secp256r1::fixture);
     }
 
-    /// Regression: optimistic future proposal requests must not be dropped when
-    /// unrelated events (like current-view timeout handling) occur first.
+    /// Regression: an optimistic future proposal request must survive the
+    /// loop iteration that handles the current view's timeout while the
+    /// request is in flight.
     #[test_traced]
     fn test_optimistic_future_proposal_survives_interleaved_timeout() {
         let n = 5;
@@ -2889,22 +2890,22 @@ mod tests {
                 elector,
                 VoterOptions {
                     leader_timeout: Duration::from_secs(2),
-                    // Certify latency exceeds the certification timeout, so
-                    // view 1's timeout is guaranteed to fire while the view-2
-                    // optimistic proposal request is still in flight; the
-                    // propose latency delays that request long enough for the
-                    // timeout to win the race.
-                    certification_timeout: Duration::from_secs(4),
-                    timeout_retry: Duration::from_millis(200),
+                    // The certification timeout fires between the view-2
+                    // optimistic proposal request (issued with view 1's
+                    // notarize after one propose latency) and its response
+                    // (a second propose latency later): handling the view-1
+                    // timeout must not drop the in-flight request.
+                    certification_timeout: Duration::from_millis(300),
+                    timeout_retry: Duration::from_secs(10),
                     local_index,
                     propose_latency_ms: 200.0,
-                    certify_latency_ms: 5_000.0,
                     ..Default::default()
                 },
             )
             .await;
 
             let mut saw_view_1_notarize = false;
+            let mut saw_view_1_nullify = false;
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -2919,8 +2920,17 @@ mod tests {
                                         saw_view_1_notarize,
                                         "expected view 1 notarize before optimistic view 2 notarize"
                                     );
+                                    assert!(
+                                        saw_view_1_nullify,
+                                        "expected the view-1 timeout to interleave before the view-2 notarize"
+                                    );
                                     break;
                                 }
+                            }
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == View::new(1) =>
+                            {
+                                saw_view_1_nullify = true;
                             }
                             _ => {}
                         }
@@ -3340,10 +3350,8 @@ mod tests {
 
     #[test_traced]
     fn test_missed_notarization_is_fetched() {
-        missed_notarization_is_fetched(bls12381_multisig::fixture::<MinPk, _>);
-        missed_notarization_is_fetched(bls12381_multisig::fixture::<MinSig, _>);
+        // Request routing is scheme-independent; one scheme is enough.
         missed_notarization_is_fetched(ed25519::fixture);
-        missed_notarization_is_fetched(secp256r1::fixture);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote

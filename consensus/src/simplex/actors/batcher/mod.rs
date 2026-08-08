@@ -2399,20 +2399,8 @@ mod tests {
 
     #[test_traced]
     fn test_future_notarization_without_leader_does_not_panic() {
-        future_notarization_without_leader_does_not_panic(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        future_notarization_without_leader_does_not_panic(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        future_notarization_without_leader_does_not_panic(
-            bls12381_threshold_std::fixture::<MinPk, _>,
-        );
-        future_notarization_without_leader_does_not_panic(
-            bls12381_threshold_std::fixture::<MinSig, _>,
-        );
-        future_notarization_without_leader_does_not_panic(bls12381_multisig::fixture::<MinPk, _>);
-        future_notarization_without_leader_does_not_panic(bls12381_multisig::fixture::<MinSig, _>);
+        // The missing-leader path is scheme-independent; one batchable and
+        // one non-batchable scheme cover both verification flows.
         future_notarization_without_leader_does_not_panic(ed25519::fixture);
         future_notarization_without_leader_does_not_panic(secp256r1::fixture);
     }
@@ -6214,7 +6202,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
-            let (voter_sender, _voter_receiver) = mailbox::new::<voter::Message<S, Sha256Digest>>(
+            let (voter_sender, mut voter_receiver) = mailbox::new::<voter::Message<S, Sha256Digest>>(
                 context.child("mailbox"),
                 NZUsize!(1024),
             );
@@ -6230,6 +6218,22 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
+
+            // Register the participants that will send votes later.
+            let quorum_size = quorum(n) as usize;
+            let mut participant_senders = Vec::new();
+            for pk in participants.iter().skip(1).take(quorum_size - 1) {
+                participant_senders.push(
+                    register_and_link_peer(
+                        &oracle,
+                        pk.clone(),
+                        me.clone(),
+                        0,
+                        Duration::from_millis(1),
+                    )
+                    .await,
+                );
+            }
 
             // Start the batcher at view 1
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -6251,7 +6255,7 @@ mod tests {
                 View::new(1),
                 Sha256::hash(&[b"ahead"]),
             );
-            let notarize = Notarize::sign(&schemes[0], proposal).unwrap();
+            let notarize = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Notarize(notarize));
             context.sleep(Duration::from_millis(50)).await;
 
@@ -6260,17 +6264,49 @@ mod tests {
                 metrics.contains("added_total 1"),
                 "constructed vote ahead of the batcher's view must be added: {metrics}"
             );
+
+            // Advancing into the stored vote's view reactivates it: with
+            // quorum-1 network votes on top, the batcher constructs the
+            // notarization and forwards it to the voter.
+            batcher_mailbox.update(
+                Span::none(),
+                future_view,
+                Participant::new(0),
+                View::zero(),
+                None,
+            );
+            for (scheme, sender) in schemes[1..quorum_size].iter().zip(&mut participant_senders) {
+                let vote = Notarize::sign(scheme, proposal.clone()).unwrap();
+                sender.send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(vote).encode(),
+                    true,
+                );
+            }
+            loop {
+                select! {
+                    message = voter_receiver.recv() => {
+                        let message = message.expect("voter mailbox closed");
+                        if matches!(
+                            &message,
+                            voter::Message::Verified { certificate: Certificate::Notarization(n), .. }
+                                if n.view() == future_view
+                        ) {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("stored constructed vote was never processed");
+                    },
+                }
+            }
         });
     }
 
     #[test_traced]
     fn test_constructed_votes_are_not_future_bounded() {
-        constructed_votes_are_not_future_bounded(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        constructed_votes_are_not_future_bounded(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        constructed_votes_are_not_future_bounded(bls12381_threshold_std::fixture::<MinPk, _>);
-        constructed_votes_are_not_future_bounded(bls12381_threshold_std::fixture::<MinSig, _>);
-        constructed_votes_are_not_future_bounded(bls12381_multisig::fixture::<MinPk, _>);
-        constructed_votes_are_not_future_bounded(bls12381_multisig::fixture::<MinSig, _>);
+        // Retention and reactivation are scheme-independent; one batchable
+        // and one non-batchable scheme cover both certificate flows.
         constructed_votes_are_not_future_bounded(ed25519::fixture);
         constructed_votes_are_not_future_bounded(secp256r1::fixture);
     }

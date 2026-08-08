@@ -13,7 +13,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use rand_core::CryptoRng;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // Intentionally restates View::covers with independent integer arithmetic:
 // the fuzz oracle must not delegate to the production term predicates
@@ -105,14 +105,13 @@ pub fn check<P: Simplex>(
                 finalizations.iter().map(|(&view, d)| (view, d.parent))
             })
             .collect();
-        // Terms any replica nullified. Taking the union across replicas is
+        // Views any replica nullified. Taking the union across replicas is
         // deliberately permissive: a skip is accepted when the nullification
         // that justifies it was observed anywhere, not necessarily by the
         // replica that finalized. That can only weaken the check below.
-        let nullified_terms: HashSet<u64> = replicas
+        let nullified_views: BTreeSet<u64> = replicas
             .iter()
-            .flat_map(|(_, nullifications, _)| nullifications.keys())
-            .map(|&view| term_of(view, term_length))
+            .flat_map(|(_, nullifications, _)| nullifications.keys().copied())
             .collect();
 
         // In ascending view order, each parent must be strictly below its
@@ -142,11 +141,21 @@ pub fn check<P: Simplex>(
                 );
                 continue;
             }
-            for term in term_of(parent + 1, term_length)..=term_of(view - 1, term_length) {
+            // A nullification abandons its own view and the rest of that
+            // view's term, so each term touched by the gap needs a
+            // nullification at or below its first skipped view.
+            let mut cursor = parent + 1;
+            while cursor < view {
+                let term = term_of(cursor, term_length);
+                let covered = nullified_views
+                    .range(..=cursor)
+                    .next_back()
+                    .is_some_and(|&nullified| term_of(nullified, term_length) == term);
                 assert!(
-                    nullified_terms.contains(&term),
-                    "Invariant violation: view {view} finalized over term {term} (parent {parent}) with no nullification",
+                    covered,
+                    "Invariant violation: view {view} finalized over view {cursor} (parent {parent}) with no nullification",
                 );
+                cursor = term * term_length.get() + 1;
             }
         }
     }
@@ -383,6 +392,23 @@ mod tests {
     use commonware_utils::NZU32;
     use std::{collections::HashMap, panic};
 
+    /// Runs `check` and returns the panic message, so each test can assert
+    /// its named invariant fired (fixtures can violate more than one rule).
+    fn check_panics(
+        configuration: Configuration,
+        term_length: TermLength,
+        replicas: Vec<ReplicaState>,
+    ) -> String {
+        let result = panic::catch_unwind(|| {
+            check::<SimplexEd25519>(configuration, term_length, replicas);
+        });
+        let err = result.expect_err("check must panic");
+        err.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .expect("panic payload must be a string")
+    }
+
     #[test]
     fn same_term_nullification_blocks_later_finalization() {
         let payload = Sha256Digest::from([7u8; 32]);
@@ -402,23 +428,26 @@ mod tests {
             },
         );
         let mut finalizations = HashMap::new();
+        // Parent 2 keeps the ancestry rules satisfied so only the same-term
+        // nullification invariant can fire.
         finalizations.insert(
             3,
             Finalization {
                 payload,
-                parent: 0,
+                parent: 2,
                 signature_count: Some(3),
             },
         );
 
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(
-                N4F1C3,
-                TermLength::new(NZU32!(5)),
-                vec![(notarizations, nullifications, finalizations)],
-            );
-        });
-        assert!(result.is_err());
+        let message = check_panics(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            vec![(notarizations, nullifications, finalizations)],
+        );
+        assert!(
+            message.contains("finalized in the same term"),
+            "wrong invariant fired: {message}"
+        );
     }
 
     #[test]
@@ -454,15 +483,18 @@ mod tests {
             vec![replica(1), replica(2)],
         );
 
-        // With an honest quorum, a parent mismatch is a real violation.
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(
-                N4F1C3,
-                TermLength::new(NZU32!(5)),
-                vec![replica(1), replica(2)],
-            );
-        });
-        assert!(result.is_err());
+        // With an honest quorum, a parent mismatch is a real violation. Pin
+        // the message: whether the fixture's other violation (parent 1 skips
+        // view 2) can also fire depends on how the checker flattens replicas.
+        let message = check_panics(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            vec![replica(1), replica(2)],
+        );
+        assert!(
+            message.contains("finalized parent mismatch"),
+            "wrong invariant fired: {message}"
+        );
     }
 
     #[test]
@@ -520,15 +552,18 @@ mod tests {
         }
 
         // View 5 finalized with parent 1, but view 2 is also finalized: view 2
-        // is forked around, so the ancestry invariant must fire.
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(
-                N4F1C3,
-                TermLength::ONE,
-                vec![(notarizations, HashMap::new(), finalizations)],
-            );
-        });
-        assert!(result.is_err());
+        // is forked around, so the ancestry invariant must fire. The fixture
+        // also skips unnullified terms, so pin the message to the
+        // forked-around invariant.
+        let message = check_panics(
+            N4F1C3,
+            TermLength::ONE,
+            vec![(notarizations, HashMap::new(), finalizations)],
+        );
+        assert!(
+            message.contains("finalized strictly between parent"),
+            "wrong invariant fired: {message}"
+        );
     }
 
     #[test]
@@ -556,10 +591,11 @@ mod tests {
         };
 
         // View 4 is not a term start, so it must build on view 3.
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state());
-        });
-        assert!(result.is_err());
+        let message = check_panics(N4F1C3, TermLength::new(NZU32!(5)), state());
+        assert!(
+            message.contains("finalized with non-immediate parent"),
+            "wrong invariant fired: {message}"
+        );
 
         // Without an honest quorum the parent is not trustworthy, so the rule
         // must not fire (see `parent_mismatch_requires_honest_quorum`).
@@ -602,18 +638,80 @@ mod tests {
             vec![(notarizations, nullifications, finalizations)]
         };
 
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[]));
-        });
-        assert!(result.is_err(), "skip over an unnullified term must fire");
+        let message = check_panics(N4F1C3, TermLength::new(NZU32!(5)), state(&[]));
+        assert!(
+            message.contains("with no nullification"),
+            "skip over an unnullified term must fire: {message}"
+        );
 
         // Nullifying only the first skipped term leaves the second uncovered.
-        let result = panic::catch_unwind(|| {
-            check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[4]));
-        });
-        assert!(result.is_err(), "partial coverage must fire");
+        let message = check_panics(N4F1C3, TermLength::new(NZU32!(5)), state(&[4]));
+        assert!(
+            message.contains("with no nullification"),
+            "partial coverage must fire: {message}"
+        );
+
+        // A nullification covers only its own view and the rest of its term:
+        // late nullifications (views 5 and 10) leave views 4 and 6 uncovered.
+        // Pin the first uncovered view so coverage of view 4 cannot regress
+        // while the assert still fires at view 6.
+        let message = check_panics(N4F1C3, TermLength::new(NZU32!(5)), state(&[5, 10]));
+        assert!(
+            message.contains("over view 4"),
+            "late nullifications must not cover earlier views: {message}"
+        );
 
         // Both skipped terms nullified: the skip is legal.
         check::<SimplexEd25519>(N4F1C3, TermLength::new(NZU32!(5)), state(&[4, 6]));
+    }
+
+    #[test]
+    fn parent_at_or_above_child_fires() {
+        let payload = Sha256Digest::from([3u8; 32]);
+        let mut finalizations = HashMap::new();
+        finalizations.insert(
+            3,
+            Finalization {
+                payload,
+                parent: 3,
+                signature_count: Some(3),
+            },
+        );
+
+        let message = check_panics(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            vec![(HashMap::new(), HashMap::new(), finalizations)],
+        );
+        assert!(
+            message.contains("not strictly below it"),
+            "wrong invariant fired: {message}"
+        );
+    }
+
+    #[test]
+    fn finalization_without_notarization_fires() {
+        // Complements `same_term_nullification_requires_honest_quorum`, which
+        // proves this check is suppressed without an honest quorum.
+        let payload = Sha256Digest::from([10u8; 32]);
+        let mut finalizations = HashMap::new();
+        finalizations.insert(
+            3,
+            Finalization {
+                payload,
+                parent: 2,
+                signature_count: Some(3),
+            },
+        );
+
+        let message = check_panics(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            vec![(HashMap::new(), HashMap::new(), finalizations)],
+        );
+        assert!(
+            message.contains("finalization without notarization"),
+            "wrong invariant fired: {message}"
+        );
     }
 }

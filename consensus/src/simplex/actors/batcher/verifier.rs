@@ -1359,14 +1359,14 @@ mod tests {
         verifier.set_leader(leader, None);
     }
 
-    fn set_leader_change_panics<S, F>(mut fixture: F)
-    where
-        S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
-    {
+    /// Changing an already-set leader is scheme-independent bookkeeping, so
+    /// one scheme is enough.
+    #[test]
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics() {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let mut verifier = Verifier::<S, Sha256>::new(
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 3);
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
             3,
@@ -1375,52 +1375,25 @@ mod tests {
         verifier.set_leader(Participant::new(1), None);
     }
 
+    /// The notarize handed to set_leader must come from the elected leader.
+    /// This is a caller contract, not adversarial-input filtering.
     #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_bls_threshold_minsig() {
-        set_leader_change_panics(bls12381_threshold_vrf::fixture::<MinSig, _>);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_bls_threshold_minpk() {
-        set_leader_change_panics(bls12381_threshold_vrf::fixture::<MinPk, _>);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_bls_threshold_std_minsig() {
-        set_leader_change_panics(bls12381_threshold_std::fixture::<MinSig, _>);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_bls_threshold_std_minpk() {
-        set_leader_change_panics(bls12381_threshold_std::fixture::<MinPk, _>);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_bls_multisig_minsig() {
-        set_leader_change_panics(bls12381_multisig::fixture::<MinSig, _>);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_bls_multisig_minpk() {
-        set_leader_change_panics(bls12381_multisig::fixture::<MinPk, _>);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_ed() {
-        set_leader_change_panics(ed25519::fixture);
-    }
-
-    #[test]
-    #[should_panic(expected = "leader changed within round")]
-    fn test_set_leader_change_panics_secp() {
-        set_leader_change_panics(secp256r1::fixture);
+    #[should_panic(expected = "notarize must be from leader")]
+    fn test_set_leader_rejects_foreign_notarize() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 3);
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(
+            Round::new(Epoch::new(0), View::new(1)),
+            schemes[0].clone(),
+            3,
+        );
+        let notarize = create_notarize(
+            &schemes[1],
+            Round::new(Epoch::new(0), View::new(1)),
+            View::new(0),
+            10,
+        );
+        verifier.set_leader(Participant::new(0), Some(&notarize));
     }
 
     async fn notarizes_wait_for_quorum<S, F>(mut fixture: F)
@@ -1674,18 +1647,9 @@ mod tests {
 
     #[test_async]
     async fn test_verified_leader_notarize_is_not_reverified() {
-        verified_leader_notarize_is_not_reverified(bls12381_threshold_vrf::fixture::<MinSig, _>)
-            .await;
-        verified_leader_notarize_is_not_reverified(bls12381_threshold_vrf::fixture::<MinPk, _>)
-            .await;
-        verified_leader_notarize_is_not_reverified(bls12381_threshold_std::fixture::<MinSig, _>)
-            .await;
-        verified_leader_notarize_is_not_reverified(bls12381_threshold_std::fixture::<MinPk, _>)
-            .await;
-        verified_leader_notarize_is_not_reverified(bls12381_multisig::fixture::<MinSig, _>).await;
-        verified_leader_notarize_is_not_reverified(bls12381_multisig::fixture::<MinPk, _>).await;
+        // The skip-reverification bookkeeping is scheme-independent; one
+        // batchable scheme exercises it (the helper is a no-op otherwise).
         verified_leader_notarize_is_not_reverified(ed25519::fixture).await;
-        verified_leader_notarize_is_not_reverified(secp256r1::fixture).await;
     }
 
     async fn certificate_proposal_allows_finalize_verification<S, F>(mut fixture: F)

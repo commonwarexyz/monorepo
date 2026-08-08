@@ -178,6 +178,7 @@ mod tests {
             required_containers: containers,
             term_length,
             optimistic_views: ViewDelta::new(term_length.get()),
+            heterogeneous_optimism: true,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }

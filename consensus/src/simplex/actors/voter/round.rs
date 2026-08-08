@@ -819,6 +819,51 @@ mod tests {
         assert!(!round.request(requested.next()));
     }
 
+    /// The latency sample anchors at our own proposal when we built one,
+    /// falls back to view entry, and is absent for rounds we never started.
+    /// First entry wins across repeated [Round::mark_entered] calls.
+    #[test]
+    fn elapsed_since_start_anchors_at_proposal_then_entry() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(10));
+        let t0 = SystemTime::UNIX_EPOCH;
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+
+        // Never started: no sample.
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        assert!(round.elapsed_since_start(at(5)).is_none());
+
+        // Follower: anchored at view entry, first entry wins.
+        round.mark_entered(at(1));
+        round.mark_entered(at(3));
+        assert_eq!(
+            round.elapsed_since_start(at(5)),
+            Some(Duration::from_secs(4))
+        );
+
+        // Optimistic leader: proposing before entering the view anchors the
+        // sample at the proposal.
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        let proposal = Proposal::new(round_info, View::new(9), Sha256Digest::from([1u8; 32]));
+        assert!(round.proposed(at(2), proposal.clone()));
+        round.mark_entered(at(4));
+        assert_eq!(
+            round.elapsed_since_start(at(6)),
+            Some(Duration::from_secs(4))
+        );
+
+        // Normal leader: the proposal anchors the sample even when the view
+        // was entered first, not whichever timestamp is earlier.
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        round.mark_entered(at(1));
+        assert!(round.proposed(at(3), proposal));
+        assert_eq!(
+            round.elapsed_since_start(at(6)),
+            Some(Duration::from_secs(3))
+        );
+    }
+
     #[test]
     fn equivocation_detected_on_proposal_notarization_conflict() {
         let mut rng = test_rng();
