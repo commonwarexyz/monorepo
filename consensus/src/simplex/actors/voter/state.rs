@@ -625,7 +625,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let result = self.create_round(view).add_finalization(finalization);
         if result.0 {
             self.slide_optimistic_frontier(view);
-            self.wake_certification_child(view);
+            self.requeue_child_certification(view);
         }
         result
     }
@@ -1114,9 +1114,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         (ready, fetches)
     }
 
-    /// Reconsiders the immediate in-term child whose certification was blocked
-    /// on `parent`. The child's round retains the notarization while dormant.
-    fn wake_certification_child(&mut self, parent: View) {
+    /// Requeues certification for the immediate in-term child after `parent`
+    /// becomes explicit ancestry.
+    ///
+    /// No other candidate can depend on this transition. The gate applies only
+    /// within a term, where structural validation requires each proposal to
+    /// name the previous view. Term-start candidates bypass the gate.
+    fn requeue_child_certification(&mut self, parent: View) {
         let child = parent.next();
         if child <= self.last_finalized
             || child.is_term_start(self.term_length())
@@ -1183,7 +1187,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.remove(&view);
 
         if is_success {
-            self.wake_certification_child(view);
+            self.requeue_child_certification(view);
+
             // Keep the stall deadline armed after certification so the
             // term-level timeout can still abandon a term that certifies but
             // never finalizes.
@@ -5118,9 +5123,12 @@ mod tests {
                 Duration::from_secs(4),
                 ViewDelta::new(2),
             );
+            // Use a non-leader so its local vote is the event that opens the
+            // optimistic child.
             let leader_idx =
                 usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
             let local_idx = (leader_idx + 1) % schemes.len();
+
             let config = |scheme, elector| Config {
                 scheme,
                 elector,
@@ -5131,6 +5139,8 @@ mod tests {
                 timeout_retry: Duration::from_secs(3),
             };
 
+            // Follow the live path through a local view-1 notarize vote and an
+            // optimistic verification request for view 2.
             let mut live = State::new(
                 context.child("live"),
                 config(schemes[local_idx].clone(), elector.clone()),
@@ -5157,6 +5167,8 @@ mod tests {
             assert!(live.set_proposal(View::new(2), child.clone()));
             assert!(matches!(live.try_verify(), Verify::Ready(..)));
 
+            // Rebuild from the durable vote and redeliver the child proposal,
+            // matching the inputs available after restart.
             let mut restarted = State::new(
                 context.child("restarted"),
                 config(schemes[local_idx].clone(), elector),
@@ -5165,6 +5177,8 @@ mod tests {
             restarted.replay(&Artifact::Notarize(local_vote));
             assert!(restarted.set_proposal(View::new(2), child));
 
+            // Replay must restore the ancestry gate that admitted the child on
+            // the live path.
             assert!(
                 matches!(restarted.try_verify(), Verify::Ready(..)),
                 "replayed local notarize should preserve optimistic child verification"

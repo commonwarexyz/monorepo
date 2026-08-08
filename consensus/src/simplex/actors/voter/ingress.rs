@@ -141,9 +141,9 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             return;
         }
 
-        // Preserve the leader-nullify fast path. An inactivity timeout can be
-        // ignored after a proposal is buffered, while a leader's explicit
-        // refusal remains sufficient to abandon the view.
+        // For the same view, LeaderNullify is stronger than Inactivity. A
+        // buffered proposal may suppress inactivity, but the leader's explicit
+        // refusal must still abandon the view.
         if let Self::Timeout {
             round: new_round,
             reason: new_reason,
@@ -520,6 +520,7 @@ mod tests {
 
     #[test]
     fn leader_nullify_replaces_inactivity_for_same_view() {
+        // A leader refusal upgrades an inactivity timeout already in the queue.
         let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
         Message::handle(
             &mut overflow,
@@ -541,6 +542,7 @@ mod tests {
         ));
         assert!(overflow.is_empty());
 
+        // A later inactivity timeout cannot downgrade a queued leader refusal.
         let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
         Message::handle(
             &mut overflow,

@@ -772,8 +772,7 @@ mod tests {
         actor
     }
 
-    #[test_async]
-    async fn self_targeted_fetch_does_not_restrict_existing_backfill() {
+    fn assert_targeted_fetch_does_not_restrict_existing_backfill(target_index: usize) {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -806,7 +805,7 @@ mod tests {
             }
             let mut connections = connections.into_iter();
             let requester_connection = connections.next().unwrap();
-            let (_target_sender, mut target_receiver) = connections.next().unwrap();
+            let (_silent_sender, mut silent_receiver) = connections.next().unwrap();
             let responder_connection = connections.next().unwrap();
             let _unused_connection = connections.next().unwrap();
 
@@ -878,7 +877,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Advancing to view 2 creates an unrestricted background ask for
-            // view 1. The only connected peer is the silent target, so seeing
+            // view 1. The only connected peer is silent, so seeing
             // its request proves the background fetch is already in flight.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
                 &schemes,
@@ -887,25 +886,25 @@ mod tests {
                 View::new(2),
             )));
             let (requester_key, _) = select! {
-                request = target_receiver.recv() => request.expect("target channel closed"),
+                request = silent_receiver.recv() => request.expect("silent peer channel closed"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("background request did not reach silent target");
+                    panic!("background request did not reach silent peer");
                 },
             };
             assert_eq!(requester_key, participants[0]);
 
-            // A stable leader can later ask for the same ancestry targeted at
-            // its own key. It must attach a subscriber without narrowing the
-            // in-flight unrestricted fetch; self is not an eligible peer.
+            // A later targeted ancestry request may name a remote peer or the
+            // requester itself. It must attach its subscriber without
+            // narrowing the in-flight unrestricted fetch.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
                 Kind::Nullification,
-                Some(participants[0].clone()),
+                Some(participants[target_index].clone()),
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Remove the silent target and expose a different responder. If
+            // Remove the silent peer and expose a different responder. If
             // the targeted ask narrowed the fetch, recovery cannot finish.
             oracle
                 .remove_link(participants[0].clone(), participants[1].clone())
@@ -931,7 +930,7 @@ mod tests {
             let recovered = select! {
                 message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("unrestricted fetch was narrowed to the silent target");
+                    panic!("unrestricted fetch was narrowed by the targeted request");
                 },
             };
             assert!(matches!(
@@ -942,6 +941,16 @@ mod tests {
                 } if nullification == available
             ));
         });
+    }
+
+    #[test_async]
+    async fn targeted_fetch_does_not_restrict_existing_backfill() {
+        assert_targeted_fetch_does_not_restrict_existing_backfill(1);
+    }
+
+    #[test_async]
+    async fn self_targeted_fetch_does_not_restrict_existing_backfill() {
+        assert_targeted_fetch_does_not_restrict_existing_backfill(0);
     }
 
     /// A valid notarization that does not settle the ask does not prevent a
