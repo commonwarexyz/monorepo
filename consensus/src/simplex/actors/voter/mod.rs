@@ -190,8 +190,12 @@ mod tests {
         local_index: usize,
         /// Mock application propose latency, in milliseconds.
         propose_latency_ms: f64,
+        /// Mock application verify latency, in milliseconds.
+        verify_latency_ms: f64,
         /// Mock application certify latency, in milliseconds.
         certify_latency_ms: f64,
+        /// Views whose verification requests reached the mock application.
+        verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
@@ -205,7 +209,9 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 local_index: 0,
                 propose_latency_ms: 1.0,
+                verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
+                verify_requests: None,
                 certifier: mocks::application::Certifier::Always,
             }
         }
@@ -240,17 +246,23 @@ mod tests {
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
+        let verify_requests = options.verify_requests;
 
         let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
             propose_latency: (options.propose_latency_ms, 0.0),
-            verify_latency: (1.0, 0.0),
+            verify_latency: (options.verify_latency_ms, 0.0),
             certify_latency: (options.certify_latency_ms, 0.0),
             should_certify: options.certifier,
         };
-        let (actor, application) =
+        let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
+        if let Some(verify_requests) = verify_requests {
+            actor.set_verify_observer(Box::new(move |context, _| {
+                verify_requests.lock().push(context.view());
+            }));
+        }
         actor.start();
 
         let voter_cfg = Config {
@@ -3324,20 +3336,38 @@ mod tests {
                     _ => continue,
                 }
             }
+            while resolver_receiver.recv().now_or_never().flatten().is_some() {}
 
             // Deliver notarization(3), skipping notarization(2): the voter
             // observed the certificate broadcast for view 3 but missed the one
             // for view 2. Certifying view 3 requires view 2's exact-view
-            // certificate, so the voter must fetch it.
+            // certificate, so the voter must fetch it. The certificate update
+            // must reach the resolver first: it opens unrestricted background
+            // repair that a later leader target cannot narrow.
             mailbox.recovered(Certificate::Notarization(notarization_3));
+            assert!(matches!(
+                resolver_receiver.recv().await.unwrap(),
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Notarization(notarization),
+                    ..
+                } if notarization.view() == View::new(3)
+            ));
             loop {
                 select! {
                     message = resolver_receiver.recv() => {
-                        let MailboxMessage::Resolve { view, kind, .. } = message.unwrap() else {
+                        let MailboxMessage::Resolve {
+                            proposal,
+                            view,
+                            kind,
+                            target,
+                            ..
+                        } = message.unwrap() else {
                             continue;
                         };
+                        assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
+                        assert!(target.is_some(), "certification repair should retain leader affinity");
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(20)) => {
@@ -4130,6 +4160,100 @@ mod tests {
         );
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    /// A view-exiting certificate cancels an in-flight verification before
+    /// its completion can be processed into a vote for the exited view.
+    #[test_traced]
+    fn test_finalization_cancels_inflight_verification() {
+        let n = 4;
+        let quorum = quorum(n);
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"finalization_cancels_verify", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let leader_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let local_index = (leader_index + 1) % schemes.len();
+            let verify_requests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    local_index,
+                    verify_latency_ms: 1_000.0,
+                    verify_requests: Some(verify_requests.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let (target_view, leader) = match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current, leader, ..
+                } => (current, leader),
+                _ => panic!("expected initial update"),
+            };
+            assert_eq!(target_view, View::new(1));
+            assert_eq!(usize::from(leader), leader_index);
+            assert_ne!(usize::from(leader), local_index);
+
+            let proposal = Proposal::new(
+                Round::new(epoch, target_view),
+                target_view.previous().unwrap_or(View::zero()),
+                Sha256::hash(&[b"verification_overtaken_by_finalization"]),
+            );
+            let contents = (
+                proposal.round,
+                mocks::application::genesis::<Sha256>(epoch),
+                7u64,
+            )
+                .encode();
+            relay.broadcast(
+                &participants[leader_index],
+                Recipients::All,
+                (proposal.payload, contents),
+            );
+            mailbox.proposal(proposal.clone());
+
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                verify_requests.lock().contains(&target_view),
+                "verification must be in flight before finalization arrives"
+            );
+
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+            mailbox.recovered(Certificate::Finalization(finalization));
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current > target_view => break,
+                    _ => {}
+                }
+            }
+
+            // Let the application finish the now-canceled verification. The
+            // old view must not regain a path into vote construction.
+            context.sleep(Duration::from_secs(2)).await;
+            assert!(
+                !reporter.notarizes.lock().contains_key(&target_view),
+                "verification completed after finalization must not emit a notarize vote"
+            );
+        });
     }
 
     /// Tests that permanently invalid proposal ancestry fast-paths `nullify`
