@@ -316,6 +316,21 @@ impl<T: Policy> Receiver<T> {
         recv_from(&self.state).await
     }
 
+    /// Poll to receive the next message.
+    ///
+    /// Returns `Ready(None)` after all senders are dropped and all buffered
+    /// messages have been drained.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))] // ALPHA
+    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        self.state.poll_recv(cx)
+    }
+
     /// Try to receive the next message without waiting.
     ///
     /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
@@ -332,6 +347,21 @@ impl<T: UnreliablePolicy> UnreliableReceiver<T> {
     /// have been drained.
     pub async fn recv(&mut self) -> Option<T> {
         recv_from(&self.state).await
+    }
+
+    /// Poll to receive the next message.
+    ///
+    /// Returns `Ready(None)` after all senders are dropped and all buffered
+    /// messages have been drained.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))] // ALPHA
+    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        self.state.poll_recv(cx)
     }
 
     /// Try to receive the next message without waiting.

@@ -1183,6 +1183,7 @@ name = "commonware-actor"
 version = "2026.7.0"
 dependencies = [
  "cfg-if",
+ "commonware-actor-macros",
  "commonware-macros",
  "commonware-runtime",
  "commonware-utils",
@@ -1192,6 +1193,20 @@ dependencies = [
  "futures-util",
  "loom",
  "parking_lot",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-core",
+]
+
+[[package]]
+name = "commonware-actor-macros"
+version = "2026.7.0"
+dependencies = [
+ "heck",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
