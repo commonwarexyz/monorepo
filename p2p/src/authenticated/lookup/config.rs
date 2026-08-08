@@ -53,8 +53,7 @@ pub struct Config<C: Signer> {
     /// This applies to the deduplicated union of a peer set's primary and secondary identities.
     /// The local identity counts even when omitted from the registered set. Configure only this
     /// per-set value; the network derives its retained identity bound by multiplying it by
-    /// [`Config::tracked_peer_sets`]. The tracker actor panics when it processes an oversized
-    /// registration.
+    /// [`Config::tracked_peer_sets`]. Tracking an oversized peer set panics.
     ///
     /// The derived bound sizes every application channel's inbound mailbox and its contribution
     /// to the shared outbound router mailbox.

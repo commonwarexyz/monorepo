@@ -155,11 +155,10 @@
 //! peers from blocking sends to other peers. Incoming application messages are enqueued without
 //! waiting. Each channel has one mailbox shared by all peers and sized from the retained-peer bound
 //! `max_peers_per_set * tracked_peer_sets + remote_bootstrappers`, where remote bootstrappers are
-//! deduplicated and exclude the local identity,
-//! leaving room for one configured quota burst from every remote peer. When it is full, the
-//! arriving message is dropped and queued messages remain. This allows protocol messages (BitVec,
-//! Peers) to continue flowing, but provides no per-peer reservation or fairness. See
-//! [`Network::register`] for details.
+//! deduplicated and exclude the local identity. This leaves room for one configured quota burst
+//! from every remote peer. When it is full, the arriving message is dropped and queued messages
+//! remain. This allows protocol messages (BitVec, Peers) to continue flowing, but provides no
+//! per-peer reservation or fairness. See [`Network::register`] for details.
 //!
 //! # Example
 //!

@@ -1,6 +1,4 @@
-use crate::{AddressableTrackedPeers, TrackedPeers};
-use commonware_cryptography::PublicKey;
-use std::num::NonZeroUsize;
+use std::{cmp::Ordering, num::NonZeroUsize};
 
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn
 /// from distinct `participants` when the network runs as `local`.
@@ -16,14 +14,14 @@ pub fn peer_set_limit<'a, P: Eq + 'a>(
     participants: impl IntoIterator<Item = &'a P>,
     local: &P,
 ) -> NonZeroUsize {
-    let mut peer_count = 0;
+    let mut peer_count = 0usize;
     let mut contains_local = false;
     for participant in participants {
-        peer_count = checked_peer_set_size(peer_count, 1);
+        peer_count = peer_count.checked_add(1).expect("peer set size overflow");
         contains_local |= participant == local;
     }
     if !contains_local {
-        peer_count = checked_peer_set_size(peer_count, 1);
+        peer_count = peer_count.checked_add(1).expect("peer set size overflow");
     }
     NonZeroUsize::new(peer_count).expect("local identity ensures at least one peer")
 }
@@ -41,59 +39,44 @@ pub(crate) fn max_retained_peers(
         .expect("maximum retained peer count overflow")
 }
 
-pub(crate) fn peer_set_size<P: PublicKey>(peers: &TrackedPeers<P>) -> usize {
-    checked_peer_set_size(
-        peers.primary.len(),
-        peers
-            .secondary
-            .iter()
-            .filter(|peer| peers.primary.position(peer).is_none())
-            .count(),
-    )
-}
-
-pub(crate) fn peer_set_size_including<P: PublicKey>(
-    peers: &TrackedPeers<P>,
-    required: &P,
+/// Counts identities across primary and secondary roles.
+///
+/// Each iterator must be sorted and deduplicated. Identities in both roles count once, and
+/// `extension` counts once when absent from both roles.
+pub(crate) fn peer_set_size<'a, P: Ord + 'a>(
+    primary: impl Iterator<Item = &'a P>,
+    secondary: impl Iterator<Item = &'a P>,
+    extension: Option<&P>,
 ) -> usize {
-    let peer_count = peer_set_size(peers);
-    if peers.primary.position(required).is_some() || peers.secondary.position(required).is_some() {
-        peer_count
-    } else {
-        checked_peer_set_size(peer_count, 1)
+    let mut primary = primary.peekable();
+    let mut secondary = secondary.peekable();
+    let mut peer_count = 0usize;
+    let mut contains_extension = extension.is_none();
+
+    loop {
+        let peer = match (primary.peek(), secondary.peek()) {
+            (Some(primary_peer), Some(secondary_peer)) => match primary_peer.cmp(secondary_peer) {
+                Ordering::Less => primary.next(),
+                Ordering::Equal => {
+                    secondary.next();
+                    primary.next()
+                }
+                Ordering::Greater => secondary.next(),
+            },
+            (Some(_), None) => primary.next(),
+            (None, Some(_)) => secondary.next(),
+            (None, None) => break,
+        }
+        .expect("peeked peer must exist");
+
+        peer_count = peer_count.checked_add(1).expect("peer set size overflow");
+        contains_extension |= extension == Some(peer);
     }
-}
 
-pub(crate) fn addressable_peer_set_size<P: PublicKey>(peers: &AddressableTrackedPeers<P>) -> usize {
-    checked_peer_set_size(
-        peers.primary.len(),
-        peers
-            .secondary
-            .keys()
-            .iter()
-            .filter(|peer| peers.primary.position(peer).is_none())
-            .count(),
-    )
-}
-
-pub(crate) fn addressable_peer_set_size_including<P: PublicKey>(
-    peers: &AddressableTrackedPeers<P>,
-    required: &P,
-) -> usize {
-    let peer_count = addressable_peer_set_size(peers);
-    if peers.primary.position(required).is_some()
-        || peers.secondary.keys().position(required).is_some()
-    {
-        peer_count
-    } else {
-        checked_peer_set_size(peer_count, 1)
+    if !contains_extension {
+        peer_count = peer_count.checked_add(1).expect("peer set size overflow");
     }
-}
-
-const fn checked_peer_set_size(primary: usize, secondary_only: usize) -> usize {
-    primary
-        .checked_add(secondary_only)
-        .expect("peer set size overflow")
+    peer_count
 }
 
 #[cfg(test)]
@@ -119,14 +102,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "maximum retained peer count overflow")]
-    fn test_max_retained_peers_overflow() {
-        max_retained_peers(NonZeroUsize::MAX, NZUsize!(2), 0);
+    fn test_peer_set_size_deduplicates_roles_and_includes_extension() {
+        let primary = [1, 3];
+        let secondary = [2, 3];
+
+        assert_eq!(peer_set_size(primary.iter(), secondary.iter(), None), 3);
+        assert_eq!(peer_set_size(primary.iter(), secondary.iter(), Some(&2)), 3);
+        assert_eq!(peer_set_size(primary.iter(), secondary.iter(), Some(&4)), 4);
     }
 
     #[test]
-    #[should_panic(expected = "peer set size overflow")]
-    fn test_peer_set_size_overflow() {
-        checked_peer_set_size(usize::MAX, 1);
+    #[should_panic(expected = "maximum retained peer count overflow")]
+    fn test_max_retained_peers_overflow() {
+        max_retained_peers(NonZeroUsize::MAX, NZUsize!(2), 0);
     }
 }

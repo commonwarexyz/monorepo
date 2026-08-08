@@ -87,9 +87,7 @@ fn main() {
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(u64))
-                .help(
-                    "All participant keys (arbiter and contributors), including the key from --me",
-                ),
+                .help("All participant keys (arbiter and contributors), including your own"),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();

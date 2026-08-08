@@ -6,7 +6,7 @@
 //! `commonware-chat` only sends messages to connected friends. If a friend is offline at the time a message is sent,
 //! `commonware-p2p::authenticated` will drop the message. You can confirm you are connected to all your friends by
 //! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
-//! equal the number of distinct `--friends` entries other than your own identity.
+//! equal the number of distinct `--friends` entries, excluding yourself.
 //!
 //! # Synchronized Friends
 //!

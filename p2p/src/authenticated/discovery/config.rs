@@ -60,8 +60,8 @@ pub struct Config<C: Signer> {
     /// The local identity counts even when omitted from the registered set. Configure only this
     /// per-set value; do not multiply it or add bootstrappers separately. The network derives its
     /// retained identity bound by multiplying it by [`Config::tracked_peer_sets`] and adding the
-    /// distinct configured bootstrappers other than the local identity. The tracker actor panics
-    /// when it processes an oversized registration.
+    /// distinct configured bootstrappers other than the local identity. Tracking an oversized peer
+    /// set panics.
     ///
     /// The derived bound sizes every application channel's inbound mailbox and its contribution
     /// to the shared outbound router mailbox. It also limits primary peer-set bit vectors decoded

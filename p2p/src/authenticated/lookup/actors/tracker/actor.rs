@@ -6,7 +6,6 @@ use super::{
 use crate::{
     PeerSetUpdate,
     authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
-    sizing::addressable_peer_set_size_including,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
@@ -22,13 +21,6 @@ use tracing::debug;
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
-
-    // ---------- Configuration ----------
-    /// The maximum number of distinct identities in one peer set.
-    max_peers_per_set: usize,
-
-    /// The local identity, which counts toward every peer-set limit.
-    local: C::PublicKey,
 
     // ---------- Message-Passing ----------
     /// The mailbox for the actor.
@@ -68,23 +60,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the mailboxes
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let oracle = Oracle::new(sender.clone());
+        let local = cfg.crypto.public_key();
+        let oracle = Oracle::new(sender.clone(), local.clone(), cfg.max_peers_per_set);
         let releaser = Releaser::new(sender.clone());
 
         // Create the directory
-        let local = cfg.crypto.public_key();
-        let directory = Directory::init(
-            context.child("directory"),
-            local.clone(),
-            directory_cfg,
-            releaser,
-        );
+        let directory = Directory::init(context.child("directory"), local, directory_cfg, releaser);
 
         (
             Self {
                 context: ContextCell::new(context),
-                max_peers_per_set: cfg.max_peers_per_set,
-                local,
                 receiver,
                 directory,
                 listener: cfg.listener,
@@ -125,8 +110,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                self.assert_peer_set_size(addressable_peer_set_size_including(&peers, &self.local));
-
                 // Identify peers whose connection state should be torn down.
                 let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
@@ -244,15 +227,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             peer.kill();
         }
     }
-
-    /// Enforces the configured maximum over one peer set.
-    fn assert_peer_set_size(&self, peer_count: usize) {
-        assert!(
-            peer_count <= self.max_peers_per_set,
-            "peer set too large: {peer_count} > {}",
-            self.max_peers_per_set
-        );
-    }
 }
 
 #[cfg(test)]
@@ -340,30 +314,6 @@ mod tests {
                 matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
             );
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "peer set too large")]
-    fn test_peer_set_limit_includes_local_identity() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (mut cfg, _) = test_config(PrivateKey::from_seed(0), false);
-            cfg.max_peers_per_set = 2;
-            let TestHarness {
-                mailbox,
-                mut oracle,
-            } = setup_actor(context.child("actor"), cfg);
-
-            let peer_1 = PrivateKey::from_seed(1).public_key();
-            let peer_2 = PrivateKey::from_seed(2).public_key();
-            let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
-            let addr_2 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1002);
-            oracle.track(
-                0,
-                Map::try_from([(peer_1, addr_1.into()), (peer_2, addr_2.into())]).unwrap(),
-            );
-            let _ = mailbox.dialable().await;
         });
     }
 

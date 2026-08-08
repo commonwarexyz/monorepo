@@ -308,12 +308,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         self.assert_peer_set_size(&peers);
-
         let primary = peers.primary;
         let secondary = peers.secondary;
         let tracked_peer_sets = self.tracked_peer_sets;
 
-        // Create and store new primary peer set.
+        // Track primary peers.
         for public_key in primary.iter() {
             self.ensure_peer_exists(public_key).await;
             self.peer_ref_counts
@@ -322,7 +321,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .primary += 1;
         }
 
-        // Secondary peers: Peers in both roles count only as primary.
+        // Track secondary peers, treating overlaps as primary.
         let secondary_filtered = Set::from_iter_dedup(
             secondary
                 .iter()
@@ -390,7 +389,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Enforces the configured maximum over one peer set.
     fn assert_peer_set_size(&self, peers: &TrackedPeers<P>) {
-        let peer_count = peer_set_size(peers);
+        let peer_count = peer_set_size(peers.primary.iter(), peers.secondary.iter(), None);
         assert!(
             peer_count <= self.max_peers_per_set,
             "peer set too large: {peer_count} > {}",
