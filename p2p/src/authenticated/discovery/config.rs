@@ -64,7 +64,8 @@ pub struct Config<C: Signer> {
     /// when it processes an oversized registration.
     ///
     /// The derived bound sizes every application channel's inbound mailbox and its contribution
-    /// to the shared outbound router mailbox.
+    /// to the shared outbound router mailbox. It also limits primary peer-set bit vectors decoded
+    /// from the network.
     pub max_peers_per_set: NonZeroUsize,
 
     /// Capacity for internal actor mailboxes.
@@ -128,13 +129,6 @@ pub struct Config<C: Signer> {
     /// key).
     pub tracked_peer_sets: NonZeroUsize,
 
-    /// Maximum number of peers represented in one peer-set bit vector.
-    ///
-    /// Unlike [`Config::max_peers_per_set`], this encoded-message safety limit applies only to
-    /// primary peers. It can be set to a reasonably high value that valid peer sets should never
-    /// reach.
-    pub max_peer_set_size: u64,
-
     /// Frequency we gossip about known peers.
     ///
     /// If there is no other network activity, this message is used as a ping
@@ -189,7 +183,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_secs(1),
             dial_fail_limit: 2,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 16,
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(4),
@@ -235,7 +228,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 16,
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(1),
@@ -273,7 +265,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 8,
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_mins(1),

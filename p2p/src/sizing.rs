@@ -1,23 +1,30 @@
 use crate::{AddressableTrackedPeers, TrackedPeers};
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::Set;
 use std::num::NonZeroUsize;
 
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn
-/// from `participants` when the network runs as `local`.
+/// from distinct `participants` when the network runs as `local`.
 ///
 /// The trackers count the local identity in every peer set whether or not it
 /// is registered, so a `local` outside `participants` consumes one extra slot.
+/// Duplicate participants are counted conservatively as separate slots.
 ///
 /// # Panics
 ///
 /// Panics if the resulting size does not fit in a `usize`.
-pub fn peer_set_limit<P: Ord>(participants: &Set<P>, local: &P) -> NonZeroUsize {
-    let peer_count = if participants.position(local).is_some() {
-        participants.len()
-    } else {
-        checked_peer_set_size(participants.len(), 1)
-    };
+pub fn peer_set_limit<'a, P: Eq + 'a>(
+    participants: impl IntoIterator<Item = &'a P>,
+    local: &P,
+) -> NonZeroUsize {
+    let mut peer_count = 0;
+    let mut contains_local = false;
+    for participant in participants {
+        peer_count = checked_peer_set_size(peer_count, 1);
+        contains_local |= participant == local;
+    }
+    if !contains_local {
+        peer_count = checked_peer_set_size(peer_count, 1);
+    }
     NonZeroUsize::new(peer_count).expect("local identity ensures at least one peer")
 }
 
@@ -101,13 +108,13 @@ mod tests {
 
     #[test]
     fn test_peer_set_limit_counts_included_local_identity() {
-        let participants = Set::from_iter_dedup([1, 2]);
+        let participants = [1, 2];
         assert_eq!(peer_set_limit(&participants, &1).get(), 2);
     }
 
     #[test]
     fn test_peer_set_limit_counts_omitted_local_identity() {
-        let participants = Set::from_iter_dedup([1, 2]);
+        let participants = [1, 2];
         assert_eq!(peer_set_limit(&participants, &3).get(), 3);
     }
 

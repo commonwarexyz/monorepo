@@ -39,6 +39,7 @@ pub struct Network<
     context: ContextCell<E>,
     cfg: Config<C>,
     max_frame_size: u32,
+    max_bit_vec: u64,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
@@ -62,12 +63,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if configured frame or retained-peer capacity arithmetic overflows.
+    /// Panics if configured frame, bit-vector, or retained-peer capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
+        let max_bit_vec =
+            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
         let local = cfg.crypto.public_key();
         let persistent_peers = Set::from_iter_dedup(
             cfg.bootstrappers
@@ -97,7 +100,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-                max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
                 block_duration: cfg.block_duration,
             },
@@ -110,6 +112,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 context: ContextCell::new(context),
                 cfg,
                 max_frame_size,
+                max_bit_vec,
 
                 channels,
                 tracker,
@@ -215,7 +218,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
-                max_peer_set_size: self.cfg.max_peer_set_size,
+                max_bit_vec: self.max_bit_vec,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
             },

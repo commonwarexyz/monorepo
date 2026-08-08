@@ -57,7 +57,10 @@ mod logger;
 
 use clap::{Arg, Command, value_parser};
 use commonware_cryptography::{Signer as _, ed25519};
-use commonware_p2p::{Manager as _, authenticated::discovery};
+use commonware_p2p::{
+    Manager as _,
+    authenticated::{self, discovery},
+};
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
 use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
@@ -69,10 +72,6 @@ use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_CHAT";
-
-fn include_local<P: Ord>(peers: Set<P>, local: P) -> Set<P> {
-    Set::from_iter_dedup(peers.into_iter().chain([local]))
-}
 
 #[doc(hidden)]
 fn main() {
@@ -88,8 +87,7 @@ fn main() {
                 .long("friends")
                 .required(true)
                 .value_delimiter(',')
-                .value_parser(value_parser!(u64))
-                .help("Friend keys; the key from --me is added automatically"),
+                .value_parser(value_parser!(u64)),
         )
         .arg(
             Arg::new("bootstrappers")
@@ -139,7 +137,6 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
-    let recipients = include_local(recipients, signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -159,10 +156,7 @@ fn main() {
 
     // Configure network
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
-    let max_peers_per_set = recipients
-        .len()
-        .try_into()
-        .expect("at least one peer must be configured");
+    let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
@@ -211,18 +205,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn includes_local_identity_once_in_peer_set() {
+    fn sizes_local_identity_without_adding_recipient() {
         let local = ed25519::PrivateKey::from_seed(1).public_key();
         let friend = ed25519::PrivateKey::from_seed(2).public_key();
-        let peers = Set::try_from([friend.clone()]).unwrap();
+        let recipients = Set::try_from([friend.clone()]).unwrap();
 
-        let peers = include_local(peers, local.clone());
+        let max_peers_per_set = authenticated::peer_set_limit(&recipients, &local);
 
-        assert_eq!(peers.len(), 2);
-        assert!(peers.position(&local).is_some());
-        assert!(peers.position(&friend).is_some());
-
-        let peers = include_local(peers, local);
-        assert_eq!(peers.len(), 2);
+        assert_eq!(max_peers_per_set.get(), 2);
+        assert_eq!(recipients.len(), 1);
+        assert!(recipients.position(&local).is_none());
+        assert!(recipients.position(&friend).is_some());
     }
 }

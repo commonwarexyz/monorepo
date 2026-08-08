@@ -37,9 +37,6 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// For signing and verifying messages.
     crypto: C,
 
-    /// The maximum number of primary peers represented in a peer-set bit vector.
-    max_peer_set_size: u64,
-
     /// The maximum number of distinct identities in one peer set.
     max_peers_per_set: usize,
 
@@ -123,7 +120,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         let actor = Self {
             context: ContextCell::new(context),
             crypto: cfg.crypto,
-            max_peer_set_size: cfg.max_peer_set_size,
             max_peers_per_set: cfg.max_peers_per_set,
             max_retained_peers: cfg.max_retained_peers.get(),
             peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -165,13 +161,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                let primary_peer_count =
-                    u64::try_from(peers.primary.len()).expect("primary peer set size exceeds u64");
-                assert!(
-                    primary_peer_count <= self.max_peer_set_size,
-                    "primary peer set too large: {primary_peer_count} > {}",
-                    self.max_peer_set_size
-                );
                 self.assert_peer_set_size(&peers);
 
                 // Attempt to update peer set membership.
@@ -415,7 +404,6 @@ mod tests {
             tracked_peer_sets,
             peer_connection_cooldown: Duration::from_millis(200),
             peer_gossip_max_count: 5,
-            max_peer_set_size: 128,
             dial_fail_limit: 1,
             block_duration: Duration::from_secs(100),
         }
@@ -518,28 +506,6 @@ mod tests {
             tracker_pk,
             cfg: stored_cfg,
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "primary peer set too large")]
-    fn test_register_primary_peer_set_too_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut oracle,
-                cfg,
-                mailbox,
-                ..
-            } = setup_actor(context.child("actor"), cfg_initial);
-            let too_many_peers: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
-                .map(|i| new_signer_and_pk(i).1)
-                .try_collect()
-                .unwrap();
-            oracle.track(0, too_many_peers);
-            // Ensure the message is processed causing the panic
-            let _ = mailbox.dialable().await;
-        });
     }
 
     #[test]

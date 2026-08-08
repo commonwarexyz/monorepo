@@ -90,7 +90,7 @@ mod tests {
 
     async fn initialize_simulation(
         context: deterministic::Context,
-        num_peers: u32,
+        num_peers: usize,
         success_rate: f64,
     ) -> (
         Vec<PublicKey>,
@@ -101,7 +101,7 @@ mod tests {
             context,
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
-                max_peers_per_set: NZUsize!(num_peers as usize),
+                max_peers_per_set: NZUsize!(num_peers),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

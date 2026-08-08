@@ -55,7 +55,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 info_verifier: cfg.info_verifier,
-                max_bit_vec: cfg.max_peer_set_size,
+                max_bit_vec: cfg.max_bit_vec,
                 max_peers: cfg.peer_gossip_max_count,
                 control: control_receiver.messages,
                 kill: control_receiver.kill,
@@ -453,7 +453,7 @@ mod tests {
             mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
-            max_peer_set_size: 128,
+            max_bit_vec: 128,
             peer_gossip_max_count: 10,
             info_verifier: types::Info::verifier(
                 me,
