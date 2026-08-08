@@ -1,7 +1,7 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{Config as StateConfig, State, Verify},
+    state::{CertificateFetch, Config as StateConfig, State, Verify},
 };
 use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
@@ -207,7 +207,9 @@ impl<
         )
     }
 
-    /// Returns the elapsed wall-clock seconds for `view` when we are its leader.
+    /// Returns the wall-clock seconds since we proposed in `view` (or entered
+    /// it, when we led without a local proposal). None when we are not the
+    /// view's leader or never started it (no meaningful sample).
     fn leader_elapsed(&self, view: View) -> Option<f64> {
         let elapsed = self.state.elapsed_since_start(view)?;
         let leader = self.state.leader_index(view)?;
@@ -383,7 +385,7 @@ impl<
                 kind,
                 target,
             } => {
-                resolver.resolve(proposal, view, kind, target);
+                resolver.resolve(proposal, view, kind, Some(target));
                 return None;
             }
             Verify::Wait => return None,
@@ -477,8 +479,8 @@ impl<
 
     /// Handles the certification of a proposal.
     ///
-    /// The certification may succeed, in which case the proposal can be used in future views—
-    /// or fail, in which case we should nullify the view as fast as possible.
+    /// If certification succeeds, the proposal can be used in future views. If it fails, we
+    /// should nullify the view as fast as possible.
     async fn handle_certification(
         mut self,
         view: View,
@@ -640,11 +642,11 @@ impl<
             }
         };
 
-        // If we have already moved to another view, drop the response as we will
-        // not broadcast it
-        let our_round = Rnd::new(self.state.epoch(), self.state.current_view());
-        if our_round != context.round {
-            debug!(round = ?context.round, ?our_round, "dropping requested proposal");
+        // If we have already moved past this view, drop the response as we
+        // will not broadcast it. Proposals for the current or optimistic
+        // future views are kept.
+        if context.view() < self.state.current_view() {
+            debug!(round = ?context.round, current = ?self.state.current_view(), "dropping requested proposal");
             return None;
         }
 
@@ -654,7 +656,7 @@ impl<
             warn!(round = ?context.round, "dropped our proposal");
             return None;
         }
-        let view = self.state.current_view();
+        let view = context.view();
 
         // Notify the application of the proposal. To lower view latency as
         // much as possible while preserving safety, this precedes the notarize
@@ -688,12 +690,12 @@ impl<
             Ok(false) => {
                 warn!(round = ?context.round, "proposal failed verification");
                 self.state
-                    .trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
+                    .verification_failed(view, TimeoutReason::InvalidProposal);
             }
             Err(err) => {
                 debug!(?err, round = ?context.round, "failed to verify proposal");
                 self.state
-                    .trigger_timeout(context.view(), TimeoutReason::IgnoredProposal);
+                    .verification_failed(view, TimeoutReason::IgnoredProposal);
             }
         };
         view
@@ -949,9 +951,9 @@ impl<
         .await
         .expect("unable to open journal");
 
-        // Add initial view from the configured floor. Genesis starts from view
-        // zero; non-genesis floors skip replayed artifacts at or below the floor
-        // certificate view.
+        // Add initial view from the configured floor. Replay skips all
+        // artifacts at or below the floor's view (see the nullify-skip
+        // rationale in the replay loop below).
         let floor = self.floor.take().expect("floor not initialized");
         let replay_floor = floor.view();
 
@@ -972,6 +974,7 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
+        let mut replayed_successful_certifications = Vec::new();
         let replayed;
         (self, replayed) = async {
             let mut replay = journal
@@ -1011,6 +1014,7 @@ impl<
                         resolver.certified(round.view(), success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
+                            replayed_successful_certifications.push(round.view());
                         }
                     }
                     Artifact::Nullify(nullify) => {
@@ -1065,6 +1069,24 @@ impl<
         let (span, finalized) = self.state.batcher_context(observed_view);
         batcher.update(span, observed_view, leader, finalized, None);
 
+        // Re-attempt finalize votes for certifications that completed before
+        // shutdown: no later event re-triggers construction for an
+        // already-certified view (see [Self::construct]), so recovery would
+        // otherwise require abandoning the term through timeouts. This builds
+        // a fresh vote through `construct_finalize`'s usual gates rather than
+        // replaying an artifact, and is a no-op if the prior vote was
+        // journaled (replay restores its broadcast flag).
+        for view in replayed_successful_certifications {
+            let finalize;
+            (self, finalize) = self.prepare_finalize(view).await;
+            let Some(finalize) = finalize else {
+                continue;
+            };
+            self = self.sync_journal().await;
+            debug!(proposal=?finalize.proposal, "broadcasting replayed finalize");
+            self.publish_vote(&mut batcher, &mut vote_sender, Vote::Finalize(finalize));
+        }
+
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
@@ -1073,18 +1095,19 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop any pending items if we have moved to a new view. A view
-                // is exited only on successful certification, nullification, or
-                // finalization. Nullification does not cancel certification work
-                // for the exited view, so the automaton must tolerate a dropped
-                // verify receiver while certify still wants the result.
+                // Drop any pending items if we have moved past their view (work
+                // for optimistic future views is kept). A view is exited only on
+                // successful certification, nullification, or finalization.
+                // Nullification does not cancel certification work for the
+                // exited view, so the automaton must tolerate a dropped verify
+                // receiver while certify still wants the result.
                 if let Some(ref pp) = pending_propose
-                    && pp.view() != self.state.current_view()
+                    && pp.view() < self.state.current_view()
                 {
                     pending_propose = None;
                 }
                 if let Some(ref pv) = pending_verify
-                    && pv.view() != self.state.current_view()
+                    && pv.view() < self.state.current_view()
                 {
                     pending_verify = None;
                 }
@@ -1104,7 +1127,11 @@ impl<
                 // Even our own proposals are certified through the automaton: that
                 // is the durability barrier that makes a block recoverable before
                 // we cast a finalize vote for it.
-                for proposal in self.state.certify_candidates() {
+                let (candidates, fetches) = self.state.certify_candidates();
+                for CertificateFetch { proposal, view, kind, target } in fetches {
+                    resolver.resolve(proposal, view, kind, target);
+                }
+                for proposal in candidates {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1263,16 +1290,16 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
-                    // If we skip a view, we don't worry about forwarding our latest certified proposal
-                    // because the network has already moved on
-                    let certified_proposal = current_view
+                    // Forward only the previous view's proposal. After a
+                    // multi-view jump, the network has moved past anything older.
+                    let forwardable_proposal = current_view
                         .previous()
-                        .and_then(|view| self.state.certified_proposal(view));
+                        .and_then(|view| self.state.forwardable_proposal(view));
 
                     // If the leader nullified or is inactive, the batcher
                     // responds with a timeout that expires the view immediately
                     let (span, finalized) = self.state.batcher_context(current_view);
-                    batcher.update(span, current_view, leader, finalized, certified_proposal);
+                    batcher.update(span, current_view, leader, finalized, forwardable_proposal);
                 }
             },
         }

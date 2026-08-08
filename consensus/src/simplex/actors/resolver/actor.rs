@@ -382,7 +382,7 @@ impl<
         proposal: View,
         view: View,
         kind: Kind,
-        target: S::PublicKey,
+        target: Option<S::PublicKey>,
     ) where
         R: TargetedResolver<Key = U64, Subscriber = Ask, PublicKey = S::PublicKey>,
     {
@@ -398,14 +398,15 @@ impl<
             reason = "proposal_ancestry",
             kind = ask.kind.as_str()
         );
-        let _ = resolver.fetch_targeted(
-            Fetch {
-                key: U64::from(view),
-                subscriber: ask,
-                span,
-            },
-            NonEmptyVec::new(target),
-        );
+        let fetch = Fetch {
+            key: U64::from(view),
+            subscriber: ask,
+            span,
+        };
+        let _ = match target {
+            Some(target) => resolver.fetch_targeted(fetch, NonEmptyVec::new(target)),
+            None => resolver.fetch(fetch),
+        };
     }
 
     /// Returns whether local evidence has settled an ask for `kind` at `view`.
@@ -521,18 +522,7 @@ impl<
             return None;
         }
 
-        let verified = match &incoming {
-            Certificate::Notarization(notarization) => {
-                notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-            }
-            Certificate::Nullification(nullification) => {
-                nullification.verify::<_, D>(self.context.as_mut(), &self.scheme, &self.strategy)
-            }
-            Certificate::Finalization(finalization) => {
-                finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
-            }
-        };
-        if !verified {
+        if !incoming.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
             debug!(%view, "certificate failed verification");
             return None;
         }
@@ -926,7 +916,7 @@ mod tests {
                 View::new(3),
                 requested,
                 Kind::Nullification,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1154,7 +1144,7 @@ mod tests {
                 View::new(3),
                 requested,
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             let recovered = select! {
                 message = requester_voter_receiver.recv() => {
@@ -1223,6 +1213,33 @@ mod tests {
         });
     }
 
+    /// A resolve without a target (no tracked round in the term knows the
+    /// leader) must fall back to an untargeted fetch, not be dropped.
+    #[test_async]
+    async fn resolve_without_target_falls_back_to_untargeted_fetch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { verifier, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let actor = build_actor(context, verifier, TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let requested = View::new(9);
+
+            actor.resolve(
+                &mut resolver,
+                View::new(10),
+                requested,
+                Kind::Notarization,
+                None,
+            );
+            assert!(resolver.targeted().is_empty());
+            assert_eq!(resolver.outstanding(), vec![9]);
+            assert_eq!(
+                resolver.subscriptions(9),
+                vec![Ask::ancestry(Kind::Notarization)]
+            );
+        });
+    }
+
     #[test_async]
     async fn targeted_fetches_drop_only_when_ask_is_satisfied() {
         let runtime = deterministic::Runner::default();
@@ -1242,14 +1259,14 @@ mod tests {
                 View::new(10),
                 requested,
                 Kind::Nullification,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(11),
                 requested,
                 Kind::Notarization,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             resolver.fetch(Fetch {
                 key: U64::from(requested),
@@ -1299,14 +1316,14 @@ mod tests {
                 View::new(14),
                 requested,
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(14),
                 requested.next(),
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             assert_eq!(resolver.targeted().len(), 2);
 
@@ -1319,14 +1336,14 @@ mod tests {
                 View::new(12),
                 second_requested,
                 Kind::Nullification,
-                participants[2].clone(),
+                Some(participants[2].clone()),
             );
             actor.resolve(
                 &mut resolver,
                 View::new(13),
                 second_requested,
                 Kind::Notarization,
-                participants[3].clone(),
+                Some(participants[3].clone()),
             );
             resolver.fetch(Fetch {
                 key: U64::from(second_requested),
@@ -1356,7 +1373,7 @@ mod tests {
                 View::new(14),
                 second_requested,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(resolver.targeted().len(), 4);
 
@@ -1386,7 +1403,7 @@ mod tests {
                 finalized.next(),
                 requested,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert!(resolver.outstanding().is_empty());
             assert_eq!(resolver.targeted().len(), 4);
@@ -1583,7 +1600,7 @@ mod tests {
                 View::new(10),
                 view,
                 Kind::Nullification,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(
                 resolver.subscriptions(3),
@@ -1608,7 +1625,7 @@ mod tests {
                 View::new(11),
                 view,
                 Kind::Nullification,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             assert_eq!(resolver.targeted().len(), 1);
         });
@@ -1639,7 +1656,7 @@ mod tests {
                 View::new(8),
                 View::new(4),
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(
                 resolver.targeted(),
@@ -1671,7 +1688,7 @@ mod tests {
                 View::new(10),
                 view,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             actor.updated(
                 &mut resolver,
@@ -1688,7 +1705,7 @@ mod tests {
                 View::new(11),
                 view,
                 Kind::Notarization,
-                participants[1].clone(),
+                Some(participants[1].clone()),
             );
             assert_eq!(resolver.targeted().len(), 1);
         });
@@ -1769,7 +1786,7 @@ mod tests {
                 View::new(11),
                 view,
                 Kind::Notarization,
-                participants[0].clone(),
+                Some(participants[0].clone()),
             );
             assert_eq!(resolver.targeted().len(), targeted);
         });
