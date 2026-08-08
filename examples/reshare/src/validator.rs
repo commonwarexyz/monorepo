@@ -81,6 +81,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
+    // Channel rates are enforced independently per peer. The network derives each shared inbound
+    // mailbox capacity from the retained-peer bound and quota burst size.
     let vote_network = p2p.register(VOTE_CHANNEL, MESSAGE_RATE);
     let certificate_network = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE);
     let resolver_network = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE);

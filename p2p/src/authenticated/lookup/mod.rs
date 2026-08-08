@@ -107,12 +107,11 @@
 //!
 //! Outgoing message submissions can be rejected when a peer's send buffer is full, preventing slow
 //! peers from blocking sends to other peers. Incoming application messages are enqueued without
-//! waiting. Each channel has one mailbox shared by all peers and sized from the retained-peer bound
-//! `max_peers_per_set * tracked_peer_sets`,
-//! leaving room for one configured quota burst from every remote peer. When it is full, the
-//! arriving message is dropped and queued messages remain. This allows ping messages to continue
-//! flowing, but provides no per-peer reservation or fairness. See [`Network::register`] for
-//! details.
+//! waiting. Each channel has one mailbox shared by all peers. Its capacity is derived from the
+//! retained-peer bound `max_peers_per_set * tracked_peer_sets`, leaving room for one configured
+//! quota burst from every remote peer. When it is full, the arriving message is dropped and queued
+//! messages remain. This allows ping messages to continue flowing, but provides no per-peer
+//! reservation or fairness. See [`Network::register`] for details.
 //!
 //! # Example
 //!

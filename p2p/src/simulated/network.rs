@@ -307,6 +307,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             return false;
         }
 
+        // Validate and unpack the peer set.
         self.assert_peer_set_size(&peers);
         let primary = peers.primary;
         let secondary = peers.secondary;

@@ -71,6 +71,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             .expect("maximum frame size overflow");
         let max_peer_set_size =
             u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+
+        // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
+        // distinct remote identity without folding them into the per-set limit.
         let local = cfg.crypto.public_key();
         let persistent_peers = Set::from_iter_dedup(
             cfg.bootstrappers

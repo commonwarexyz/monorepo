@@ -26,6 +26,14 @@ pub fn peer_set_limit<'a, P: Eq + 'a>(
     NonZeroUsize::new(peer_count).expect("local identity ensures at least one peer")
 }
 
+/// Derives a conservative retained-peer bound for mailbox sizing.
+///
+/// Each tracked set may contribute `max_peers_per_set` identities. Persistent peers remain outside
+/// that window and are added separately.
+///
+/// # Panics
+///
+/// Panics if the resulting bound overflows.
 pub(crate) fn max_retained_peers(
     max_peers_per_set: NonZeroUsize,
     tracked_peer_sets: NonZeroUsize,

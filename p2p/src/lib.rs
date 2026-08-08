@@ -11,8 +11,6 @@
 
 use commonware_macros::{stability_mod, stability_scope};
 
-stability_mod!(BETA, mod sizing);
-
 stability_mod!(ALPHA, pub mod simulated);
 
 stability_scope!(BETA {
@@ -25,6 +23,7 @@ stability_scope!(BETA {
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
+    mod sizing;
     pub mod authenticated;
     pub mod types;
     pub mod utils;
