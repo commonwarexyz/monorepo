@@ -42,7 +42,10 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64,
+    Acknowledgement, NZU32, NZU64, NZUsize,
+    ordered::Set,
+    range::NonEmptyRange,
+    sequence::{U64, Unit},
     sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -65,7 +68,7 @@ pub type Database<E> = Shared<Qmdb<E>>;
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
 /// Number of blocks in each epoch.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
-/// Maximum participant count accepted when decoding DKG payloads.
+/// Maximum entries accepted in each DKG participant set.
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
 /// Share derivation mode used by DKG and reshare ceremonies.
 pub const SHARING_MODE: Mode = Mode::NonZeroCounter;
@@ -167,7 +170,7 @@ impl Read for Block {
             range: NonEmptyRange::read(buf)?,
             payload: Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
                 buf,
-                &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
+                &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, ()),
             )?,
         })
     }
@@ -204,6 +207,7 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MinSig;
     type Signer = ed25519::PrivateKey;
+    type Directory = Unit;
 
     fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
         self.payload.clone()
@@ -303,9 +307,14 @@ impl Participants {
 
 impl ParticipantsProvider for Participants {
     type PublicKey = ed25519::PublicKey;
+    type Directory = Unit;
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         self.get(epoch)
+    }
+
+    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {
+        Unit
     }
 }
 
@@ -558,8 +567,11 @@ mod epoch_info_hex {
     ) -> Result<dkg::types::EpochInfo<MinSig, ed25519::PublicKey>, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        dkg::types::EpochInfo::decode_cfg(bytes.as_slice(), &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
-            .map_err(D::Error::custom)
+        dkg::types::EpochInfo::decode_cfg(
+            bytes.as_slice(),
+            &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, ()),
+        )
+        .map_err(D::Error::custom)
     }
 }
 
@@ -628,6 +640,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: Unit,
         };
 
         write_genesis(&path, &info).unwrap();
@@ -657,6 +670,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: Unit,
         };
 
         write_genesis(&path, &info).unwrap();

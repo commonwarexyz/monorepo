@@ -1,5 +1,6 @@
 //! Shared types for the DKG module.
 
+use crate::dkg::network::Directory;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
@@ -15,7 +16,7 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{Faults as _, N3f1, ordered::Set};
+use commonware_utils::{Faults as _, N3f1, ordered::Set, sequence::Unit};
 use std::num::{NonZeroU32, NonZeroU64};
 use thiserror::Error;
 
@@ -247,6 +248,8 @@ impl<P: PublicKey> Read for Participants<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dkg::network::Addresses;
+    use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{
         bls12381::{
             dkg::feldman_desmedt::deal,
@@ -254,12 +257,131 @@ mod tests {
         },
         ed25519,
     };
-    use commonware_utils::{NZU64, TestRng};
+    use commonware_p2p::Address;
+    use commonware_utils::{NZU32, NZU64, TestRng};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn keys(count: u64) -> Set<ed25519::PublicKey> {
         Set::from_iter_dedup(
             (0..count).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
         )
+    }
+
+    fn addresses(keys: &Set<ed25519::PublicKey>) -> Addresses<ed25519::PublicKey> {
+        keys.iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), index as u16 + 1);
+                (key.clone(), Address::Symmetric(socket))
+            })
+            .collect()
+    }
+
+    fn addressed_info(
+        participants: u64,
+    ) -> EpochInfo<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>> {
+        let keys = keys(participants);
+        let (output, _) =
+            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, keys.clone())
+                .expect("trusted deal");
+        EpochInfo {
+            outcome: EpochOutcome::Success,
+            epoch: Epoch::new(2),
+            output,
+            players: keys.clone(),
+            next_players: keys.clone(),
+            directory: addresses(&keys),
+        }
+    }
+
+    #[test]
+    fn addressed_epoch_info_roundtrips() {
+        let info = addressed_info(4);
+        let decoded =
+            EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
+                info.encode(),
+                &(
+                    NZU32!(4),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::exact(4),
+                ),
+            )
+            .expect("decode addressed epoch info");
+        assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn addressed_epoch_info_roundtrips_disjoint_participant_sets() {
+        let dealers = keys(4);
+        let players = Set::from_iter_dedup(
+            (4..8).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
+        );
+        let next_players = Set::from_iter_dedup(
+            (8..12).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
+        );
+        let peers = Set::from_iter_dedup(
+            dealers
+                .iter()
+                .chain(players.iter())
+                .chain(next_players.iter())
+                .cloned(),
+        );
+        let (output, _) = deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, dealers)
+            .expect("trusted deal");
+        let info = EpochInfo {
+            outcome: EpochOutcome::Success,
+            epoch: Epoch::new(2),
+            output,
+            players,
+            next_players,
+            directory: addresses(&peers),
+        };
+
+        let decoded =
+            EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
+                info.encode(),
+                &(
+                    NZU32!(4),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::exact(12),
+                ),
+            )
+            .expect("decode addressed epoch info");
+        assert_eq!(decoded, info);
+    }
+
+    #[test]
+    fn addressed_epoch_info_rejects_extra_directory_peer() {
+        let mut info = addressed_info(1);
+        info.directory = addresses(&keys(2));
+        assert!(
+            EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
+                info.encode(),
+                &(
+                    NZU32!(1),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::new(0..=2),
+                ),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn addressed_epoch_info_rejects_missing_directory_peer() {
+        let mut info = addressed_info(1);
+        info.directory = addresses(&keys(0));
+        assert!(
+            EpochInfo::<MinPk, ed25519::PublicKey, Addresses<ed25519::PublicKey>>::decode_cfg(
+                info.encode(),
+                &(
+                    NZU32!(1),
+                    crate::dkg::tests::max_supported_mode(),
+                    RangeCfg::new(0..=1),
+                ),
+            )
+            .is_err()
+        );
     }
 
     fn participants(count: u64) -> Participants<ed25519::PublicKey> {
@@ -358,13 +480,20 @@ where
 
 /// Canonical public epoch artifact.
 ///
-/// This is the public truth needed to start an epoch: the latest public output
-/// and the participant sets not already carried by that output.
-/// The genesis block carries the [`EpochInfo`] for epoch 0; the final block of
-/// each epoch carries the [`EpochInfo`] for the following epoch. The reshare
-/// actor never invents this; it reads it back from finalized block ancestry.
+/// This is the public truth needed to start an epoch: the latest public output,
+/// the participant sets not already carried by that output, and the transport
+/// [`Directory`] for every peer of the epoch. The genesis block carries the
+/// [`EpochInfo`] for epoch 0; the final block of each epoch carries the
+/// [`EpochInfo`] for the following epoch. The reshare actor never invents this;
+/// it reads it back from finalized block ancestry.
+///
+/// Because the directory rides in the artifact, a node recovering through a
+/// certificate-backed route (a finalized boundary block, a
+/// [`probe`](crate::dkg::probe) artifact, or persisted
+/// [`state_sync`](crate::dkg::state_sync) material) can activate the epoch's
+/// peers without access to application state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EpochInfo<V: Variant, P: PublicKey> {
+pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// Whether or not the reshare ceremony in this epoch was successful.
     pub outcome: EpochOutcome,
     /// Epoch this artifact describes.
@@ -375,9 +504,12 @@ pub struct EpochInfo<V: Variant, P: PublicKey> {
     pub players: Set<P>,
     /// Players of the next epoch, tracked early for connectivity.
     pub next_players: Set<P>,
+    /// Transport directory containing exactly this epoch's dealers, players,
+    /// and next players.
+    pub directory: D,
 }
 
-impl<V: Variant, P: PublicKey> EpochInfo<V, P> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
     /// Reconstructs the complete participant snapshot for this epoch.
     pub fn participants(&self) -> Participants<P> {
         Participants {
@@ -388,54 +520,83 @@ impl<V: Variant, P: PublicKey> EpochInfo<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Write for EpochInfo<V, P> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Write for EpochInfo<V, P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.outcome.write(buf);
         self.epoch.write(buf);
         self.output.write(buf);
         self.players.write(buf);
         self.next_players.write(buf);
+        self.directory.write(buf);
     }
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for EpochInfo<V, P> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for EpochInfo<V, P, D> {
     fn encode_size(&self) -> usize {
         self.outcome.encode_size()
             + self.epoch.encode_size()
             + self.output.encode_size()
             + self.players.encode_size()
             + self.next_players.encode_size()
+            + self.directory.encode_size()
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for EpochInfo<V, P> {
-    /// Maximum number of participants and maximum supported sharing mode version.
-    type Cfg = (NonZeroU32, ModeVersion);
+impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
+    /// Maximum entries accepted in each participant set, maximum supported
+    /// sharing mode version, and directory codec configuration.
+    ///
+    /// The first value bounds each set independently. A collection bound in
+    /// the directory configuration must accept their union, which may contain
+    /// up to three times as many distinct peers, and reject larger directories.
+    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
 
     fn read_cfg(
         buf: &mut impl Buf,
-        (max_participants, max_supported_mode): &Self::Cfg,
+        (max_participants, max_supported_mode, directory_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
+        let outcome = EpochOutcome::read(buf)?;
+        let epoch = Epoch::read(buf)?;
+        let output = Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
+        let players = Set::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=max_participants.get() as usize), ()),
+        )?;
+        let next_players = Set::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=max_participants.get() as usize), ()),
+        )?;
+        let peers = Set::from_iter_dedup(
+            output
+                .players()
+                .iter()
+                .chain(players.iter())
+                .chain(next_players.iter())
+                .cloned(),
+        );
+        let directory = D::read_cfg(buf, directory_cfg)?;
+        if !directory.matches(&peers) {
+            return Err(CodecError::Invalid(
+                "EpochInfo",
+                "directory does not match participants",
+            ));
+        }
         Ok(Self {
-            outcome: EpochOutcome::read(buf)?,
-            epoch: Epoch::read(buf)?,
-            output: Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
-            players: Set::read_cfg(
-                buf,
-                &(RangeCfg::new(0..=max_participants.get() as usize), ()),
-            )?,
-            next_players: Set::read_cfg(
-                buf,
-                &(RangeCfg::new(0..=max_participants.get() as usize), ()),
-            )?,
+            outcome,
+            epoch,
+            output,
+            players,
+            next_players,
+            directory,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for EpochInfo<V, P>
+impl<V: Variant, P: PublicKey, D: Directory<P>> arbitrary::Arbitrary<'_> for EpochInfo<V, P, D>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
     Output<V, P>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -445,6 +606,7 @@ where
             output: u.arbitrary()?,
             players: u.arbitrary()?,
             next_players: u.arbitrary()?,
+            directory: u.arbitrary()?,
         })
     }
 }
@@ -455,15 +617,15 @@ where
 /// finalized dealer logs. The final block of an epoch instead carries the
 /// canonical [`EpochInfo`] for the following epoch.
 #[allow(clippy::large_enum_variant)]
-pub enum Payload<V: Variant, C: Signer> {
+pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// A finalized signed dealer log for inclusion mid-epoch.
     DealerLog(SignedDealerLog<V, C>),
     /// The canonical public epoch artifact for the next epoch, carried by the
     /// final block of the current epoch.
-    EpochInfo(EpochInfo<V, C::PublicKey>),
+    EpochInfo(EpochInfo<V, C::PublicKey, D>),
 }
 
-impl<V: Variant, C: Signer> Clone for Payload<V, C> {
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
     fn clone(&self) -> Self {
         match self {
             Self::DealerLog(log) => Self::DealerLog(log.clone()),
@@ -472,7 +634,7 @@ impl<V: Variant, C: Signer> Clone for Payload<V, C> {
     }
 }
 
-impl<V: Variant, C: Signer> PartialEq for Payload<V, C> {
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V, C, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::DealerLog(a), Self::DealerLog(b)) => a == b,
@@ -482,9 +644,9 @@ impl<V: Variant, C: Signer> PartialEq for Payload<V, C> {
     }
 }
 
-impl<V: Variant, C: Signer> Eq for Payload<V, C> {}
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> {}
 
-impl<V: Variant, C: Signer> Write for Payload<V, C> {
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::DealerLog(log) => {
@@ -499,7 +661,7 @@ impl<V: Variant, C: Signer> Write for Payload<V, C> {
     }
 }
 
-impl<V: Variant, C: Signer> EncodeSize for Payload<V, C> {
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V, C, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::DealerLog(log) => log.encode_size(),
@@ -508,9 +670,14 @@ impl<V: Variant, C: Signer> EncodeSize for Payload<V, C> {
     }
 }
 
-impl<V: Variant, C: Signer> Read for Payload<V, C> {
-    /// Maximum number of participants and maximum supported sharing mode version.
-    type Cfg = (NonZeroU32, ModeVersion);
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
+    /// Maximum entries accepted in each participant set, maximum supported
+    /// sharing mode version, and directory codec configuration.
+    ///
+    /// The first value bounds each set independently. A collection bound in
+    /// the directory configuration must accept their union, which may contain
+    /// up to three times as many distinct peers, and reject larger directories.
+    type Cfg = (NonZeroU32, ModeVersion, D::Cfg);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
@@ -522,10 +689,11 @@ impl<V: Variant, C: Signer> Read for Payload<V, C> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, C: Signer> arbitrary::Arbitrary<'_> for Payload<V, C>
+impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>
+    for Payload<V, C, D>
 where
     SignedDealerLog<V, C>: for<'a> arbitrary::Arbitrary<'a>,
-    EpochInfo<V, C::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
+    EpochInfo<V, C::PublicKey, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(if u.arbitrary::<bool>()? {
@@ -607,6 +775,7 @@ where
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
+    use crate::dkg::network::Addresses;
     use commonware_codec::conformance::CodecConformance;
     use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 
@@ -614,7 +783,9 @@ mod conformance {
         CodecConformance<EpochOutcome>,
         CodecConformance<Participants<ed25519::PublicKey>>,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey>> => 8192,
+        CodecConformance<EpochInfo<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
         CodecConformance<Payload<MinSig, ed25519::PrivateKey>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PrivateKey, Addresses<ed25519::PublicKey>>> => 8192,
         CodecConformance<Message<MinSig, ed25519::PublicKey>>,
     }
 }

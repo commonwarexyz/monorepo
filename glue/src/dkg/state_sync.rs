@@ -6,7 +6,7 @@
 //! A later startup removes the record after marshal's recovered epoch advances
 //! beyond the synced epoch.
 
-use crate::dkg::types::EpochInfo;
+use crate::dkg::{network::Directory, types::EpochInfo};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use commonware_consensus::{
@@ -25,24 +25,36 @@ use commonware_storage::{
     Context,
     metadata::{self, Metadata},
 };
-use commonware_utils::{fixed_bytes, sequence::FixedBytes, sync::AsyncMutex};
+use commonware_utils::{
+    fixed_bytes,
+    sequence::{FixedBytes, Unit},
+    sync::AsyncMutex,
+};
 use std::{fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
 const STATE_SYNC_SUFFIX: &str = "_dkg_state_sync";
-type EpochInfoCodecConfig = (NonZeroU32, ModeVersion);
+type EpochInfoCodecConfig<Dir> = (NonZeroU32, ModeVersion, <Dir as Read>::Cfg);
 
 /// Storage settings for a DKG state-sync recovery plan.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct Config<C = ()> {
     /// Stable node-wide partition prefix.
     pub partition_prefix: String,
 
-    /// Maximum participants accepted in persisted epoch information.
+    /// Maximum entries accepted in each persisted participant set.
     pub max_participants: NonZeroU32,
 
     /// Maximum sharing mode version accepted in persisted epoch information.
     pub max_supported_mode: ModeVersion,
+
+    /// Codec configuration for persisted transport directories.
+    ///
+    /// Collection limits MUST accept the union of dealers, players, and next
+    /// players, which may contain up to three times
+    /// [`Self::max_participants`] distinct entries, and reject larger
+    /// directories.
+    pub directory_codec_config: C,
 }
 
 /// Public material needed to start DKG actors in a state-synced epoch.
@@ -53,24 +65,29 @@ pub struct Config {
 ///
 /// The probe fixes the floor and the epoch info atomically, so the info
 /// always describes the epoch containing the floor.
-pub struct StateSync<S, D, V>
+pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     /// Public information for the epoch containing the state-sync floor.
-    pub info: EpochInfo<V, S::PublicKey>,
+    ///
+    /// Carries the epoch's transport directory, so a state-synced node can
+    /// activate the epoch's peers without any application state.
+    pub info: EpochInfo<V, S::PublicKey, Dir>,
 
     /// Finalized floor selected for application state sync.
     pub floor: Finalization<S, D>,
 }
 
-impl<S, D, V> Clone for StateSync<S, D, V>
+impl<S, D, V, Dir> Clone for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -80,11 +97,12 @@ where
     }
 }
 
-impl<S, D, V> fmt::Debug for StateSync<S, D, V>
+impl<S, D, V, Dir> fmt::Debug for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -95,30 +113,33 @@ where
     }
 }
 
-impl<S, D, V> PartialEq for StateSync<S, D, V>
+impl<S, D, V, Dir> PartialEq for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.info == other.info && self.floor == other.floor
     }
 }
 
-impl<S, D, V> Eq for StateSync<S, D, V>
+impl<S, D, V, Dir> Eq for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
 }
 
-impl<S, D, V> Write for StateSync<S, D, V>
+impl<S, D, V, Dir> Write for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn write(&self, writer: &mut impl BufMut) {
         self.info.write(writer);
@@ -126,24 +147,26 @@ where
     }
 }
 
-impl<S, D, V> EncodeSize for StateSync<S, D, V>
+impl<S, D, V, Dir> EncodeSize for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.floor.encode_size()
     }
 }
 
-impl<S, D, V> Read for StateSync<S, D, V>
+impl<S, D, V, Dir> Read for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
-    type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
+    type Cfg = (EpochInfoCodecConfig<Dir>, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(
         reader: &mut impl Buf,
@@ -157,11 +180,12 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S, D, V> arbitrary::Arbitrary<'_> for StateSync<S, D, V>
+impl<S, D, V, Dir> arbitrary::Arbitrary<'_> for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
     V: Variant,
+    Dir: Directory<S::PublicKey> + for<'a> arbitrary::Arbitrary<'a>,
     S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
     Output<V, S::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
@@ -192,18 +216,19 @@ where
     )
 }
 
-enum PlanState<S, D, V>
+enum PlanState<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     Pending {
-        candidate: Option<StateSync<S, D, V>>,
+        candidate: Option<StateSync<S, D, V, Dir>>,
         partition: String,
-        codec_config: EpochInfoCodecConfig,
+        codec_config: EpochInfoCodecConfig<Dir>,
     },
-    Resolved(Option<StateSync<S, D, V>>),
+    Resolved(Option<StateSync<S, D, V, Dir>>),
 }
 
 /// Shared startup recovery plan for DKG actors.
@@ -212,20 +237,22 @@ where
 /// and before starting either DKG actor. Clones share the resolution decision,
 /// so both actors observe the same material while using one durable partition.
 /// Use [`Plan::disabled`] for deployments that never use application state sync.
-pub struct Plan<S, D, V>
+pub struct Plan<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
-    state: Arc<AsyncMutex<PlanState<S, D, V>>>,
+    state: Arc<AsyncMutex<PlanState<S, D, V, Dir>>>,
 }
 
-impl<S, D, V> Clone for Plan<S, D, V>
+impl<S, D, V, Dir> Clone for Plan<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -234,22 +261,24 @@ where
     }
 }
 
-impl<S, D, V> fmt::Debug for Plan<S, D, V>
+impl<S, D, V, Dir> fmt::Debug for Plan<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Plan").finish_non_exhaustive()
     }
 }
 
-impl<S, D, V> Plan<S, D, V>
+impl<S, D, V, Dir> Plan<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     /// Initializes and durably records a DKG state-sync recovery candidate.
     ///
@@ -263,15 +292,20 @@ where
     /// persisted material has mismatched artifact and floor epochs.
     pub async fn init<E: Context>(
         context: E,
-        config: Config,
-        provided: Option<StateSync<S, D, V>>,
+        config: Config<Dir::Cfg>,
+        provided: Option<StateSync<S, D, V, Dir>>,
     ) -> Self {
         if let Some(provided) = &provided {
             assert_epoch(provided);
         }
         let partition = format!("{}{STATE_SYNC_SUFFIX}", config.partition_prefix);
-        let codec_config = (config.max_participants, config.max_supported_mode);
-        let mut store = open_store::<E, S, D, V>(context, partition.clone(), codec_config).await;
+        let codec_config = (
+            config.max_participants,
+            config.max_supported_mode,
+            config.directory_codec_config,
+        );
+        let mut store =
+            open_store::<E, S, D, V, Dir>(context, partition.clone(), codec_config.clone()).await;
         if let Some(provided) = provided {
             store.put(STATE_SYNC_KEY, provided);
             store = store
@@ -305,7 +339,7 @@ where
         &self,
         context: E,
         recovered_epoch: Option<Epoch>,
-    ) -> Option<StateSync<S, D, V>> {
+    ) -> Option<StateSync<S, D, V, Dir>> {
         let mut state = self.state.lock().await;
         let (candidate, partition, codec_config) = match &*state {
             PlanState::Resolved(resolved) => return resolved.clone(),
@@ -313,7 +347,7 @@ where
                 candidate,
                 partition,
                 codec_config,
-            } => (candidate.clone(), partition.clone(), *codec_config),
+            } => (candidate.clone(), partition.clone(), codec_config.clone()),
         };
 
         let Some(candidate) = candidate else {
@@ -325,7 +359,7 @@ where
             return Some(candidate);
         }
 
-        let mut store = open_store::<E, S, D, V>(context, partition, codec_config).await;
+        let mut store = open_store::<E, S, D, V, Dir>(context, partition, codec_config).await;
         store.remove(&STATE_SYNC_KEY);
         store
             .sync()
@@ -336,16 +370,17 @@ where
     }
 }
 
-async fn open_store<E, S, D, V>(
+async fn open_store<E, S, D, V, Dir>(
     context: E,
     partition: String,
-    epoch_info_codec_config: EpochInfoCodecConfig,
-) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V>>
+    epoch_info_codec_config: EpochInfoCodecConfig<Dir>,
+) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V, Dir>>
 where
     E: Context,
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     Metadata::init(
         context,
@@ -361,11 +396,12 @@ where
     .expect("failed to load DKG state sync metadata")
 }
 
-fn assert_epoch<S, D, V>(state_sync: &StateSync<S, D, V>)
+fn assert_epoch<S, D, V, Dir>(state_sync: &StateSync<S, D, V, Dir>)
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     assert!(
         state_sync.info.epoch == state_sync.floor.epoch(),
@@ -419,6 +455,7 @@ mod tests {
                 output,
                 players: participants.clone(),
                 next_players: participants,
+                directory: Unit,
             },
             floor,
         }
@@ -431,6 +468,7 @@ mod tests {
             partition_prefix: partition.into(),
             max_participants: NZU32!(16),
             max_supported_mode: crate::dkg::tests::max_supported_mode(),
+            directory_codec_config: (),
         }
     }
 
