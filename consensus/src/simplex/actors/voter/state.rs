@@ -625,7 +625,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let result = self.create_round(view).add_finalization(finalization);
         if result.0 {
             self.slide_optimistic_frontier(view);
-            self.requeue_child_certification(view);
         }
         result
     }
@@ -1071,11 +1070,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all newly eligible certification candidates and returns proposals
-    /// ready for certification, plus fetches for candidates blocked on a
-    /// certificate we do not hold (see [`Self::certification_fetch`]). A
-    /// parent-blocked candidate remains dormant until the parent certifies or
-    /// finalizes, rather than being polled on every actor wakeup.
+    /// Takes all certification candidates and returns proposals ready for
+    /// certification, plus fetches for candidates blocked on a certificate we
+    /// do not hold (see [`Self::certification_fetch`]).
     pub fn certify_candidates(
         &mut self,
     ) -> (Vec<Proposal<D>>, Vec<CertificateFetch<S::PublicKey>>) {
@@ -1100,13 +1097,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     warn!(round = ?proposal.round, ?err, "proposal failed certification precheck");
                 } else {
                     fetches.extend(self.certification_fetch(&err));
-                    // The resolver owns parent-certificate retries, and the
-                    // child is woken when that parent becomes usable. A
-                    // missing-nullification dependency has no such keyed
-                    // wakeup, so keep it active.
-                    if matches!(err, ParentPayloadError::MissingNullification { .. }) {
-                        self.certification_candidates.insert(view);
-                    }
+                    self.certification_candidates.insert(view);
                 }
                 continue;
             }
@@ -1120,23 +1111,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             }
         }
         (ready, fetches)
-    }
-
-    /// Requeues certification for the immediate in-term child after `parent`
-    /// becomes explicit ancestry.
-    ///
-    /// No other candidate can depend on this transition. The gate applies only
-    /// within a term, where structural validation requires each proposal to
-    /// name the previous view. Term-start candidates bypass the gate.
-    fn requeue_child_certification(&mut self, parent: View) {
-        let child = parent.next();
-        if child <= self.last_finalized
-            || child.is_term_start(self.term_length())
-            || self.notarization(child).is_none()
-        {
-            return;
-        }
-        self.certification_candidates.insert(child);
     }
 
     /// Returns the fetch a blocked certification justifies, if any.
@@ -1200,8 +1174,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.remove(&view);
 
         if is_success {
-            self.requeue_child_certification(view);
-
             // Keep the stall deadline armed after certification so the
             // term-level timeout can still abandon a term that certifies but
             // never finalizes.
@@ -3375,12 +3347,7 @@ mod tests {
             assert!(state.is_me(leader.idx));
             assert!(fetches[0].target.is_none());
 
-            // The resolver owns retries after the first fetch. Leave the
-            // blocked candidate dormant until its parent's state changes so
-            // unrelated actor wakeups do not rescan the whole blocked set.
-            assert!(state.certification_candidates.is_empty());
-
-            // Unrelated certification passes do not duplicate the fetch.
+            // The round deduplicates the fetch while it is outstanding.
             let (ready, fetches) = state.certify_candidates();
             assert!(ready.is_empty());
             assert!(fetches.is_empty());
@@ -4040,7 +4007,6 @@ mod tests {
             let child_notarization = build_notarization(&verifier, &schemes, &child);
             assert!(state.add_notarization(child_notarization).0);
             assert!(state.certify_candidates().0.is_empty());
-            assert!(state.certification_candidates.is_empty());
 
             // A finalization certificate for the parent overrides the local
             // rejection and restores it as usable ancestry.
