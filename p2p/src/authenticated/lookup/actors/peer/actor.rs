@@ -139,24 +139,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         }
     }
 
-    /// Sends a batch while allowing teardown to cancel a backpressured transport write.
-    async fn send_many_or_kill<Si: Sink>(
-        peer: &C,
-        conn_sender: &mut Sender<Si>,
-        control: &mut ring::Receiver<Message>,
-        batch: &mut Vec<IoBufs>,
-    ) -> Result<(), Error> {
-        select! {
-            result = conn_sender.send_many(batch.drain(..)) => {
-                result.map_err(Error::SendFailed)
-            },
-            msg = control.next() => match msg {
-                Some(Message::Kill) => Err(Error::PeerKilled(peer.to_string())),
-                None => Err(Error::PeerDisconnected),
-            },
-        }
-    }
-
     pub async fn run<Si: Sink, St: Stream>(
         self,
         peer: C,
@@ -219,13 +201,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        Self::send_many_or_kill(
-                            &peer,
-                            &mut conn_sender,
-                            control,
-                            &mut batch,
-                        )
-                        .await?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
                         deadline = context.current() + self.ping_frequency;
                     },
                     // Await any outbound message (control, high, or low), then
@@ -258,13 +237,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        Self::send_many_or_kill(
-                            &peer,
-                            &mut conn_sender,
-                            control,
-                            &mut batch,
-                        )
-                        .await?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
                     },
                 }
 
@@ -362,7 +338,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{router, test_utils::BlockingSink};
+    use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -378,7 +354,7 @@ mod tests {
         num::NonZeroU32,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -657,97 +633,6 @@ mod tests {
                 matches!(result, Err(Error::PeerKilled(_))),
                 "unexpected result: {result:?}"
             );
-        });
-    }
-
-    #[test]
-    fn test_kill_interrupts_pending_write() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
-
-            let (local_sink, remote_stream) = mocks::Channel::init();
-            let (remote_sink, local_stream) = mocks::Channel::init();
-            let armed = Arc::new(AtomicBool::new(false));
-            let blocked = Arc::new(AtomicBool::new(false));
-
-            let local_config = stream_config(local_key);
-            let remote_config = stream_config(remote_key);
-            let local_pk_clone = local_pk.clone();
-            let listener_handle = context.child("listener").spawn({
-                let armed = armed.clone();
-                let blocked = blocked.clone();
-                move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        BlockingSink::new(remote_sink, armed, blocked),
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
-                }
-            });
-
-            let (_local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk,
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
-            let (remote_sender, remote_receiver) = listener_handle
-                .await
-                .expect("listen failed")
-                .expect("listen result failed");
-
-            let (peer_actor, peer_mailbox, relay) = Actor::new(
-                context.child("actor"),
-                default_peer_config(context.child("config")),
-            );
-            let mut channels = create_channels(context.child("channels"));
-            let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
-            let peer_handle = context.child("task").spawn(move |_context| async move {
-                peer_actor
-                    .run(local_pk, (remote_sender, remote_receiver), channels)
-                    .await
-            });
-
-            armed.store(true, Ordering::SeqCst);
-            let pool = context.network_buffer_pool().clone();
-            assert!(
-                relay
-                    .send(
-                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"blocked"))),
-                        false,
-                    )
-                    .accepted()
-            );
-            for _ in 0..10 {
-                if blocked.load(Ordering::SeqCst) {
-                    break;
-                }
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            assert!(blocked.load(Ordering::SeqCst), "write never blocked");
-
-            peer_mailbox.kill();
-            let result = context
-                .timeout(Duration::from_millis(10), peer_handle)
-                .await
-                .expect("kill did not interrupt the pending write")
-                .expect("peer task failed");
-            assert!(matches!(result, Err(Error::PeerKilled(_))));
         });
     }
 }

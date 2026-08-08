@@ -17,8 +17,8 @@ use std::{
 };
 
 const MAX_OPERATIONS: usize = 50;
-const MAX_PEERS: u8 = 16;
-const MIN_PEERS: u8 = 2;
+const MAX_PEERS: usize = 16;
+const MIN_PEERS: usize = 2;
 const MAX_MSG_SIZE: u32 = 1024 * 1024;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
@@ -82,7 +82,7 @@ struct FuzzInput {
     /// Number of peers to create in the network.
     ///
     /// Must be in the range [MIN_PEERS, MAX_PEERS].
-    num_peers: u8,
+    num_peers: usize,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -111,7 +111,7 @@ fn fuzz(input: FuzzInput) {
 
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
-        max_peers_per_set: NZUsize!(usize::from(num_peers)),
+        max_peers_per_set: NZUsize!(num_peers),
         disconnect_on_block: false,
         tracked_peer_sets: NZUsize!(1),
     };

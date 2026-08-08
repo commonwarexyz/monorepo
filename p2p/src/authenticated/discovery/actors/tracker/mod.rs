@@ -31,7 +31,6 @@ pub struct Config<C: Signer> {
     pub synchrony_bound: Duration,
     pub mailbox_size: NonZeroUsize,
     pub max_peers_per_set: usize,
-    pub max_retained_peers: NonZeroUsize,
     pub tracked_peer_sets: NonZeroUsize,
     pub peer_connection_cooldown: Duration,
     pub peer_gossip_max_count: usize,

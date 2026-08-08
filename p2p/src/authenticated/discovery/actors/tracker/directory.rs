@@ -392,15 +392,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
-    /// Returns the number of distinct configured identities, including the local identity.
-    /// Temporarily blocked peers remain part of this total.
-    pub fn peer_count(&self) -> usize {
-        self.peers
-            .values()
-            .filter(|record| record.configured())
-            .count()
-    }
-
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C) -> Option<Info<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())

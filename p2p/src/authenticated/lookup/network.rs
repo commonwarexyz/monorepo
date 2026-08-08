@@ -70,7 +70,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 crypto: cfg.crypto.clone(),
                 mailbox_size: cfg.mailbox_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
-                max_retained_peers,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,

@@ -291,13 +291,6 @@ impl Record {
             && matches!(self.status, Status::Inert)
     }
 
-    /// Returns `true` if this identity is configured locally.
-    ///
-    /// The local identity is always configured.
-    pub const fn configured(&self) -> bool {
-        self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
-    }
-
     /// Returns `true` if this peer is eligible for connection.
     ///
     /// A peer is eligible if:
@@ -305,7 +298,12 @@ impl Record {
     /// - It is part of at least one primary peer set, at least one secondary peer set, or
     ///   persistent
     pub const fn eligible(&self) -> bool {
-        !matches!(self.address, Address::Myself) && self.configured()
+        match &self.address {
+            Address::Myself => false,
+            Address::Known(_) => {
+                self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
+            }
+        }
     }
 }
 #[cfg(test)]
@@ -540,16 +538,12 @@ mod tests {
     #[test]
     fn test_eligible_logic() {
         // Myself is never eligible
-        let myself = Record::myself();
-        assert!(myself.configured());
-        assert!(!myself.eligible());
+        assert!(!Record::myself().eligible());
 
         // Known records are only eligible when in a peer set
         let mut record_known = Record::known(test_address());
-        assert!(!record_known.configured());
         assert!(!record_known.eligible(), "Not eligible when sets=0");
         record_known.increment_primary();
-        assert!(record_known.configured());
         assert!(record_known.eligible(), "Eligible when sets>0");
         record_known.decrement_primary();
         assert!(!record_known.eligible(), "Not eligible when sets=0 again");

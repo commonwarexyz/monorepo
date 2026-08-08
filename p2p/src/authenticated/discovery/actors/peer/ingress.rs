@@ -2,13 +2,7 @@ use crate::authenticated::discovery::types;
 use commonware_actor::mailbox::{self, UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Metrics;
-use commonware_utils::{NZUsize, channel::ring};
-use futures::Sink;
-#[cfg(test)]
-use futures::StreamExt as _;
-#[cfg(test)]
-use std::sync::mpsc::TryRecvError;
-use std::{collections::VecDeque, fmt, num::NonZeroUsize, pin::Pin};
+use std::{collections::VecDeque, fmt, num::NonZeroUsize};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -18,74 +12,52 @@ pub enum Message<C: PublicKey> {
 
     /// Send a list of [types::Info] to the peer.
     Peers(Vec<types::Info<C>>),
+
+    /// Kill the peer actor.
+    Kill,
 }
 
 impl<C: PublicKey> UnreliablePolicy for Message<C> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
-        false
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+        if matches!(message, Self::Kill) {
+            overflow.clear();
+            overflow.push_back(message);
+            true
+        } else {
+            false
+        }
     }
 }
 
-pub struct Mailbox<C: PublicKey> {
-    messages: mailbox::UnreliableSender<Message<C>>,
-    kill: ring::Sender<()>,
-}
-
-pub struct Receiver<C: PublicKey> {
-    pub(super) messages: mailbox::UnreliableReceiver<Message<C>>,
-    pub(super) kill: ring::Receiver<()>,
-}
-
-#[cfg(test)]
-impl<C: PublicKey> Receiver<C> {
-    pub async fn recv(&mut self) -> Option<Message<C>> {
-        self.messages.recv().await
-    }
-
-    pub fn try_recv(&mut self) -> Result<Message<C>, TryRecvError> {
-        self.messages.try_recv()
-    }
-
-    pub async fn killed(&mut self) -> bool {
-        self.kill.next().await.is_some()
-    }
-}
+pub struct Mailbox<C: PublicKey>(mailbox::UnreliableSender<Message<C>>);
 
 impl<C: PublicKey> Mailbox<C> {
-    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receiver<C>) {
-        let (messages, receiver) = mailbox::new_unreliable(metrics, size);
-        let (kill, kill_receiver) = ring::channel(NZUsize!(1));
-        (
-            Self { messages, kill },
-            Receiver {
-                messages: receiver,
-                kill: kill_receiver,
-            },
-        )
+    pub fn new(
+        metrics: impl Metrics,
+        size: NonZeroUsize,
+    ) -> (Self, mailbox::UnreliableReceiver<Message<C>>) {
+        let (sender, receiver) = mailbox::new_unreliable(metrics, size);
+        (Self(sender), receiver)
     }
 
     pub fn bit_vec(&self, bit_vec: types::BitVec) {
-        let _ = self.messages.enqueue(Message::BitVec(bit_vec));
+        let _ = self.0.enqueue(Message::BitVec(bit_vec));
     }
 
     pub fn peers(&self, peers: Vec<types::Info<C>>) {
-        let _ = self.messages.enqueue(Message::Peers(peers));
+        let _ = self.0.enqueue(Message::Peers(peers));
     }
 
     pub fn kill(&self) {
-        let mut kill = self.kill.clone();
-        let _ = Pin::new(&mut kill).start_send(());
+        let _ = self.0.enqueue(Message::Kill);
     }
 }
 
 impl<C: PublicKey> Clone for Mailbox<C> {
     fn clone(&self) -> Self {
-        Self {
-            messages: self.messages.clone(),
-            kill: self.kill.clone(),
-        }
+        Self(self.0.clone())
     }
 }
 
@@ -100,10 +72,9 @@ mod tests {
     use super::*;
     use commonware_cryptography::ed25519;
     use commonware_utils::NZUsize;
-    use futures::FutureExt as _;
 
     #[test]
-    fn kill_delivered_despite_full_mailbox() {
+    fn kill_retained_on_overflow() {
         let (mailbox, mut receiver) =
             Mailbox::<ed25519::PublicKey>::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox.peers(Vec::new());
@@ -111,7 +82,7 @@ mod tests {
         mailbox.kill();
 
         assert!(matches!(receiver.try_recv(), Ok(Message::Peers(_))));
+        assert!(matches!(receiver.try_recv(), Ok(Message::Kill)));
         assert!(receiver.try_recv().is_err());
-        assert!(matches!(receiver.killed().now_or_never(), Some(true)));
     }
 }

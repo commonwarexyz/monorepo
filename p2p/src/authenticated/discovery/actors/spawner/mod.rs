@@ -13,7 +13,7 @@ pub struct Config<C: PublicKey> {
     pub mailbox_size: NonZeroUsize,
     pub send_batch_size: NonZeroUsize,
     pub gossip_bit_vec_frequency: Duration,
-    pub max_bit_vec: u64,
+    pub max_peer_set_size: u64,
     pub peer_gossip_max_count: usize,
     pub info_verifier: InfoVerifier<C>,
 }

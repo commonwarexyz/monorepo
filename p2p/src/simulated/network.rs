@@ -9,7 +9,7 @@ use super::{
 use crate::{
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
-    sizing::{max_retained_peers, peer_set_size},
+    sizing::peer_set_size,
     utils::{
         PeerSetsAtIndex as PeerSetsAtIndexBase,
         limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
@@ -128,9 +128,7 @@ pub struct Config {
     /// Maximum number of distinct identities at one peer-set index.
     ///
     /// This applies to the deduplicated union of a peer set's primary and secondary identities.
-    /// Configure only this per-set value; the simulator derives its retained identity bound by
-    /// multiplying it by [`Config::tracked_peer_sets`]. The simulator panics when it processes an
-    /// oversized registration.
+    /// The simulator panics when it processes an oversized registration.
     pub max_peers_per_set: NonZeroUsize,
 
     /// True if peers should disconnect upon being blocked. While production networking would
@@ -157,9 +155,6 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Maximum number of distinct identities in one peer set.
     max_peers_per_set: usize,
-
-    // Maximum number of distinct peer identities retained across all peer sets.
-    max_retained_peers: NonZeroUsize,
 
     // True if peers should disconnect upon being blocked.
     // While production networking would typically disconnect, for testing purposes it may be useful
@@ -216,7 +211,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// # Panics
     ///
-    /// Panics if configured frame or retained-peer capacity arithmetic overflows.
+    /// Panics if [`Config::max_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
@@ -225,9 +220,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .max_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
-        let max_retained_peers =
-            max_retained_peers(cfg.max_peers_per_set, cfg.tracked_peer_sets, 0);
-
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
 
@@ -237,7 +229,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 max_size: cfg.max_size,
                 max_frame_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
-                max_retained_peers,
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
@@ -394,8 +385,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
         }
-        self.assert_peer_count();
-
         true
     }
 
@@ -406,16 +395,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             peer_count <= self.max_peers_per_set,
             "peer set too large: {peer_count} > {}",
             self.max_peers_per_set
-        );
-    }
-
-    /// Enforces the configured maximum over all retained peer identities.
-    fn assert_peer_count(&self) {
-        let peer_count = self.peer_ref_counts.len();
-        assert!(
-            peer_count <= self.max_retained_peers.get(),
-            "retained peer count exceeds derived maximum: {peer_count} > {}",
-            self.max_retained_peers
         );
     }
 
@@ -1742,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_peers_per_set_allows_retained_union() {
+    fn test_max_peers_per_set_allows_larger_union_across_sets() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1756,7 +1735,7 @@ mod tests {
             let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
             let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
 
-            // Each set contains two identities. Their retained union may be larger than either
+            // Each set contains two identities. Their combined union may be larger than either
             // individual set.
             assert!(
                 network
@@ -1858,55 +1837,6 @@ mod tests {
             let peer_2_counts = network.peer_ref_counts.get(&peer_2).unwrap();
             assert_eq!(peer_2_counts.primary, 1);
             assert_eq!(peer_2_counts.secondary, 1);
-        });
-    }
-
-    #[test]
-    fn test_retained_peer_bound_allows_disjoint_rollover_after_eviction() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                max_size: MAX_MESSAGE_SIZE,
-                max_peers_per_set: NZUsize!(2),
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            };
-            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
-            let old_primary = ed25519::PrivateKey::from_seed(1).public_key();
-            let old_secondary = ed25519::PrivateKey::from_seed(2).public_key();
-            let new_primary = ed25519::PrivateKey::from_seed(3).public_key();
-            let new_secondary = ed25519::PrivateKey::from_seed(4).public_key();
-
-            // With one retained set, the replacement evicts both old identities before enforcing
-            // the limit.
-            assert!(
-                network
-                    .register_tracked_peer_set(
-                        0,
-                        TrackedPeers::new(
-                            Set::try_from([old_primary.clone()]).unwrap(),
-                            Set::try_from([old_secondary.clone()]).unwrap(),
-                        ),
-                    )
-                    .await
-            );
-            assert!(
-                network
-                    .register_tracked_peer_set(
-                        1,
-                        TrackedPeers::new(
-                            Set::try_from([new_primary.clone()]).unwrap(),
-                            Set::try_from([new_secondary.clone()]).unwrap(),
-                        ),
-                    )
-                    .await
-            );
-
-            assert_eq!(network.peer_ref_counts.len(), 2);
-            assert!(!network.peer_ref_counts.contains_key(&old_primary));
-            assert!(!network.peer_ref_counts.contains_key(&old_secondary));
-            assert!(network.peer_ref_counts.contains_key(&new_primary));
-            assert!(network.peer_ref_counts.contains_key(&new_secondary));
         });
     }
 

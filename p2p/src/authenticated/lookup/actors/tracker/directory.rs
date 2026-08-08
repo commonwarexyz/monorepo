@@ -372,15 +372,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
-    /// Returns the number of distinct configured identities, including the local identity.
-    /// Temporarily blocked peers remain part of this total.
-    pub fn peer_count(&self) -> usize {
-        self.peers
-            .values()
-            .filter(|record| record.configured())
-            .count()
-    }
-
     /// Returns true if the peer is eligible for connection.
     ///
     /// A peer is eligible if it is in a peer set, not blocked, and not ourselves.
