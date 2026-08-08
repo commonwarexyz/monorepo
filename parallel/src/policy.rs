@@ -335,14 +335,8 @@ struct SpawnEntry {
 }
 
 impl SpawnEntry {
-    // Returns the path to run and whether the caller should time it. Offload is seeded first: it is
-    // the only path that also measures the job's own wall time, which estimates the inline cost.
-    // Once both estimates exist, the cheaper caller-visible cost wins (ties -> inline, which frees a
-    // worker). Inlining is gated on the latest raw inline sample (or the pool wall before we have
-    // one) against `budget`, so a single over-budget inline run switches to offloading at once and
-    // a long job never blocks the calling task. The loser is probed on an interval that doubles
-    // with how badly it lost, so a close race is re-checked often while a blowout is re-checked
-    // rarely.
+    // Decides whether this call runs inline or offloads, and whether the caller should time the run.
+    // `budget` bounds how long an inline run may occupy the calling task.
     fn choose(&mut self, budget: u64) -> (SpawnExecution, bool) {
         let Some(offload_ns) = self.offload_ns else {
             self.since_probe = u32::MAX;
@@ -391,6 +385,8 @@ impl SpawnEntry {
         )
     }
 
+    // Folds one timing sample into this entry: `caller_ns` is the caller-visible wait for
+    // `execution`, and `job_wall_ns` is the job's own pool wall (present only for offload runs).
     fn record(&mut self, execution: SpawnExecution, caller_ns: u64, job_wall_ns: Option<u64>) {
         match execution {
             SpawnExecution::Inline => {
