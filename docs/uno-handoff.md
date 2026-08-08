@@ -1,614 +1,391 @@
-# UNO formal-specification and model-checking handoff
+# UNO specification and Kani handoff
 
-> **Paused checkpoint, 6 August 2026.** This handoff's original “next task” and two-module inventory
-> are now historical. `docs/uno-protocol.qnt` has 5,089 lines and three modules, including the
-> two-participant `uno_composed` byte-level bridge. Its current SHA-256 is
-> `dde48576de33b8993cdc340a01a9019f842ae61bb91a15c996af834f32b75965`. Its immediate predecessor,
-> SHA-256 `ee66bfc46088ffd9b1ccd1aa5779ff59f05bff7b44aaa72c48cd9446a33465f4`, typechecked with the
-> command below. A later full-diff audit found and corrected that checkpoint's generation-2
-> predecessor fixture: it claimed ordinary `R` but encoded the `M` guard and CRCs. Because formal
-> execution remains paused, the corrected current artifact has not yet been typechecked.
-> Development runs found the intended broken-generation counterexample and completed
-> several shallow pair-fixed obligations, but later edits mean that no final-current-hash Apalache
-> matrix is complete. The exact-A recovery run was manually stopped (`exit=137`,
-> `OOMKilled=false`) when the user paused formal-model execution. Do not resume a checker merely to
-> complete this handoff. `docs/uno-model-checking.md` now distinguishes current evidence, older
-> development evidence, OOM/interrupted attempts, and pending checks. On resumption, run one heavy
-> checker at a time with the established 44 GiB JVM profile and the approximately 58.75 GiB Docker
-> ceiling; do not repeat low-memory calibration. The paper now specifies commit-biased recovery:
-> rejection before exact code-last `A` is provisional and may become new after a torn abort-body
-> repair; exact `A` is irreversible old, and no caller mutation, destructive payload change, or
-> payload/slot reuse is permitted while a distinguishable rejected generation lacks it.
-> Proof-preserving predecessor finalization is allowed. A byte-for-byte canonical lower-generation
-> pre-attempt source, including its own exact lower-generation witness, has no distinguishable new
-> generation to consume.
+> **Authoritative restart checkpoint: 7 August 2026.** This file supersedes earlier handoff
+> language claiming that the current Kani source has a completed proof matrix. Complete 30- and
+> 36-harness matrices exist for older source snapshots. Pre-execution adversarial review and
+> regression fixes have produced 42 proof harnesses and changed the codec, composed, and protocol
+> sources; those current sources have **not** received a recorded full matrix. Do not transfer the
+> older results to them.
 
-> **Post-handoff workspace update.** The branch was externally advanced to
-> `5ecb6c433c0392cd9fc7f6d7ab9cafc1b4a69cea` (`progress`), which tracks the six UNO artifacts and
-> changes no Rust relative to `26a532dd6`. After explicit authorization, commit
-> `c5597b66670f31c71795e9c2cd02d195e711af10` adds the reviewed cancellation-ownership repair and
-> regressions without changing the R13 on-disk format. The workspace-state inventory below is
-> preserved as the historical starting checkpoint. Fresh Linux/ext4 and Rust/cancellation review
-> results and exact validation commands are recorded in `docs/uno-model-checking.md`; formal-model
-> execution remains paused. The current TeX rebuilt successfully as a 25-page, 257,917-byte PDF
-> with SHA-256
-> `68b469865c29dc74a3f7ebcd6109a651bde927f37df37fccb14d81c3e3a4a354`.
+The normative proposal is R14-2P, the two-phase code-last protocol. The checked-in production
+implementation remains R13 and is not claimed to satisfy R14-2P. The Kani crate is a bounded,
+specification-only model. Production Rust and AIO work are out of scope unless the user explicitly
+authorizes them.
 
-> **Confirmed target-protocol blocker.** A final full-diff audit and an independent byte-level
-> reconstruction confirmed that the one-phase proposed R14 prepare does not bind the adjacent
-> generation-independent witness to the issued candidate-generation guard. Old two-member topology
-> bytes and issued-new three-member candidate bytes can form an exact checksummed two-member ring,
-> publishing two participants while the third remains old. This requires no CRC collision,
-> generation skip, incarnation reuse, or external namespace mutation. The paper now withdraws the
-> unconditional theorem and records only a conditional conjecture. The current two-participant
-> `uno_composed` model starts witnesses from zero and cannot express this old-two/new-three trace.
-> The next action requires an architecture choice: (A) two-phase code-last prepare, which adds a
-> second ordered durability layer and is the correctness-first recommendation; (B) a splice-binding
-> root-to-witness commitment with a stronger computational assumption; or (C) narrowing away
-> admitted-but-unacknowledged atomicity. Formal execution remains paused until that choice is made.
+## Start here
 
-This document is a session handoff for continuing the UNO protocol audit in a fresh Codex session.
-It records the exact local state, user requirements, work completed, known correctness gaps, and
-reproducible validation commands. Do not infer that an item is complete merely because it appears
-in the specification: the paper deliberately distinguishes the proposed R14 protocol from the
-checked-in R13 implementation.
+1. Read the repository-root `AGENTS.md` completely.
+2. Read this file completely.
+3. Show `git status --short --branch` and confirm the commit and dirty artifacts below before
+   changing anything.
+4. Preserve all existing work. In particular, `docs/uno-kani-model/` is intentionally untracked;
+   do not clean, reset, or replace it from `HEAD`.
+5. Do not resume Quint or Apalache. Kani is the selected executable formal method. After the Kani
+   work and reviews are genuinely complete, remove every remaining Quint/Apalache artifact as
+   described below.
+6. Do not start with a broad proof matrix. First reconcile the current source, documentation, and
+   historical evidence. When proofs are resumed, run one harness at a time with no timeout or
+   memory ceiling. The user explicitly asked not to use low-memory calibration runs.
 
-## Historical starting objective
+No Kani, CBMC, Quint, or Apalache process was active when this checkpoint was written. No formal
+model or test command was run while preparing this handoff.
 
-The session began with the objective of making the UNO formal specification sound under adversarial
-review and using a real model checker (Quint with Apalache), not a home-grown state-machine
-explorer. The original next task was to close the gap between the separate byte-provenance and
-group-control abstractions by adding a small composed, byte-level, two-participant model. That model
-now exists, but the confirmed three-participant witness-provenance counterexample above supersedes
-this historical objective. The current next action is the architecture choice in the checkpoint.
+## Repository state at this checkpoint
 
-The explicitly authorized cancellation repair is complete. Do not make further Rust changes to
-implement any witness-provenance option unless the user selects that architecture and authorizes
-implementation work.
-
-## Historical workspace state (original handoff)
-
-- Repository: `/Users/patrickogrady/code/monorepo-pr-4368`
+- Worktree: `/Users/patrickogrady/code/monorepo-pr-4368`
 - Branch: `pr/4368`
-- HEAD: `26a532dd6` (`origin/explore-runtime-atomics`)
-- HEAD subject: `[runtime] Clean stranded tombstones during partition recovery`
-- Docker image already built: `uno-quint:0.32.0`
-- Quint: 0.32.0
-- Apalache: 0.56.1
+- `HEAD`: `44196f356af4ef7cd12bb924c8a8c9d29cde0f5a` (`progress`)
+- Required lineage commit `26a532dd6` is an ancestor of `HEAD`.
+- `git diff --check` was clean immediately before the handoff rewrite.
+- No production Rust file appeared in the dirty-worktree status.
 
-At the original handoff, the following files were intentionally untracked and contained the work.
-They are tracked by `5ecb6c433` now, but must still not be reset, cleaned, or overwritten:
+The status before this handoff rewrite was:
 
 ```text
-docs/uno-model-checking.md
-docs/uno-protocol-spec.pdf
-docs/uno-protocol-spec.tex
-docs/uno-protocol.qnt
-docs/uno-quint.Dockerfile
+ M docs/uno-handoff.md
+ M docs/uno-model-checking.md
+ M docs/uno-protocol-spec.pdf
+ M docs/uno-protocol-spec.tex
+?? docs/uno-kani-model/
+?? docs/uno-protocol-spec.aux
+?? docs/uno-protocol-spec.log
+?? docs/uno-protocol-spec.out
 ```
 
-This handoff file was also untracked at that checkpoint and is tracked now.
+The TeX source is newer than the PDF, so the PDF is stale. The generated `.aux`, `.log`, and `.out`
+files are temporary build artifacts; remove them after a successful final rebuild, retaining the
+PDF. Preserve unrelated dirty work.
 
-The existing presentation is tracked and clean:
+## Protocol decision and negative control
 
-```text
-docs/uno-v2-atomic-storage.tex
-docs/uno-v2-atomic-storage.pdf
-```
+R14-2P is the correctness-first reference:
 
-At handoff creation, the paper source was newer than its PDF:
+1. For every participant, issue the candidate payload/length update and every candidate-slot byte
+   except root offset 7. Complete that participant's file durability operation.
+2. Wait for a group-wide join. Every participant must have the exact body, witness, payload
+   evidence, and live phase-one durability credit from the same candidate execution.
+3. Only then issue each participant's one-byte, generation-colored prepared guard at root offset 7
+   and complete a second file durability operation.
+4. A crash clears every live durability credit. Recovery may decode a surviving exact prepared
+   guard but may never manufacture one.
+5. Rejection uses the same code-last order for the abort root: establish every non-guard abort byte,
+   then issue its one-byte state guard. Recovery/repair writes may crash and tear under the same
+   arbitrary-subset rule as ordinary writes.
+6. No removal unlink is enabled until every participant has an independent durable final root.
 
-```text
-2026-08-06 00:15:08 docs/uno-protocol-spec.tex
-2026-08-05 23:00:24 docs/uno-protocol-spec.pdf
-```
+The storage fault model is deliberately strong: **any subset of every unsynced write's addressed
+bytes may survive**. It is not a prefix model. This applies equally to append, rewind/truncate,
+remove, recovery, abort, and final-repair writes.
 
-That stale original PDF has since been rebuilt. The current PDF dimensions and digest are recorded
-in the checkpoint at the top of this file. The presentation PDF was already current relative to its
-source at the original handoff.
+R14-1P deliberately omits the group-wide body barrier before prepared guards and is retained only
+as a negative control. Its fixed trace starts from an older exact two-member witness at `a,b`,
+rewinds to exact empty generation-two authorities, admits a legal generation-three three-member
+append, and retains an arbitrary subset of issued bytes. The resulting exact synthetic two-member
+ring publishes `a,b` while `c` remains old. This requires neither a checksum collision nor a
+generation skip. The deliberately broken harness must fail only its intended atomicity assertion
+and must reach its counterexample cover.
 
-## Non-negotiable user requirements and corrections
+## Current Kani source: reviewed, proof-pending snapshot
 
-1. Use Apalache or Quint. The user explicitly rejected a custom state-machine checker.
-2. The storage crash model is **not prefix persistence**. Before a successful durability barrier,
-   any subset of every issued write's addressed bytes may survive, torn at arbitrary byte
-   boundaries.
-3. The same fault model applies to recovery and repair. Abort roots, final materialization roots,
-   truncation, tombstone cleanup, unlink, and directory repair may themselves be interrupted by
-   another crash.
-4. Model real batches, including mixed append/update-as-append, rewind/resize, and delete—not a
-   prepare-only toy model.
-5. Model partial deletion: some unlinks/directory updates may survive while others do not.
-6. Be explicit about what the model does and does not say about Linux/ext4. Do not call the Quint
-   model an ext4 model or a proof of the Rust implementation.
-7. Keep analysis adversarial. A passing bounded run is evidence, not an unbounded proof.
-8. AIO experimentation was explicitly dropped. Do not resume the legacy-AIO prototype or present
-   it as active work.
-9. UNO is intended as an atomic wrapper over an ordinary V1 `Blob`; if a narrow filesystem/backend
-   capability is needed, pipe it through the ordinary abstraction rather than bypassing it.
-10. Preserve ordinary V0/V1 behavior and the current public usage. The atomic API is ALPHA and may
-    change, but mainline non-atomic storage must not be undermined.
+The executable model is [`uno-kani-model`](uno-kani-model/README.md). It has three layers:
 
-## Target architecture in one paragraph
+- `src/codec.rs`: physical proposed-R14 fixtures. Native tests use real CRC32C and full 2,048-byte
+  slots. Kani quotients a slot to the 466 decoded root/wrapper/link bytes and gives every addressed
+  retained byte an independent survival selector. Omitted bytes are fixed zero and unread.
+  Wrapper/root checksum validation is erased under Kani as a conservative over-approximation;
+  payload equality uses collision-free finite opaque tokens.
+- `src/composed.rs`: twelve independently torn candidate byte-equivalence cells per participant,
+  three exact-decoded fallback cells for authority/payload/extent, an explicit one-to-three-member
+  ring decoder, active-count-aware atomicity, decoded operations and observations, distinct
+  logical/suffix evidence, exact operation projection, mixed append/rewind/remove, and the broken
+  one-phase control.
+- `src/protocol.rs`: a bounded one-to-three-participant lifecycle abstraction with the group-wide
+  phase-one join, crash-cleared body and phase-two completion credits, recovery-inert guard-sync
+  history, no recovery prepared-guard writer, arbitrary phase-two guard crash cuts, one-authority
+  abort selection with an explicit terminal admission action that blocks peer mutation until
+  normalization, code-last abort, final repair,
+  arbitrary unlink subsets, and retained semantic provenance.
 
-UNO wraps each ordinary blob with a private root page and append-only payload. A batch writes each
-participant's payload once at its final location and publishes a checksummed local successor link
-plus an invisible prepared root. The links form a canonical ring; a complete exact ring is the
-distributed commit certificate. Every participant can then independently materialize to an `M`
-root or a deletion tombstone `T`. There is no global coordinator, manifest, WAL, global lock, or
-global sync order. Per-file durability obligations are independent and may be issued concurrently,
-but there is no guarantee that the filesystem/device coalesces them into one physical flush.
+Static source inventory at the checkpoint:
 
-The target mutation vocabulary is append, rewind, and delete. It deliberately does not promise
-single-copy atomic arbitrary in-place overwrite; that requires undo/redo logging, COW/patch mapping,
-or a volume-like allocator and reclamation scheme.
+- 42 `#[kani::proof]` harnesses: 17 codec, 6 composed, and 19 protocol. There are 41 positive
+  obligations with 52 positive cover declarations and one deliberately broken negative harness
+  with one counterexample cover.
+- 40 native `#[test]` functions: 17 codec, 5 composed, and 18 protocol.
 
-## Important distinction: checked-in R13 versus proposed R14
+These counts are only a source inventory. They are not execution results.
 
-The source tree at `26a532dd6` reports R13 roots and L14 links:
+Pre-execution review first fixed empty-subset abort-body classification, stored-checksum
+overconstraint, and boolean fallback authority. A later fresh review added regressions for active
+one/two-member composed rings, exact operation projection, one-authority abort selection, volatile
+phase-two completion credit, and arbitrary phase-two guard crash cuts. A fresh post-fix review then
+added failing regressions for exact bridge group identity and explicit mutation admission; the
+latter exposed a missing action at compilation. All regressions pass after the fixes. Full
+post-format validation passes for the hashes below: format checking, all 40 native tests, Clippy
+with warnings denied, and discovery of exactly 42 harnesses. The proof matrix is still pending; no
+proof result is recorded for these hashes.
 
-```text
-storage/runtime/src/storage/atomic.rs
-  CWUNOR13, CWUNOP13, CWUNOB13, CWUNOM13, CWUNOT13, CWUNOW13
+Current file hashes:
 
-storage/runtime/src/storage/batch/coordinator.rs
-  CWUNOL14
-```
+| File | SHA-256 |
+|---|---|
+| `docs/uno-kani-model/Cargo.toml` | `1ea006476cbd398a0879d59c47d573df4dc38fbc82cc11f1c0129be58e051aef` |
+| `docs/uno-kani-model/Cargo.lock` | `e6c55013776fcd28a9af1b707fcdd41f45a18c079a1c00999b37caf9d3be7b0f` |
+| `docs/uno-kani-model/README.md` | `a297bb204e0b4a139990054d7e417b22de6127608f63964fce36fad347516051` |
+| `docs/uno-kani-model/src/lib.rs` | `fea94108026c13f1ad55c409e0be3006c399a6c1ce4a05d13d06e96beba0af0d` |
+| `docs/uno-kani-model/src/codec.rs` | `b4eab34c636c80420567a40e027923f0ee39204fe9bbf0ef23576d2c8ef04076` |
+| `docs/uno-kani-model/src/composed.rs` | `671daae27ec9ba28d0bbb9a38fb054a161e6b87ed588244b9e79564f474cc771` |
+| `docs/uno-kani-model/src/protocol.rs` | `c66fae4345aec25e6d89db535e60e3020515eed5353f5f295736623428be91cb` |
 
-The paper's safety argument is for a proposed **R14** root format, not the current R13 codec. R14
-uses one generation-colored state/guard byte:
+Recompute all hashes before recording final results. A source change invalidates proof reuse for the
+changed source and any downstream claim that depends on it.
 
-```text
-chi(g, state) = 1 + 6 * (g mod 3) + state_index
-```
+## Historical 36-harness matrix: valid only for its exact hashes
 
-This guard prevents an old same-slot final spelling, a torn new prepare, and a later torn abort from
-accidentally synthesizing an exact final root that was never issued. R14 also requires:
+The ledger also records a later completed 36-harness matrix for codec
+`233ea437b97298317309ec230368eb23dbcdd98d4424fcd268c390959d9ac34e`, composed
+`b831a62be5bbfe8eda2fae9ffed2a5cf5db91a958e770082bc8d2c85dcbe76df`, and protocol
+`10165120c0dabcc12009493c10d4d7e7af4b031e7ebdb3f77dbe0060661fbce4`. All 35 positive
+harnesses passed, checking 31,064 properties and satisfying 33/33 positive covers. The negative
+harness failed only its intended assertion and reached its cover. Those results are historical and
+do not apply to any live model source hash above.
 
-- consecutive, nonwrapping generation lineage;
-- canonical full-slot preparation;
-- rejected generations consumed with a predecessor-equivalent abort authority;
-- code-last abort publication: barrier all 111 non-guard header bytes, then write and barrier the
-  one-byte abort guard;
-- only exact group-bound `M/T` roots plus their witness may act as final group certificates;
-- ordinary `R` roots are not group certificates.
-- an authority-bearing witness must have disk-observable issuance provenance; exact CRC validation
-  alone does not supply it.
+## Historical 30-harness matrix: valid only for its exact hashes
 
-Do not describe the checked-in R13 implementation as satisfying the proposed R14 conditions, and
-do not describe the current one-phase target as having an unconditional theorem.
+`docs/uno-model-checking.md` records a real sequential matrix run using Kani 0.67.0, bundled CBMC
+6.8.0, and CaDiCaL. For the exact older hashes below, all 29 positive harnesses passed, checking
+25,011 properties and satisfying 26/26 positive covers. The deliberately broken harness failed
+only its intended atomicity assertion and reached its counterexample cover. The maximum reported
+resident set was 4,013,195,264 bytes, with zero swap and no imposed timeout or memory ceiling.
 
-## Original artifact inventory (superseded by the top checkpoint)
+Those results apply only to this historical snapshot:
 
-### `docs/uno-protocol-spec.tex`
+| File | Historical SHA-256 |
+|---|---|
+| `Cargo.toml` | `1ea006476cbd398a0879d59c47d573df4dc38fbc82cc11f1c0129be58e051aef` |
+| `Cargo.lock` | `e6c55013776fcd28a9af1b707fcdd41f45a18c079a1c00999b37caf9d3be7b0f` |
+| `README.md` | `dd3416e6677a37f3ac45476f155483bf405f770a374d44a371daf412230f1cf2a` |
+| `src/lib.rs` | `fea94108026c13f1ad55c409e0be3006c399a6c1ce4a05d13d06e96beba0af0d` |
+| `src/codec.rs` | `a73e0df69bd1921c349d315bba60331245bf397616700249b47c651910c3964b` |
+| `src/composed.rs` | `c28e12c51d3c76473af5eb1491e7cb1ce5054d7908ac486628656981012b3bf7` |
+| `src/protocol.rs` | `5fc8acbf6dc7c4cc00e203f134942f04e1403533690f42c050a2ceaf76297df0` |
 
-Approximately 2,055 lines. It is written like a conference protocol paper and includes:
+The 30-harness/29-positive/25,011-property wording predates the live source. Preserve it only as
+historical evidence and never present it as the result for the current 42-harness source.
 
-- vocabulary, objects, identities, API observations, and safety target;
-- an explicit arbitrary-subset addressed-byte crash model;
-- a Linux/ext4 refinement boundary;
-- backing-blob geometry, root and witness layouts;
-- preparation, decision, materialization, deletion, ring discovery, and missing-participant recovery;
-- generation-colored R14 state guard and code-last abort protocol;
-- invariants, lemmas, a conditional safety conjecture, liveness conditions, cost discussion, and
-  API semantics;
-- source-to-spec correspondence;
-- a candid implementation-refinement status section with concrete blockers and counterexamples;
-- executable-model scope and audit checklist.
+Ten current harness names did not exist in the historical matrix:
 
-The Linux/ext4 section intentionally states that the paper assumes a supported local-filesystem
-profile rather than modeling JBD2. The intended initial profile is local non-DAX ext4 with normal
-journal replay, working barriers/flushes, and `data=ordered` or `data=journal`. A successful
-`fdatasync` establishes the relevant file-data/size frontier; directory-entry durability requires a
-directory `fsync`. `RWF_DSYNC` is not `RWF_ATOMIC`. `data=writeback`, `nobarrier`, `noload`, devices
-that lie about flushes, misdirected writes, and neighboring-block damage are outside the conditional safety envelope
-unless separately refined.
+- `codec::proofs::abort_body_tears_cannot_promote_an_incomplete_prepare_set`
+- `codec::proofs::every_append_payload_tear_requires_exact_suffix_evidence`
+- `codec::proofs::every_final_tear_retains_disk_decision_evidence`
+- `codec::proofs::physical_all_append_candidate_fields_are_self_consistent`
+- `codec::proofs::rewind_requires_exact_retained_prefix_evidence`
+- `codec::proofs::root_checksum_abstraction_accepts_arbitrary_stored_checksum_bytes`
+- `codec::proofs::wrapper_checksum_abstraction_accepts_arbitrary_stored_checksum_bytes`
+- `composed::proofs::every_pre_guard_body_subset_with_exact_fallbacks_recovers_old`
+- `composed::proofs::old_observation_requires_an_exact_fallback_decode`
+- `protocol::proofs::empty_abort_body_survival_preserves_the_source_classification`
 
-### `docs/uno-protocol.qnt`
+Four historical names are absent from the current source, having been renamed or strengthened:
 
-At the original handoff this was approximately 1,197 lines and had two modules:
+- `codec::proofs::every_final_tear_preserves_the_exact_witness`
+- `codec::proofs::physical_code_last_candidate_matches_composed_ring`
+- `composed::proofs::every_pre_guard_body_subset_with_exact_authorities_recovers_old`
+- `composed::proofs::old_observation_requires_an_exact_authority`
 
-1. `uno_group`
-   - one, two, or three participants;
-   - each participant independently append, rewind, or remove;
-   - independent prepare/payload/link outcomes;
-   - decision derived from disk evidence;
-   - interruptible code-last abort repair;
-   - interruptible `M/T` finalization;
-   - post-decision physical rewind;
-   - issued unlink sets with arbitrary crash-surviving subsets;
-   - recovery observations decoded from local state rather than assigned directly from a ghost goal;
-   - focused cut-point initializers `initRejected`, `initDecided`, and `initFinalized`.
+The protocol source hash also changed even though most protocol harness names did not. Historical
+results therefore do not transfer to those current harnesses either.
 
-2. `uno_slot`
-   - finite byte-cell provenance abstraction;
-   - arbitrary powersets of addressed cells survive each unsynced write;
-   - crash always loses volatile recovery phase and barrier credit;
-   - abort repair writes header only, never the witness;
-   - deliberate generation-uncolored negative control (`initBuggy`);
-   - generation-colored, code-last target (`initFixed`).
+## Exact proof boundary
 
-At that checkpoint the model header and paper both admitted that these modules were disconnected
-abstractions. The later `uno_composed` module closed that two-participant structural gap but not the
-three-participant witness-provenance gap recorded at the top of this handoff.
+Even after a fresh 42-harness matrix succeeds, the result remains bounded and decomposed:
 
-### `docs/uno-model-checking.md`
+- physical fixtures use exactly three participants, generations one through three, and four-byte
+  payload pieces;
+- the mixed vector is append to logical length eight/physical extent 8,200, rewind to logical
+  length two/physical extent 8,196, and remove with physical extent 8,196;
+- the composed model uses twelve candidate and three fallback byte-equivalence cells per participant
+  rather than every physical byte;
+- the protocol induction is unbounded in transition count only within its fixed one-to-three-member
+  state quotient; and
+- the mixed physical bridge harness is intended to prove selected field projections, while separate physical
+  harnesses check the all-append and splice fixtures; no single mechanized refinement theorem maps
+  every arbitrary physical disk image through every composed cell to every protocol
+  transition. In particular, retained semantic provenance in the protocol layer is not derived
+  from raw bytes by one end-to-end harness.
 
-At the original handoff it contained the pinned Docker commands and fault abstraction but still
-needed the composed-model ledger. The current file now distinguishes final-hash, development,
-interrupted, and pending evidence; do not quote any result outside the category in which it is
-recorded.
+Do not describe the work as an arbitrary-participant, arbitrary-payload, arbitrary-generation,
+production-Rust, filesystem, cancellation, namespace, or public-API proof. Coarser byte-equivalence
+classes and collision-free checksum tokens are authorized only when they conservatively preserve
+arbitrary-subset survival and the negative control; review that claim rather than assuming it.
 
-### `docs/uno-quint.Dockerfile`
+## Checked-in R13 and review boundaries
 
-Pins the actual tools. Continue using it rather than installing Java or Apalache directly on the
-host.
+The current implementation does not implement the generation-colored R14 root grammar or either
+R14-2P prepare phase. Known independent blockers include:
 
-## Historical validation state at original handoff
+- a newer tombstone can lose to an older complete ring;
+- an ordinary root is not a group-bound final certificate;
+- generation-independent R13 state spellings permit exact unissued authority reconstruction under
+  arbitrary-subset survival;
+- a rejected witness can become selectable again after payload-offset reuse;
+- one fixed-chunk/integrity path can admit a noncanonical candidate;
+- direct-regular-file and distinct-inode participant preconditions are not fully enforced for a
+  pre-populated namespace; and
+- missing retained successors remain an availability boundary.
 
-The model artifact present at the original handoff typechecked successfully with:
+The branch separately contains a cancellation-ownership repair for the R13 runtime. It makes
+admitted namespace and publication work self-driving after caller cancellation. That repair does
+not change the storage format, solve the R14 blockers, or establish R13 conformance. Review Rust and
+cancellation correspondence, but do not implement production changes without explicit permission.
+AIO was explicitly dropped; do not resume it.
+
+The intended Linux profile is direct regular files on one local ext4 filesystem with normal JBD2
+replay, enabled barriers, truthful successful file and directory durability operations, and no
+external namespace mutation. File and directory durability are separate. The profile excludes at
+least `data=writeback`, DAX, symlink participants, hard-link aliases, casefold directories,
+encryption or other byte-transforming stacks not separately refined, lying device caches, media
+loss, and Byzantine mutation. Short, unsupported, or error returns are not successful durability
+operations. Length extension may expose zero-filled bytes where application data did not survive.
+The arbitrary-subset model is a conservative specification assumption, not a claimed description
+of ext4's exact journaling behavior.
+
+## Completion plan for the next session
+
+### 1. Reconcile before executing
+
+- Confirm status, branch, commit ancestry, current hashes, static harness inventory, and absence of
+  active proof processes.
+- Read the current Kani source and diff it against the historical hashes/results. Check every new
+  abstraction for under-approximation, unconstrained semantic oracles, vacuity, missing action
+  branches, checksum misuse, and unsupported composition.
+- Reconcile `docs/uno-model-checking.md` and `docs/uno-protocol-spec.tex` so stale historical results
+  cannot be mistaken for current results. Until the current matrix exists, say **pending**, not
+  passed.
+
+### 2. Validate and run the current snapshot
+
+Run cheap validation first from `docs/uno-kani-model`:
 
 ```sh
-docker run --rm \
-  -v uno-quint-cache:/root/.quint \
-  -v "$PWD/docs":/model:ro -w /tmp \
-  uno-quint:0.32.0 \
-  typecheck /model/uno-protocol.qnt
+cargo fmt --manifest-path Cargo.toml -- --check
+cargo test --manifest-path Cargo.toml
+cargo clippy --manifest-path Cargo.toml --all-targets -- -D warnings
+cargo kani list
 ```
 
-Important: the image entrypoint is already `quint`. Do **not** run
-`uno-quint:0.32.0 quint typecheck ...`; that accidentally launches the REPL and can produce an
-irrelevant `write EPIPE` message.
-
-Historical bounded results obtained before the current artifact:
-
-- generation-uncolored slot negative control: violation found within depth 5 (expected);
-- generation-colored/code-last slot model: no violation through depth 8;
-- expanded group model: no violation through depth 6;
-- randomized group simulation: 10,000 samples, 24 steps, no violation;
-- focused cut-point initializers typechecked and passed a shallow reachability check.
-
-These runs preceded later model edits. Treat them as historical evidence only. The current digest
-has not been typechecked because formal execution is paused. A 100,000-sample/30-step randomized
-run was stopped because it was too slow; never claim it passed.
-
-## Known target and implementation blockers
-
-The paper intentionally does not hide these:
-
-- **Target witness provenance is unsound.** The one-phase proposed R14 prepare can reconstruct an
-  exact never-issued smaller ring from an older same-parity witness and issued-new candidate bytes.
-  This blocks the unconditional conjecture independently of every Rust correspondence issue and
-  requires the architecture choice recorded at the top of this handoff.
-
-The checked-in implementation additionally has these refinement blockers:
-
-1. **Namespace shape is not fully checked.** Hard-link aliases can make two logical participants
-   write the same inode. Existing-file open can follow a symlink while recovery uses no-follow
-   behavior, creating live/recovery disagreement.
-2. **A newer tombstone can lose to an older complete ring.** Current stale-witness suppression does
-   not give a newer exact `T` precedence over every older ring, so a partially unlinked deletion can
-   resurrect data.
-3. **R13 permits exact unissued authority synthesis.** Generation-independent state magic allows a
-   non-prefix mixture of old final, torn prepare, and torn abort bytes to reconstruct a canonical
-   final header never issued by the protocol.
-4. **Ordinary roots are not valid group certificates.** Current recovery can use an `R` root that
-   carries no group identity as evidence for a stale group.
-5. **Rejected witnesses can survive payload reuse.** Without durable reject-and-consume, later
-   payload written at reused offsets can accidentally make an old witness validate.
-6. **Missing successor partition causes an availability failure.** Current ordered-delete recovery
-   can propagate `ENOENT` instead of using independent local `M/T` authority.
-7. **Integrity geometry has acknowledged-reopen gaps.** Empty chunk completion and malformed rewind
-   units can stage a root that admission accepts but ordinary reopen rejects.
-
-The earlier cancellation-ownership blocker was repaired after explicit Rust authorization. Tokio
-open/scan/remove and direct Tokio/io_uring publication now become self-driving after namespace
-admission, with exact post-unlink, recovery-truncate, and carried-materialization regressions. This
-does not repair or validate the remaining R13/R14 format and correspondence blockers above.
-
-These are implementation-refinement blockers, not all defects in the abstract R14 protocol. A fresh
-session should keep that distinction explicit.
-
-## Findings from adversarial review of the model
-
-The latest adversarial review found the model useful but still too easy in several ways:
-
-- `uno_slot` groups many bytes into semantic cells. It catches the known checksum-byte splice but
-  is not a concrete all-byte codec model.
-- `uno_group` and `uno_slot` are disconnected. A property proved in each does not mechanically show
-  the byte-decoded roots drive the group recovery transition.
-- The model covers only one generation transition. It does not yet exercise post-abort reuse,
-  same-slot reuse two generations later, or overlapping successor groups.
-- Append/rewind/remove are represented by semantic flags and lengths rather than a concrete payload
-  byte store.
-- The namespace abstraction models partial unlink but not full inode incarnation/recreation,
-  rename/create, or directory-journal replay.
-- It is not a Rust refinement model and has no async cancellation/owned-guard state.
-
-Two findings were already repaired in the current model:
-
-- crash no longer preserves volatile recovery phase or body-barrier credit;
-- after a partial unlink, independently final/missing participants can re-enter cleanup instead of
-  getting stuck because the old exact-tombstone predicate no longer holds.
-
-## Historical next task: add a composed byte-level model
-
-This task was completed by adding `uno_composed`. The design notes below are retained as provenance,
-not as the current instruction. The next task is instead to select and model one of the three
-witness-provenance contracts in the top checkpoint.
-
-Add a third Quint module, preferably `uno_composed`, with a deliberately small state space but a
-real end-to-end connection between bytes and group observations.
-
-Recommended scope:
-
-- exactly two participants;
-- independently choose append, rewind, or remove for each;
-- represent each participant's 112-byte R14 root header as `offset -> byte`, not semantic whole-field
-  atoms;
-- model the adjacent witness bytes separately and require an exact reciprocal two-node ring;
-- use concrete canonical old, prepared, abort, materialized/tombstone byte vectors;
-- include all four real CRC32C bytes for those representative vectors so accidental byte equality is
-  preserved;
-- every unsynced root/witness/repair write chooses an arbitrary powerset of **addressed byte
-  offsets** from the current disk image;
-- append has concrete old/new logical length plus payload-valid evidence;
-- rewind has a smaller selected length and permits physical truncation only after decision;
-- remove reaches exact `T`, then namespace unlink can survive for either, both, or neither name;
-- recovery must classify bytes first and derive the group decision from exact decoded roots and
-  witnesses—never from a ghost goal;
-- abort body and abort guard remain two separately barriered phases, and a crash may occur during or
-  after either;
-- final `M/T` writes are ordinary interruptible writes;
-- opening each participant derives `old`, `new`, or `absent` from recovered bytes/name state;
-- assert that the observed pair is entirely old or entirely the intended new vector and that an
-  acknowledged decision always recovers new.
-
-The composed module is not required to model all participant counts. Its purpose is to bridge the
-codec/provenance and two-node ring/control-flow reasoning. Keep `uno_group` for participant-scale
-and mixed-operation control flow, and keep `uno_slot` as the fast negative control.
-
-Representative CRC32C bytes previously computed for a candidate concrete R14 encoding are below.
-Recheck the generator assumptions before treating these as format fixtures:
-
-```text
-p0 append old       206, 89,138, 39
-p0 append prepared  149, 33, 64, 79
-p0 append abort     132, 68,  9,  4
-p0 append final      38, 69,200,209
-p0 rewind old       206, 89,138, 39
-p0 rewind prepared   62,143,127, 26
-p0 rewind abort     132, 68,  9,  4
-p0 rewind final     141,235,247,132
-p0 remove old       206, 89,138, 39
-p0 remove prepared   10, 55,217,168
-p0 remove abort     132, 68,  9,  4
-p0 remove final     254,106,185, 96
-p1 append old       223,247,180,218
-p1 append prepared  161,230,220,178
-p1 append abort     149,234, 55,249
-p1 append final      18,130, 84, 44
-p1 rewind old       223,247,180,218
-p1 rewind prepared   38, 48,231, 49
-p1 rewind abort     149,234, 55,249
-p1 rewind final     149, 84,111,175
-p1 remove old       223,247,180,218
-p1 remove prepared   27,153,231, 85
-p1 remove abort     149,234, 55,249
-p1 remove final     239,196,135,157
-```
-
-The assumptions used for that table were:
-
-- root magic bytes are ASCII `CWUNO14` followed by the colored guard;
-- old generation `1`, candidate generation `3` (representing same-slot reuse with a two-generation
-  gap), old length `5`, append length `7`, rewind length `2`;
-- state order `P=0, B=1, R=2, A=3, M=4, T=5`;
-- integrity fields zero/unbound;
-- 64-byte old tag byte `i` is `(17 + 13*p + 3*i) mod 256`;
-- append tag byte `i` is `(91 + 13*p + 5*i) mod 256`;
-- rewind tag byte `i` is `(121 + 13*p + 5*i) mod 256`;
-- remove retains the old tag;
-- checksum domain `_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT`.
-
-This proposed model is intentionally more concrete than the current paper target. If its constants
-do not exactly match the intended R14 codec, fix the model or label it representative; do not imply
-it validates checked-in R13 bytes.
-
-## Historical suggested execution order (superseded)
-
-Do not follow the checker steps below while formal execution remains paused. After an architecture
-choice, use the current ordered obligations in `docs/uno-model-checking.md` instead.
-
-1. Read the repository `AGENTS.md` instructions from the user/session and inspect `git status`.
-2. Read this handoff and all of:
-   - `docs/uno-protocol-spec.tex`
-   - `docs/uno-protocol.qnt`
-   - `docs/uno-model-checking.md`
-   - `docs/uno-quint.Dockerfile`
-3. Typecheck the untouched current model to establish a baseline.
-4. Implement `uno_composed` incrementally; typecheck after each structural block.
-5. Add a deliberate negative control that removes generation coloring or code-last abort and ensure
-   Apalache finds the known unissued-final counterexample.
-6. Run bounded checks on the corrected composed model. Start shallow, then increase depth using
-   focused reachable-cut initializers so repair/delete paths are not hidden by setup depth.
-7. Rerun `uno_slot` negative and positive controls and every `uno_group` initializer on the final
-   file.
-8. Update `docs/uno-model-checking.md` with exact commands, depths, wall times, and limitations.
-9. Update the paper's executable-model section to describe the composed module and its actual bound.
-10. Rebuild `docs/uno-protocol-spec.pdf`.
-11. Dispatch fresh adversarial reviews with separate scopes:
-    - formal/model soundness and abstraction fairness;
-    - Linux/ext4 refinement assumptions;
-    - correspondence to the Rust implementation and cancellation behavior.
-12. Resolve every actionable finding or record it candidly as a blocker/limitation. Repeat until a
-    fresh full review has no unaddressed specification defect.
-
-## Reproducible commands
-
-Run from the repository root.
-
-Build the pinned tool image if needed:
+Then freeze and record the exact current hashes and harness inventory. Run all current proof
+harnesses sequentially, one at a time, with no timeout, no memory cap, no unwind override, and no
+disabled checks:
 
 ```sh
-docker build -f docs/uno-quint.Dockerfile -t uno-quint:0.32.0 .
+cd docs/uno-kani-model
+/usr/bin/time -l -p cargo kani \
+  --harness '<fully-qualified-harness>' \
+  --solver cadical \
+  --output-format=terse
 ```
 
-Typecheck:
+Use the installed Kani 0.67.0/CBMC 6.8.0 toolchain unless a deliberate, documented toolchain change
+is required. Record the exact command, tool versions, hash set, per-harness result, property and
+cover counts, elapsed time, and peak RSS. All positive harnesses must pass. The broken harness must
+fail only its intended assertion and reach its cover. Treat any other failure, timeout, incomplete
+unwind, unsupported reachable construct, or missing cover as a blocker. Do not silently weaken the
+fault model or proof bounds to make a run finish. If the machine cannot provide enough memory, stop
+and report that concrete blocker instead of retrying with undersized budgets.
 
-```sh
-docker run --rm \
-  -v uno-quint-cache:/root/.quint \
-  -v "$PWD/docs":/model:ro -w /tmp \
-  uno-quint:0.32.0 \
-  typecheck /model/uno-protocol.qnt
-```
+### 3. Update artifacts and conduct fresh reviews
 
-Expected-broken slot model (must find a violation; nonzero exit is success for this negative test):
-
-```sh
-docker run --rm \
-  -v uno-quint-cache:/root/.quint \
-  -v "$PWD/docs":/model:ro -w /tmp \
-  uno-quint:0.32.0 \
-  verify /model/uno-protocol.qnt \
-  --main=uno_slot --init=initBuggy --step=step \
-  --invariant=safe --max-steps=5 --verbosity=1
-```
-
-R14 target slot model:
-
-```sh
-docker run --rm \
-  -v uno-quint-cache:/root/.quint \
-  -v "$PWD/docs":/model:ro -w /tmp \
-  uno-quint:0.32.0 \
-  verify /model/uno-protocol.qnt \
-  --main=uno_slot --init=initFixed --step=step \
-  --invariant=safe --max-steps=8 --verbosity=1
-```
-
-Group model (increase bounds only after shallow runs succeed):
-
-```sh
-docker run --rm \
-  -v uno-quint-cache:/root/.quint \
-  -v "$PWD/docs":/model:ro -w /tmp \
-  uno-quint:0.32.0 \
-  verify /model/uno-protocol.qnt \
-  --main=uno_group --init=init --step=step \
-  --invariant=safe --max-steps=6 --verbosity=1
-```
-
-Randomized simulation is supplementary evidence only:
-
-```sh
-docker run --rm \
-  -v "$PWD/docs":/model:ro -w /tmp \
-  uno-quint:0.32.0 \
-  run /model/uno-protocol.qnt \
-  --main=uno_group --init=init --step=step \
-  --invariants=safe --max-steps=24 --max-samples=10000 \
-  --seed=0x4368 --backend=typescript --verbosity=1
-```
-
-Compile the paper using the available LaTeX toolchain. Check which compiler is installed first; in
-the previous session the intent was to use `tectonic`. A typical command is:
+- Make `docs/uno-model-checking.md` an exact ledger for the final hashes. Keep older results clearly
+  labeled historical if retained.
+- Update the paper to match only demonstrated results and the exact model boundary.
+- Rebuild the PDF from the final TeX:
 
 ```sh
 tectonic --keep-logs --keep-intermediates docs/uno-protocol-spec.tex
 ```
 
-Confirm where the compiler writes the PDF and move/update only the intended
-`docs/uno-protocol-spec.pdf`. Do not use shell redirection or ad-hoc file-generation tricks for
-source edits; use `apply_patch`.
+- Inspect the log and references, record final page count, size, and SHA-256, then remove `.aux`,
+  `.log`, and `.out` while retaining the PDF.
+- Perform fresh, independent adversarial reviews of:
+  1. formal soundness and composition;
+  2. Linux/ext4 assumptions against primary upstream sources; and
+  3. Rust correspondence and cancellation ownership at the current commit.
+- Fix every specification/model/documentation defect found. If a fix changes model source, invalidate
+  dependent results and rerun them. State any unresolved issue candidly as a blocker.
+- Only if the cancellation correspondence conclusion depends on current test evidence, run the
+  focused regressions appropriate to the platform. Do not make production Rust changes without
+  authorization.
 
-## Relevant implementation entry points
+### 4. Remove the retired checker only at genuine completion
 
-```text
-storage/runtime/src/atomic_api.rs
-storage/runtime/src/storage/atomic.rs
-storage/runtime/src/storage/uno.rs
-storage/runtime/src/storage/batch/coordinator.rs
-storage/runtime/src/storage/tokio/mod.rs
-storage/runtime/src/storage/tokio/unix.rs
-storage/runtime/src/storage/iouring.rs
-storage/runtime/src/storage/faulty.rs
-storage/runtime/src/utils/buffer/paged/atomic.rs
-```
+The only remaining repository paths found by a case-insensitive `quint|apalache` search at this
+checkpoint were tracked files:
 
-Useful exact anchors are listed in the paper's `Implementation correspondence` table. Prefer names
-over line numbers because the branch may advance.
+- `docs/uno-protocol.qnt`
+- `docs/uno-quint.Dockerfile`
 
-## What counts as done
+Local Docker artifacts also remained:
 
-Do not call the work complete until all of the following are true:
+- image `uno-quint:0.32.0` (observed image ID `ff922469d7c6`)
+- volume `uno-quint-cache`
 
-- the paper cleanly distinguishes abstract R14 safety from current R13 implementation status;
-- the fault model says arbitrary subsets of all unsynced writes, including repair writes;
-- mixed append/rewind/delete and partial deletion are represented;
-- a composed model derives recovery from concrete byte images and an exact ring;
-- a deliberate broken variant produces a counterexample;
-- corrected bounded checks pass at documented bounds on the final file;
-- all commands and limitations are recorded in `uno-model-checking.md`;
-- the PDF is rebuilt from the final TeX without unresolved layout/reference errors;
-- a fresh adversarial review finds no unrecorded specification defect;
-- remaining Rust mismatches are listed as blockers rather than waved away.
+After every useful obligation is represented in the validated Kani work and all final reviews are
+complete, delete those repository files and exact local Docker artifacts. Verify the exact image and
+volume names immediately before removal. Then search the working tree, excluding `.git`, to prove
+that no case-insensitive `quint` or `apalache` trace remains. Finish with `git diff --check` and a
+full status report. Do not perform this cleanup early: the old files remain recovery evidence until
+the replacement is complete.
 
-## Session instability note
+## Permissible final claim
 
-The previous session repeatedly displayed:
+Only after the current hash-frozen matrix and reviews complete may the final text say:
 
-```text
-Responses HTTPS request failed: error sending request for url
-(https://chatgpt.com/backend-api/codex/responses)
-```
+> The complete bounded Kani matrix passes for the stated R14-2P physical, composed, and lifecycle
+> abstractions, and its one-phase control produces the expected mixed-vector counterexample. The
+> layers are not joined by a general mechanized refinement theorem. No result establishes ext4,
+> public-API, cancellation, or production-Rust refinement, and the checked-in R13 implementation is
+> not claimed to satisfy the proposed R14 theorem.
 
-Those were Codex response-transport failures, not repository, Docker, Quint, or Apalache failures.
-Local edits and completed tool invocations remained intact. One misleading `write EPIPE` came from
-invoking `quint` twice despite the Docker image already using it as the entrypoint; the correct
-typecheck command above exited successfully for the recorded predecessor artifact.
+Until then, replace “passes” with “is pending for the current source snapshot.”
 
-## Current copy/paste prompt for the next session
+## Copy-paste prompt for the next session
 
 ```text
-Continue the UNO formal-specification and model-checking work in:
+Continue the UNO formal-specification work in:
 
   /Users/patrickogrady/code/monorepo-pr-4368
 
-First read the repository instructions and then read this handoff completely:
+First read the repository-root AGENTS.md completely, then read this authoritative handoff completely:
 
   /Users/patrickogrady/code/monorepo-pr-4368/docs/uno-handoff.md
 
-Preserve all existing work. Do not run git clean, reset the UNO artifacts, replace them from HEAD,
-stage, commit, or push without explicit authorization. The branch is `pr/4368` at
-`c5597b66670f31c71795e9c2cd02d195e711af10`; compare the complete work to
-`26a532dd658fbee10137ad185da087548d9b114c`.
+Preserve every existing change. The untracked docs/uno-kani-model directory is intentional; do not
+clean, reset, or replace it from HEAD. Start by showing git status, confirming branch pr/4368 and
+that commit 26a532dd6 remains an ancestor, recomputing the handoff hashes/harness counts, and checking
+that no formal-model process is already running.
 
-The goal is to make the UNO protocol specification sound under adversarial review. Use the pinned
-Quint 0.32.0 + Apalache 0.56.1 Docker image (`uno-quint:0.32.0`); do not build a custom model
-checker. The storage fault model is that ANY subset of every unsynced write's addressed bytes may
-survive—not a prefix—and recovery/repair writes may crash and tear in exactly the same way.
+The handoff's central warning is binding: the recorded completed 30- and 36-harness Kani matrices
+belong to older exact source snapshots. The reviewed current source has 42 harnesses and changed
+codec, composed, and protocol files. Do not claim the old results for the current source. Reconcile
+and adversarially review the current model before executing it, then run the current harnesses sequentially with more
+than enough memory from the outset: no memory ceiling, no timeout, no low-memory calibration, no
+unwind override, and no disabled checks. Record exact hashes, commands, tool versions, bounds,
+per-harness results, property/cover counts, elapsed time, and peak RSS. Every positive harness must
+pass; the deliberately broken one-phase variant must fail only its intended assertion and reach its
+counterexample cover. Do not weaken arbitrary-subset byte survival, including for recovery and
+repair writes.
 
-The two-participant composed model exists, but fresh adversarial review confirmed that it
-underapproximates a real old-two/new-three exact-witness splice. The proposed one-phase R14 target
-therefore has no unconditional admitted-window theorem. Before changing or running the model, ask
-the user to choose: (A) two-phase code-last prepare, the correctness-first noncryptographic repair;
-(B) a root-to-witness splice-binding commitment with an explicit stronger computational
-assumption; or (C) an acknowledged-prefix-only contract that withdraws admitted-but-unacknowledged
-atomicity. Do not silently choose among those materially different contracts.
+Update docs/uno-model-checking.md and docs/uno-protocol-spec.tex to match only the final demonstrated
+results, rebuild and inspect docs/uno-protocol-spec.pdf, and perform fresh adversarial reviews of
+formal soundness, Linux/ext4 assumptions, and Rust correspondence/cancellation. Fix every
+specification/model/documentation defect or report a concrete blocker. Do not change production Rust
+without explicit authorization. AIO remains dropped. Never claim the current R13 implementation
+satisfies the proposed R14 theorem.
 
-Once a contract is selected, follow `docs/uno-model-checking.md`: add an old `H={a,b}` / new
-`G={a,b,c}` physical regression whose broken control reproduces the mixed vector and whose repaired
-variant blocks it, then run the complete pinned Quint/Apalache matrix on the final hash. Do not claim
-the current R13 Rust implementation satisfies the proposed R14 conditions or conditional
-conjecture.
-
-AIO work was explicitly dropped. Do not resume it. The cancellation-ownership Rust repair is
-already committed and reviewed; do not make additional Rust changes without explicit authorization.
-
-Start by showing `git status`, confirming the artifact hashes, and asking for the architecture
-decision above. Formal execution remains paused until that choice is made. If it resumes, run one
-checker at a time with the established 44 GiB JVM heap and approximately 58.75 GiB Docker ceiling;
-do not repeat low-memory calibration.
+Kani is the selected executable method; do not resume Quint or Apalache. Only after the Kani work
+and reviews are genuinely complete, delete every Quint/Apalache repository and exact local Docker
+artifact listed in the handoff, verify no trace remains outside .git, and finish with git diff
+--check plus a full status report. Continue autonomously with concise progress updates until the
+review is clean or a concrete blocker requires my decision.
 ```

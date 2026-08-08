@@ -107,7 +107,7 @@
 
 \title{\vspace{-1.2em}\textbf{UNO: Coordinator-Free Crash-Atomic Publication\\over Ordinary Blobs}}
 \author{Commonware storage design note}
-\date{6 August 2026}
+\date{7 August 2026}
 
 \begin{document}
 \maketitle
@@ -116,9 +116,11 @@
 UNO is an append-oriented storage design for atomically publishing pending epochs of several
 ordinary blobs without a coordinator file, root WAL, or shared allocation layer. Payload is written
 once at its final offset. Each participant stores one checksummed local witness beside an otherwise
-invisible prepared root; witnesses form a canonical successor ring. The intended design treats a
-complete, valid ring as the commit decision and places participant durability operations in one
-serial barrier layer, even though each file retains its own durability boundary.
+invisible prepared root; witnesses form a canonical successor ring. The normative R14-2P reference
+protocol treats a complete, valid ring as the commit decision and publishes it in two ordered
+durability layers per participant: first all non-guard slot bytes and the candidate payload/length
+evidence, then only the one-byte generation-colored prepared guard. Each layer may fan out across
+files; no coordinator record or cross-file barrier is introduced.
 
 This paper specifies a target transition system using generation-colored root spellings under a crash model
 in which \emph{any subset} of non-durable addressed writes may survive---not merely a prefix of
@@ -132,20 +134,25 @@ cannot expose a mixed vector. The checked-in implementation is compared against 
 than assumed to satisfy it. The audit exposes concrete refinement blockers, including stale-ring
 authority and unconsumed rejected witnesses, and records the reviewed repair for a filesystem-
 backend cancellation defect; \S\ref{sec:implementation-status} states the distinction explicitly.
-Fresh adversarial review found a target-protocol blocker: a one-phase prepare can splice an older
-witness topology with newly issued candidate bytes into an exact, never-issued smaller ring. The
-unconditional crash-atomicity theorem is therefore withdrawn at this checkpoint. The result is a
-reviewable specification with an explicit open architecture choice, not a claim of proof or machine
-verification.
+The former one-phase R14-1P proposal and checked-in generation-uncolored R13 format remain explicit
+nonconforming controls. R14-1P can splice an older witness topology with newly issued candidate
+bytes into an exact, never-issued smaller ring. R14-2P closes that provenance gap by ordering the
+only write of the $B$ guard after the exact body and payload evidence are durable, clearing all live
+phase credit on crash, and forbidding recovery from writing $B$. The result is a reviewable
+reference specification and a manual safety conjecture. The current 42-harness Kani matrix is
+pending for its exact source snapshot; completed 30- and 36-harness matrices apply only to older
+snapshots. The physical, composed, and protocol abstractions remain separate, and an end-to-end
+refinement theorem and production refinement remain absent.
 \end{abstract}
 
 \noindent\fcolorbox{Accent}{AccentSoft}{%
   \parbox{\dimexpr\columnwidth-2\fboxsep-2\fboxrule\relax}{\small
   \textbf{Status.} UNO is an opt-in ALPHA API. Ordinary blob APIs and formats are unchanged.
-  The append/rewind mechanism corresponds to the current code, while the root format below is a
-  proposed R14 repair. The previously stated unconditional safety theorem is blocked even for that
-  target: the one-phase prepare does not give exact witnesses issuance provenance under arbitrary
-  byte-subset survival. Conjecture~\ref{thm:atomic} is conditional on closing that gap.
+  The append/rewind mechanism corresponds in part to the current code, while the root format and
+  two-phase prepare below are the proposed R14-2P reference. Conjecture~\ref{thm:atomic} is stated
+  for that transition system; its current bounded Kani obligations are pending, and the abstraction
+  layers are not joined by one mechanized refinement theorem. R14-1P is retained only as a
+  witness-splicing negative control, and R13 is a nonconforming implementation baseline.
   Current implementation deviations---including stale-ring
   authority, rejected-witness reuse, one integrity-boundary error, and unenforced
   direct-file/no-alias namespace preconditions---are listed in
@@ -161,10 +168,10 @@ solves this by introducing another durable authority and at least one ordering e
 places a local fragment of the decision in every participant and makes the fragments mutually
 discoverable.
 
-The development name ``UNO'' denotes the target of writing payload \emph{once} and using one
-hot-path barrier layer. It is not a claim that one system call or one physical device flush occurs:
-an $n$-participant group still has $n$ per-file durability obligations. The obligations are
-independent and may be submitted concurrently.
+The development name ``UNO'' denotes the target of writing payload \emph{once}, not a promise of
+one durability layer. R14-2P has two serial per-participant durability layers. Within each layer an
+$n$-participant group still has $n$ independent file obligations that may be submitted
+concurrently. This is not a claim that one system call or one physical device flush occurs.
 
 \subsection{Supported mutation vocabulary}
 
@@ -195,12 +202,14 @@ preflushing invisible payload is not admission because it cannot change a select
 following group events are distinct:
 \begin{description}
   \item[Admission $\mathsf{admit}(G)$.] For a group, the generic admission event is the first byte
-  of a $G$-specific prepared root or witness.
-  \item[Decision $\mathsf{decide}(G)$.] Either every participant prepare barrier has succeeded, or
-  crash recovery has read and validated a complete exact ring including every required payload
-  byte. Once established, this is a monotone protocol fact.
+  of a $G$-specific phase-1 slot body. A guardless phase-1 image is not a prepare vote, but remains
+  an admission effect that recovery must resolve before mutation or reuse.
+  \item[Decision $\mathsf{decide}(G)$.] Either every participant's phase-2 prepared-guard
+  durability operation has succeeded, or crash recovery has read and validated a complete exact
+  $B$-proven ring including every required payload byte. Once established, this is a monotone
+  protocol fact.
   \item[Acknowledgement $\mathsf{ack}(G)$.] \code{start\_apply} returns \code{Ok}. This transition is
-  permitted only after the normal prepare-barrier route has established
+  permitted only after the normal phase-2 guard-barrier route has established
   $\mathsf{decide}(G)$.
   \item[Completion $\mathsf{complete}(G)$.] The returned handle resolves successfully after the
   in-memory state is active and required eager materialization, truncation, and namespace work has
@@ -210,8 +219,9 @@ following group events are distinct:
 A failed attempt to establish $\mathsf{decide}(G)$ is not the opposite monotone event. In
 particular, a recognizable candidate generation or non-quiescent higher-generation image that does
 not currently prove a candidate is only \emph{provisionally rejected} until an exact code-last $A$
-root consumes that generation. A crash during the non-guard abort-body write may leave a different
-byte image that validates the complete candidate and therefore establishes the decision. Recovery
+root consumes that generation. Recovery re-decodes after a crash during the non-guard abort-body
+write and honors any already-issued $B$ or final evidence that remains. It never supplies a missing
+$B$ guard, so a guardless phase-1 body cannot be promoted into a decision. Recovery
 returns the predecessor for caller mutation, truncates or overwrites payload, or reuses its slot only
 after exact $A$; proof-preserving predecessor finalization remains permitted and may be required
 before $A$. The sole no-$A$ case is a complete slot
@@ -222,8 +232,10 @@ generation.
 
 For a crash image $D$, $\view_G(D)$ is the vector returned by a \emph{successful} fresh namespace
 recovery followed by ordinary root recovery, before the caller optionally recreates an absent key.
-A retained key maps to its selected metadata and payload bytes; an exact tombstone or a missing
-removed incarnation maps to $\absent$; internal generation/spelling is projected away. A recovery
+A retained key maps to its selected metadata and payload bytes. An exact tombstone, or a missing
+removed incarnation whose absence was produced by authorized post-finalization cleanup or a later
+serialized remove, maps to $\absent$; internal generation/spelling is projected away. An actually
+missing pre-finalization path is an assumption violation, not an old-vector encoding. A recovery
 that detects corruption and fails closed returns
 no vector and cannot be mistaken for either outcome. Under the stated assumptions, a crash image
 created solely by protocol transitions has a defined recovery vector; fail-stop is reserved for an
@@ -246,10 +258,11 @@ image after $\mathsf{ack}(G)$ must yield the new vector.
 The definition is crash/reopen atomicity, not live read isolation. Existing handles may expose
 pending bytes according to the API, and recreation is a later key mutation rather than part of the
 recovered absence observation. After a later conflicting operation is admitted, the old/new-only
-interval ends; the stronger remaining obligation is that recovery correspond to a serial history
-containing $G$ before that later operation. UNO intentionally defines no total durable order between
-disjoint groups. A semantic dependency must be placed in one group or ordered by waiting for the
-first acknowledgement.
+interval ends. The stronger remaining obligation is that recovery correspond to a serial history in
+which a decided $G$ appears completely before that operation, while a rejected $G$ contributes no
+state transition and the later operation follows its predecessor state. UNO intentionally defines
+no total durable order between disjoint groups. A semantic dependency must be placed in one group or
+ordered by waiting for the first acknowledgement.
 
 \section{System and fault model}
 
@@ -546,6 +559,23 @@ issues $\chi(h,\Root)$, $\chi(h,\Materialized)$, or $\chi(h,\Tombstone)$ before 
   abort writes cannot contain the guard byte required by an unissued committed or final root.
 \end{invariant}
 
+\begin{invariant}[Prepare code-last publication]\label{i:prepareorder}
+For R14-2P, phase 1 issues the candidate payload bytes and any required extending length update,
+never a decision-dependent shrink, and every byte of
+the exact canonical 2 KiB candidate slot except root offset 7. A successful file barrier must cover
+those updates and every stamp-specific payload credit on which the candidate depends before live
+$\mathsf{BodyReady}_i$ credit is granted. Phase 2 begins only after every participant in $G$ has
+live body credit. It is the only transition that may issue $\chi(h,\Prepared)$: it addresses only
+offset 7, is enabled by that group-wide live phase-1 join, and has its own durability completion
+$\mathsf{GuardDone}_i$. Any crash clears all such live credits. The lifecycle model separately
+retains a recovery-inert history bit recording that a guard synchronization once succeeded; this is
+proof bookkeeping for acknowledgement, not live $\mathsf{GuardDone}_i$ credit or a recovery input. Recovery has
+no transition that writes a $B$ guard and never reconstructs $\mathsf{BodyReady}_i$ from a
+guardless body. Consequently, any exact generation-$h$ $B$ observed on disk descends from a
+phase-2 issue whose exact same-candidate non-guard slot bytes, wrapped witness, payload, and length
+evidence were already durable.
+\end{invariant}
+
 \begin{invariant}[Abort code-last publication]\label{i:abortorder}
 The write that can place $\chi(h,\Abort)$ is issued only after a successful barrier has made every
 other byte of the exact predecessor-equivalent $A_h(O)$ header durable. Until a later authority is
@@ -555,9 +585,9 @@ handle and admits no later slot or payload reuse.
 \end{invariant}
 
 Before the guard barrier establishes exact $A_h$, the abort body has no rollback authority. After
-every crash in either phase, recovery first decodes the entire resulting disk image again. If the
-surviving body bytes complete valid candidate evidence, recovery follows the decision path rather
-than resuming rollback. Exact $A_h$ has precedence over the stale same-slot witness and is the first
+every crash in either phase, recovery first decodes the entire resulting disk image again. If
+already-issued candidate or final evidence remains complete, recovery follows the decision path
+rather than resuming rollback; it never writes a missing $B$. Exact $A_h$ has precedence over the stale same-slot witness and is the first
 disk state that makes the old classification permanent.
 
 \subsection{Witness wrapper and local link}
@@ -566,13 +596,16 @@ A $\Prepared$ slot appends a 16-byte wrapper immediately after the root: 8-byte 
 \code{CWUNOW13}, 4-byte link length, and a 4-byte CRC32C over the wrapper prefix and link under
 domain \code{\_COMMONWARE\_RUNTIME\_ATOMIC\_BATCH\_WITNESS}. Up to 1920 link bytes fit in the slot.
 
-Every prepare that introduces a generation writes one canonical complete 2 KiB slot image.
-A direct prepare is $P$ followed by zeros. A batch prepare is $B$, its exact wrapper and link, then
-zeros through the end of the slot. Direct finalization changes the header to $R$ and leaves the
-zero suffix; group finalization changes only the header to $M/T$ and preserves the exact witness and
-zero padding. Completed rejection changes only the header to exact $A$ and leaves any stale witness
-physically present but semantically suppressed. This full-slot prepare grammar is
-recovery metadata: bytes outside a shorter write are not silently treated as harmless padding.
+Every prepare that introduces a generation has one canonical complete 2 KiB target image. A direct
+prepare is $P$ followed by zeros. A batch target image is $B$, its exact wrapper and link, then
+zeros through the end of the slot. R14-2P does not issue that image as one unordered overwrite:
+phase 1 writes all 2,047 bytes except the guard at root offset 7, and phase 2 writes that one byte
+only after phase 1 and the payload/length obligation are durable. Direct finalization changes the
+header to $R$ and leaves the zero suffix; group finalization changes only the header to $M/T$ and
+preserves the exact witness and zero padding. Completed rejection changes only the header to exact
+$A$ and leaves any stale witness physically present but semantically suppressed. This canonical
+full-slot grammar is recovery metadata: bytes outside a shorter write are not silently treated as
+harmless padding.
 
 Each local link stores the fields in Table~\ref{tab:link}. The containing filesystem path supplies
 the local key; only the successor key is encoded. Thus every path appears once around the ring,
@@ -604,17 +637,22 @@ group into one descriptor.}
 \label{tab:link}
 \end{table*}
 
-\begin{limitation}[Exact-witness provenance blocker]\label{l:witness-provenance}
-The generation-colored root guard proves that a state byte for generation $h$ was issued; it does
-not prove that an adjacent generation-independent \code{CWUNOW13} wrapper was issued with that
-root. The wrapper CRC proves byte consistency, not issuance provenance. Under
-Assumption~\ref{a:fault}, checksum bytes may themselves be selected independently from the old and
-new slot images.
+\begin{limitation}[R14-1P witness-splicing negative control]\label{l:witness-provenance}
+R14-1P is the former one-phase control that writes the generation-colored $B$ guard, adjacent
+generation-independent \code{CWUNOW13} wrapper, and remaining slot bytes in one unordered
+full-slot update. Generation coloring proves that a state byte for generation $h$ was issued, but
+under that ordering it does not prove that the adjacent witness bytes came from the same prepare.
+The wrapper CRC proves byte consistency, not issuance provenance. Under Assumption~\ref{a:fault},
+checksum bytes may themselves be selected independently from the old and new slot images.
 
 A concrete protocol-reachable trace starts with an independently finalized generation-one
-two-member group $H=\{a,b\}$, selects generation-two ordinary $R$ predecessors, and admits a
-generation-three three-member append group $G=\{a,b,c\}$ into the same-parity slots. A crash before
-any $G$ prepare barrier may retain exact issued $B_3$ roots and new candidate fields at $a$ and $b$
+two-member group $H=\{a,b\}$ and an independent generation-one singleton at $c$, whose length-four
+witnesses remain in the same-parity slots. Each
+participant then selects an exact empty generation-two ordinary $R$ after rewind, and the
+generation-three group $G=\{a,b,c\}$ is a legal four-byte append from that authority. Thus its
+links name base generation two and no transition skips a generation; the generation-one slots are
+only the older physical witness source. A crash before
+any $G$ R14-1P prepare barrier may retain exact issued $B_3$ roots and new candidate fields at $a$ and $b$
 while retaining $H$'s group identifier, count, ordinals, and $a\leftrightarrow b$ successor fields.
 The wrapper checksums can also be exact old/new mosaics: in one independently reconstructed fixture,
 the old/new/hybrid CRC32C values are \code{47ad25a0}/\code{c3bcb36c}/\code{47ad256c} at $a$ and
@@ -622,22 +660,21 @@ the old/new/hybrid CRC32C values are \code{47ad25a0}/\code{c3bcb36c}/\code{47ad2
 old or issued-new checksum at that address and equals the canonical checksum of the hybrid link.
 This is exact reconstruction, not a CRC collision. Retaining no generation-three update at $c$
 then lets recovery accept a synthetic exact two-member ring, publish $a$ and $b$, and leave $c$
-old. The observation of the admitted $G$ is mixed.
+old. The observation of the admitted $G$ is mixed. R14-1P is therefore nonconforming for the
+admitted-window guarantee even though its root guard is generation-colored.
 
-Write $\mathsf{IssuedWitness}(G)$ for the missing premise that every witness accepted as authority
-for $G$ is byte-for-byte the canonical witness issued by the same prepare event and participant set
-as its candidate-generation guard. The current one-phase transition system does not establish this
-premise. The results below that relate a decoded ring to the originally admitted $G$ are conditional
-on it.
-
-Three repairs have materially different contracts. A two-phase, code-last batch prepare can first
-make the candidate payload/length obligation and all 2,047 non-guard bytes of the exact 2 KiB slot
-durable, then issue and synchronize only $\chi(h,\Prepared)$. This preserves the existing
-noncryptographic fault assumptions but adds a second ordered durability layer. A one-layer design
-instead needs a root-to-witness commitment over every decision-relevant topology byte and an
-explicit computational \emph{splice-binding} assumption; CRC32C or ordinary collision resistance
-is insufficient. If neither change is accepted, the admitted-but-unacknowledged old-or-new claim
-must be withdrawn. This architecture choice is unresolved here.
+R14-2P is the selected noncryptographic repair. Before its phase-1 barrier, no $B_h$ guard has been
+issued. After that barrier, every decision-relevant non-guard slot byte, wrapper/link byte,
+checksum byte, padding byte, payload byte, and length update for the candidate is exact and durable.
+Only then may phase 2 address $\chi(h,\Prepared)$. Thus an observed exact $B_h$ is itself the
+disk-visible proof that its canonical witness and payload evidence were established first; no
+external witness-intent premise is needed. A crash discards the live phase credit, and recovery
+may finalize an already proved ring or publish $A$ code-last, but never writes $B$. A one-layer
+design would instead require a root-to-witness commitment over every decision-relevant topology
+byte and an explicit computational \emph{splice-binding} assumption; CRC32C or ordinary collision
+resistance is insufficient. That alternative is not the reference protocol. The checked-in R13
+format remains a separate generation-uncolored negative control and is not made conforming by this
+selection.
 \end{limitation}
 
 \begin{definition}[Candidate]
@@ -697,7 +734,8 @@ For a removed participant, $T_i[j]$ is also admitted. Here $A_i$ is the predeces
 abort root, while $M_i$ and $T_i$ are deterministically derived from $R_i$ by changing the
 generation-colored spelling and recomputing the root checksum. Byte membership alone is not a
 decision predicate: recovery also requires the guard byte to name a state whose write was enabled
-by the transition system. Invariant~\ref{i:color} makes that issuance fact disk-observable.
+by the transition system. Invariants~\ref{i:color} and~\ref{i:prepareorder} make both the state
+issue and the exact candidate-body/witness provenance of a $B$ guard disk-observable.
 \end{definition}
 
 Recovery applies exact-$A_i$ precedence before using this predicate as candidate evidence. Exact
@@ -707,6 +745,19 @@ non-$A$ image, the wrapper and link must themselves validate exactly. Installati
 the first 112 bytes, so the already durable witness remains available even when the final root write tears.
 The appearance of $R_i$ in $\mathsf{Transition}$ makes its byte values legal during repair; it does
 \emph{not} make an ordinary root proof of this group.
+
+For final installation, recovery uses the stronger predicate
+\[
+  \mathsf{FinalTransition}_i(X,F) \iff
+  \left(\forall j,\;X[j]\in\{B_i[j],F_i[j]\}\right)
+  \land \left(X=B_i\ \lor\ \exists j,\;F_i[j]\ne B_i[j]\land X[j]=F_i[j]\right),
+\]
+where $F_i$ is the canonical $M_i$ or $T_i$ target. The successful phase-2 barrier established
+exact $B_i$ as the durable base before any final write was enabled. No other write to those 112
+bytes intervenes. Therefore $X=B_i$ retains the prepared ring, while $X\ne B_i$ contains at least
+one target-only byte whose persistence proves that the final write was issued after
+$\mathsf{decide}(G)$. This discriminator includes a root-checksum byte even when the $B$ guard
+survives. Byte membership without this exact-base condition is not final-decision evidence.
 
 \begin{definition}[Group-bound final certificate]\label{def:certificate}
 A final certificate for participant $i$ of $G$ is the pair consisting of (a) the exact candidate
@@ -809,6 +860,16 @@ strictly increasing keys after rotation to ordinal zero; pairwise-distinct curre
 identities; and closure to the starting exact incarnation on step $n$, neither earlier nor later.
 \end{invariant}
 
+\begin{invariant}[No ring contraction]\label{i:nocontraction}
+A candidate that declares group identifier $\gid$ and count $n$ can authorize only that exact
+$n$-participant ring. A missing, suppressed, replaced, malformed, or early-closing successor never
+causes recovery to reinterpret the reachable participants as a smaller group. In particular, a
+surviving participant is not a singleton merely because no peer remains reachable; a one-participant
+decision must have been admitted with count one and an exact self-link. An independent $M/T$
+certificate may bypass traversal after decision, but it proves the earlier $n$-participant decision
+and does not construct a smaller ring.
+\end{invariant}
+
 \begin{figure*}[t]
 \centering
 \begin{tikzpicture}[node distance=1.45cm]
@@ -829,7 +890,11 @@ A one-participant publication self-links.}
 
 A configuration contains the namespace map, each inode's two raw slots and payload bytes, the
 durable base and post-barrier updates from Assumption~\ref{a:fault}, and volatile lock/carried-group
-state. An initial configuration contains only durably and directly named regular-file participants whose two slots are
+state, including per-participant $\mathsf{BodyReady}$ and $\mathsf{GuardDone}$ credits. A crash
+clears both credits before recovery begins. An abstract proof-history bit may remember that a
+guard synchronization returned successfully, but recovery neither reads that bit nor treats it as
+durable disk evidence. An initial configuration contains only durably and
+directly named regular-file participants whose two slots are
 canonical, whose selected roots or canonical $\Zero_0$ predecessors and payloads pass ordinary
 recovery, and whose logical-key-to-inode map is injective with canonical integrity geometry; it
 contains no unsuppressed prepared witness. A configuration is
@@ -845,29 +910,46 @@ produce another transition does not refine this protocol.
   truncated, overwritten, or reused while that candidate could still be rediscovered as an exact
   ring; the abort-authority transition below must run first.
 
-  \item[Prepare $G$.] While all keys in $K_G$ are exclusively locked, validate exact current
-  directly named regular files, incarnations, and pairwise-distinct current device/inode
-  identities, construct only
-  $\mathsf{Eligible}$ candidates, and establish
-  Invariant~\ref{i:payload}. Issuing the first $B_i$/witness byte is $\mathsf{admit}(G)$. Each
-  participant receives its exact canonical full-slot $B_i$/wrapped-link/zero-padding image in its
-  candidate slot. No prepared root is an ordinary visible root. This is the one-phase prepare
-  analyzed by Limitation~\ref{l:witness-provenance}; without an additional issuance mechanism, a
-  checksummed ring recovered from a torn prepare need not be the ring this transition issued.
+  \item[Prepare $G$, phase 1: body and evidence.] While all keys in $K_G$ are exclusively locked,
+  validate exact current directly named regular files, incarnations, and pairwise-distinct current
+  device/inode identities, construct only $\mathsf{Eligible}$ candidates, and establish
+  Invariant~\ref{i:payload}. Issuing the first non-guard slot byte is $\mathsf{admit}(G)$; payload
+  staging alone remains invisible. For each participant, issue its required candidate
+  payload and extending-length updates (never a rewind shrink) and write all 2,047 bytes of the canonical
+  $B_i$/wrapped-link/zero-padding slot except root offset 7. Leave that guard byte unaddressed. A
+  successful file barrier covering this exact body and every payload credit grants volatile
+  $\mathsf{BodyReady}_i$. A phase-1-only image is not a prepare vote.
 
-  \item[Normal decision and acknowledgement.] Submit each participant's durability obligation.
-  Only the successful join over \emph{all} obligations establishes $\mathsf{decide}(G)$ on the live
-  path; only then may $\mathsf{ack}(G)$ occur. The obligations have no protocol order among them.
+  \item[Prepare $G$, phase 2: code-last $B$ guard.] Only after live
+  $\mathsf{BodyReady}_j$ exists for every $j\in G$ may normal execution issue any one-byte
+  $\chi(g_i,\Prepared)$ write at root offset 7. No other byte is addressed in this phase. Its
+  separate successful durability completion grants $\mathsf{GuardDone}_i$. The group-wide body
+  credit remains live only for this phase-2 attempt and is cleared after the join, an error, or a
+  crash. Recovery contains neither phase-1 continuation nor a $B$ writer: it
+  re-decodes disk and chooses finalization or code-last $A$ normalization. No prepared root is an
+  ordinary visible root.
+
+  \item[Normal decision and acknowledgement.] Phase-1 obligations may run concurrently across
+  participants, but the join of every phase-1 completion precedes every phase-2 guard issue.
+  Phase-2 obligations may then run concurrently. Only the successful join over \emph{all}
+  phase-2 guard durability completions establishes $\mathsf{decide}(G)$ on the live path; only then
+  may $\mathsf{ack}(G)$ occur. There is no protocol order among participants within either layer.
 
   \item[Recovery decision.] If no live join exists, recovery may establish
   $\mathsf{decide}(G)$ only after excluding exact $A$ at every candidate generation, then reading
-  one exact closed ring and checking every
+  one exact closed ring whose nonfinal anchors carry exact $B$ guards, checking every
   $\mathsf{Transition}(X_i,c_i)$ and $\mathsf{Eligible}(c_i)$, and validating all non-preflushed
-  payload suffixes. A group-bound final certificate proves that this validation or the normal join
-  occurred earlier only when its exact witness chain reaches every participant that is not already
-  independently final. A broken ring is accepted without traversal only after independent-final
-  roots or a serialized later authority already carry the proof. A missing path, incomplete link,
-  ordinary $R_i$, or malformed candidate is never a prepare vote.
+  payload suffixes. Invariant~\ref{i:prepareorder} derives each accepted witness's provenance from
+  that $B$ issue; recovery consults no witness-intent oracle. After finalization begins, an anchor
+  may instead carry $\mathsf{FinalTransition}$ evidence relative to its exact durable $B$ base; an
+  unchanged $B$ or any target-only final byte preserves the same disk-derived decision. A
+  group-bound final certificate is itself disk-derived proof that this validation or the normal
+  join occurred earlier; selecting that local final state does not require a traversable witness
+  chain. Traversal from such a certificate repairs reachable nonfinal peers. Traversal remains
+  mandatory when nonfinal $B$/link evidence is instead used as the collective decision proof.
+  Within protocol reachability, a broken ring at a final anchor means the unreachable participants
+  already have independent-final roots or serialized later authorities. A guardless phase-1 body,
+  missing path, incomplete link, ordinary $R_i$, or malformed candidate is never a prepare vote.
 
   \item[Provisional rejection and consumption.] If the current disk image does not prove a
   candidate reached through an exact wrapped witness, recovery first resolves the predecessor
@@ -876,13 +958,14 @@ produce another transition does not refine this protocol.
   from Definition~\ref{def:rollback-fence} code-last into one required witness slot: synchronize the
   111 non-guard bytes, then synchronize the one-byte $A$ guard. The initial rejection is not durable
   authority. After any crash or uncertain barrier, recovery re-reads every root, witness, and
-  required payload byte before continuing. If the surviving abort-body bytes now complete valid
-  candidate evidence, it establishes $\mathsf{decide}(G)$ and finalizes new. If exact $A_i$ is
+  required payload byte before continuing. If the disk still proves an already-issued complete
+  candidate or final transition, it establishes $\mathsf{decide}(G)$ and finalizes new. If exact $A_i$ is
   present, it suppresses the stale witness and selects old. Only after predecessor finalization and
   exact $A_i$ may recovery return a mutable handle or permit a candidate payload offset to be
   truncated, overwritten, or reused. The exact abort root consumes the candidate generation while
   preserving the old logical value; its generation-colored guard is distinct from every unissued
-  $R/M/T$ guard for that generation.
+  $R/M/T$ guard for that generation. Recovery never promotes a guardless phase-1 body by writing
+  $B$; $A$ is its only prepare-slot guard writer.
 
   \item[Normalize an orphaned slot.] After recovery resolves every exact higher-generation root,
   final certificate, and wrapped candidate, it evaluates Definition~\ref{def:quiescent} from the
@@ -892,7 +975,7 @@ produce another transition does not refine this protocol.
   to enter this branch. Recovery may return a mutable handle, truncate or reuse payload, or use the
   other slot for the next generation only after the abort-root barrier succeeds. A crash during
   normalization restarts the complete byte-derived classification, including candidate and payload
-  evidence that a partial abort body may have completed; it never relies on memory that the abort
+  evidence that may have survived a partial abort body; it never relies on memory that the abort
   write had once begun.
 
   \item[Finalize.] Only after $\mathsf{decide}(G)$ may recovery or normal execution issue $M_i$ for
@@ -900,8 +983,10 @@ produce another transition does not refine this protocol.
   followed by a file barrier and may be interrupted at any byte subset. The next recovery
   reclassifies that partial image before retrying. Group-wide independent finalization holds only
   after \emph{every} participant's final write has succeeded or an exact final image has been
-  recovered from a crash; until then all original witnesses remain intact, so a reachable exact
-  certificate or the complete ring can repair torn peers.
+  recovered from a crash; until then all original witnesses remain intact. For each torn peer,
+  $\mathsf{FinalTransition}$ yields either its unchanged exact $B$ root or a target-only persistent
+  byte proving the post-decision final write. The complete set of witnesses and these per-root
+  classifications repair the group even during the first final write.
 
   \item[Unlink.] No participant path may be unlinked before group-wide independent finalization.
   Cleanup may target only a removed participant after revalidating its exact key, incarnation,
@@ -910,9 +995,10 @@ produce another transition does not refine this protocol.
 
   \item[Proof transfer and slot reuse.] A witness required to recover $G$ may be overwritten,
   suppressed, or made unreachable only after either (a) group-wide independent finalization of
-  $G$, or (b) a complete decision for a consecutive group over exactly the same ordered
-  keys/incarnations has become durable in the alternate slots. Case (b) transfers the serial prefix
-  to the successor ring; if the successor is incomplete, the predecessor ring remains intact. Any
+  $G$, or (b) a complete, $B$-proven decision for a consecutive group over exactly the same ordered
+  keys/incarnations has become durable in the alternate slots. A phase-1-only successor cannot
+  suppress the predecessor. Case (b) transfers the serial prefix to the successor ring; if the
+  successor is incomplete, the predecessor ring remains intact. Any
   other overlapping operation---including an abort root that would suppress a linked
   predecessor---first takes route (a). Before a direct $\mathsf{P}\to R$ publisher may prepare a
   slot containing rejected evidence, recovery must consume that rejected generation with the same
@@ -935,16 +1021,17 @@ produce another transition does not refine this protocol.
   groups it touched. UNO makes no new atomicity claim for whole-partition removal itself.
 
   \item[Recovery selection.] Candidate rings are considered by descending generation. Any newer
-  exact independent $R$, $M$, or $T$ state at a key suppresses older witnesses at that key; $T$ maps
-  the key to logical absence. An exact local group-bound $M/T$ certificate is selected before ring
+  exact independent $R$, $A$, $M$, or $T$ state at a key suppresses older witnesses at that key;
+  $A$ selects its predecessor-equivalent value and $T$ maps the key to logical absence. An exact
+  local group-bound $M/T$ certificate is selected before ring
   traversal and is never rolled back merely because a deletion has broken its successors. For the
-  newest remaining prepared candidate, recovery either rejects an
-  incomplete ring with no certificate provisionally and begins abort publication, or establishes
-  the decision and finalizes the whole group. Before a provisionally rejected candidate's
+  newest remaining prepared candidate, recovery either rejects an incomplete ring or guardless
+  phase-1 body with no certificate provisionally and begins abort publication, or establishes the
+  decision and finalizes the whole group. Before a provisionally rejected candidate's
   predecessor becomes mutable, an exact code-last $A$ has made the old classification durable. If neither an exact
   candidate nor a newer authority is recognizable, the orphan-normalization transition resolves
-  every non-quiescent opposite slot before mutability. It never exposes $B$
-  directly. Recovery transitions obey
+  every non-quiescent opposite slot before mutability. It never exposes $B$ directly and never
+  writes a $B$ guard. Recovery transitions obey
   the same finalization, unlink, and proof-transfer guards and may themselves crash.
 \end{description}
 
@@ -974,6 +1061,11 @@ require every candidate to satisfy Eligible(c_i)
 choose fresh group id gamma
 encode one canonical full slot: B_i || wrapper(link_i) || zero padding
 preflight every link against its 1,920-byte local capacity
+for every participant i, concurrently where possible:
+    issue candidate payload/extension, if any
+    write every candidate-slot byte except root offset 7
+    sync participant i                    // phase-1 durability
+    set live BodyReady_i
 \end{lstlisting}
 
 Pending payload can be arbitrarily large subject to address-space, file, and implementation
@@ -987,7 +1079,7 @@ For every candidate whose ring can still establish or repair a decision (that is
 durably consumed by $A$ or suppressed by a newer authority), each payload byte below its suffix start either
 is an unchanged byte selected
 by the predecessor root or has stamp-specific durability credit from a successful file barrier
-before the $\Prepared$ write was issued. The remaining exact contiguous suffix ends at the
+before the $\Prepared$ guard write is issued. The remaining exact contiguous suffix ends at the
 candidate length and is either empty or described by a CRC32C over its current stamped values.
 Across one group, nonempty suffix lengths sum to at most 64 MiB. Rewind and offset reuse cannot
 reuse credit belonging to an earlier value.
@@ -995,31 +1087,36 @@ reuse credit belonging to an earlier value.
 
 \subsection{Decision round}
 
-For every retained participant, UNO writes $B_i$ plus its wrapped local link and submits a file
-durability operation. A deletion candidate names the last committed length, not discarded pending
-bytes, and its prepared witness write is itself made durable. The per-file obligations may run
-concurrently through the runtime backend; the protocol does not depend on any particular kernel
-submission interface or on physical flush coalescing.
+Phase 1 has already made the exact non-guard slot body, wrapped local link, candidate payload, and
+length evidence durable. A deletion candidate names the last committed length, not discarded
+pending bytes. Phase 2 writes only the prepared guard at offset 7 and completes a second per-file
+durability operation. The obligations within either layer may run concurrently through a runtime
+backend; the protocol does not depend on any particular kernel submission interface or on physical
+flush coalescing.
 
 \begin{lstlisting}[style=protocol,caption={Establish and acknowledge a decision.}]
+require live BodyReady_j for every participant j
 for every participant i, concurrently where possible:
-    write candidate slot := B_i || wrapper(link_i)
-    make that participant's prepare record durable
-wait until every participant durability obligation succeeds
+    write candidate_slot_i[7] := chi(g_i, B)  // one byte only
+    sync participant i                         // phase-2 durability
+    set live GuardDone_i
+wait until every participant GuardDone_i is established
+clear all live phase credit
 record the complete decision in process memory
 return Ok from start_apply       // durable acknowledgement
 \end{lstlisting}
 
-There is no later coordinator write. If acknowledgement occurred, all prepare records and covered
-payload are durable. The intended rule for an earlier crash was to choose old for an incomplete
-ring and new for a complete ring. Limitation~\ref{l:witness-provenance} shows that this dichotomy is
-false for the current one-phase transition: old and issued-new slot bytes can reconstruct a complete
-ring over only a strict subset of the admitted participants.
+There is no later coordinator write. If acknowledgement occurred, both layers and all covered
+payload are durable. If an earlier crash leaves an incomplete set of $B$ guards, recovery chooses
+old through code-last $A$ normalization; a complete exact $B$-proven ring chooses new. The
+R14-1P control does not have this dichotomy: Limitation~\ref{l:witness-provenance} shows that one
+unordered slot write can reconstruct a complete synthetic ring over only a strict subset of the
+admitted participants.
 
 \begin{invariant}[Prepared invisibility]\label{i:invisible}
 No $\Prepared$ root is selected by ordinary blob recovery. Until namespace recovery validates an
-entire group, each participant's preceding $\Zero_0$, $\Root$, $\Materialized$, or complete
-predecessor-ring proof remains its only visible authority.
+entire group, each participant's preceding $\Zero_0$, $\Root$, $\Abort$, $\Materialized$, or
+complete predecessor-ring proof remains its only visible authority.
 \end{invariant}
 
 \begin{invariant}[Rejected-candidate generation consumption]\label{i:retirement}
@@ -1030,6 +1127,19 @@ generation. Until exact $A$ is established, candidate payload ranges
 remain immutable and no truncate or offset reuse may be admitted. By parity, the abort-root slot
 cannot be addressed again before a strictly higher-generation authority exists in the alternate
 slot, so future arbitrary-subset rewrites cannot restore the old group's authority.
+\end{invariant}
+
+\begin{invariant}[Staggered rejection and later mutation]\label{i:staggered}
+After exact $A_i$ has durably consumed participant $i$'s candidate for rejected group $G$, normal
+mutation guards may admit a later operation at $i$ without first normalizing every unresolved peer
+of $G$. Such a peer remains non-mutable until its own recovery either finds independent final
+evidence, validates a complete exact ring, proves that no distinguishable candidate-generation
+effect remains, or durably consumes its distinguishable candidate with its own
+predecessor-equivalent $A$. A newer authority, missing successor, or replaced incarnation at
+$i$ can only break traversal of $G$; it cannot contract $G$ or make a peer's prepared candidate
+visible. This staggered permission applies only to a rejected group. If $\mathsf{decide}(G)$ was
+established, a later operation over a different participant set remains blocked by
+Invariant~\ref{i:reuse} until every participant of $G$ has an independent final root.
 \end{invariant}
 
 \begin{invariant}[Mutable-return slot normalization]\label{i:normalize}
@@ -1047,10 +1157,11 @@ $\Materialized$; a removed candidate becomes a payload-preserving $\Tombstone$. 
 subset. A live repair counts as durable only after that barrier succeeds; a post-crash exact root is
 reclassified from disk. The exact $M/T$ header together with its exact adjacent witness is a
 group-bound final certificate. An ordinary $\Root$ is never such a certificate. Normal execution
-issues no final rewrite until every participant prepare obligation has succeeded; recovery may do
+issues no final rewrite until every phase-2 guard durability completion has joined; recovery may do
 so after independently validating a complete ring and its payload.
 
-The certificate claim depends on Invariant~\ref{i:color}, not merely on CRC validation. Before
+The certificate claim depends on Invariants~\ref{i:color} and~\ref{i:prepareorder}, not merely on
+CRC validation. Code-last $B$ first binds the exact witness to the admitted candidate. Before
 $\mathsf{decide}(G)$, no transition writes $\chi(g_i,\Materialized)$ or
 $\chi(g_i,\Tombstone)$ into candidate slot $i$. Old same-parity state has a different color, and
 the $B/A$ state bytes for generation $g_i$ are distinct. Therefore an exact $M/T$ spelling cannot
@@ -1104,7 +1215,8 @@ serialized later transition and denotes a state ordered after $G$, never a state
 Once namespace recovery identifies an exact current-incarnation $\Tombstone$, that incarnation is
 logically absent and remains so unless a serialized create installs a fresh named generation.
 Exact-name open may report absence or perform that create, and scan must omit the tombstoned
-incarnation; neither path may fall through to its older $\Root$ in the alternate slot.
+incarnation; neither path may fall through to any older ordinary or linked authority in the
+alternate slot.
 \end{invariant}
 
 \begin{invariant}[Incarnation-safe cleanup]\label{i:cleanup}
@@ -1122,8 +1234,10 @@ can break the ring and strand other physical tombstones, but it cannot change th
 \section{Recovery}
 
 Recovery has two layers. Namespace recovery first resolves linked decisions and deletions. Only
-then does ordinary per-blob recovery choose the newest valid $\Root$ or $\Materialized$ root, or
-the canonical $\Zero_0$ fallback, and truncate any physical surplus to the selected length.
+then does ordinary per-blob recovery choose the newest valid $\Root$, predecessor-equivalent
+$\Abort$, or $\Materialized$ root, or the canonical $\Zero_0$ fallback, and truncate any physical
+surplus to the selected length. Namespace recovery interprets an exact current-incarnation
+$\Tombstone$ as absence before ordinary fallback selection.
 
 \subsection{Discovering a ring}
 
@@ -1132,12 +1246,17 @@ decodes the local link and follows exactly its declared count. At each successor
 \begin{enumerate}
   \item opens the exact path without following symlinks;
   \item validates the immutable container header and required incarnation;
+  \item resolves every strictly higher-generation recognizable candidate, exact independent
+  $R/A/M/T$ authority, or non-quiescent raw slot before accepting an older witness, and gives an
+  exact same-generation $A$ precedence over its adjacent witness;
   \item searches the two slots for exactly one witness matching group, count, expected ordinal,
   candidate slot, and local incarnation; and
-  \item verifies the candidate transition and exact wrapped witness.
+  \item verifies the candidate transition and exact wrapped witness, and requires an exact $B$
+  guard for an undecided nonfinal candidate. A generation-colored final guard is considered only
+  on the post-decision transition path described below.
 \end{enumerate}
 Missing, duplicated, ambiguous, early-closing, out-of-order, stale-incarnation, overlong, malformed,
-or non-closing paths provisionally reject a prepared candidate only when the anchor lacks an exact group-bound
+guardless, or non-closing paths provisionally reject a prepared candidate only when the anchor lacks an exact group-bound
 final certificate. An exact local $M/T$ certificate is examined before traversal because legitimate
 deletion may already have broken the ring. Recovery never scans unrelated names.
 
@@ -1147,6 +1266,12 @@ silently ignored: it is normalized through the same abort authority before a mut
 handle or payload reuse is permitted. This branch is deliberately independent of wrapper validity.
 
 \begin{lstlisting}[style=protocol,caption={Recover from one intact witness.}]
+if anchor has a strictly newer recognizable candidate or non-quiescent raw slot:
+    ResolveNewerGeneration(anchor)
+    restart recovery selection
+if anchor has a strictly newer exact independent R/A/M/T authority:
+    SelectNewerIndependentAuthorityOrAbsence(anchor)
+    return NEWER
 if anchor slot contains exact A for this candidate generation:
     SelectPredecessorEquivalentAbort(anchor)
     return OLD                    // exact A suppresses the stale witness
@@ -1165,8 +1290,11 @@ if links do not form one exact canonical closed ring:
     return OLD only after exact A is durable
 if any peer has an exact group-bound final certificate M/T:
     FinishDecision(links)         // decision was already durable
-else if every candidate is Eligible and every transition and suffix validates:
-    FinishDecision(links)         // complete prepare survived
+else if every participant has exact B and every candidate and suffix validates:
+    FinishDecision(links)         // complete code-last prepare survived
+else if every root is exact B or a valid final transition
+        and at least one target-only final byte survived:
+    FinishDecision(links)         // exact-B base plus target byte proves earlier decision
 else:
     IndependentlyFinalizeLinkedPredecessorIfAny()
     PublishAbortRoot(anchor, predecessor logical value)
@@ -1179,26 +1307,34 @@ if opposite raw slot is not g-quiescent:
 return authority only after the mutable-return normalization guard
 \end{lstlisting}
 
+The exact-$B$ branch derives witness provenance from disk: phase 2 could address that guard only
+after the same candidate's phase-1 body, wrapper, payload, and length evidence crossed a barrier.
+A guardless phase-1 body is never promoted. A final target-only byte is also ordered after a
+decision: the exact $B$ durable base precedes every final write, and no other transition intervenes
+at those addresses. Invariant~\ref{i:color} separately prevents exact pre-decision synthesis of an
+$M/T$ guard. Recovery never invokes either prepare phase and contains no $B$ write.
+
 The broken-ring certificate branch never rolls back or aborts the final anchor. Within protocol
 reachability, a ring can become broken after an exact local final certificate only after the
 final-before-unlink guard made every participant independently final, or after a serialized later
 mutation. The anchor therefore selects its own new state while peers select their $M/T$, missing,
 or later authorities.
 
-The abort root is required even when the provisional rejection was caused only by payload validation. Otherwise
-a later rollback and append could reuse offsets that the stale witness treats as preflushed, and a
+The abort root is required for every admitted guardless or incomplete candidate whose stale witness
+or payload descriptor remains distinguishable. Otherwise a later rollback and append could reuse
+offsets that the stale witness treats as preflushed, and a
 second crash could make the old suffix validate against a payload prefix that old group never
 proposed. Merely zeroing or complementing witness bytes is insufficient: successive partial slot
 rewrites could reconstruct an older byte pattern. The generation-consuming $A$ root avoids that
 ABA shape without rewriting the witness. Making a linked predecessor independent first preserves
 its group-wide authority when the newer abort root suppresses its ring witness. The pre-$A$
-classification is deliberately non-monotone across crashes; exact $A$, not the failed validation,
-makes the old outcome monotone without retaining in-memory write stamps on disk.
+validation failure is not itself durable authority; exact $A$, not that failed validation, makes
+the old outcome monotone without retaining in-memory write stamps on disk.
 
 A crash during abort publication does not create an undocumented fourth case. The next recovery
-first reruns the ordinary disk predicates. It may recognize a complete candidate ring---including
-one completed by surviving abort-body bytes---and decide new; recognize complete $A$ and select old;
-or see a noncanonical raw slot and repeat normalization. If the torn image happens to equal an older canonical
+first reruns the ordinary disk predicates. It may recognize already-issued complete candidate or
+final evidence and decide new; recognize complete $A$ and select old; or see a noncanonical raw
+slot and repeat normalization. It never installs a missing $B$. If the torn image happens to equal an older canonical
 quiescent image,
 then no distinguishing byte of the rejected higher-generation image remains in the recovered
 durable base; it is safe to reuse under the validity event in Assumption~\ref{a:trusted}. In
@@ -1208,38 +1344,73 @@ $\chi(g+1,\Root)$, $\chi(g+1,\Materialized)$, or $\chi(g+1,\Tombstone)$. No bran
 remembering that a pre-crash process intended to write $A$.
 
 If both slots contain recoverable linked candidates, they are considered by descending generation.
-A later exact independent $\Root$, $\Materialized$, \emph{or} $\Tombstone$ suppresses stale
-witnesses. This permits exact-ring supersession while preventing replay of an old group over a
-newer retained value or deletion. Same-generation $R$ cannot certify a stale ring: it is either
+A later exact independent $\Root$, $\Abort$, $\Materialized$, \emph{or} $\Tombstone$ suppresses
+stale witnesses. This permits exact-ring supersession while preventing replay of an old group over
+a newer predecessor-equivalent value, retained value, or deletion. Same-generation $R$ cannot
+certify a stale ring: it is either
 separated from batch use by the direct-publication retirement guard or is a protocol violation.
 
 \subsection{Arbitrary torn final roots}
 
 The final $\Materialized$ or $\Tombstone$ write may tear at any subset of its 112 addresses. The
 root CRC may consequently be invalid. Recovery does not need to guess a prefix boundary: the exact
-candidate witness supplies all legal byte values, and $\mathsf{Transition}$ checks every byte
-independently. Once another reachable exact group-bound $M/T$ certificate proves that installation
-began, recovery retries the deterministic complete final spelling. Every retry can tear again; only
-a successful barrier or a later recovered exact spelling advances that participant to independent
-final state.
+candidate witness supplies the canonical $B$ and $M/T$ values, and
+$\mathsf{FinalTransition}$ checks every byte independently. Immediately before the first final
+write, every $B$ root and witness is exact and durable. If no target-only byte survives, that root
+is still exact $B$; otherwise the surviving target-only byte proves the post-decision write was
+issued even when the state guard remains $B$. Recovery therefore does not require a second exact
+certificate to repair the first torn final root. Every retry can tear again; only a successful
+barrier or a later recovered exact spelling advances that participant to independent final state.
 
-This repair is safe only because the witness was made durable first and final installation writes
-do not overlap it. If a medium may damage unwritten neighboring bytes, Assumption~\ref{a:fault}
-does not hold.
+This repair is safe only because the R14-2P phase-1 barrier made the witness durable before the
+$B$ guard could establish a decision, and final installation writes do not overlap it. If a medium
+may damage unwritten neighboring bytes, Assumption~\ref{a:fault} does not hold.
 
 \subsection{Recovery with missing participants}
 
-A missing path has two fundamentally different meanings. Recovery must not conflate them.
+A missing successor observation does not have one generic meaning. Recovery distinguishes missing
+candidate evidence at a still-present participant, same-group unlink after finalization, a later
+serialized unlink or replacement, and external loss of a retained path. None of these observations
+is itself a prepare vote.
 
-\paragraph{No group-bound final certificate.}
-If following a prepared ring encounters a missing path before any group-bound $M/T$ certificate is known, the
-ring is incomplete and supplies no authority. Recovery provisionally rejects it. In particular, a
-missing blob whose local removal bit would have been set is \emph{not} evidence that the batch
-committed. No remaining predecessor becomes mutable until the rejected generation is consumed by
-exact $A$ on the required reachable witness authority. In a protocol-reachable execution the
-missing path cannot have been caused by UNO itself, because UNO issues no unlink before
-finalization; an actual pre-finalization missing path is external namespace interference or
-corruption and may fail closed rather than fabricate a complete old vector.
+\paragraph{Incomplete candidate with a retained participant.}
+If the expected path/incarnation remains but its exact $B$ guard, wrapped link, candidate transition,
+or required payload evidence is absent, the ring is incomplete and supplies no authority. If one
+participant's phase-1 body/evidence failed to cross its barrier, Invariant~\ref{i:prepareorder}
+forbids issuing a $B$ guard anywhere. After the group-wide phase-1 join, every body is durable, but a
+crash may retain only a proper subset of the separately issued phase-2 guards. Both cuts choose old
+unless already-issued final evidence proves a decision. No missing $B$ is reconstructed by
+recovery, and no remaining predecessor becomes mutable until the required distinguishable rejected
+generation is consumed by exact $A$.
+
+\paragraph{Pre-finalization missing path during the protected interval.}
+If following a prepared ring encounters a missing exact path before any group-bound $M/T$
+certificate is known, the ring is likewise incomplete; a missing blob whose local removal bit would
+have been set is \emph{not} evidence that the batch committed. Before admission of a later serialized
+conflicting mutation, the path cannot have been removed by UNO because UNO issues no unlink on
+behalf of this group before finalization. An actual missing path in that interval is external
+namespace interference or corruption and may fail closed rather than fabricate a complete old
+vector. After that interval, an authorized later mutation may itself remove the path; the serialized
+case below applies and the absence still supplies no vote for this group.
+
+\paragraph{Staggered rejection after successor advancement.}
+Let incomplete group $G$ declare the ring $a\to b\to c\to a$, with no group-bound final
+certificate and with $b$ lacking required candidate evidence. Opening $a$ fails exact traversal at
+$b$, resolves any linked predecessor, and publishes exact $A_a$ before returning $O_a$ for
+mutation. A later singleton or different-set operation $H$ may then advance $a$ through one or more
+generations. When $c$ is opened later, its surviving link still declares $G$ and count three. Its
+wrap edge finds $A_a$ or a newer authority at $a$, not the exact matching $G$ witness. Recovery does
+not need the old generation at $a$, does not reinterpret $c$ as a singleton, and does not scan for
+an alternate route. In the absence of local final evidence or a complete exact ring, it resolves
+its preserved predecessor, publishes exact $A_c$, and returns $O_c$. The resulting history is the
+rejection of $G$ followed by $H$.
+
+The corresponding decided history is deliberately different. If $\mathsf{decide}(G)$ had been
+established, $H$ could not suppress $a$'s witness as a different-set operation until proof transfer
+had installed independent final roots at every participant, including $M_c$ for retained $c$ (or
+$T_c$ before an authorized removal). A later open of retained $c$ would select that local final
+certificate before traversal. Thus an unresolved prepared root at $c$ together with an advanced
+successor cannot be a protocol-reachable decided-and-suppressed history.
 
 \paragraph{Deletion broke a finalized ring.}
 After unlinks start, the full ring may no longer be traversable even though the decision is already
@@ -1250,6 +1421,24 @@ protocol-generated missing path can only be a removed participant: cleanup for $
 retained participant. A later operation may replace or remove a retained incarnation only after
 Invariant~\ref{i:reuse} has made $G$ independently recoverable; that later operation is ordered
 after $G$ and is outside Definition~\ref{def:atomic}'s observation interval.
+
+For example, let decided group $G$ declare $a\to b\to c\to d\to a$ and remove $b$ and $d$.
+Before either unlink, exact $M_a,T_b,M_c,T_d$ are all durable. Once $b$ and $d$ are absent, the
+surviving links at $a$ and $c$ may each point directly into a hole, so no surviving ring component
+connects them. They nevertheless remain members of the original four-participant decision: $M_a$
+and $M_c$ select their new values independently, without traversal and without treating either
+participant as a singleton. If a later operation advances $a$ before $c$ is opened, $c$ still
+selects $M_c$; the recovered serial history contains $G$ followed by the later operation at $a$.
+Protocol-reachable failure to reach $a$, $b$, or $d$ after those tombstone unlinks or that later
+serialized operation does not strand $c$.
+
+\paragraph{Hole created by a later serialized operation.}
+A later operation may remove or replace a participant only after the older decided group is
+independently final or an allowed exact-ring successor has transferred its proof. If the older group
+was rejected instead, the later operation resolves the rejected evidence on every key it touches,
+while a durable abort authority keeps that old outcome irreversible for still-unopened peers. A
+later hole therefore contributes only a later serialized namespace effect. It never authorizes the
+older group, contracts its participant count, or makes a prepared survivor independently visible.
 
 The implementation still attempts the following eager reclamation walk when ordinal zero survives:
 
@@ -1287,11 +1476,12 @@ descending frontier is no longer traversable. Tombstones that are neither opened
 by a scan may remain allocated indefinitely; this is delayed reclamation, not logical resurrection.
 
 \begin{limitation}[Externally missing retained participant]\label{l:externalmissing}
-The missing-path argument relies on exclusive namespace ownership. UNO itself unlinks only exact
-tombstones, so a missing retained participant is not protocol-reachable after independent
-finalization. A file removed by another process or lost independently by the medium is corruption
-outside the conditional crash-atomicity target; UNO does not reconstruct its payload or promise failover
-semantics.
+The missing-path argument relies on exclusive namespace ownership. On behalf of a group, UNO
+unlinks only exact tombstones, so before a later serialized mutation of that key, a missing retained
+participant is not protocol-reachable after independent finalization. A later authorized remove may
+make the retained incarnation absent, but that effect is ordered after the group. A file removed by
+another process or lost independently by the medium is corruption outside the conditional
+crash-atomicity target; UNO does not reconstruct its payload or promise failover semantics.
 \end{limitation}
 
 \subsection{Recreation and stale paths}
@@ -1306,26 +1496,38 @@ replacement that reuses the same human-readable name.
 
 All results in this section are conditional on Assumptions~\ref{a:fault}--\ref{a:identity}.
 ``Valid'' means checksums do not collide. The invariants are consequences of the guarded transition
-system rather than additional assumptions. Statements that identify a decoded ring or certificate
-with the originally admitted group additionally require $\mathsf{IssuedWitness}(G)$ from
-Limitation~\ref{l:witness-provenance}. The current one-phase prepare does not establish that premise,
-so the crash-atomicity result is a conditional conjecture rather than a theorem of the specified
-transition system.
+system rather than additional assumptions. For the normative R14-2P system,
+Invariant~\ref{i:prepareorder} derives the provenance of every accepted $B$ witness from protocol
+ordering; witness issuance is not an external theorem premise. Limitation~\ref{l:witness-provenance}
+shows why the same conclusion is false for the R14-1P negative control. The result below remains a
+conjecture because the current executable obligations are pending and, even if completed, are
+bounded and decomposed; the production and filesystem refinement obligations also remain open.
 
 \begin{lemma}[Invariant preservation]\label{lem:preservation}
-Every protocol-reachable configuration satisfies Invariants~\ref{i:color}, \ref{i:abortorder},
-\ref{i:ring}, \ref{i:payload},
-\ref{i:invisible}, \ref{i:retirement}, \ref{i:normalize}, \ref{i:reuse}, \ref{i:finalfirst}, \ref{i:independent},
-\ref{i:tdominance}, and~\ref{i:cleanup}.
+Every protocol-reachable configuration satisfies Invariants~\ref{i:color}, \ref{i:prepareorder}, \ref{i:abortorder},
+  \ref{i:lineage}, \ref{i:ring}, \ref{i:nocontraction}, \ref{i:payload},
+\ref{i:invisible}, \ref{i:retirement}, \ref{i:staggered}, \ref{i:normalize}, \ref{i:reuse},
+\ref{i:finalfirst}, \ref{i:independent}, \ref{i:tdominance}, and~\ref{i:cleanup}.
 \end{lemma}
 \begin{proof}
 Induct on transitions from the initial configuration. Stage-payload steps do not change a selected
 root; their stamp rule invalidates credit on rewind/reuse and grants credit only after a barrier.
-Prepare admits only eligible candidates, constructs one canonical exact ring, and establishes the
-payload bound before issuing any $B$ byte. Initial-state injectivity, alias rejection, conforming
-creation, and exclusive namespace ownership preserve distinct participant inodes. A crash can
-retain arbitrary addressed bytes but cannot invent an unissued generation-colored state byte or
-alter the alternate slot; $B$ remains invisible by the recovery selection rule.
+Every admitted root or candidate transition proposes exactly the consecutive generation in the
+opposite slot. Rejection consumes that generation with $A$, no transition reuses it, and the maximum
+generation admits no successor, preserving Invariant~\ref{i:lineage}.
+Prepare admits only eligible candidates and constructs one canonical exact ring. Its first phase
+issues candidate payload/length updates and every non-guard slot byte, and grants
+$\mathsf{BodyReady}_i$ only after a successful barrier establishes the exact body, witness, and
+payload evidence. Its second phase begins only after the group-wide body-credit join, addresses
+only the $B$ guards, and records separate guard durability completions. A crash may tear either
+issued update but clears all live phase credits. Before the body barrier no $B$ was issued; after it, any issued $B$ names the
+already durable exact candidate. Recovery contains no $B$ writer, so induction across restarts
+cannot promote a guardless body. Initial-state injectivity, alias rejection, conforming creation,
+and exclusive namespace ownership preserve distinct participant inodes. A crash cannot invent an
+unissued generation-colored state byte or alter the alternate slot; $B$ remains invisible to
+ordinary root selection. Traversal never rewrites decoded group identity, count, ordinal, or
+successor fields: any mismatch rejects the candidate, while local $M/T$ selection uses a final
+certificate rather than constructing a smaller ring.
 Reject-and-consume first applies the ordinary group-wide finalization guard to any linked
 predecessor, then establishes all non-guard $A_i$ bytes before issuing its state guard. Thus an
 exact $A_i$ has the predecessor projection even if either phase crashes. Parity leaves $A_i$
@@ -1336,12 +1538,16 @@ slot decoding first re-evaluates complete candidate and payload evidence, then e
 selects exact $A_i$ as old, or classifies the raw opposite slot as non-quiescent and retries
 normalization. The same byte-derived guard covers a partial transition whose wrapper no longer
 validates. Establishing a decision changes only a monotone fact; failure to establish it does not.
-Finalize is guarded by the positive decision fact, preserves
-the non-overlapping exact witness, and reaches group-wide independence only after every $M/T$ write
+After exact $A_i$, later operations at $i$ preserve suppression of the rejected ring, while each
+unresolved peer retains its predecessor and remains subject to its own mutable-return normalization.
+Finalize is guarded by the positive decision fact and starts from the barrier-established exact
+$B$ root. It preserves the non-overlapping exact witness. Thus every crash image is either unchanged
+$B$ or carries a target-only byte in $\mathsf{FinalTransition}$, and recovery rederives rather than
+remembers the decision. Finalization reaches group-wide independence only after every $M/T$ write
 succeeds. Unlink is guarded by group-wide independence and exact incarnation/witness/inode checks.
-Proof transfer permits witness retirement only after group-wide independence or a complete
-same-ring successor decision in the alternate slots. Recovery uses the same guards, prioritizes
-newer $R/M/T$ authority, treats every surviving exact $T$ as absence, and may crash back into the
+Proof transfer permits witness retirement only after group-wide independence or a complete,
+  $B$-proven same-ring successor decision in the alternate slots. Recovery uses the same guards, prioritizes
+  newer $R/A/M/T$ authority, treats every surviving exact $T$ as absence, and may crash back into the
 same induction. These are all transitions in Section~\ref{sec:transitions}.
 \end{proof}
 
@@ -1351,7 +1557,8 @@ Issuing candidate generation $g+1$ cannot overwrite the slot record for generati
 \begin{proof}
 Slots are selected by generation parity. Consecutive generations have opposite parity. Under the
 addressed-write model, the candidate write can alter only its own 2 KiB slot, so the prior slot is
-unchanged. For $g=0$, generation one uses slot one and leaves slot zero's all-zero root-header
+unchanged. The phase-1 body and phase-2 guard address only that parity-selected slot. For $g=0$,
+generation one uses slot one and leaves slot zero's all-zero root-header
 fallback. For
 $g>0$, the prior record is either an independent root or the complete linked proof carried from the
 immediately preceding exact-ring group.
@@ -1384,8 +1591,10 @@ Recovery first resolves every exact root, certificate, and wrapped candidate. If
 compares the complete opposite slot against the canonical grammar in
 Definition~\ref{def:quiescent}. A noncanonical image enables no mutable return and is overwritten by
 another code-last $A_{g+1}$ attempt. A crash during that attempt restarts this classification; if
-the new image supplies complete candidate evidence, recovery decides new rather than assuming the
-earlier rejection remains valid. During the first phase the $A$ guard is absent; during its
+the new image still proves already-issued candidate or final evidence, recovery decides new rather
+than assuming the earlier rejection remains valid. A guardless phase-1 prepare body is such a noncanonical image, not
+a latent permission to issue $B$: its pre-crash $\mathsf{BodyReady}$ credit was lost and recovery
+has no $B$ transition. During the first phase of abort publication the $A$ guard is absent; during its
 second phase all other $A$ bytes are already barrier-established. Hence an exact $A_{g+1}$ is a
 newer independent authority with the
 same logical projection. An exact higher candidate is processed normally. An all-zero or strict
@@ -1399,15 +1608,16 @@ the argument after each crash establishes the claim without volatile intent stat
 \end{proof}
 
 \begin{lemma}[Incomplete prepare is invisible]\label{lem:incomplete}
-If a candidate ring is missing any exact link, eligible candidate transition, or required payload
-byte, and no group-bound final certificate exists, recovery does not expose any candidate state
-from that ring.
+If a candidate ring is missing any exact $B$ guard, exact link, eligible candidate transition, or
+required payload byte, and no post-decision final evidence exists, recovery does not expose any
+candidate state from that ring.
 \end{lemma}
 \begin{proof}
-Ring traversal requires all $n$ exact participants and closure by Invariant~\ref{i:ring}. Missing
-or malformed state provisionally rejects the ring in the current image. A structurally complete
-ring additionally validates every candidate and its non-preflushed payload suffix. Failure is also
-provisional. By
+Ring traversal requires all $n$ exact participants and closure by Invariant~\ref{i:ring}. Missing,
+guardless, or malformed state provisionally rejects the ring in the current image. A structurally
+complete ring additionally validates every candidate and its payload suffix. Failure is also
+provisional. Recovery cannot fill a missing $B$ guard: Invariant~\ref{i:prepareorder} clears the
+only enabling credit on crash and gives recovery no such writer. By
 Invariant~\ref{i:invisible}, $\Prepared$ is not selectable by ordinary recovery. By
 Lemma~\ref{lem:fallback} and the group-wide form of Invariant~\ref{i:reuse}, either the preceding
 canonical $\Zero_0$, independent root, or complete predecessor-ring proof remains recoverable from
@@ -1415,45 +1625,74 @@ the alternate slots. Before that predecessor is returned for mutation,
 Invariant~\ref{i:retirement} requires an exact independent abort root unless the complete candidate
 slot has reverted byte-for-byte to its canonical lower-generation pre-attempt source. That source
 may contain its own exact lower-generation witness; the exceptional image retains no distinguishing
-byte or witness effect from the admitted candidate generation. If an intervening crash during the
-abort body makes the candidate complete, Lemma~\ref{lem:complete} applies and recovery selects the
-whole new vector. Otherwise exact $A$ consumes every distinguishable rejected generation, and only
-then do Lemmas~\ref{lem:normalize} and~\ref{lem:rollback} permit later offset reuse without reviving
-the candidate. Thus the incomplete candidate is invisible in every individual image, while the
-pre-$A$ rejection classification itself need not be monotone.
+  byte or witness effect from the admitted candidate generation. If an intervening crash leaves an
+  already-issued complete candidate recognizable, Lemma~\ref{lem:complete} applies and recovery
+  selects the whole new vector. Otherwise, before any participant is returned for mutation, exact
+  $A$ consumes that participant's distinguishable rejected generation; unresolved peers remain
+  non-mutable until their own recovery performs the same classification and, when required,
+normalization. Only then do Lemmas~\ref{lem:normalize} and~\ref{lem:rollback} permit offset reuse
+at that participant without reviving the candidate. Thus the incomplete candidate is invisible in
+every individual image, while the pre-$A$ rejection classification itself need not be monotone.
+\end{proof}
+
+\begin{lemma}[Staggered peer recovery]\label{lem:staggered}
+Let incomplete group $G$ have no group-bound final evidence, and let exact $A_i$ durably reject its
+candidate at participant $i$. Protocol-reachable later operations at $i$ cannot strand an unresolved
+participant $j$, make $j$ accept a strict subset of $G$, or require $j$ to recover the superseded
+generation at $i$.
+\end{lemma}
+\begin{proof}
+Lemma~\ref{lem:rollback} makes $i$ permanently unusable as the exact witness required by $G$; every
+later exact authority at $i$ preserves that suppression before the abort slot can be reused. When
+$j$ later follows its surviving $G$ link, the missing or nonmatching successor therefore fails the
+exact $n$-member predicate. Invariant~\ref{i:nocontraction} forbids treating the reachable fragment
+as a smaller group. Lemma~\ref{lem:fallback} and Invariant~\ref{i:reuse} preserve $j$'s predecessor
+as an independent authority or a linked authority that is made independent before suppression.
+Recovery can consequently publish predecessor-equivalent $A_j$ and return the old logical value
+without reading the old generation at $i$.
+
+The only apparent conflicting history would decide $G$ before the later operation at $i$ while
+leaving $j$ merely prepared. That history is outside the transition system: a different-set later
+operation cannot suppress a decided witness until Invariant~\ref{i:reuse} has made every participant,
+including $j$, independently final. In that case $j$ selects its local $M/T$ certificate before
+traversal instead of taking the rejection path.
 \end{proof}
 
 \begin{lemma}[Complete prepare is sufficient]\label{lem:complete}
-If recovery validates a complete prepared ring with no group-bound final certificate and
-$\mathsf{IssuedWitness}(G)$ holds for that ring, every participant of the admitted $G$ has its
-candidate state reconstructible in full.
+If recovery validates a complete exact-$B$ prepared ring for R14-2P with no group-bound final
+certificate, every participant of the admitted $G$ has its candidate state reconstructible in full.
 \end{lemma}
 \begin{proof}
-Issuance provenance identifies the decoded participant set and witnesses with the admitted $G$.
-The ring supplies the exact candidate root and identity for every participant.
+For each participant, exact $B$ implies that phase 2 issued its guard. By
+Invariant~\ref{i:prepareorder}, that issue followed a successful phase-1 barrier over the exact
+same-candidate non-guard slot bytes, wrapped link, payload, and length evidence. The fresh group ID,
+exact count/ordinal sequence, and canonical closure therefore identify the decoded participant set
+and witnesses with the admitted $G$ without an external issuance premise. The ring supplies the
+exact candidate root and identity for every participant.
 Definition~\ref{def:eligible} validates candidate length, parity, integrity geometry, and ordinary
 recoverability. By Invariant~\ref{i:payload}, bytes
-before each suffix start were durable before its prepared record could be issued. Recovery reads
+before each suffix start were durable before its prepared guard could be issued. Recovery reads
 the entire remaining suffix and verifies its exact length and CRC32C. Under the no-collision
 assumption, all bytes named by every candidate are therefore present. Rewriting all retained roots
 to $\Materialized$ (and removals to $\Tombstone$) cannot synthesize a partial candidate.
 \end{proof}
 
 \begin{lemma}[Final certificate implies an established decision]\label{lem:certificate}
-An exact group-bound $\Materialized$ or $\Tombstone$ certificate whose witness satisfies
-$\mathsf{IssuedWitness}(G)$ can exist only after $\mathsf{decide}(G)$.
+An exact group-bound $\Materialized$ or $\Tombstone$ certificate can exist only after
+$\mathsf{decide}(G)$ for the same admitted group named by its preserved witness.
 \end{lemma}
 \begin{proof}
-There are exactly two finalize guards. Normal execution first joins successful durability
-obligations for every participant. Recovery first validates the complete exact ring, every eligible
+There are exactly two finalize guards. Normal execution first joins successful phase-2 guard
+durability completions for every participant. Recovery first validates the complete exact ring, every eligible
 candidate, and all required suffix bytes. Either guard establishes $\mathsf{decide}(G)$ before any
 $M/T$ byte is issued. By Invariant~\ref{i:color}, neither the older same-slot image, the $B$ prepare,
 nor an $A$ abort contains $\chi(g_i,\Materialized)$ or $\chi(g_i,\Tombstone)$. An exact $M/T$
-header therefore implies that the corresponding guarded final write was issued; it cannot be an
+header therefore implies that the corresponding final write was issued; it cannot be an
 exact bytewise reconstruction assembled from pre-decision writes. A crash may tear that later
-write but cannot reorder its issue event before the guard. The exact adjacent witness binds the
-certificate to $G$ only under the explicit issuance-provenance premise; an unbound $R$ is excluded
-by Definition~\ref{def:certificate}.
+write but cannot reorder its issue event before the decision that enabled it. The final write preserves the adjacent
+witness. Its earlier authentic-$B$ preparation is derived from Invariant~\ref{i:prepareorder}, so
+the certificate is bound to the admitted $G$; an unbound $R$ is excluded by
+Definition~\ref{def:certificate}.
 \end{proof}
 
 \begin{lemma}[Installation convergence]\label{lem:install}
@@ -1464,8 +1703,9 @@ independently final without consulting payload history.
 Lemma~\ref{lem:certificate} establishes the decision predicate, whose two constructors both prove
 the candidate payload, so crash-time suffix rehashing is no longer required as a commit test. Each
 intact witness names the exact legal root
-spellings. The bytewise transition predicate accepts any subset tear produced by final overwrite
-and rejects unrelated bytes. Recovery rewrites the deterministic $\Materialized$ or $\Tombstone$
+spellings. The bytewise final-transition predicate accepts any subset tear from the exact durable
+$B$ base, distinguishes an unchanged $B$ root from a target-only final byte, and rejects unrelated
+bytes. Recovery rewrites the deterministic $\Materialized$ or $\Tombstone$
 header durably. Within Definition~\ref{def:atomic}'s observation interval, a protocol-generated missing path
 after finalization was an exact tombstone that has already been unlinked; a missing retained
 participant is excluded by Limitation~\ref{l:externalmissing}. After that interval, proof transfer
@@ -1474,8 +1714,8 @@ and fresh named-generation identity order any replacement or removal after this 
 
 \begin{lemma}[Post-finalization namespace independence]\label{lem:delete}
 Once UNO may issue the first unlink, any subset of removed-participant names may subsequently be
-absent without changing the group's logical new vector. Cleanup never unlinks a retained
-participant or a recreated incarnation.
+absent without changing the group's logical new vector, even when no surviving link reaches another
+surviving participant. Cleanup never unlinks a retained participant or a recreated incarnation.
 \end{lemma}
 \begin{proof}
 By Invariants~\ref{i:finalfirst} and~\ref{i:independent}, the first unlink is downstream of an exact
@@ -1483,7 +1723,9 @@ durable final root at every participant. A retained participant is never an unli
 $\Materialized$ root selects the new value independently. For a removed participant, either its
 exact $\Tombstone$ remains and Invariant~\ref{i:tdominance} makes it logically absent, or its name is
 missing and the same absence is represented physically. Thus arbitrary holes among removed names
-cannot create a mixed vector. Finally, Invariant~\ref{i:cleanup} requires incarnation, witness, and
+cannot create a mixed vector. The surviving links retain their original count and successors; they
+are neither required for local $M$ selection nor reinterpreted as smaller rings. Finally,
+Invariant~\ref{i:cleanup} requires incarnation, witness, and
 inode equality immediately before unlink, so cleanup for the old decision cannot remove a same-name
 replacement. Descending traversal only reduces how much garbage later opens or scans must reclaim.
 \end{proof}
@@ -1505,23 +1747,25 @@ broken ring changes only which eager cleanup walk is available, and recovery adm
 history containing $G$ followed by the later operation.
 \end{proof}
 
-\begin{conjecture}[UNO group crash atomicity, conditional]\label{thm:atomic}
-If the transition system is strengthened so every authority-bearing prepared or final witness
-satisfies $\mathsf{IssuedWitness}(G)$, then a conforming implementation satisfies
+\begin{conjecture}[R14-2P group crash atomicity]\label{thm:atomic}
+A conforming implementation of the R14-2P transition system satisfies
 Definition~\ref{def:atomic}: during $G$'s protected logical-key interval, every protocol-reachable
 crash image exposes either $G$'s complete old vector or its complete new vector, never a mixed
-vector. The current one-phase prepare does not satisfy the premise.
+vector.
 \end{conjecture}
-\begin{proof}
-Conditional on the missing issuance premise, Lemma~\ref{lem:preservation} supplies the remaining
-protocol invariants. Partition the trace at the crash into three disjoint cases.
+\paragraph{Supporting argument.}
+The following case split explains why the preceding invariants support the conjecture; it is not a
+machine-checked proof or a refinement proof for the filesystem or implementation.
+Lemma~\ref{lem:preservation} supplies the protocol invariants, including the ordering-derived
+provenance of every accepted $B$ witness. Partition the trace at the crash into three disjoint cases.
 
 \emph{No pre-crash decision, and recovery returns old without establishing one:} there is no
 group-bound final certificate. If every candidate slot equals its canonical lower-generation
 pre-attempt source, including any witness belonging to that source, the prepare left no
 distinguishable candidate-generation admission effect and the predecessor vector is already
-authoritative. Otherwise, every image before exact $A$ either lacks complete candidate
-evidence or is reclassified into the next case. Lemma~\ref{lem:incomplete} keeps an incomplete
+authoritative. Otherwise, every guardless phase-1 or partial phase-2 image before exact $A$ either
+lacks complete candidate evidence or is reclassified into the next case. The crash erased every
+live prepare credit and recovery cannot write $B$. Lemma~\ref{lem:incomplete} keeps an incomplete
 candidate invisible, and no caller mutation, destructive payload change, or slot reuse is enabled
 during this provisional interval. Proof-preserving predecessor finalization may still run. Exact
 $A$ then selects the complete predecessor vector, changes only internal generation,
@@ -1530,15 +1774,19 @@ recognizable witness without producing complete candidate evidence, Lemma~\ref{l
 routes the raw non-quiescent slot back through normalization rather than mutable fallback.
 
 \emph{No pre-crash decision, and recovery establishes one before exact $A$:} recovery has found a
-complete ring and validated every candidate and suffix. This includes a ring made valid by the
-arbitrary subset of an interrupted abort-body write. Lemma~\ref{lem:complete} proves the complete
-candidate vector, after which finalization yields the new vector.
+complete exact-$B$ ring and validated every candidate and suffix. Code-last ordering identifies
+that ring with the admitted group. No recovery write supplied a missing guard.
+Lemma~\ref{lem:complete} proves the complete candidate vector, after which finalization yields the
+new vector.
 
-\emph{A pre-crash decision exists:} the normal prepare-barrier join or an earlier recovery already
-established $\mathsf{decide}(G)$. If no exact group-bound certificate exists, no unlink is enabled;
-all paths and exact witnesses remain. The complete ring still validates roots in any allowed torn
-transition, and its candidate payload was proved by the decision, so recovery finalizes the group.
-This covers a crash during the first final write that leaves no exact $M/T$ spelling. If a
+\emph{A pre-crash decision exists:} the normal join of all phase-2 guard durability completions or
+an earlier recovery already established $\mathsf{decide}(G)$. If no exact group-bound certificate
+exists, no unlink is enabled; all paths and exact witnesses remain. For each participant, either the
+exact $B$ root remains or $\mathsf{FinalTransition}$ contains a target-only byte relative to that
+known durable base. The all-$B$ case reconstructs the complete ring; any other case proves that a
+post-decision final write was issued. The preserved witness identifies the same candidate and
+payload, so recovery finalizes the group. This covers a crash during the first final write that
+leaves no exact $M/T$ spelling and retains only a new checksum byte. If a
 certificate exists, Lemmas~\ref{lem:certificate} and~\ref{lem:install} repair every present
 participant. If unlink has removed some or all deleted participants, Lemma~\ref{lem:delete} maps
 every missing or surviving tombstoned removal to absence while retained $M$ roots select all
@@ -1548,12 +1796,14 @@ No unlink is enabled during provisional rejection or on the exact-$A$ old path. 
 the final-before-unlink guard and Lemma~\ref{lem:delete} map every removal to logical absence without
 mixing retained participants. Thus these cases exhaust successful recovery traces and yield only
 the two vectors in Definition~\ref{def:atomic}.
-\end{proof}
 
 \begin{remark}[Refinement status]
-Conjecture~\ref{thm:atomic} is not a theorem of the current one-phase target state machine, and it
-is not a machine-checked proof of the Rust implementation. Limitation~\ref{l:witness-provenance}
-is a target-protocol blocker independent of implementation correspondence. The R13 baseline at
+Conjecture~\ref{thm:atomic} is a manual argument for the normative R14-2P transition system, not a
+machine-checked end-to-end theorem, a production-Rust refinement, or an ext4/JBD2 refinement. The
+current bounded Kani matrix is pending for its exact 42-harness source snapshot. Completed matrices
+for older 30- and 36-harness snapshots checked the three abstraction layers separately and found
+the paired R14-1P counterexample in Limitation~\ref{l:witness-provenance}; those results do not
+transfer to the current source. The R13 baseline at
 \code{26a532dd6} also has
 counterexamples to newer-$T$ authority, group-bound certificate selection, rejected-witness reuse,
 filesystem namespace ownership, and an ineligible integrity candidate. The reviewed branch repairs
@@ -1569,30 +1819,28 @@ returns the new group vector or a state obtained by serializing later protocol-r
 after that vector.
 \end{corollary}
 \begin{proof}
-Acknowledgement occurs only after all prepare durability operations succeed. Thus the group has a
-durable byte-for-byte copy of the actually issued complete ring and $\mathsf{decide}(G)$ even if no
-root has yet been materialized; the pre-acknowledgement splice in
-Limitation~\ref{l:witness-provenance} is therefore unavailable for $G$. Finalization preserves that
-witness, and later groups are serialized on overlapping participants and preserve or transfer the
-earlier proof before slot reuse. Lemma~\ref{lem:composition} covers later namespace changes that
-physically break the earlier ring. This is an acknowledged-prefix claim, not a restoration of the
-unacknowledged admitted-window conjecture.
+Acknowledgement occurs only after every phase-1 body/evidence barrier and every phase-2 guard
+durability completion succeeds. Thus the group has a durable byte-for-byte copy of the actually
+issued complete ring and $\mathsf{decide}(G)$ even if no root has yet been materialized.
+Finalization preserves that witness, and later groups are serialized on overlapping participants
+and preserve or transfer the earlier proof before slot reuse. Lemma~\ref{lem:composition} covers
+later namespace changes that physically break the earlier ring.
 \end{proof}
 
-\begin{limitation}[Indeterminate admitted window is not atomic]\label{l:admitted-window}
+\begin{limitation}[R14-1P admitted-window failure]\label{l:admitted-window}
 If physical admission occurred but \code{start\_apply} did not return \code{Ok}, the current
-one-phase protocol can return a partially new vector. The old-two/new-three trace in
+R14-1P negative control can return a partially new vector. The old-two/new-three trace in
 Limitation~\ref{l:witness-provenance} is a concrete counterexample. A validation failure or
-cancellation proved to precede admission still leaves only old selected states. Code-last prepare,
-a splice-binding commitment, or a narrowed API guarantee is required before the old-or-new
-admitted-window claim can be reinstated.
+cancellation proved to precede admission still leaves only old selected states. This limitation
+does not apply to the selected R14-2P transition system; it is retained to prevent the one-phase
+control from being mistaken for a conforming optimization.
 \end{limitation}
 
 \begin{proposition}[No cross-group temporal order]
 For disjoint groups $G$ and $H$, UNO records no durable order between their decisions. If neither
-has been acknowledged, a crash may recover either group, both, neither, or---until
-Limitation~\ref{l:witness-provenance} is repaired---a synthetic subset. An acknowledged group still
-satisfies Corollary~\ref{cor:ack} independently.
+has been acknowledged, a crash may recover either complete group, both, or neither. R14-2P does not
+permit a synthetic subset within either group; R14-1P does, as a negative control. An acknowledged
+group still satisfies Corollary~\ref{cor:ack} independently.
 \end{proposition}
 \begin{proof}
 Neither ring contains a link, sequence number, or authority belonging to the other. Per-file
@@ -1651,30 +1899,36 @@ indefinitely, although it remains logically absent.
 \subsection{Write and memory cost}
 
 Payload bytes are issued when appended and are not recopied into a transaction log. The abstract
-steady-state decision adds one canonical 2 KiB root/link-slot write per dirty participant and one dependency layer
-of per-file durability operations. The group keeps $O(n+K)$ descriptors in memory, not a
-payload-sized staging buffer and not an extent map. Large append epochs may cause earlier file
-barriers, but those barriers only advance immutable payload durability; the payload itself is still
-written once. Deletion and participant-set changes add the durable $M/T$ finalization writes and,
-for deletion, unlink plus directory-barrier completion work after the decision.
+R14-2P steady-state decision adds, per dirty participant, one logical 2,047-byte non-guard slot
+update (which may be vectored around offset 7) plus any candidate payload/length update, followed by
+a phase-1 file durability completion. It then adds one one-byte $B$-guard write and a phase-2 file
+durability completion. These are two serial protocol layers, although all participants within one
+layer may fan out concurrently. The group keeps $O(n+K)$ descriptors in memory, not a payload-sized
+staging buffer and not an extent map. Large append epochs may cause earlier file barriers, but those
+barriers only advance immutable payload durability; the payload itself is still written once.
+Deletion and participant-set changes add the durable $M/T$ finalization writes and, for deletion,
+unlink plus directory-barrier completion work after the decision.
 Rejecting a surviving candidate or normalizing a non-quiescent orphan slot during recovery adds one
 111-byte abort-body barrier and one one-byte abort-guard barrier before the predecessor becomes
 writable. If that predecessor was a carried ring, it is first materialized
 group-wide, adding an earlier barrier layer. Both are rollback-path work, not steady-state commit
 barriers.
 
-The design does not guarantee that $n$ file barriers become one device flush. It gives the kernel
-all independent durability obligations without inserting a serial coordinator barrier. Device,
-filesystem, scheduler, and backend behavior determine actual coalescing.
-For nonempty work, let $m$ be the number of locked canonical operations in the current Tokio
-backend. It schedules at
+The design does not guarantee that either layer's $n$ file barriers become one device flush. It
+gives the kernel all independent durability obligations in each layer without inserting a
+coordinator record or group-wide filesystem barrier. Device, filesystem, scheduler, and backend
+behavior determine actual coalescing.
+
+The following scheduling fact describes the checked-in one-phase R13 baseline only, not either
+proposed R14 protocol. For nonempty work, let $m$ be the number of locked canonical operations in
+the current Tokio backend. It schedules at
 most $\min(m,32)$ chunks, each with at most $\lceil m/\min(m,32)\rceil$ locked operations, and
 awaits root writes and retained-file syncs sequentially within a chunk. If chunk $j$ contains
 $d_j$ actually prepared participants, its staging phase executes at most $2d_j$ such I/O awaits (a
 deletion's durable root write combines its obligation). Clean locked operations need not become
 ring participants, so this bound is intentionally stated in $m$ and $d_j$, not only in ring size
-$n$. The io\_uring backend uses broader future fanout. ``One layer'' is therefore the
-protocol dependency depth, not a measured scheduling claim for every backend.
+$n$. The io\_uring backend uses broader future fanout. No corresponding R14-2P scheduling or await
+count is claimed until both ordered layers have a production implementation.
 
 \section{Overlapping groups and two slots}
 
@@ -1688,9 +1942,10 @@ $\Materialized$ roots only if:
   \item every new base generation is exactly the previous candidate generation; and
   \item every new candidate uses the opposite slot.
 \end{enumerate}
-If the successor group is incomplete after a crash, the preceding complete ring remains in the
-other slots and is recovered. If the successor ring is complete, recovering it yields a state
-after the preceding group in the same per-participant generation order. Any different overlapping
+If the successor group is incomplete after a crash, including when only its phase-1 bodies are
+durable, the preceding complete ring remains in the other slots and is recovered. Only a complete
+$B$-proven successor ring transfers authority; recovering it yields a state after the preceding
+group in the same per-participant generation order. Any different overlapping
 set is forced to materialize the carried group first. Disjoint sets have no semantic order even
 though the current filesystem implementation conservatively serializes namespace batches.
 
@@ -1699,15 +1954,18 @@ though the current filesystem implementation conservatively serializes namespace
 The public distinction between decision and cleanup mirrors the proof boundary:
 
 \begin{description}
-  \item[\code{start\_apply(...)} returns \code{Ok}.] The linked decision is durable. A crash must
-  recover the complete new vector. The returned handle may be dropped without canceling recovery.
+  \item[\code{start\_apply(...)} returns \code{Ok}.] Every participant's phase-1 body/evidence and
+  phase-2 guard durability completion has succeeded, so the linked decision is durable. A crash
+  must recover the complete new vector. The returned handle may be dropped without canceling recovery.
   \item[Awaiting the returned handle succeeds.] In-memory state is active; eager materialization,
   truncation, and namespace deletion required by that batch have completed.
   \item[Validation error before admission.] No candidate/link byte was issued and selected states
   are unchanged. Invisible payload writes or preflush may already have occurred.
-  \item[Error or cancellation after admission.] Reopen; do not reuse a poisoned generation. Until
-  Limitation~\ref{l:witness-provenance} is repaired, a torn one-phase prepare may recover old, new,
-  or a partially new synthetic sub-ring. Cancellation proved to precede admission is old-only.
+  \item[Error or cancellation after admission.] Reopen; do not reuse a poisoned generation. Under
+  R14-2P, recovery may return the complete old or complete new vector, never a synthetic subset; a
+  guardless body is normalized with $A$ and is never promoted to $B$. The R14-1P and R13 controls
+  may recover a partially new synthetic sub-ring. Cancellation proved to precede admission is
+  old-only.
 \end{description}
 
 Committed-only readers observe the selected root. Pending appends are immediately visible through
@@ -1717,8 +1975,10 @@ the inode; they cannot authorize mutation of a same-name replacement.
 
 \section{Implementation correspondence}
 
-Table~\ref{tab:code} identifies the executable definitions to which this specification is intended
-to refine. Function names are used instead of line numbers so ordinary edits do not stale the map.
+Table~\ref{tab:code} is an audit map, not a conformance map. In particular, the checked-in R13
+implementation has no executable anchor for either R14-2P prepare phase. The Kani files are
+specification-only Rust and are not production anchors. Function names are used instead of line
+numbers so ordinary edits do not stale the map.
 
 \begin{table*}[t]
 \centering
@@ -1729,15 +1989,29 @@ to refine. Function names are used instead of line numbers so ordinary edits do 
 \toprule
 Specification element & Source module & Executable anchor \\
 \midrule
-roots, slots, transitions & \path{storage/atomic.rs} & \path{encode_root},
+R14-2P phase-1 physical slot and payload/extent evidence & no production module & no R13 executable
+anchor; spec-only \path{docs/uno-kani-model/src/codec.rs} \path{prepare_body_after_crash},
+\path{mixed_payload_valid}, and the append/rewind evidence harnesses \\
+R14-2P phase-1 durability credit and group join & no production module & no R13 executable anchor;
+spec-only \path{docs/uno-kani-model/src/protocol.rs} \path{SyncPrepareBody} transition and
+\path{all_phase_one_durable} predicate \\
+R14-2P one-byte $B$ guard survival & no production module & no R13 executable anchor; spec-only
+\path{docs/uno-kani-model/src/codec.rs} \path{prepare_guard_after_crash} \\
+R14-2P phase-2 durability completion & no production module & no R13 executable anchor; spec-only
+\path{docs/uno-kani-model/src/protocol.rs} \path{SyncPrepareGuard} transition and
+\path{all_guard_done} live predicate; \path{guard_sync_succeeded} and
+\path{all_guard_sync_succeeded} are recovery-inert proof history used only for acknowledgement \\
+R14-2P live credit loss and no recovery $B$ writer & no production module & no R13 executable
+anchor; spec-only \path{docs/uno-kani-model/src/protocol.rs} transition relation \\
+R13 roots, slots, transitions (nonconforming control) & \path{runtime/src/storage/atomic.rs} & \path{encode_root},
 \path{recover_from_root_slots}, \path{candidate_root_is_transition},
 \path{candidate_root_is_batch_transition}, \path{candidate_root_is_delete_transition} \\
-payload preflush and suffix proof & \path{storage/atomic.rs} & \path{PayloadChecksumTracker},
+R13 payload preflush and suffix proof (partial mechanism) & \path{runtime/src/storage/atomic.rs} & \path{PayloadChecksumTracker},
 \path{validate_payload_checksum} \\
-ordinary-blob wrapper & \path{storage/uno.rs} & \path{Core}, \path{AtomicBlob},
+ordinary-blob wrapper (R13 baseline only) & \path{runtime/src/storage/uno.rs} & \path{Core}, \path{AtomicBlob},
 \path{stage_batch_commit}, \path{activate_batch_commit} \\
-canonical operation set & \path{storage/batch.rs} & \path{canonicalize_operations} \\
-embedded preflight and ring format & \path{storage/batch/coordinator.rs} & \path{preflight},
+canonical operation set & \path{runtime/src/storage/batch.rs} & \path{canonicalize_operations} \\
+R13/L14 embedded preflight and ring format (nonconforming control) & \path{runtime/src/storage/batch/coordinator.rs} & \path{preflight},
 \path{encode_link}, \path{decode_link}, \path{prepare_embedded},
 \path{prepare_single_publish} \\
 ring discovery & same & \path{recover_linked_decision}, \path{matching_link} \\
@@ -1747,18 +2021,26 @@ materialization and eager deletion & same & \path{materialize_decision_participa
 \path{unlink_deleted_participants}, \path{recover_ordered_delete_frontier} \\
 independent tombstone recovery & same & \path{recover_named_embedded},
 \path{recover_partition_embedded}, \path{unlink_exact_tombstone} \\
-Tokio batch scheduling & \path{storage/tokio/mod.rs}, \path{storage/uno.rs} &
+Tokio one-phase batch scheduling (baseline only) & \path{runtime/src/storage/tokio/mod.rs}, \path{runtime/src/storage/uno.rs} &
 \path{start_apply_guarded}, \path{stage_batch_chunk}, \path{Core::sync_batch_commit} \\
-io\_uring batch scheduling & \path{storage/iouring.rs} & \path{start_apply_guarded} \\
-filesystem open and scan integration & \path{storage/tokio/mod.rs},
-\path{storage/iouring.rs} & \path{open_versioned_inner}, \path{scan} \\
-single-participant filesystem paths & \path{storage/tokio/unix.rs},
-\path{storage/iouring.rs} & \path{V2Publisher::publish} \\
-public contract & \path{atomic_api.rs} & \path{AtomicStorage}, \path{AtomicBlob},
+io\_uring one-phase batch scheduling (baseline only) & \path{runtime/src/storage/iouring.rs} & \path{start_apply_guarded} \\
+filesystem open and scan integration & \path{runtime/src/storage/tokio/mod.rs},
+\path{runtime/src/storage/iouring.rs} & \path{open_versioned_inner}, \path{scan} \\
+single-participant filesystem paths & \path{runtime/src/storage/tokio/unix.rs},
+\path{runtime/src/storage/iouring.rs} & \path{V2Publisher::publish} \\
+Linux file and directory barriers (backend mechanics only) &
+\path{runtime/src/storage/tokio/unix.rs}, \path{runtime/src/iouring/request.rs},
+\path{runtime/src/storage/tokio/mod.rs} & \path{sync_inner},
+\path{build_datasync_sqe}, \path{sync_dir} \\
+reviewed R13 cancellation ownership repair & \path{runtime/src/storage/tokio/mod.rs},
+\path{runtime/src/storage/uno.rs}, \path{runtime/src/storage/iouring.rs} &
+\path{open_versioned_guarded}, \path{remove_guarded}, \path{scan_guarded},
+\path{start_publication}, \path{Publisher::spawn} \\
+public contract & \path{runtime/src/atomic_api.rs} & \path{AtomicStorage}, \path{AtomicBlob},
 \path{BatchStorage} \\
 \bottomrule
 \end{tabularx}
-\caption{Specification-to-code correspondence.}
+\caption{Reference-to-source audit. Baseline anchors do not implement or conform to R14-2P.}
 \label{tab:code}
 \end{table*}
 
@@ -1784,7 +2066,7 @@ would then be followed by recovery of the old alternate root because no two-memb
 The runtime creates distinct inodes for distinct names and its exclusive-directory contract rules
 out external namespace mutation during operation, but revision \code{26a532dd6} does not detect a
 hard-link alias already present at open or compare participant device/inode identities during batch
-preflight. The conditional conjecture therefore applies only when the owned namespace was created through
+preflight. The R14-2P conjecture therefore applies only when the owned namespace was created through
 conforming operations and has not been externally aliased. If arbitrary pre-populated directories
 must be accepted, initialization or admission must reject aliases and a two-hard-link
 acknowledge/crash regression is required.
@@ -1803,27 +2085,28 @@ directory entry and open it with no-follow semantics as one serialized admission
 opened descriptor to the inspected device/inode identity. A symlink-to-valid-V2 acknowledge/crash/
 reopen regression is required on both filesystem backends.
 
-\subsection{Target blocker: exact witness need not have been issued}
+\subsection{R14-1P negative control and selected R14-2P repair}
 
-Limitation~\ref{l:witness-provenance} is not an R13/R14 correspondence mismatch: it invalidates the
-one-phase proposed target itself. A full-slot prepare may tear into an exact current-generation
+Limitation~\ref{l:witness-provenance} is not merely an R13/R14 correspondence mismatch: it
+invalidates R14-1P itself. A one-phase full-slot prepare may tear into an exact current-generation
 $B$ root plus a checksummed witness whose topology came from the previous same-parity group and
 whose candidate fields came from the new group. Recovery has no separate manifest with which to
-distinguish that exact synthetic ring. The two-participant composed model starts from zero witness
-bytes and therefore underapproximates this trace.
+distinguish that exact synthetic ring.
 
-The independently reconstructed old-two/new-three fixture satisfies consecutive lineage, distinct
+The independently reconstructed old-two/new-three fixture satisfies consecutive lineage: a
+length-four generation-one same-slot witness source is followed by an exact empty generation-two
+$R$ after rewind and an eligible generation-three four-byte append. It also satisfies distinct
 group identifiers and incarnations, canonical slot and link parsing, payload validation, and the
 paper's no-CRC-collision event. It yields a mixed observation of the actually admitted three-member
-group. Consequently Conjecture~\ref{thm:atomic}, the indeterminate admitted-window guarantee, and
-any positive model result that assumes witness intent are blocked.
+group. Consequently R14-1P, the corresponding indeterminate admitted-window guarantee, and any
+positive model result that assumes witness intent are blocked.
 
-The correctness-first repair is a code-last prepare: make all non-guard slot bytes and candidate
+The normative R14-2P repair is code-last prepare: make all non-guard slot bytes and candidate
 payload/length state durable, then issue the one-byte $B$ guard and make it durable. This gives the
 guard disk-observable provenance for the exact witness but requires two ordered per-file durability
 layers. Preserving one layer instead requires a new splice-binding cryptographic commitment and a
-stronger computational assumption. Selecting between those contracts is an unresolved architecture
-decision; no Rust implementation change for either repair is claimed here.
+stronger computational assumption; that is not the selected reference contract. No checked-in Rust
+implementation of either R14-2P phase is claimed here.
 
 \subsection{Blocker: newer tombstone can lose to an older ring}
 
@@ -1854,12 +2137,14 @@ place. For concrete caller-tag values, the resulting 112 bytes equal the canonic
 even though no decision or $M$ write occurred; this is exact reconstruction, not a CRC collision.
 Certificate-first recovery would then publish one participant while its peer rolls back.
 
-The R14 target closes that provenance gap with Invariant~\ref{i:color}. A single spelling byte
+R14 generation coloring closes this unissued-root-state gap with Invariant~\ref{i:color}. A single spelling byte
 jointly encodes the state and generation modulo three. The previous use of the same slot was two
 generations earlier and therefore has another color; $B$, $A$, $R$, $M$, and $T$ within the new
 color have distinct byte values. Consequently a crash may preserve any subset of all other root
 bytes and checksum bytes, but an exact state whose guard write was never issued is unreachable.
-This format change is required before Lemma~\ref{lem:certificate} applies to the implementation.
+Generation coloring alone does not close adjacent-witness splicing: R14-2P's code-last $B$ ordering
+in Invariant~\ref{i:prepareorder} is separately required. Both changes are prerequisites before
+Lemma~\ref{lem:certificate} can apply to an implementation.
 Regressions must enumerate every subset of the abstract spelling/body/checksum/witness cells across
 a torn prepare, repeated abort recovery, finalization, and subsequent slot reuse.
 
@@ -1936,24 +2221,32 @@ The runtime-agnostic UNO wrapper now routes an admitted synchronous publication 
 self-driving \code{Publisher::spawn} mechanism already used by \code{start\_sync}. The spawned task
 owns the armed mutation state. Consequently a canceled \code{write\_at\_sync} observer cannot release
 the publisher's namespace authority while an older carried group is being materialized. This shared
-repair applies to the Tokio and io\_uring publishers; a spawn failure drops the armed guard and
-poisons that generation.
+repair applies to the Tokio and io\_uring publishers. When the synchronous append has already
+issued payload I/O, its mutation guard is armed before the publication task is spawned, so dropping
+that task on a spawn failure poisons the generation. A plain \code{start\_sync} spawn failure occurs
+before the publication future is polled or protocol I/O is admitted and may drop an unarmed guard.
+The reviewed Tokio and io\_uring \code{Publisher::spawn} implementations currently return success;
+this distinction pins the generic interface semantics rather than claiming an exercised failure.
 
 Deterministic regressions pause and cancel Tokio open, scan, and remove with blocking work queued;
 pause exact removal after unlink but before directory durability and invalidation; pause the exact
 recovery \code{set\_len}, then reopen and acknowledge an append; and pause carried-group
 materialization during a direct synchronous publication. The last regression also runs against the
-Linux io\_uring backend. Each test proves that namespace authority remains unavailable while the
+Linux io\_uring backend. Each test demonstrates that namespace authority remains unavailable while the
 parked worker is outstanding and that a later reopen derives the expected bytes or a fresh
 generation. These tests close the cancellation-ownership races above for the reviewed code.
 
 This repair does not weaken Assumption~\ref{a:failstop}. Runtime shutdown, task panic, or an
 indeterminate mutable I/O error still requires the affected instance to stop and recover from disk;
 self-driving work is not a promise that an observer canceled after admission can safely ignore that
-assumption. Nor does this R13 implementation acquire the proposed R14 generation-colored guard,
-code-last abort normalization, or the other format and integrity repairs in this section. It is
-therefore not a refinement proof from the checked-in implementation to the proposed R14
-conditions or conditional conjecture.
+assumption. An armed publication guard poisons its local generation when a detached task is dropped,
+but detached namespace-worker panic is not automatically converted into a storage-wide poison
+signal after its observer has gone away; the fail-stop response remains an implementation
+precondition at that boundary. Nor does this R13 implementation acquire the proposed R14 generation-colored guard,
+R14-2P code-last prepare, crash-cleared phase credit, no-recovery-$B$ rule, code-last abort
+normalization, or the other format and integrity repairs in this section. It is therefore not a
+refinement proof from the checked-in implementation to the proposed R14-2P conditions or
+Conjecture~\ref{thm:atomic}.
 
 \subsection{Availability deviation: missing successor partition}
 
@@ -1988,10 +2281,10 @@ and wrong-width rewind regressions are required for direct sync and group public
 
 \section{Evidence and validation obligations}
 
-The current tests exercise the principal proof partitions:
+The checked-in R13 Rust tests exercise useful implementation mechanisms and regression partitions:
 \begin{itemize}
-  \item arbitrary retained subsets of payload writes and arbitrary non-prefix prepared-root bytes
-  cannot publish an incomplete group;
+  \item selected retained-subset payload and non-prefix prepared-root fixtures reject incomplete
+  groups;
   \item complete rings larger than the 32-worker fanout recover, while one missing link at either
   side of a worker boundary rolls back;
   \item a missing intended deletion before finalization is not treated as a commit decision;
@@ -2001,83 +2294,152 @@ The current tests exercise the principal proof partitions:
   exact-name open;
   \item partition recovery does not enumerate a stranded tombstone after another participant is
   recreated;
-  \item arbitrary bytewise mixtures of prepared, materialized, and tombstone roots are repaired
+  \item selected bytewise mixtures of prepared, materialized, and tombstone roots are repaired
   once an exact group-bound $M/T$ witness proves the decision;
   \item stale replay preserves a recreated same-name incarnation;
   \item normal recovery reads bounded metadata rather than historical payload; and
   \item large pending epochs preflush so unresolved group validation remains within 64 MiB.
 \end{itemize}
 
-These tests are finite evidence, not a proof of the Rust implementation.
+These tests are finite evidence for their exact R13 paths. They do not implement either R14-2P
+durability phase, reproduce every R14-1P/R13 negative control, or prove refinement to
+Conjecture~\ref{thm:atomic}. In particular, the proper-subset fixtures recover one anchor and inspect
+the immediate predecessor vector; they do not then advance that anchor through later generations
+and recover a previously unopened peer.
 
-\subsection{Executable Quint/Apalache model}
+\subsection{Executable Kani reference model (current matrix pending)}
 
-The companion \path{docs/uno-protocol.qnt} uses Quint 0.32.0 and Apalache 0.56.1; the
-pinned image and exact command ledger are in \path{docs/uno-model-checking.md}. The file contains
-three complementary modules. The fast \code{uno\_slot} abstraction separates generation, the
-one-byte state/color guard, logical body, all four CRC bytes, and witness into decoder-relevant
-addressed cells. The larger \code{uno\_group} control abstraction chooses one to three participants
-and independently assigns append, rewind, or remove, including payload validation, interruptible
-abort/final repair, post-decision rewind, and partial unlink.
+The active executable checker is Kani 0.67.0 with bundled CBMC 6.8.0. The nested crate
+\path{docs/uno-kani-model} is specification-only Rust: it is isolated from the Commonware workspace,
+does not call production R13 code, and supplies no ext4/JBD2 or public-API refinement. Its three
+layers intentionally separate physical encoding, decoded ring observations, and lifecycle
+induction.
 
-The \code{uno\_composed} bridge fixes exactly two participants and derives recovery observations
-from on-disk evidence. It uses concrete offset-indexed 112-byte representative R14 headers, all four
-CRC bytes, generation-1 same-slot source/generation-2 ordinary-$R$ predecessor/generation-3 candidate lineage, a
-seven-byte payload, and a compact exact 16-byte reciprocal-ring witness abstraction. It defines
-pair-fixed cuts for all nine ordered append/rewind/remove combinations. Prepare, ordinary-$R$,
-abort-body, abort-guard, final, witness, payload, and unlink outcomes retain independent survivor
-masks; physical file-length persistence is an independent old/new scalar abstraction. The full
-crash actions admit an arbitrary subset of every addressed root or repair write. Some focused step
-relations instead use predicate-specific dependency projections or staged successful-barrier
-summaries; a result applies only to its named step relation. The 111-byte abort body and one-byte
-guard are separate barrier phases, and either issued
-unlink may independently survive. Recovery re-decodes the resulting roots, witnesses, payload, and
-namespace rather than consulting an intended outcome. In particular, it represents provisional
-pre-$A$ rejection, reconsideration after a torn abort body, exact-$A$ precedence, interrupted final
-repair, and observations stored from the disk decoder.
+The physical layer in \path{src/codec.rs} fixes three participants and the proposed R14 encoding.
+Native tests use real CRC32C and complete 2,048-byte candidate slots. Kani retains the 466-byte
+decoded prefix containing the 112-byte root, 16-byte wrapper, and 338-byte link; the omitted suffix
+is zero in every modeled source and target and is never read. Each addressed byte has an independent
+survival selector, so the fault set contains every subset rather than only prefixes. Prepare-body
+selectors exclude only guard offset 7; abort and final repair independently select their addressed
+root bytes. Metadata-checksum validation is erased under Kani, conservatively admitting more torn
+images, while payload checksums are collision-free tokens for the finite modeled logical values.
+Native regressions retain the real checksum arithmetic and full-slot constants.
 
-The composed bridge deliberately initializes each generation-three witness overlay from an all-zero
-image and fixes the intended ring to two participants. It therefore cannot express the confirmed
-generation-one $H=\{a,b\}$ to generation-three $G=\{a,b,c\}$ witness splice in
-Limitation~\ref{l:witness-provenance}. Positive results from this module do not establish
-$\mathsf{IssuedWitness}(G)$ and cannot validate Conjecture~\ref{thm:atomic}. A repair model must
-include the exact older wrapped witnesses, a differing later participant set, independent survival
-of every wrapper/link/checksum byte, and disk observations for every originally admitted
-participant.
+That zero-suffix restriction is fixture-specific, not a general projection argument for every
+canonical $A$ source: an abort root may retain stale witness bytes throughout its ignored suffix.
+A complete physical refinement must either carry arbitrary such bytes through a later full-slot
+prepare, abort retry, and parity-slot reuse, or prove that none can affect decoding. The current
+matrix supplies neither obligation.
 
-Validation is paused at a non-final checkpoint. The current model artifact (SHA-256
-\code{dde48576...2b75965}; full digest in the companion note) has not been typechecked since a fresh
-full-diff audit corrected its generation-2 predecessor fixture from the $M$ guard and CRCs to the
-claimed ordinary-$R$ encoding. Its immediate predecessor typechecked. Apalache found
-the intended deliberately generation-broken counterexample and completed several pair-fixed staged
-obligations on earlier development revisions, but the file changed afterward. The exact-$A$ run was
-interrupted when execution was paused, and the current-hash all-pair matrix has not been run.
-Accordingly, those results are development evidence, not final validation; the exact bounds,
-elapsed times, OOM/interrupted runs, and pending commands are recorded candidly in the companion
-note.
+The physical fixtures cover an empty generation-two fallback followed by a legal generation-three
+four-byte append, and a separate exact generation-two mixed workload. In the latter, participant
+$a$ appends four bytes to a four-byte prefix, participant $b$ rewinds to two bytes, and participant
+$c$ is removed. Their physical extents are $[8200,8196,8196]$. Root integrity, suffix evidence,
+suffix length, logical length, removal, and topology are decoded from the slot. The one-phase fixture
+can splice the older two-member topology into exact newly issued candidates at $a,b$ while $c$
+retains its old authority.
 
-This remains bounded model checking, not an arbitrary-$n$ proof, an ext4/JBD2 model, or a Rust
-refinement. The compact fixed witness does not validate the complete physical L14 codec or padding;
-the composed model covers one two-participant, three-generation window and a tiny representative
-payload. Its current old-observation cut requires both participants to be locally quiescent or exact
-$A$; it has not checked the intermediate paper route where one exact $A$ suppresses the ring and a
-peer's stale $B$ slot is normalized only before peer mutability. It does not model duplicate-inode
-or symlink admission, rename/recreation and stale inode identity, journal replay, delayed allocation,
-concrete syscall order, or cancellation ownership.
-It also does not establish public API reachability, multi-generation source-window wraparound, the
-newer-tombstone/older-ring implementation trace, stale-ring direct-$R$ aliasing, rejected-witness
-payload reuse across multiple later generations, or the fixed-chunk and rewind integrity blockers.
-Those require codec tests, filesystem refinement tests, and continuing Rust correspondence work
-beyond the reviewed cancellation-ownership repair.
+The composed layer in \path{src/composed.rs} has twelve candidate byte-equivalence cells per
+participant. It independently tears guard, group, count, ordinal, successor, base generation,
+operation, removal, root integrity, suffix evidence, suffix length, and logical length. An explicit
+decoder traverses rings of one to three members; operation and observation are derived from the
+decoded cells. Each participant also has a three-cell fallback image for its authority root,
+logical payload, and physical extent; a member not recovered through the ring observes old only
+when all three decode exactly. Separate root-integrity and suffix-evidence cells prevent one payload
+fact from standing in for the other. Its positive exact-body harness ranges over active counts one,
+two, and three, ignoring inactive participants in the atomicity comparison. The pending mixed
+physical bridge harness is intended to prove that its three exact fixed candidates project to the
+expected group identity, composed topology, operation vector, and evidence. Separate
+physical harnesses decode the exact all-append and splice fixtures, and native tests run the
+physical ring decoder end to end.
+
+The protocol layer in \path{src/protocol.rs} fixes one to three participants, chooses
+append/rewind/remove independently, and represents payload validity, group-wide body durability and
+live credit, guard issue, crash-cleared $\mathsf{GuardDone}$ credit, recovery-inert synchronization
+history, the no-recovery-$B$ rule, code-last abort, interrupted abort/final repair, rewind
+truncation, and arbitrary subsets of removal unlinks. It includes a direct arbitrary phase-2 guard
+crash cut and the one-durable-$A$ route: one abort authority selects old while unresolved peers
+remain non-mutable until individually normalized. An explicit terminal mutation-admission action
+stutters for an unresolved peer and succeeds for an individually normalized old authority; the
+later mutation is the next serialized lifecycle. Its base and arbitrary one-step preservation
+harnesses encode an inductive invariant for unbounded transition count within that fixed state
+quotient. Consequence and cover harnesses encode all 27 three-participant operation vectors, nine
+ordered pairwise cover classes, group-wide prepare provenance, crash/no-promotion, abort/final cuts,
+one-authority peer normalization, and all eight unlink subsets.
+
+The terminal mutation-admission action establishes only that a normalized participant may begin the
+next serialized lifecycle. It does not encode the next operation's physical root/witness writes,
+reuse both parity slots, or invoke fresh recovery from an unresolved peer after that advancement.
+Before staggered recovery is treated as end-to-end machine evidence, a physical/composed refinement
+fixture must:
+\begin{enumerate}
+  \item admit $G=\langle a,b,c\rangle$ and retain an incomplete proper subset of its exact prepared
+  evidence, including the cut with $a$ and $c$ recognizable but $b$ lacking its $B$ guard;
+  \item recover $a$, publish exact code-last $A_a$, and admit a later singleton or different-set
+  operation that advances $a$ far enough to reuse both parity slots under arbitrary addressed-byte
+  tears;
+  \item crash and recover previously unopened $c$, proving that it preserves count three, cannot
+  accept a strict sub-ring, and reaches $O_c$ only through its own exact abort authority;
+  \item run the decided control in which independent $M/T$ roots precede every later different-set
+  mutation, then use $a\to b\to c\to d\to a$ with removals $\{b,d\}$, establish exact
+  $M_a,T_b,M_c,T_d$ before any unlink, and exercise unlink subsets $\varnothing$, $\{b\}$,
+  $\{d\}$, and $\{b,d\}$. For each subset, independently open $a$ and $c$ and scan, preserving
+  count four and proving that the retained $M$ roots need no traversal after another survivor
+  advances. Distinguish the normal descending subsets $\varnothing$, $\{d\}$, $\{d,b\}$ from the
+  out-of-order exact-open/scan cleanup that can first produce $\{b\}$; and
+  \item distinguish both controls from external retained-path loss, which must remain fail-closed or
+  outside the proved transition relation rather than being modeled as a protocol unlink.
+\end{enumerate}
+The first three obligations fit the current three-participant bound. The alternating-removal control
+requires a separate four-participant topology/lifecycle harness and a native deterministic recovery
+regression. Neither is supplied by the current three-participant matrix, so the disconnected-survivor
+trace remains an explicit unverified obligation rather than machine evidence. The lifecycle model
+must additionally preserve the monotone consequences that once exact $A_i$ exists, $G$ can never
+subsequently become decided, and that no different-set successor mutation is admitted after
+$\mathsf{decide}(G)$ until every participant has an independent final authority.
+The staggered fixture must leave the old $G$ witness physically present while enumerating newer
+authority at $a$ as $A$, $R$, $M$, and $T$, plus an unresolved newer candidate, with crashes at both
+abort-publication barriers. Each case must suppress $G$ before $c$ traverses it and must leave $c$
+non-mutable until its own exact normalization.
+
+The current source inventory contains 42 harnesses: 41 positive obligations with 52 positive cover
+declarations and the deliberately broken \code{broken\_one\_phase\_atomicity\_claim} with one
+counterexample cover. It also contains 40 native tests. No completed matrix is yet recorded for
+this snapshot. Completed 30- and 36-harness matrices for older exact source hashes had 29 and 35
+positive passes respectively, plus the intended one-phase counterexample, but their property
+totals, covers, timing, and memory figures are historical evidence only. The current commands,
+source hashes, per-harness property and cover counts, times, and memory figures will be recorded in
+\path{docs/uno-model-checking.md} only after a fresh sequential run.
+
+Even a completed current matrix would not be one end-to-end proof of the paper. The mixed physical
+bridge harness is intended to establish selected exact-fixture correspondence, not a refinement relation for
+every arbitrary disk image. The protocol layer retains semantic provenance after roots are replaced; its recovery-goal
+harness proves consistency of that abstraction but does not derive the retained field from bytes in
+one composed theorem. The codec layer fixes generations one through three and four-byte payload
+pieces; the protocol layer fixes at most three participants. Later overlap and recreation,
+generation wraparound, arbitrary payload geometry, production R13 transitions, cancellation,
+namespace aliasing, Linux syscalls, ext4 journal replay, and device refinement are outside the
+model. Consequently any final Kani results can support the manual R14-2P argument only as separate
+bounded obligations and cannot convert Conjecture~\ref{thm:atomic} into a machine-checked
+implementation theorem.
 
 \subsection{Audit checklist}
 
 The state-machine proof fails if any of the following becomes reachable:
 \begin{enumerate}
+  \item phase 1 addresses root offset 7, or grants $\mathsf{BodyReady}$ before the exact non-guard
+  slot body and candidate payload/length evidence are barrier-established;
+  \item the first $B$ guard is issued unless every $j\in G$ has live $\mathsf{BodyReady}_j$ from
+  that same candidate and phase-1 execution, or its phase addresses any byte other than offset 7;
+  \item a crash preserves $\mathsf{BodyReady}$ or $\mathsf{GuardDone}$ credit, recovery recreates
+  either credit from disk, or any recovery/repair action writes a $B$ guard;
   \item a checksummed exact witness can be reconstructed from older and issued-new slot bytes without
-  being the exact witness issued by the candidate-generation prepare;
-  \item an $M/T$ final write can be issued before either the all-prepare barrier join or complete
+  being the exact witness made durable before the candidate-generation $B$ guard;
+  \item an $M/T$ final write can be issued before either the all-phase-2 guard durability join or complete
   recovery validation establishes $\mathsf{decide}(G)$;
+  \item recovery of a torn final root accepts bytes outside the exact $B$-to-$M/T$ transition,
+  forgets that exact $B$ was the durable base, or requires the final state guard rather than
+  recognizing a target-only checksum byte as post-decision issuance evidence;
   \item a root format permits an exact $R/M/T$ generation-$g$ spelling to be assembled without
   issuing that generation-colored state byte;
   \item $\chi(g,\Abort)$ can be issued before every other byte of $A_g(O)$ is barrier-established,
@@ -2090,7 +2452,12 @@ The state-machine proof fails if any of the following becomes reachable:
   \item final installation can overwrite witness bytes or another slot;
   \item a non-eligible candidate can be admitted or acknowledged;
   \item ordinary root recovery begins accepting $\Prepared$ directly;
+  \item recovery contracts a broken $n$-participant ring into a smaller ring, treats a surviving
+  fragment as a singleton, or uses a missing successor as a positive decision vote;
   \item an unlink can occur before every participant has an independent durable final root;
+  \item a different-set later operation suppresses a decided witness before every participant is
+  independently final, or advancement of a durably aborted participant prevents an unresolved peer
+  from selecting its preserved predecessor through its own normalization;
   \item an exact current-incarnation tombstone can fall through to an older ordinary root or appear
   in a live namespace scan;
   \item cleanup can unlink a retained participant or a same-name replacement without exact
@@ -2104,7 +2471,7 @@ The state-machine proof fails if any of the following becomes reachable:
   \item root reuse removes any needed witness before group-wide independent finalization or a
   complete exact-ring successor decision;
   \item a stale witness can match a different incarnation or survive authority from a later visible
-  $R/M/T$ generation;
+  $R/A/M/T$ generation;
   \item a rejected generation can remain selectable when dependent payload offsets or its slot are
   reused, rather than being consumed by a newer independent abort authority;
   \item recovery can return a mutable predecessor while its opposite raw slot is non-quiescent,
@@ -2117,15 +2484,23 @@ The state-machine proof fails if any of the following becomes reachable:
   and namespace recovery;
   \item two distinct live logical keys can alias one device/inode identity;
   \item a backend reports durability before its ordinary \code{Blob::sync} contract is met; or
-  \item external namespace mutation is admitted without a stronger missing-file model.
+  \item external namespace mutation is admitted without a stronger missing-file model;
+  \item the Kani base and one-step harnesses do not share a complete well-formed invariant,
+  including pending-unlink authorization, or omit any enabled action from preservation coverage;
+  or
+  \item a bounded Kani result is reported without explicit loop-unwind policy, unwind-assertion
+  status, non-vacuity classification, frozen source hash, and exact command.
 \end{enumerate}
 
 \section{Non-goals and known boundaries}
 
 \begin{itemize}
-  \item \textbf{No current admitted-window atomicity claim.} The one-phase target remains subject
-  to Limitation~\ref{l:witness-provenance}; only the acknowledged-prefix result is retained while
-  the prepare-provenance architecture choice is open.
+  \item \textbf{No end-to-end machine or refinement proof.} R14-2P has the manual admitted-window
+  conjecture in Conjecture~\ref{thm:atomic}; the current bounded Kani matrix over three separate
+  abstractions is pending. No single refinement theorem joins every physical image to every
+  lifecycle state, and every production/ext4 refinement remains open. The expected R14-1P
+  executable negative-control result is historical for an older exact snapshot and must be
+  reproduced for the current source.
   \item \textbf{No global WAL or total order.} This avoids a global durable lock and volume-like
   layer, but callers must represent temporal dependencies explicitly.
   \item \textbf{No random overwrite atomicity.} Supporting it requires copy-on-write mappings,
@@ -2142,8 +2517,8 @@ The state-machine proof fails if any of the following becomes reachable:
   \item \textbf{No prompt reclamation guarantee after a broken deletion ring.} Exact open and
   partition scan remove independently recognizable tombstones, but an untouched name may retain
   its tombstone indefinitely.
-  \item \textbf{No claim that concurrent fsync calls collapse physically.} UNO removes serial
-  protocol depth; it does not control a device's flush scheduler.
+  \item \textbf{No claim that concurrent fsync calls collapse physically.} R14-2P has two serial
+  durability layers and does not control a device's flush scheduler within either layer.
 \end{itemize}
 
 \section{Conclusion}
@@ -2155,13 +2530,15 @@ nonstandard: complete-ring validation must survive arbitrary subset tears, disti
 participants must not alias one inode, and deletion must transfer authority from the ring to
 independently meaningful final roots before destroying any link.
 
-The current one-durability-layer target does not establish that obligation. Generation coloring
-proves issuance of a root state, but a checksummed adjacent witness can be an exact never-issued
-old/new mosaic. The confirmed old-two/new-three trace therefore invalidates unconditional
-admitted-window atomicity and leaves Conjecture~\ref{thm:atomic} blocked. Alternating slots,
-prepared invisibility, payload coverage, abort ordering, final-before-unlink materialization,
-tombstone dominance, and incarnation-safe cleanup remain necessary, but they are not sufficient
-without exact-witness issuance provenance.
+R14-2P is the normative reference protocol for that obligation. Phase 1 makes every non-guard slot
+byte and the candidate payload/length evidence durable. Phase 2 then writes and synchronizes only
+the generation-colored $B$ guard. A crash clears the live phase credit, and recovery never writes
+$B$. An accepted $B$ therefore derives its adjacent witness provenance from protocol ordering,
+without an external issuance premise. The confirmed old-two/new-three mosaic remains the R14-1P
+negative control and demonstrates why generation coloring without code-last prepare is
+insufficient. Alternating slots, payload coverage, code-last abort, final-before-unlink
+materialization, tombstone dominance, and incarnation-safe cleanup remain necessary alongside that
+prepare order.
 
 The refinement audit also found independent implementation gaps. Revision \code{26a532dd6} still
 allows a newer tombstone to lose to an older complete ring, accepts an unbound ordinary $R$ as group
@@ -2169,52 +2546,75 @@ evidence, uses generation-independent R13 spellings that permit exact unissued-r
 can reactivate a rejected witness after payload-offset reuse, can let admitted namespace work or an
 ordinary recovery truncate outlive its guard, and can construct noncanonical fixed-chunk or rewind
 candidates. The reviewed branch repairs the cancellation-ownership item only. It does not enforce
-the conditional conjecture's direct-regular-file and no-alias preconditions for a pre-populated
-directory, and it does not repair the target witness-provenance blocker. No claim is made that R13
-satisfies the proposed R14 conditions.
+the R14-2P conjecture's direct-regular-file and no-alias preconditions for a pre-populated directory,
+and it does not implement either R14-2P durability phase. No claim is made that R13 satisfies the
+proposed R14 conditions.
 
-The unresolved trade is explicit. Code-last prepare retains the existing noncryptographic crash
-model but adds a second ordered durability layer. A splice-binding commitment may preserve one
-layer but changes the format and theorem assumptions. Narrowing the guarantee preserves the current
-one-phase shape but gives up atomicity for admitted, unacknowledged groups. Until one of those paths
-is selected and modeled, UNO has an acknowledged-prefix result and a conditional per-group target,
-not a complete crash-atomicity proof.
+The correctness-first trade is now selected: two serial durability layers preserve the existing
+noncryptographic fault model and one-copy payload without introducing a coordinator. A
+splice-binding commitment remains a possible different one-layer design with stronger assumptions,
+not this reference protocol. The Kani 0.67.0 artifacts are specification-only, and their current
+42-harness matrix is pending. The completed 30- and 36-harness results belong to older exact source
+hashes.
+Even after a fresh current run, the physical, composed, and lifecycle layers remain connected only
+by selected bridge obligations rather than one general refinement theorem. Thus R14-2P has a
+coherent manual per-group conjecture, not a claimed end-to-end machine proof, ext4 refinement, or
+R13 conformance result.
 
 \appendix
 
 \section{Compact state-transition summary}
 
+Let $\mathsf{Body}^{\neg 7}_{g+1}$ denote the exact candidate payload/length evidence and all
+candidate-slot bytes except root offset 7. It is a durable latent body, not a root state or vote.
 For one retained participant, the common filesystem path is
 \[
-  \Root_g \;\Vert\; \Prepared_{g+1}
-  \xrightarrow[\text{complete ring}]{\text{recover or carry}}
-  \Root_g \;\Vert\; \Materialized_{g+1}.
+\begin{aligned}
+  \mathsf{Authority}_g \Vert \mathsf{source}
+    &\longrightarrow \mathsf{Authority}_g \Vert \mathsf{Body}^{\neg 7}_{g+1}
+      &&\text{phase 1},\\
+  \mathsf{Authority}_g \Vert \mathsf{Body}^{\neg 7}_{g+1}
+    &\longrightarrow \mathsf{Authority}_g \Vert \Prepared_{g+1}
+      &&\text{phase 2},\\
+  \mathsf{Authority}_g \Vert \Prepared_{g+1}
+    &\longrightarrow \mathsf{Authority}_g \Vert \Materialized_{g+1}
+      &&\text{decision.}
+\end{aligned}
 \]
+The first-layer barrier grants only volatile $\mathsf{BodyReady}$ credit. The second arrow is
+enabled for the group only after every $j\in G$ has live $\mathsf{BodyReady}_j$ for the same
+candidate and phase-1 execution; participant guard writes may then fan out and consume local
+credit. Their durability completions contribute $\mathsf{GuardDone}$. A crash clears both credits.
+Recovery accepts already present exact $B$ or final evidence, but never executes the second arrow.
 For removal it is
 \[
-  \Root_g \;\Vert\; \Prepared_{g+1}
+  \mathsf{Authority}_g \;\Vert\; \Prepared_{g+1}
   \longrightarrow
-  \Root_g \;\Vert\; \Tombstone_{g+1}
+  \mathsf{Authority}_g \;\Vert\; \Tombstone_{g+1}
   \longrightarrow
   \absent.
 \]
-For a provisionally rejected candidate, after independently finalizing any linked predecessor, recovery attempts
+Write $\mathsf{CandidateCut}_{g+1}$ for a non-quiescent candidate image that does not prove the new
+outcome, including a guardless $\mathsf{Body}^{\neg 7}_{g+1}$, an incomplete $B$ ring, or another
+partial candidate transition. After independently finalizing any linked predecessor, recovery
+attempts
 \[
-  \mathsf{Authority}_g \;\Vert\; \Prepared_{g+1}
+  \mathsf{Authority}_g \;\Vert\; \mathsf{CandidateCut}_{g+1}
   \longrightarrow
   \mathsf{Authority}_g \;\Vert\; \Abort_{g+1}.
 \]
 Here $\pi(A_{g+1})=\pi(\mathsf{Authority}_g)$. Recovery first makes all non-guard $A$ bytes durable,
 then publishes the one-byte $A$ guard; the stale witness may remain but is suppressed by $A$.
 The arrow is provisional until exact $A_{g+1}$ exists. If either phase crashes, restart re-decodes
-the complete raw slot, witness, ring, and payload. A newly complete candidate diverts to the decision
-and new-vector path; a non-quiescent image without complete evidence retries the code-last
+the complete raw slot, witness, ring, and payload. Still-complete already-issued candidate or final
+evidence diverts to the decision and new-vector path; a non-quiescent image without complete evidence retries the code-last
 $A_{g+1}$ transition. Only exact $A_{g+1}$ selects a mutable predecessor and makes the old outcome
 irreversible. This reconsideration/orphan branch is what makes the arrow sound under repeated crashes.
 Any arrow may crash after changing an arbitrary subset of addressed bytes. The wrapped local link
-remains exact after the prepare barrier and supplies the complete source and destination spellings
-for repair. Before that barrier, however, a checksummed exact link need not have been issued;
-Limitation~\ref{l:witness-provenance} blocks treating such a ring as the admitted group's decision.
+is exact after the phase-1 barrier but supplies no vote until the code-last $B$ guard is issued.
+Once that guard is observed, its ordering supplies the complete source and destination spellings
+for repair. R14-1P omits this order; Limitation~\ref{l:witness-provenance} blocks treating its
+synthetic ring as the admitted group's decision.
 A direct non-batch correctness-first publisher may use
 $\mathsf{P}_{g+1}\to\Root_{g+1}$ only outside batch-capable persistent media or after proof transfer
 has resolved decided evidence and abort publication has consumed rejected evidence; $R$ never proves
@@ -2222,18 +2622,33 @@ a linked group. The
 participant-linked filesystem hot path uses $\Prepared$ and normally materializes to
 $\Materialized$ only when proof transfer is required.
 
+These transitions never change a surviving witness's group identifier, count, ordinal, or
+successor to fit the paths that remain reachable. For an anchor whose declared ring is broken,
+recovery has three relevant outcomes: an exact local group-bound $M/T$ selects the independently
+final value without traversal; a complete exact $n$-member ring selects and finalizes the group; and
+an unresolved prepared candidate with neither form of positive evidence selects its predecessor
+only after exact $A$. Protocol-reachable failure to match peers because of a later authority or
+authorized post-finalization unlink is therefore not by itself fatal and never means that the anchor
+has become a singleton. Fail-closed behavior is reserved for an assumption violation, unrecoverable
+local authority, or subsequent I/O failure.
+
 \section{Guarantee matrix for missing paths}
 
 \begin{center}
-\small
+\footnotesize
 \begin{tabularx}{\columnwidth}{@{}>{\raggedright\arraybackslash}X
   >{\raggedright\arraybackslash}X
   >{\raggedright\arraybackslash}X@{}}
 \toprule
 Observed state & Interpretation & Required recovery action \\
 \midrule
-missing successor, prepared anchor only & incomplete ring; absence is not a vote & resolve predecessor, publish abort authority, expose old roots \\
+exact-looking phase-1 body/witness without $B$ & no vote; live body credit was lost & never promote
+to $B$; re-decode and publish code-last $A$ or follow independently proved final evidence \\
+present successor lacks exact candidate evidence & incomplete ring; missing evidence is not a vote & resolve predecessor, publish abort authority, expose old roots \\
+expected path/incarnation absent before any final certificate and before any later serialized mutation & external interference or corruption; absence is not a vote & fail closed is permitted; do not fabricate an old vector or a smaller ring \\
+newest local state is prepared, successor has a later exact authority & the older group was rejected; a legal decided history would have finalized this anchor before suppression & retain the declared count; never contract the ring; publish local abort authority and expose its predecessor \\
 missing path after independent finalization, before a later target-key mutation & protocol-generated absence can only be a removed participant & use surviving M/T roots independently; cleanup may be deferred \\
+disconnected retained $M$ roots after peer tombstone unlinks & original group decided before any unlink; ring connectivity is no longer authority & select each local $M$ without traversal; never reinterpret a survivor as a singleton \\
 missing successor on exact ordinal-zero chain & optional descending cleanup frontier & synchronize observed absence; reclaim reachable lower tombstones \\
 surviving exact tombstone at any ordinal & independently logical deletion & omit from scan/open; never select fallback root \\
 ordinal zero absent or ring non-prefix & no special safety meaning after independent finalization & retained M roots and surviving T roots stand alone \\

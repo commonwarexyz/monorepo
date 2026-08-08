@@ -1,0 +1,139 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand*\HyPL@Entry[1]{}
+\HyPL@Entry{0<</S/D>>}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Problem and scope}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Supported mutation vocabulary}{1}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}Events, observations, and safety target}{2}{subsection.1.2}\protected@file@percent }
+\newlabel{def:atomic}{{1}{2}{Group crash atomicity}{definition.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}System and fault model}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Objects and identities}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Medium operations}{3}{subsection.2.2}\protected@file@percent }
+\newlabel{a:fault}{{1}{3}{Arbitrary-subset addressed-write crash model}{assumption.1}{}}
+\newlabel{a:trusted}{{2}{3}{Trusted local medium}{assumption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Linux/ext4 refinement boundary}{3}{subsection.2.3}\protected@file@percent }
+\newlabel{a:namespace}{{3}{4}{Exclusive namespace}{assumption.3}{}}
+\newlabel{a:admission}{{4}{4}{Durable participant admission}{assumption.4}{}}
+\newlabel{a:failstop}{{5}{4}{Fail-stop mutation errors}{assumption.5}{}}
+\newlabel{a:identity}{{6}{4}{Fresh identities}{assumption.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Physical representation}{4}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Blob geometry}{4}{subsection.3.1}\protected@file@percent }
+\newlabel{i:lineage}{{1}{4}{Consecutive nonwrapping slot lineage}{invariant.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Filesystem geometry. At the generic wrapper boundary, backing logical offset zero is physical offset 4096, so the root page and payload are accessed only through ordinary \texttt  {Blob} methods.}}{5}{figure.1}\protected@file@percent }
+\newlabel{fig:layout}{{1}{5}{Filesystem geometry. At the generic wrapper boundary, backing logical offset zero is physical offset 4096, so the root page and payload are accessed only through ordinary \code {Blob} methods}{figure.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Root header}{5}{subsection.3.2}\protected@file@percent }
+\newlabel{def:zero}{{2}{5}{Canonical empty predecessor}{definition.2}{}}
+\newlabel{i:color}{{2}{5}{Generation-colored provenance}{invariant.2}{}}
+\newlabel{i:prepareorder}{{3}{5}{Prepare code-last publication}{invariant.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces The root header. The checksum domain is \texttt  {\_COMMONWARE\_RUNTIME\_ATOMIC\_LOG\_ROOT}.}}{6}{table.1}\protected@file@percent }
+\newlabel{tab:root}{{1}{6}{The root header. The checksum domain is \code {\_COMMONWARE\_RUNTIME\_ATOMIC\_LOG\_ROOT}}{table.1}{}}
+\newlabel{i:abortorder}{{4}{6}{Abort code-last publication}{invariant.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Witness wrapper and local link}{6}{subsection.3.3}\protected@file@percent }
+\newlabel{l:witness-provenance}{{1}{6}{R14-1P witness-splicing negative control}{limitation.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Local successor link. Names are bounded per edge; they are never summed across the group into one descriptor.}}{7}{table.2}\protected@file@percent }
+\newlabel{tab:link}{{2}{7}{Local successor link. Names are bounded per edge; they are never summed across the group into one descriptor}{table.2}{}}
+\newlabel{def:integrity}{{4}{7}{Canonical integrity geometry}{definition.4}{}}
+\newlabel{def:eligible}{{5}{7}{Eligible candidate}{definition.5}{}}
+\newlabel{def:certificate}{{7}{8}{Group-bound final certificate}{definition.7}{}}
+\newlabel{def:rollback-fence}{{8}{8}{Abort authority}{definition.8}{}}
+\newlabel{def:quiescent}{{9}{8}{Canonical and quiescent slot}{definition.9}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Logical protocol state}{8}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Per-blob state}{8}{subsection.4.1}\protected@file@percent }
+\newlabel{sec:blob-state}{{4.1}{8}{Per-blob state}{subsection.4.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Groups and the canonical ring}{9}{subsection.4.2}\protected@file@percent }
+\newlabel{i:ring}{{5}{9}{Exact closed ring}{invariant.5}{}}
+\newlabel{i:nocontraction}{{6}{9}{No ring contraction}{invariant.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Transition system}{9}{section.5}\protected@file@percent }
+\newlabel{sec:transitions}{{5}{9}{Transition system}{section.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Three participants linked in canonical order, closing on the exact starting incarnation. A one-participant publication self-links.}}{10}{figure.2}\protected@file@percent }
+\newlabel{fig:ring}{{2}{10}{Three participants linked in canonical order, closing on the exact starting incarnation. A one-participant publication self-links}{figure.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Normal execution}{11}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Preparation}{11}{subsection.6.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {1}Prepare one group $G$.}{11}{lstlisting.1}\protected@file@percent }
+\newlabel{i:payload}{{7}{12}{Payload coverage}{invariant.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Decision round}{12}{subsection.6.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {2}Establish and acknowledge a decision.}{12}{lstlisting.2}\protected@file@percent }
+\newlabel{i:invisible}{{8}{12}{Prepared invisibility}{invariant.8}{}}
+\newlabel{i:retirement}{{9}{12}{Rejected-candidate generation consumption}{invariant.9}{}}
+\newlabel{i:staggered}{{10}{12}{Staggered rejection and later mutation}{invariant.10}{}}
+\newlabel{i:normalize}{{11}{12}{Mutable-return slot normalization}{invariant.11}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Materialization and activation}{12}{subsection.6.3}\protected@file@percent }
+\newlabel{i:reuse}{{12}{13}{Proof transfer before reuse}{invariant.12}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Deletion}{13}{subsection.6.4}\protected@file@percent }
+\newlabel{i:finalfirst}{{13}{13}{Final-before-unlink}{invariant.13}{}}
+\newlabel{i:independent}{{14}{13}{Independent authority before unlink}{invariant.14}{}}
+\newlabel{i:tdominance}{{15}{13}{Tombstone dominance}{invariant.15}{}}
+\newlabel{i:cleanup}{{16}{13}{Incarnation-safe cleanup}{invariant.16}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Recovery}{13}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Discovering a ring}{13}{subsection.7.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {3}Recover from one intact witness.}{14}{lstlisting.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Arbitrary torn final roots}{15}{subsection.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Recovery with missing participants}{15}{subsection.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Incomplete candidate with a retained participant.}{15}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Pre-finalization missing path during the protected interval.}{15}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Staggered rejection after successor advancement.}{15}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Deletion broke a finalized ring.}{15}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hole created by a later serialized operation.}{16}{section*.6}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {4}Recover an ordered delete frontier from ordinal zero.}{16}{lstlisting.4}\protected@file@percent }
+\newlabel{l:externalmissing}{{2}{16}{Externally missing retained participant}{limitation.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4}Recreation and stale paths}{16}{subsection.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Safety argument}{16}{section.8}\protected@file@percent }
+\newlabel{lem:preservation}{{1}{16}{Invariant preservation}{lemma.1}{}}
+\newlabel{lem:fallback}{{2}{17}{Alternating-slot predecessor preservation}{lemma.2}{}}
+\newlabel{lem:rollback}{{3}{17}{Abort-authority permanence}{lemma.3}{}}
+\newlabel{lem:normalize}{{4}{17}{Disk-derived orphan normalization}{lemma.4}{}}
+\newlabel{lem:incomplete}{{5}{18}{Incomplete prepare is invisible}{lemma.5}{}}
+\newlabel{lem:staggered}{{6}{18}{Staggered peer recovery}{lemma.6}{}}
+\newlabel{lem:complete}{{7}{18}{Complete prepare is sufficient}{lemma.7}{}}
+\newlabel{lem:certificate}{{8}{18}{Final certificate implies an established decision}{lemma.8}{}}
+\newlabel{lem:install}{{9}{19}{Installation convergence}{lemma.9}{}}
+\newlabel{lem:delete}{{10}{19}{Post-finalization namespace independence}{lemma.10}{}}
+\newlabel{lem:composition}{{11}{19}{Composition with later namespace operations}{lemma.11}{}}
+\newlabel{thm:atomic}{{1}{19}{R14-2P group crash atomicity}{conjecture.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Supporting argument.}{19}{section*.7}\protected@file@percent }
+\newlabel{cor:ack}{{1}{20}{Acknowledged durability}{corollary.1}{}}
+\newlabel{l:admitted-window}{{3}{20}{R14-1P admitted-window failure}{limitation.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}Progress and resource bounds}{20}{section.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Recovery work}{20}{subsection.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.2}Liveness conditions}{21}{subsection.9.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.3}Write and memory cost}{21}{subsection.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}Overlapping groups and two slots}{21}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}API semantics}{21}{section.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {12}Implementation correspondence}{22}{section.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {13}Implementation refinement status}{22}{section.13}\protected@file@percent }
+\newlabel{sec:implementation-status}{{13}{22}{Implementation refinement status}{section.13}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.1}Confirmed partial correspondence}{22}{subsection.13.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.2}Unchecked namespace-shape preconditions}{22}{subsection.13.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.3}R14-1P negative control and selected R14-2P repair}{22}{subsection.13.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.4}Blocker: newer tombstone can lose to an older ring}{23}{subsection.13.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.5}Blocker: R13 permits exact unissued authority synthesis}{23}{subsection.13.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.6}Blocker: ordinary roots are not group certificates}{23}{subsection.13.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.7}Blocker: rejected witnesses survive payload reuse}{23}{subsection.13.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.8}Reviewed cancellation repair: self-driving namespace ownership}{24}{subsection.13.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.9}Availability deviation: missing successor partition}{24}{subsection.13.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {13.10}Known integrity-boundary issue}{25}{subsection.13.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {14}Evidence and validation obligations}{25}{section.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {14.1}Executable Kani reference model (current matrix pending)}{25}{subsection.14.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {14.2}Audit checklist}{27}{subsection.14.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {15}Non-goals and known boundaries}{28}{section.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {16}Conclusion}{28}{section.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {A}Compact state-transition summary}{28}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {B}Guarantee matrix for missing paths}{30}{appendix.B}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {C}Why a checksum alone is insufficient for overwrite}{30}{appendix.C}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Reference-to-source audit. Baseline anchors do not implement or conform to R14-2P.}}{31}{table.3}\protected@file@percent }
+\newlabel{tab:code}{{3}{31}{Reference-to-source audit. Baseline anchors do not implement or conform to R14-2P}{table.3}{}}
+\gdef \@abspage@last{31}
