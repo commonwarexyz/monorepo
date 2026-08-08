@@ -558,10 +558,9 @@ impl<
         // Tell the resolver this view is complete so it can stop requesting it.
         // For a certificate from the batcher, this update is enqueued before
         // the next loop iteration can emit any targeted ancestry repair it
-        // exposes. The
-        // resolver's unrestricted backfill therefore cannot be narrowed by
-        // that later target. Skip if the resolver just sent us this certificate
-        // (avoid boomerang).
+        // exposes. The resolver's unrestricted backfill therefore cannot be
+        // narrowed by that later target. Skip if the resolver just sent us
+        // this certificate (avoid boomerang).
         if resolved != Resolved::Notarization {
             resolver.updated(Certificate::Notarization(notarization.clone()));
         }
