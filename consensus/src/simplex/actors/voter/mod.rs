@@ -4182,9 +4182,8 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
-            let leader_index = usize::from(
-                built_elector.elect(Round::new(epoch, View::new(1)), None),
-            );
+            let leader_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
             let local_index = (leader_index + 1) % schemes.len();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(

@@ -5125,8 +5125,7 @@ mod tests {
             );
             // Use a non-leader so its local vote is the event that opens the
             // optimistic child.
-            let leader_idx =
-                usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
+            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
             let local_idx = (leader_idx + 1) % schemes.len();
 
             let config = |scheme, elector| Config {
