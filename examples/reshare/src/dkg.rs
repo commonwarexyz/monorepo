@@ -41,30 +41,29 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     network.validate().expect("invalid network config");
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
+    let bootstrappers = network.bootstrappers(&local);
+    let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
         node.signing_key.clone(),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
-        network.bootstrappers(&local),
+        bootstrappers,
+        max_peers_per_set,
         AtMost!(MAX_MESSAGE_SIZE),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
-    // Configure channel capacity
-    //
-    // The rate is enforced independently for each peer. All peers share each channel's inbound
-    // mailbox, so size its backlog for one full burst from every peer.
-    let message_backlog = authenticated::backlog(network.participants.len(), MESSAGE_RATE);
-
-    let vote = p2p.register(VOTE_CHANNEL, MESSAGE_RATE, message_backlog);
-    let certificate = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE, message_backlog);
-    let resolver = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE, message_backlog);
-    let backfill = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE, message_backlog);
-    let broadcast = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE, message_backlog);
-    let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE, message_backlog);
+    // Channel rates are enforced independently per peer. The network derives each shared inbound
+    // mailbox capacity from the retained-peer bound and quota burst size.
+    let vote = p2p.register(VOTE_CHANNEL, MESSAGE_RATE);
+    let certificate = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE);
+    let resolver = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE);
+    let backfill = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE);
+    let broadcast = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE);
+    let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
 
     let strategy = context.strategy(NZUsize!(2));
     let store = FileSecretStore::load(args.node_dir.join("secrets.json"))

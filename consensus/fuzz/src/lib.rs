@@ -260,6 +260,7 @@ async fn setup_network<P: simplex::Simplex>(
         context.child("network"),
         NetworkConfig {
             max_size: AtMost!(1024 * 1024),
+            max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
         },

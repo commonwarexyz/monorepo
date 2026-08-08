@@ -57,7 +57,6 @@ const MIN_PEERS: usize = 4;
 const MAX_MSG_SIZE: u32 = 1024 * 1024; // 1MB
 const MAX_INDEX: u8 = 10;
 const TRACKED_PEER_SETS: NonZeroUsize = NZUsize!(5);
-const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
 
 /// Operations that can be performed on the p2p network during fuzzing.
@@ -240,6 +239,11 @@ impl NetworkScheme for Discovery {
             peer.info.address,
             peer.info.address,
             bootstrappers,
+            peer.topo
+                .peers
+                .len()
+                .try_into()
+                .expect("topology must contain at least one peer"),
             AtMost!(MAX_MSG_SIZE),
         );
         // Override some settings for fuzzing environment
@@ -265,7 +269,7 @@ impl NetworkScheme for Discovery {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) = network.register(0, quota);
 
         // Start the network background task
         let handle = network.start();
@@ -311,6 +315,11 @@ impl NetworkScheme for Lookup {
             peer.info.private_key.clone(),
             b"fuzz_namespace",
             peer.info.address,
+            peer.topo
+                .peers
+                .len()
+                .try_into()
+                .expect("topology must contain at least one peer"),
             AtMost!(MAX_MSG_SIZE),
         );
         config.allow_private_ips = true; // Required for localhost testing
@@ -351,7 +360,7 @@ impl NetworkScheme for Lookup {
         }
 
         let quota = Quota::per_second(NZU32!(100));
-        let (sender, receiver) = network.register(0, quota, DEFAULT_MESSAGE_BACKLOG);
+        let (sender, receiver) = network.register(0, quota);
 
         // Start the network background task
         let handle = network.start();

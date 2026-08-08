@@ -304,23 +304,19 @@
 //!
 //! ### Fetching Missing Certificates
 //!
-//! Instead of trying to fetch all possible certificates above the floor, we only attempt to fetch
-//! nullifications for all views from the floor (last certified notarization or finalization) to the current view.
-//! This technique, however, is not sufficient to guarantee progress.
+//! Background repair fetches nullifications above the local certified or finalized floor. If honest
+//! participants complete a view with different certificate types, both sides can still consider it
+//! complete while rejecting the other's proposal ancestry.
 //!
-//! Consider the case where `f` honest participants have seen a finalization for a given view `v` (and nullifications only
-//! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
-//! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
+//! Proposal verification repairs this split by requesting the first missing nullification or named
+//! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
+//! full ancestry after each delivery and votes only once it is valid.
 //!
-//! To ensure progress is eventually made, a leader whose proposal's view is nullified broadcasts the certificate of its
-//! proposal's parent (the parent's finalization if it holds one, otherwise the parent's notarization) alongside the
-//! nullification to ensure all honest participants eventually consider the same proposal ancestry valid.
-//!
-//! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
-//! finalization certificate after nullification, it would impose significant overhead under normal network
-//! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
-//! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
-//! be observed following severe network degradation)._
+//! A resolver key identifies a view, not a certificate. A notarization and a covering nullification
+//! for one view answer opposite questions, so a peer can return valid evidence that does not settle
+//! the request. The requester records that evidence and retries without faulting the peer. A
+//! delivered notarization completes its fetch on arrival, because certification judges evidence
+//! already in hand. Matching evidence or finalization retires targeted work.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -725,10 +721,13 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
+        let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
                 max_size: AtMost!(1024 * 1024),
+                // Some tests replace the initial set with the committee plus one injector.
+                max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -749,10 +748,13 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
     {
+        let primary: Vec<_> = primary.into_iter().collect();
+        let secondary: Vec<_> = secondary.into_iter().collect();
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
                 max_size: AtMost!(1024 * 1024),
+                max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -5616,6 +5618,878 @@ mod tests {
     }
 
     test_for_all_fixtures!(split_views_no_lockup);
+
+    /// Heals a certified-notarization/nullification split in a group-led view.
+    ///
+    /// One honest validator certifies Notarization(3), two hold Nullification(3), and
+    /// the fourth Byzantine validator stays silent. A group leader builds on parent 2.
+    /// Targeted repair supplies the missing nullification, so group-led view 11
+    /// becomes the first new finalization.
+    fn certified_split_heals_in_group_led_view<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n) as usize;
+        assert_eq!(quorum, 3);
+        let view_retention = ViewDelta::new(10);
+        let skip_timeout = Duration::from_secs(12);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // This schedule is independent of the entry certificate. The silent
+            // participant leads view 10, the group leads views 11..=12, and the
+            // lone participant leads view 13.
+            let epoch = Epoch::new(333);
+            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let schedule = L::default().build(&participant_set);
+            let leader_of =
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+            let byzantine = leader_of(10);
+            let group = [leader_of(11), leader_of(12)];
+            let lone = leader_of(13);
+            assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
+
+            // Delivery roles, not the arbitrary quorum signers, define the split.
+            let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization quorum")
+            };
+            let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization quorum")
+            };
+            let build_nullification = |view: u64| -> TNullification<_> {
+                let round = Round::new(epoch, View::new(view));
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
+                    .collect();
+                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                    .expect("nullification quorum")
+            };
+            let payload_b2 = Sha256::hash(&[b"B_2"]);
+            let proposal_b2 =
+                Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_b2);
+            let payload_b3 = Sha256::hash(&[b"B_3"]);
+            let proposal_b3 =
+                Proposal::new(Round::new(epoch, View::new(3)), View::new(2), payload_b3);
+            let b2_notarization = build_notarization(&proposal_b2);
+            let b2_finalization = build_finalization(&proposal_b2);
+            let b3_notarization = build_notarization(&proposal_b3);
+            let null_3 = build_nullification(3);
+
+            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
+            let (mut injector_sender, _inj_certificate_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            for p in participants.iter() {
+                oracle
+                    .add_link(injector_pk.clone(), p.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(participants.iter().cloned()),
+                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                ),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Split the view-3 certificates by role and share all other evidence.
+            let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
+            injector_sender.send(Recipients::All, msg, true);
+            let msg = Certificate::<_, D>::Finalization(b2_finalization).encode();
+            injector_sender.send(Recipients::All, msg, true);
+            let msg = Certificate::<_, D>::Notarization(b3_notarization).encode();
+            injector_sender.send(Recipients::One(participants[lone].clone()), msg, true);
+            let msg = Certificate::<_, D>::Nullification(null_3).encode();
+            for idx in group {
+                injector_sender.send(
+                    Recipients::One(participants[idx].clone()),
+                    msg.clone(),
+                    true,
+                );
+            }
+            for view in 4..=9 {
+                let msg = Certificate::<_, D>::Nullification(build_nullification(view)).encode();
+                injector_sender.send(Recipients::All, msg, true);
+            }
+
+            // Start honest engines before GST so preload rebroadcasts are lost.
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let mut honest_reporters = HashMap::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                if idx == byzantine {
+                    drop(pending);
+                    drop(recovered);
+                    drop(resolver);
+                    continue;
+                }
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter = mocks::reporter::Reporter::new(
+                    context
+                        .child("reporter")
+                        .with_attribute("public_key", validator),
+                    reporter_config,
+                );
+                honest_reporters.insert(idx, reporter.clone());
+
+                let application_cfg = mocks::application::Config::<Sha256, _> {
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (250.0, 50.0), // ensure we process certificates first
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context
+                        .child("application")
+                        .with_attribute("public_key", validator),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch,
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(11),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    view_retention,
+                    skip_timeout,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
+                };
+                let engine = Engine::new(
+                    context
+                        .child("engine")
+                        .with_attribute("public_key", validator),
+                    cfg,
+                );
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Drain the preload before checking the split.
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Confirm the intended view-3 split before GST.
+            let view_2 = View::new(2);
+            let view_3 = View::new(3);
+            for (idx, reporter) in honest_reporters.iter() {
+                assert!(
+                    reporter.finalizations.lock().contains_key(&view_2),
+                    "reporter {idx} missing finalization for view 2"
+                );
+                let notarizations = reporter.notarizations.lock();
+                let nullifications = reporter.nullifications.lock();
+                if *idx == lone {
+                    assert!(notarizations.contains_key(&view_3));
+                    assert!(!nullifications.contains_key(&view_3));
+                    assert!(reporter.certifications.lock().contains_key(&view_3));
+                } else {
+                    assert!(nullifications.contains_key(&view_3), "reporter {idx}");
+                    assert!(!notarizations.contains_key(&view_3), "reporter {idx}");
+                }
+            }
+
+            // End the partition.
+            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+
+            {
+                let target = View::new(3);
+                let mut finalizers = Vec::new();
+                for reporter in honest_reporters.values_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(
+                        context
+                            .child("resume_finalizer")
+                            .spawn(move |_| async move {
+                                while latest < target {
+                                    latest = monitor.recv().await.expect("event missing");
+                                }
+                            }),
+                    );
+                }
+                join_all(finalizers).await;
+            }
+
+            // Group-led view 11 is the first new finalization.
+            for (idx, reporter) in honest_reporters.iter() {
+                let first = {
+                    let finalizations = reporter.finalizations.lock();
+                    finalizations
+                        .keys()
+                        .filter(|view| **view > view_2)
+                        .min()
+                        .copied()
+                        .expect("no finalization past the preload")
+                };
+                assert_eq!(
+                    first,
+                    View::new(11),
+                    "reporter {idx} did not finalize the first honest-led view"
+                );
+            }
+            // Background repair considers view 3 complete, so this proves targeted delivery.
+            assert!(
+                honest_reporters[&lone]
+                    .nullifications
+                    .lock()
+                    .contains_key(&view_3),
+                "lone did not resolve Nullification(3) from the group leader"
+            );
+
+            for reporter in honest_reporters.values() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_certified_split_heals_in_group_led_view() {
+        certified_split_heals_in_group_led_view::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    /// Heals a certified-notarization/nullification split when the holder leads first.
+    ///
+    /// The group fetches and certifies Notarization(3) from the leader. The
+    /// recovered parent becomes the first new finalization.
+    fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n) as usize;
+        assert_eq!(quorum, 3);
+        let view_retention = ViewDelta::new(10);
+        let skip_timeout = Duration::from_secs(12);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // This schedule is independent of the entry certificate. The silent
+            // participant leads view 10, the lone participant leads view 11, and
+            // the group leads views 12..=13.
+            let epoch = Epoch::new(333);
+            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let schedule = L::default().build(&participant_set);
+            let leader_of =
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+            let byzantine = leader_of(10);
+            let lone = leader_of(11);
+            let group = [leader_of(12), leader_of(13)];
+            assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
+
+            // Delivery roles, not the arbitrary quorum signers, define the split.
+            let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization quorum")
+            };
+            let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization quorum")
+            };
+            let build_nullification = |view: u64| -> TNullification<_> {
+                let round = Round::new(epoch, View::new(view));
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
+                    .collect();
+                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                    .expect("nullification quorum")
+            };
+            let payload_b2 = Sha256::hash(&[b"B_2"]);
+            let proposal_b2 =
+                Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_b2);
+            let payload_b3 = Sha256::hash(&[b"B_3"]);
+            let proposal_b3 =
+                Proposal::new(Round::new(epoch, View::new(3)), View::new(2), payload_b3);
+            let b2_notarization = build_notarization(&proposal_b2);
+            let b2_finalization = build_finalization(&proposal_b2);
+            let b3_notarization = build_notarization(&proposal_b3);
+            let null_3 = build_nullification(3);
+
+            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
+            let (mut injector_sender, _inj_certificate_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            for p in participants.iter() {
+                oracle
+                    .add_link(injector_pk.clone(), p.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(participants.iter().cloned()),
+                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                ),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Split the view-3 certificates by role and share all other evidence.
+            let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
+            injector_sender.send(Recipients::All, msg, true);
+            let msg = Certificate::<_, D>::Finalization(b2_finalization).encode();
+            injector_sender.send(Recipients::All, msg, true);
+            let msg = Certificate::<_, D>::Notarization(b3_notarization).encode();
+            injector_sender.send(Recipients::One(participants[lone].clone()), msg, true);
+            let msg = Certificate::<_, D>::Nullification(null_3).encode();
+            for idx in group {
+                injector_sender.send(
+                    Recipients::One(participants[idx].clone()),
+                    msg.clone(),
+                    true,
+                );
+            }
+            for view in 4..=9 {
+                let msg = Certificate::<_, D>::Nullification(build_nullification(view)).encode();
+                injector_sender.send(Recipients::All, msg, true);
+            }
+
+            // Start honest engines before GST so preload rebroadcasts are lost.
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let mut honest_reporters = HashMap::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                if idx == byzantine {
+                    drop(pending);
+                    drop(recovered);
+                    drop(resolver);
+                    continue;
+                }
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter = mocks::reporter::Reporter::new(
+                    context
+                        .child("reporter")
+                        .with_attribute("public_key", validator),
+                    reporter_config,
+                );
+                honest_reporters.insert(idx, reporter.clone());
+
+                let application_cfg = mocks::application::Config::<Sha256, _> {
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (250.0, 50.0), // ensure we process certificates first
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context
+                        .child("application")
+                        .with_attribute("public_key", validator),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch,
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(11),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    view_retention,
+                    skip_timeout,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
+                };
+                let engine = Engine::new(
+                    context
+                        .child("engine")
+                        .with_attribute("public_key", validator),
+                    cfg,
+                );
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Drain the preload before checking the split.
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Confirm the intended view-3 split before GST.
+            let view_2 = View::new(2);
+            let view_3 = View::new(3);
+            for (idx, reporter) in honest_reporters.iter() {
+                assert!(
+                    reporter.finalizations.lock().contains_key(&view_2),
+                    "reporter {idx} missing finalization for view 2"
+                );
+                let notarizations = reporter.notarizations.lock();
+                let nullifications = reporter.nullifications.lock();
+                if *idx == lone {
+                    assert!(notarizations.contains_key(&view_3));
+                    assert!(!nullifications.contains_key(&view_3));
+                    assert!(reporter.certifications.lock().contains_key(&view_3));
+                } else {
+                    assert!(nullifications.contains_key(&view_3), "reporter {idx}");
+                    assert!(!notarizations.contains_key(&view_3), "reporter {idx}");
+                }
+            }
+
+            // End the partition.
+            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+
+            {
+                let target = View::new(3);
+                let mut finalizers = Vec::new();
+                for reporter in honest_reporters.values_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(
+                        context
+                            .child("resume_finalizer")
+                            .spawn(move |_| async move {
+                                while latest < target {
+                                    latest = monitor.recv().await.expect("event missing");
+                                }
+                            }),
+                    );
+                }
+                join_all(finalizers).await;
+            }
+
+            // The recovered parent is the first new finalization.
+            for (idx, reporter) in honest_reporters.iter() {
+                let first = {
+                    let finalizations = reporter.finalizations.lock();
+                    finalizations
+                        .keys()
+                        .filter(|view| **view > view_2)
+                        .min()
+                        .copied()
+                        .expect("no finalization past the preload")
+                };
+                assert_eq!(
+                    first, view_3,
+                    "reporter {idx} did not finalize the recovered parent view"
+                );
+            }
+
+            // Background repair considers view 3 complete, so this proves targeted delivery.
+            for idx in group {
+                let reporter = &honest_reporters[&idx];
+                assert!(
+                    reporter.notarizations.lock().contains_key(&view_3),
+                    "group reporter {idx} did not resolve Notarization(3) from lone"
+                );
+                assert!(
+                    reporter.certifications.lock().contains_key(&view_3),
+                    "group reporter {idx} did not certify Notarization(3)"
+                );
+            }
+
+            for reporter in honest_reporters.values() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_certified_split_heals_when_lone_holder_leads_first() {
+        certified_split_heals_when_lone_holder_leads_first::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    /// Repairs ancestry gaps below a displaced certified view.
+    ///
+    /// One validator certifies Notarization(5) but lacks Nullification(3..=5),
+    /// which the group holds. Targeted repair fetches each gap in order and lets
+    /// the first group-led proposal finalize.
+    fn certified_split_heals_with_displaced_certified_view<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n) as usize;
+        assert_eq!(quorum, 3);
+        let view_retention = ViewDelta::new(10);
+        let skip_timeout = Duration::from_secs(12);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // This schedule is independent of the entry certificate. The silent
+            // participant leads view 10, the group leads views 11..=12, and the
+            // lone participant leads view 13.
+            let epoch = Epoch::new(333);
+            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let schedule = L::default().build(&participant_set);
+            let leader_of =
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+            let byzantine = leader_of(10);
+            let group = [leader_of(11), leader_of(12)];
+            let lone = leader_of(13);
+            assert!(!group.contains(&byzantine) && !group.contains(&lone) && byzantine != lone);
+
+            // Delivery roles, not the arbitrary quorum signers, define the split.
+            let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization quorum")
+            };
+            let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization quorum")
+            };
+            let build_nullification = |view: u64| -> TNullification<_> {
+                let round = Round::new(epoch, View::new(view));
+                let votes: Vec<_> = (0..quorum)
+                    .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
+                    .collect();
+                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                    .expect("nullification quorum")
+            };
+            let payload_b2 = Sha256::hash(&[b"B_2"]);
+            let proposal_b2 =
+                Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_b2);
+            let payload_b5 = Sha256::hash(&[b"B_5"]);
+            let proposal_b5 =
+                Proposal::new(Round::new(epoch, View::new(5)), View::new(2), payload_b5);
+            let b2_notarization = build_notarization(&proposal_b2);
+            let b2_finalization = build_finalization(&proposal_b2);
+            let b5_notarization = build_notarization(&proposal_b5);
+
+            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
+            let (mut injector_sender, _inj_certificate_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            for p in participants.iter() {
+                oracle
+                    .add_link(injector_pk.clone(), p.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(participants.iter().cloned()),
+                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                ),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Split view-5 notarization from nullifications 3 through 5.
+            let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
+            injector_sender.send(Recipients::All, msg, true);
+            let msg = Certificate::<_, D>::Finalization(b2_finalization).encode();
+            injector_sender.send(Recipients::All, msg, true);
+            let msg = Certificate::<_, D>::Notarization(b5_notarization).encode();
+            injector_sender.send(Recipients::One(participants[lone].clone()), msg, true);
+            for view in 3..=5 {
+                let msg = Certificate::<_, D>::Nullification(build_nullification(view)).encode();
+                for idx in group {
+                    injector_sender.send(
+                        Recipients::One(participants[idx].clone()),
+                        msg.clone(),
+                        true,
+                    );
+                }
+            }
+            for view in 6..=9 {
+                let msg = Certificate::<_, D>::Nullification(build_nullification(view)).encode();
+                injector_sender.send(Recipients::All, msg, true);
+            }
+
+            // Start honest engines before GST so preload rebroadcasts are lost.
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let mut honest_reporters = HashMap::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                if idx == byzantine {
+                    drop(pending);
+                    drop(recovered);
+                    drop(resolver);
+                    continue;
+                }
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter = mocks::reporter::Reporter::new(
+                    context
+                        .child("reporter")
+                        .with_attribute("public_key", validator),
+                    reporter_config,
+                );
+                honest_reporters.insert(idx, reporter.clone());
+
+                let application_cfg = mocks::application::Config::<Sha256, _> {
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (250.0, 50.0), // ensure we process certificates first
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context
+                        .child("application")
+                        .with_attribute("public_key", validator),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch,
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(11),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    view_retention,
+                    skip_timeout,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                    track_historical_votes: false,
+                };
+                let engine = Engine::new(
+                    context
+                        .child("engine")
+                        .with_attribute("public_key", validator),
+                    cfg,
+                );
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Drain the preload before checking the split.
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Confirm the intended certificate split before GST.
+            let view_2 = View::new(2);
+            let view_5 = View::new(5);
+            for (idx, reporter) in honest_reporters.iter() {
+                assert!(
+                    reporter.finalizations.lock().contains_key(&view_2),
+                    "reporter {idx} missing finalization for view 2"
+                );
+                let notarizations = reporter.notarizations.lock();
+                let nullifications = reporter.nullifications.lock();
+                if *idx == lone {
+                    assert!(notarizations.contains_key(&view_5));
+                    assert!(reporter.certifications.lock().contains_key(&view_5));
+                    for view in 3..=5 {
+                        assert!(!nullifications.contains_key(&View::new(view)));
+                    }
+                } else {
+                    for view in 3..=5 {
+                        assert!(
+                            nullifications.contains_key(&View::new(view)),
+                            "reporter {idx}"
+                        );
+                    }
+                    assert!(!notarizations.contains_key(&view_5), "reporter {idx}");
+                }
+            }
+
+            // End the partition.
+            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+
+            {
+                let target = View::new(3);
+                let mut finalizers = Vec::new();
+                for reporter in honest_reporters.values_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(
+                        context
+                            .child("resume_finalizer")
+                            .spawn(move |_| async move {
+                                while latest < target {
+                                    latest = monitor.recv().await.expect("event missing");
+                                }
+                            }),
+                    );
+                }
+                join_all(finalizers).await;
+            }
+
+            // Group-led view 11 is the first new finalization after all three repairs.
+            for (idx, reporter) in honest_reporters.iter() {
+                let first = {
+                    let finalizations = reporter.finalizations.lock();
+                    finalizations
+                        .keys()
+                        .filter(|view| **view > view_2)
+                        .min()
+                        .copied()
+                        .expect("no finalization past the preload")
+                };
+                assert_eq!(
+                    first,
+                    View::new(11),
+                    "reporter {idx} did not finalize the first honest-led view"
+                );
+            }
+            let lone_reporter = &honest_reporters[&lone];
+            for view in 3..=5 {
+                assert!(
+                    lone_reporter
+                        .nullifications
+                        .lock()
+                        .contains_key(&View::new(view)),
+                    "lone did not resolve Nullification({view}) from the group leader"
+                );
+            }
+
+            for reporter in honest_reporters.values() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_certified_split_heals_with_displaced_certified_view() {
+        certified_split_heals_with_displaced_certified_view::<_, _, RoundRobin>(ed25519::fixture);
+    }
 
     fn tle<V, L>()
     where

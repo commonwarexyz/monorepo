@@ -2060,10 +2060,12 @@ mod tests {
 
     /// Test fixture for setting up multiple participants with shard engines.
     struct Fixture<S: CodingScheme = C> {
-        /// Number of peers in the test network.
-        num_peers: usize,
-        /// Number of non-participant peers in the test network.
-        num_non_participants: usize,
+        /// Number of primary peers created during setup.
+        num_primary_peers: usize,
+        /// Number of secondary peers created during setup.
+        num_secondary_peers: usize,
+        /// Number of peers introduced after setup.
+        num_future_peers: usize,
         /// Additional epochs that use the fixture's participant set.
         additional_scheme_epochs: Vec<Epoch>,
         /// Network link configuration.
@@ -2075,8 +2077,9 @@ mod tests {
     impl<S: CodingScheme> Default for Fixture<S> {
         fn default() -> Self {
             Self {
-                num_peers: 4,
-                num_non_participants: 0,
+                num_primary_peers: 4,
+                num_secondary_peers: 0,
+                num_future_peers: 0,
                 additional_scheme_epochs: Vec::new(),
                 link: DEFAULT_LINK,
                 _marker: PhantomData,
@@ -2098,7 +2101,7 @@ mod tests {
         ) {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
-                let mut private_keys = (0..self.num_peers)
+                let mut private_keys = (0..self.num_primary_peers)
                     .map(|i| PrivateKey::from_seed(i as u64))
                     .collect::<Vec<_>>();
                 private_keys.sort_by_key(|s| s.public_key());
@@ -2106,8 +2109,8 @@ mod tests {
 
                 let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
 
-                let mut np_private_keys = (0..self.num_non_participants)
-                    .map(|i| PrivateKey::from_seed((self.num_peers + i) as u64))
+                let mut np_private_keys = (0..self.num_secondary_peers)
+                    .map(|i| PrivateKey::from_seed((self.num_primary_peers + i) as u64))
                     .collect::<Vec<_>>();
                 np_private_keys.sort_by_key(|s| s.public_key());
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
@@ -2117,6 +2120,10 @@ mod tests {
                         context.child("network"),
                         simulated::Config {
                             max_size: AtMost!(MAX_SHARD_SIZE),
+                            max_peers_per_set: NZUsize!(
+                                self.num_primary_peers
+                                    + self.num_secondary_peers.max(self.num_future_peers)
+                            ),
                             disconnect_on_block: true,
                             tracked_peer_sets: NZUsize!(1),
                         },
@@ -2150,9 +2157,9 @@ mod tests {
                 }
 
                 let coding_config =
-                    coding_config_for_participants(u16::try_from(self.num_peers).unwrap());
+                    coding_config_for_participants(u16::try_from(self.num_primary_peers).unwrap());
 
-                let mut peers = Vec::with_capacity(self.num_peers);
+                let mut peers = Vec::with_capacity(self.num_primary_peers);
                 for (idx, peer_key) in peer_keys.iter().enumerate() {
                     let (control, sender, receiver) = registrations
                         .remove(peer_key)
@@ -2204,7 +2211,7 @@ mod tests {
                     });
                 }
 
-                let mut non_participants = Vec::with_capacity(self.num_non_participants);
+                let mut non_participants = Vec::with_capacity(self.num_secondary_peers);
                 for (idx, np_key) in np_keys.iter().enumerate() {
                     let (control, sender, receiver) = registrations
                         .remove(np_key)
@@ -2264,7 +2271,7 @@ mod tests {
     #[test_traced]
     fn test_e2e_broadcast_and_reconstruction() {
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -2308,7 +2315,7 @@ mod tests {
     #[test_traced]
     fn test_e2e_broadcast_and_reconstruction_zoda() {
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -2356,7 +2363,7 @@ mod tests {
     #[test_traced]
     fn test_block_subscriptions() {
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -2405,7 +2412,7 @@ mod tests {
     #[test_traced]
     fn test_proposer_preproposal_subscriptions_resolve_after_local_cache() {
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3141,7 +3148,10 @@ mod tests {
 
     #[test_traced]
     fn test_shard_from_non_participant_blocks_peer() {
-        let fixture = Fixture::<C>::default();
+        let fixture = Fixture {
+            num_future_peers: 1,
+            ..Fixture::<C>::default()
+        };
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
@@ -3197,7 +3207,10 @@ mod tests {
 
     #[test_traced]
     fn test_preleader_shard_from_non_participant_is_not_buffered() {
-        let fixture = Fixture::<C>::default();
+        let fixture = Fixture {
+            num_future_peers: 1,
+            ..Fixture::<C>::default()
+        };
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
@@ -3270,7 +3283,7 @@ mod tests {
     fn test_duplicate_shard_ignored() {
         // Use 10 peers so minimum_shards=4, giving us time to send duplicate before reconstruction.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3337,7 +3350,7 @@ mod tests {
     fn test_equivocating_shard_blocks_peer() {
         // Use 10 peers so minimum_shards=4, giving us time to send equivocating shard.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3404,7 +3417,7 @@ mod tests {
     fn test_reconstruction_states_pruned_at_or_below_reconstructed_view() {
         // Use 10 peers so minimum_shards=4.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3501,7 +3514,7 @@ mod tests {
     #[test_traced]
     fn test_later_notarization_refreshes_reconstruction_state_round() {
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3583,7 +3596,7 @@ mod tests {
     #[test_traced]
     fn test_cached_observations_refresh_reconstruction_state_round() {
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3723,7 +3736,7 @@ mod tests {
     #[test_traced]
     fn test_local_proposal_prune_clears_older_reconstruction_state() {
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3806,7 +3819,7 @@ mod tests {
         // pending_shards). Once the leader's shard + 3 pending shards >= 4,
         // batch validation fires and reconstruction succeeds.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3888,7 +3901,7 @@ mod tests {
         // Test that shards received before leader announcement do not progress
         // reconstruction until Discovered is delivered.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -3971,7 +3984,7 @@ mod tests {
     #[test_traced]
     fn test_notarized_commitment_reconstructs_from_buffered_peer_shards_without_leader() {
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4063,7 +4076,7 @@ mod tests {
     #[test_traced]
     fn test_leader_shard_after_notarized_is_buffered_until_discovered() {
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4113,7 +4126,7 @@ mod tests {
         // Test that shards arriving after leader announcement are processed
         // without waiting for any extra trigger.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4184,7 +4197,7 @@ mod tests {
     fn test_invalid_shard_codec_blocks_peer() {
         // Test that receiving an invalid shard (codec failure) blocks the sender.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 4,
+            num_primary_peers: 4,
             ..Default::default()
         };
 
@@ -4383,7 +4396,7 @@ mod tests {
         // Test that a shard whose shard index doesn't match the sender's
         // participant index results in blocking the sender.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4436,7 +4449,7 @@ mod tests {
         // Test that a shard failing cryptographic verification
         // results in blocking the sender once batch validation fires at quorum.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4508,7 +4521,7 @@ mod tests {
         // quorum is reached, but checked_shards stays at 3 after batch validation.
         // Then send one more valid shard to meet reconstruction threshold.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4603,7 +4616,7 @@ mod tests {
         // Test that a shard buffered in pending shards (before checking data) is
         // blocked when batch validation runs at quorum and verification fails.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -4683,6 +4696,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: AtMost!(MAX_SHARD_SIZE),
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -4810,6 +4824,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: AtMost!(MAX_SHARD_SIZE),
+                    max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -4963,7 +4978,7 @@ mod tests {
         //   3. The digest subscription survives the invalid candidate
         //   4. The valid commitment later reconstructs the claimed digest
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -5102,7 +5117,7 @@ mod tests {
         // match the commitment, but the commitment carries a mismatched context digest.
         // The engine must reject reconstruction and keep the commitment unresolved.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -5220,7 +5235,7 @@ mod tests {
         //   broadcast but before its local persist legitimately re-proposes
         //   a different block for the same round after restart)
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -5334,7 +5349,7 @@ mod tests {
         // (i.e. a shard for a different participant index), the receiver must
         // block the leader.
         let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -5396,7 +5411,7 @@ mod tests {
         // gossiped by other participants (sent via Recipients::All) without
         // any backfill mechanism.
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -5470,7 +5485,7 @@ mod tests {
     #[test_traced]
     fn test_shard_subscription_pending_after_reconstruction_without_leader_shard() {
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 
@@ -5535,7 +5550,7 @@ mod tests {
     #[test_traced]
     fn test_broadcast_routes_participant_and_non_participant_shards() {
         let fixture = Fixture {
-            num_non_participants: 1,
+            num_secondary_peers: 1,
             ..Default::default()
         };
 
@@ -5596,7 +5611,7 @@ mod tests {
     #[test_traced]
     fn test_non_participant_reconstructs_after_discovered() {
         let fixture = Fixture {
-            num_non_participants: 1,
+            num_secondary_peers: 1,
             ..Default::default()
         };
 
@@ -5658,6 +5673,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: AtMost!(MAX_SHARD_SIZE),
+                    max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -5784,6 +5800,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: AtMost!(MAX_SHARD_SIZE),
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -5862,6 +5879,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: AtMost!(MAX_SHARD_SIZE),
+                    max_peers_per_set: NZUsize!(num_peers - 1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -6000,6 +6018,7 @@ mod tests {
                 context.child("network"),
                 simulated::Config {
                     max_size: AtMost!(MAX_SHARD_SIZE),
+                    max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -6179,7 +6198,7 @@ mod tests {
     #[test_traced]
     fn test_late_leader_shard_accepted_after_quorum_transition() {
         let fixture = Fixture {
-            num_peers: 10,
+            num_primary_peers: 10,
             ..Default::default()
         };
 

@@ -432,14 +432,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
         }
 
-        let blob_partition = Partition::select(&context, &cfg.partition).await?;
+        let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
             context.child("blobs"),
             blob_partition,
             cfg.page_cache,
             cfg.write_buffer,
         );
-        let mut pending = partition.open_all().await?;
+        let mut pending = partition.open_many(names).await?;
 
         // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
@@ -5291,7 +5291,7 @@ mod tests {
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
-            // This name would fail `Partition::open_all` if init tried to parse stale blobs before
+            // This name would fail `Partition::open_many` if init tried to parse stale blobs before
             // honoring the clear intent.
             let (blob, _) = context.open(&blob_part, b"not-u64").await.unwrap();
             blob.write_at(0, vec![1, 2, 3], WriteOptions::SYNC)

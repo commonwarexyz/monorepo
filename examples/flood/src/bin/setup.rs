@@ -7,7 +7,7 @@ use commonware_formatting::hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Within, sys_rng};
 use rand::seq::IteratorRandom;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::info;
 use uuid::Uuid;
 
@@ -78,10 +78,11 @@ fn main() {
                 .value_parser(value_parser!(u32)),
         )
         .arg(
-            Arg::new("message-backlog")
-                .long("message-backlog")
+            Arg::new("message-rate")
+                .long("message-rate")
                 .required(true)
-                .value_parser(value_parser!(usize)),
+                .help("Offered messages per second per peer (sizes the derived channel mailboxes)")
+                .value_parser(value_parser!(NonZeroU32)),
         )
         .arg(
             Arg::new("mailbox-size")
@@ -160,7 +161,7 @@ fn main() {
         { size_of::<u64>() as u32 },
         { commonware_p2p::authenticated::MAX_SIZE },
     > = Within!(message_size);
-    let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
+    let message_rate = *matches.get_one::<NonZeroU32>("message-rate").unwrap();
     let mailbox_size = *matches.get_one::<NonZeroUsize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();
     let mut instance_configs = Vec::new();
@@ -176,7 +177,7 @@ fn main() {
             bootstrappers: bootstrappers.clone(),
             worker_threads,
             message_size,
-            message_backlog,
+            message_rate,
             mailbox_size,
             instrument,
         };

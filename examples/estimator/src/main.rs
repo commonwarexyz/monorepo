@@ -25,7 +25,7 @@ use futures::future::try_join_all;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     time::{Duration, SystemTime},
 };
 use tracing::debug;
@@ -40,9 +40,10 @@ const DEFAULT_CHANNEL: u64 = 0;
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
 /// Configure the network for the estimator's static peer set.
-fn network_config() -> Config {
+fn network_config(max_peers_per_set: NonZeroUsize) -> Config {
     Config {
         max_size: AtMost!(MAX_SIZE),
+        max_peers_per_set,
         disconnect_on_block: true,
         tracked_peer_sets: NZUsize!(1),
     }
@@ -325,7 +326,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
 
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
-        network_config(),
+        network_config(NZUsize!(peer_addresses.len())),
         peer_addresses.iter().map(|(k, _)| k.clone()),
     )
     .await;
@@ -918,7 +919,7 @@ mod tests {
     fn network_config_is_compatible() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let _ = Network::<_, ed25519::PublicKey>::new(context, network_config());
+            let _ = Network::<_, ed25519::PublicKey>::new(context, network_config(NZUsize!(1)));
         });
     }
 }

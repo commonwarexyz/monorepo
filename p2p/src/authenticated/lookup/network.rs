@@ -10,6 +10,7 @@ use crate::{
         channels::{self, Channels},
         router,
     },
+    sizing::max_retained_peers,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select;
@@ -33,8 +34,6 @@ pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Me
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: tracker::Mailbox<C::PublicKey>,
-    router: router::Actor<E, C::PublicKey>,
-    router_mailbox: router::Mailbox<C::PublicKey>,
     listener: listener::Updates,
 }
 
@@ -51,14 +50,20 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if configured retained-peer capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let max_message_size = cfg.max_message_size.get();
+        let max_retained_peers =
+            max_retained_peers(cfg.max_peers_per_set, cfg.tracked_peer_sets, 0);
         let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 mailbox_size: cfg.mailbox_size,
+                max_peers_per_set: cfg.max_peers_per_set.get(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,
@@ -68,13 +73,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let (router, router_mailbox, messenger) = router::Actor::new(
-            context.child("router"),
-            router::Config {
-                mailbox_size: cfg.mailbox_size,
-            },
-        );
-        let channels = Channels::new(messenger, max_message_size);
+        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let channels = Channels::new(messenger, cfg.max_message_size.get(), max_retained_peers);
 
         (
             Self {
@@ -84,8 +84,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 channels,
                 tracker,
                 tracker_mailbox,
-                router,
-                router_mailbox,
                 listener,
             },
             oracle,
@@ -100,23 +98,32 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
-    /// * `backlog` - Capacity of the channel's single bounded inbound mailbox.
-    ///
     /// # Backpressure
     ///
-    /// All peer connections share the inbound mailbox. Enqueueing never waits for capacity. When
-    /// the mailbox is full, the arriving message is dropped and queued messages remain. There is no
-    /// per-peer reservation or fairness.
+    /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
+    /// capacity. When the mailbox is full, the arriving message is dropped and queued messages
+    /// remain. There is no per-peer reservation or fairness.
     ///
-    /// A synchronized burst can contribute up to `rate.burst_size()` messages per connected peer.
-    /// To absorb one full burst from every peer, use
-    /// [`backlog`](crate::authenticated::backlog) with the maximum number of connected peers. This
-    /// sizing includes honest traffic since protocol events can synchronize honest senders. Also
-    /// account for expected receiver stalls and ensure its drain rate can sustain aggregate ingress.
-    /// No finite backlog can absorb sustained ingress above the drain rate.
+    /// The mailbox holds one quota burst for every identity allowed by the derived retained-peer
+    /// bound. This includes honest traffic since protocol events can synchronize honest senders,
+    /// but does not cover receiver stalls or sustained ingress above the receiver's drain rate.
     ///
-    /// The queued payloads can consume roughly `backlog * max_message_size` bytes, in addition to
-    /// queue and allocator overhead.
+    /// Outbound send invocations from all channels share one router mailbox. The final mailbox
+    /// capacity is [`Config::mailbox_size`] plus every registered channel's derived inbound
+    /// capacity. This capacity is pooled rather than reserved per channel, and each send uses one
+    /// slot regardless of its number of recipients.
+    ///
+    /// The derived capacity budgets per-recipient quota bursts for every configured remote
+    /// identity. It does not reserve space for arbitrary offline recipient identities, so bursts
+    /// to those identities may be rejected under backpressure.
+    ///
+    /// For memory budgeting, multiply the derived retained-peer bound by the burst size and maximum
+    /// message size, then add queue and allocator overhead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `channel` is already registered or if the derived channel or router mailbox
+    /// capacity overflows.
     ///
     /// # Returns
     ///
@@ -128,7 +135,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         &mut self,
         channel: Channel,
         rate: Quota,
-        backlog: usize,
     ) -> (
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
@@ -137,22 +143,40 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             .context
             .child("channel")
             .with_attribute("index", channel);
-        self.channels.register(channel, rate, backlog, context)
+        self.channels.register(channel, rate, context)
     }
 
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
+    ///
+    /// # Panics
+    ///
+    /// Panics if adding the internal mailbox capacity to the registered channel capacities
+    /// overflows.
     pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+        // Size the router mailbox from the registered channels before binding their senders.
+        // Submissions made before binding are accepted and dropped.
+        let (router, router_mailbox) = router::Actor::new(
+            self.context.child("router"),
+            router::Config {
+                mailbox_size: self.channels.outbound_mailbox_size(self.cfg.mailbox_size),
+            },
+        );
+        self.channels.bind(router_mailbox.clone());
+        spawn_cell!(self.context, self.run(router, router_mailbox))
     }
 
-    async fn run(self) {
+    async fn run(
+        self,
+        router: router::Actor<E, C::PublicKey>,
+        router_mailbox: router::Mailbox<C::PublicKey>,
+    ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
 
         // Start router
-        let mut router_task = self.router.start(self.channels);
+        let mut router_task = router.start(self.channels);
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -163,8 +187,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 ping_frequency: self.cfg.ping_frequency,
             },
         );
-        let mut spawner_task =
-            spawner.start(self.tracker_mailbox.clone(), self.router_mailbox.clone());
+        let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Start listener
         let max_frame_size = self.cfg.max_frame_size();

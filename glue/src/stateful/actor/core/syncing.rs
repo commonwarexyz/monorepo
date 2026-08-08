@@ -1,7 +1,9 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::{Deferred, mailbox::Message, processing::Processing},
+        core::{
+            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
+        },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
@@ -10,9 +12,9 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    Block, Epochable, Heightable, Viewable,
+    Epochable, Heightable, Viewable,
     marshal::{
-        ancestry::{BlockProvider, BoxedAncestry},
+        ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
     },
 };
@@ -20,27 +22,20 @@ use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use commonware_utils::{
+    Acknowledgement as _,
+    acknowledgement::Exact,
+    channel::{fallible::OneshotExt, oneshot},
+};
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
-use tracing::{Instrument as _, Span, debug, error, info_span};
-
-/// Verify request buffered while state sync is still in progress.
-pub(super) struct HeldVerify<C, B: Block> {
-    span: Span,
-    context: C,
-    ancestry: BoxedAncestry<B>,
-    response: oneshot::Sender<bool>,
-}
-
-type HeldVerifyRequest<E, A> =
-    HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
+use tracing::{Instrument as _, debug, error, info_span};
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
-    Covered(B, Deferred),
-    Reflected(B, Deferred),
-    Apply(B, Deferred),
+    Covered(B, Exact),
+    Reflected(B, Exact),
+    Apply(B, Exact),
 }
 
 /// A finalized block retained with its marshal acknowledgement while state sync is active.
@@ -49,7 +44,7 @@ enum FinalizedHandoff<B> {
 /// is recorded or the block is durably handed off after state sync completes.
 pub(super) struct PendingFinalization<B> {
     block: B,
-    acknowledgement: Deferred,
+    acknowledgement: Exact,
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
@@ -82,8 +77,8 @@ where
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
-    /// Verify requests held while syncing.
-    pub(super) held_verify_requests: Vec<HeldVerifyRequest<E, A>>,
+    /// Verification requests deferred until state sync completes.
+    pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
     /// Open subscriptions to the synced databases.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
@@ -121,8 +116,8 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.held_verify_requests
-                    .retain(|request| !request.response.is_closed());
+                self.deferred_verifications
+                    .retain(|request| !request.verification.is_cancelled());
                 self.database_subscribers
                     .retain(|subscriber| !subscriber.is_closed());
             },
@@ -158,21 +153,21 @@ where
                     span,
                     context,
                     ancestry,
-                    response,
+                    verification,
                 } => {
-                    let process = info_span!(parent: &span, "stateful.actor.hold_verify");
-                    self.held_verify_requests
-                        .retain(|request| !request.response.is_closed());
-                    self.held_verify_requests.push(HeldVerify {
+                    let process = info_span!(parent: &span, "stateful.actor.verify.defer");
+                    self.deferred_verifications
+                        .retain(|request| !request.verification.is_cancelled());
+                    self.deferred_verifications.push(VerificationRequest {
                         span,
                         context,
                         ancestry,
-                        response,
+                        verification,
                     });
                     process.in_scope(|| {
                         debug!(
-                            held_verify_requests = self.held_verify_requests.len(),
-                            "verify held: state sync in progress"
+                            deferred_verifications = self.deferred_verifications.len(),
+                            "verification deferred: state sync in progress"
                         );
                     });
                 }
@@ -180,6 +175,7 @@ where
                     span,
                     block,
                     acknowledgement,
+                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoffs;
@@ -207,7 +203,7 @@ where
     async fn process_finalized(
         mut self,
         block: Arc<A::Block>,
-        acknowledgement: Deferred,
+        acknowledgement: Exact,
     ) -> (Self, Option<VecDeque<FinalizedHandoff<Arc<A::Block>>>>) {
         assert!(
             self.artifact.is_none(),
@@ -368,7 +364,7 @@ where
         // pruning or exposing the databases to other actors.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
-            prune.run(processor.databases_mut(), &self.marshal).await;
+            prune.run(processor.databases(), &self.marshal).await;
         }
 
         // Attach the resolvers to the initialized databases before starting the processor,
@@ -383,26 +379,13 @@ where
             subscriber.send_lossy(processor.databases().clone());
         }
 
-        for request in self.held_verify_requests.drain(..) {
-            let process = info_span!(parent: &request.span, "stateful.actor.replay_verify");
-            processor
-                .verify(
-                    self.context.as_present(),
-                    self.marshal.clone(),
-                    request.context,
-                    request.ancestry,
-                    request.response,
-                )
-                .instrument(process)
-                .await;
-        }
-
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            deferred_verifications: self.deferred_verifications,
             skip_finalized_until: Some(completed_height),
         }
         .start()
@@ -452,7 +435,7 @@ mod tests {
         let (acknowledgement, _waiter) = Exact::handle();
         PendingFinalization {
             block: Arc::new(block),
-            acknowledgement: acknowledgement.into(),
+            acknowledgement,
         }
     }
 
@@ -500,10 +483,11 @@ mod tests {
             let mut waiters = Vec::new();
             for (height, digest) in [(8, 10), (9, 11)] {
                 let (acknowledgement, mut waiter) = Exact::handle();
-                let mut process = Box::pin(self.syncing.process_finalized(
-                    Arc::new(TestBlock::new(height, digest)),
-                    acknowledgement.into(),
-                ));
+                let mut process =
+                    Box::pin(self.syncing.process_finalized(
+                        Arc::new(TestBlock::new(height, digest)),
+                        acknowledgement,
+                    ));
                 let std::task::Poll::Ready((syncing, handoff)) = poll!(process.as_mut()) else {
                     panic!("a partial acknowledgement window must not retarget");
                 };
@@ -517,7 +501,7 @@ mod tests {
             let (acknowledgement, mut newest_waiter) = Exact::handle();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
-                    .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement.into())
+                    .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
             });
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -578,7 +562,7 @@ mod tests {
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
-                    held_verify_requests: Vec::new(),
+                    deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: None,
                     resolvers: NoopResolver,
@@ -632,7 +616,7 @@ mod tests {
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
                     syncer: syncer::Mailbox::new(syncer_sender),
-                    held_verify_requests: Vec::new(),
+                    deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: Some(SyncResult {
                         databases: test_databases(),
@@ -759,15 +743,12 @@ mod tests {
                 harness.syncing.transition([
                     FinalizedHandoff::Reflected(
                         Arc::new(TestBlock::new(7, 9)),
-                        reflected_acknowledgement.into(),
+                        reflected_acknowledgement,
                     ),
-                    FinalizedHandoff::Apply(
-                        Arc::new(TestBlock::new(8, 10)),
-                        first_acknowledgement.into(),
-                    ),
+                    FinalizedHandoff::Apply(Arc::new(TestBlock::new(8, 10)), first_acknowledgement),
                     FinalizedHandoff::Apply(
                         Arc::new(TestBlock::new(9, 11)),
-                        second_acknowledgement.into(),
+                        second_acknowledgement,
                     ),
                 ])
             });
@@ -819,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn aborted_handoff_flush_keeps_ack_pending_and_sync_incomplete() {
+    fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let databases = Shared::new(
@@ -833,18 +814,18 @@ mod tests {
                 .expect("harness must contain a sync artifact")
                 .databases = databases;
 
-            let (acknowledgement, mut waiter) = Exact::handle();
+            let (acknowledgement, waiter) = Exact::handle();
             harness
                 .syncing
                 .transition(Some(FinalizedHandoff::Apply(
                     Arc::new(TestBlock::new(8, 10)),
-                    acknowledgement.into(),
+                    acknowledgement,
                 )))
                 .await;
 
             assert!(
-                poll!(&mut waiter).is_pending(),
-                "an aborted handoff must leave marshal's acknowledgement pending",
+                waiter.await.is_err(),
+                "an aborted handoff must cancel marshal's acknowledgement",
             );
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
@@ -879,7 +860,7 @@ mod tests {
             let process = context.child("process_finalized").spawn(move |_| {
                 harness
                     .syncing
-                    .process_finalized(Arc::new(block), acknowledgement.into())
+                    .process_finalized(Arc::new(block), acknowledgement)
             });
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -1191,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn target_observation_shutdown_keeps_floor_and_ack_pending() {
+    fn target_observation_shutdown_keeps_floor_and_cancels_ack() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
             let initial = fixtures::finalization(&fixture, 7, Sha256::fill(9));
@@ -1222,7 +1203,7 @@ mod tests {
             let process = context.child("process_finalized").spawn(move |_| {
                 harness
                     .syncing
-                    .process_finalized(Arc::new(block), acknowledgement.into())
+                    .process_finalized(Arc::new(block), acknowledgement)
             });
             let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
                 syncer_receiver.recv().await
@@ -1250,8 +1231,8 @@ mod tests {
             drop(syncing);
             drop(pending_update);
             assert!(
-                poll!(&mut waiter).is_pending(),
-                "shutdown must leave the retained acknowledgement pending",
+                waiter.await.is_err(),
+                "shutdown must cancel the retained acknowledgement",
             );
             stop.await.expect("stop task should finish");
         });

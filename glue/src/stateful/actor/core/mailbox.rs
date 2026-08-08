@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::core::Deferred};
+use crate::stateful::Application;
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -14,13 +14,37 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
-use commonware_utils::channel::oneshot;
+use commonware_utils::{
+    acknowledgement::Exact,
+    channel::{fallible::OneshotExt, oneshot},
+};
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, info_span};
 
+type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
+
+/// A verification is scoped to its caller.
+pub(in crate::stateful::actor) struct Verification {
+    response: oneshot::Sender<bool>,
+}
+
+impl Verification {
+    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
+        self.response.closed().await;
+    }
+
+    pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
+        self.response.is_closed()
+    }
+
+    pub(in crate::stateful::actor) fn respond(self, valid: bool) {
+        self.response.send_lossy(valid);
+    }
+}
+
 /// Messages processed by the actor loop.
-pub(crate) enum Message<E, A>
+pub(super) enum Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -39,14 +63,15 @@ where
         span: Span,
         context: (E, A::Context),
         ancestry: BoxedAncestry<A::Block>,
-        response: oneshot::Sender<bool>,
+        verification: Verification,
     },
 
     /// A reporting of a new finalized block.
     Finalized {
         span: Span,
         block: Arc<A::Block>,
-        acknowledgement: Deferred,
+        acknowledgement: Exact,
+        retry_mailbox: RetryMailbox<E, A>,
     },
 
     /// Requests the attached database set.
@@ -63,17 +88,17 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    fn response_closed(&self) -> bool {
+    fn is_obsolete(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
-            Self::Verify { response, .. } => response.is_closed(),
+            Self::Verify { verification, .. } => verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
 }
 
-pub(crate) struct Pending<E, A>(VecDeque<Message<E, A>>)
+pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>;
@@ -102,7 +127,7 @@ where
         F: FnMut(Message<E, A>) -> Option<Message<E, A>>,
     {
         while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
+            if message.is_obsolete() {
                 continue;
             }
 
@@ -122,7 +147,7 @@ where
     type Overflow = Pending<E, A>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.response_closed() {
+        if message.is_obsolete() {
             return;
         }
         overflow.0.push_back(message);
@@ -139,6 +164,7 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
+    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -149,6 +175,7 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -159,8 +186,15 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(crate) const fn new(sender: Sender<Message<E, A>>) -> Self {
-        Self { sender }
+    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
+        let retry_sender = sender.clone();
+        let retry_mailbox = Arc::new(move |message| {
+            let _ = retry_sender.enqueue(message);
+        });
+        Self {
+            sender,
+            retry_mailbox,
+        }
     }
 }
 
@@ -231,8 +265,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        // We must panic if we don't get a response; We cannot override the decision
-        // of the application based on the availabilitiy of the actor.
+        // Actor availability cannot override the application's decision.
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.verify",
@@ -243,7 +276,7 @@ where
             span,
             context,
             ancestry: BoxedAncestry::new(ancestry),
-            response,
+            verification: Verification { response },
         });
         receiver
             .await
@@ -272,7 +305,8 @@ where
                 Message::Finalized {
                     span,
                     block,
-                    acknowledgement: acknowledgement.into(),
+                    acknowledgement,
+                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };
