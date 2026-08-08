@@ -637,10 +637,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// rule can permanently lose a one-shot vote, while a looser rule can sign
     /// ancestry the local automaton rejected.
     ///
-    /// One abstention is tolerated: a parent at failed certification rejects
-    /// the child's one-shot vote. A later parent finalization restores the
-    /// ancestry but does not retry the vote, because vote construction runs
-    /// only for the view an event touches and the finalization touches the
+    /// One abstention is tolerated: a parent whose certification failed
+    /// rejects the child's one-shot vote. A later parent finalization
+    /// restores the ancestry but does not retry the vote: construction runs
+    /// only for the view an event touches, and the finalization touches the
     /// parent. Reaching this case requires the network to finalize a proposal
     /// our automaton rejected, and that finalization proves a quorum advanced
     /// without our vote.
@@ -1142,9 +1142,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // Certification exempts term starts, so the candidate and its parent
         // sit mid-term and share the term's stable leader (see
         // [`Self::term_leader`]). Without a tracked leader the fetch asks any
-        // peer. A leader that is the local signer is also excluded: the fetch
-        // exists because we lack the certificate, and a fresh fetch targeted
-        // only at ourselves has no peer to serve it.
+        // peer. A leader that is the local signer is also excluded: a fresh
+        // fetch targeted only at ourselves has no peer to serve it.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
@@ -3494,7 +3493,7 @@ mod tests {
     }
 
     /// Certification exempts term-start candidates from the parent precheck
-    /// (see [`State::certification_parent_ready`]): a term-start proposal
+    /// (see [`State::certification_parent_ready`]). A term-start proposal
     /// dispatches even when its cross-term parent is uncertified and the
     /// skipped views' nullifications are not held.
     #[test]
@@ -4040,7 +4039,7 @@ mod tests {
                 state.construct_notarize(View::new(2)).is_none(),
                 "failed-certified parent must not unlock optimistic child notarize"
             );
-            // Certification of the notarized child is blocked the same way.
+            // The notarized child must also remain ineligible for certification.
             let child_notarization = build_notarization(&verifier, &schemes, &child);
             assert!(state.add_notarization(child_notarization).0);
             assert!(state.certify_candidates().0.is_empty());
@@ -7127,8 +7126,8 @@ mod tests {
 
             // Construct a defensive state the actor cannot persist: live
             // child certification is dispatched only after its parent anchor's
-            // journal section has synced. This bypasses that ordering directly
-            // to keep the state-level finalize gate fail-closed.
+            // journal section has synced. The test bypasses that ordering to
+            // prove the state-level finalize gate stays closed.
             let proposal_v1 = Proposal::new(
                 Rnd::new(Epoch::new(1), View::new(1)),
                 GENESIS_VIEW,

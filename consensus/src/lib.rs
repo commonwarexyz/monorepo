@@ -151,10 +151,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// for temporary inability to decide.
         ///
         /// The future-context requirement on [`Self::propose`] applies here
-        /// too. Do not return `false` or close the channel only because the
-        /// context's dependencies are temporarily unavailable. Under the
-        /// single-shot contract, either outcome permanently rejects the
-        /// request.
+        /// too: the context's dependencies may not be resolvable locally yet.
         fn verify(
             &mut self,
             context: Self::Context,
