@@ -637,6 +637,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// This must use the same ancestry rule as proposal construction. A stricter
     /// rule can permanently lose a one-shot vote, while a looser rule can sign
     /// ancestry the local automaton rejected.
+    ///
+    /// One abstention is tolerated: a parent at failed certification rejects
+    /// the child's one-shot vote. A later parent finalization restores the
+    /// ancestry but does not retry the vote, because vote construction runs
+    /// only for the view an event touches and the finalization touches the
+    /// parent. Reaching this case requires the network to finalize a proposal
+    /// our automaton rejected, and that finalization proves a quorum advanced
+    /// without our vote.
     fn optimistic_parent_ready(&self, view: View) -> bool {
         let Some(parent) = self.previous_in_term(view) else {
             return true;
@@ -1234,8 +1242,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     //
     // The `*_parent_ready` predicates answer whether a view's immediate parent
     // is settled enough to act on. Certification and finalization require
-    // `explicit_parent_ready`. Notarize issuance uses the weaker
-    // `optimistic_parent_ready`.
+    // `explicit_parent_ready`. Notarize issuance uses `optimistic_parent_ready`,
+    // which delegates to `optimistic_ancestry_payload` so issuance and proposal
+    // construction share one ancestry rule.
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
     /// proposal, the strongest form of ancestry.
