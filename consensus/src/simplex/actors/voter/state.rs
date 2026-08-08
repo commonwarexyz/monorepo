@@ -1160,12 +1160,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // Certification exempts term starts, so the candidate and its parent
         // sit mid-term and share the term's stable leader (see
         // [`Self::term_leader`]). Without a tracked leader the fetch asks any
-        // peer.
+        // peer. A leader that is the local signer is also excluded: the fetch
+        // exists because we lack the certificate, and a fresh fetch targeted
+        // only at ourselves has no peer to serve it.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
             kind: Kind::Notarization,
-            target: self.term_leader(*proposal_view).map(|leader| leader.key),
+            target: self
+                .term_leader(*proposal_view)
+                .filter(|leader| !self.is_me(leader.idx))
+                .map(|leader| leader.key),
         })
     }
 
@@ -3325,10 +3330,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    participants,
-                    schemes,
-                    verifier,
-                    ..
+                    schemes, verifier, ..
                 },
                 mut state,
             ) = setup_state_with(
@@ -3357,11 +3359,12 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert_eq!(
-                fetches[0].target.as_ref(),
-                Some(&participants[2]),
-                "the stable leader may target itself after unrestricted backfill is already queued"
-            );
+            // The local signer is the term's stable leader, so the fetch is
+            // untargeted: a fresh fetch targeted only at ourselves has no
+            // peer to serve it.
+            let leader = state.term_leader(View::new(3)).expect("term leader");
+            assert!(state.is_me(leader.idx));
+            assert!(fetches[0].target.is_none());
 
             // The resolver owns retries after the first fetch. Leave the
             // blocked candidate dormant until its parent's state changes so
