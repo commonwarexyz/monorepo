@@ -840,7 +840,7 @@ where
         current_db
             .strategy
             .clone()
-            .spawn(move |strategy| {
+            .spawn(graft_inputs.len(), move |strategy| {
                 let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
                 let mut grafted_batch = grafted_parent.new_batch();
                 let old_grafted_leaves = *grafted_parent.leaves() as usize;
