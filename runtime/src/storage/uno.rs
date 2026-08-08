@@ -92,12 +92,53 @@ where
         let virtual_len = backing_len
             .checked_add(VIRTUAL_HEADER_LEN)
             .ok_or(Error::OffsetOverflow)?;
-        let mut slots = [[0u8; atomic::ROOT_LEN]; atomic::ROOT_OFFSETS.len()];
-        for (slot, virtual_offset) in slots.iter_mut().zip(atomic::ROOT_OFFSETS) {
+        let mut physical_slots =
+            [[0u8; atomic::ROOT_SLOT_LEN as usize]; atomic::ROOT_OFFSETS.len()];
+        for (slot, virtual_offset) in physical_slots.iter_mut().zip(atomic::ROOT_OFFSETS) {
             let offset = Self::backing_offset(virtual_offset)?;
-            let bytes = backing.read_at(offset, atomic::ROOT_LEN).await?;
+            let bytes = backing
+                .read_at(offset, atomic::ROOT_SLOT_LEN as usize)
+                .await?;
             let bytes = bytes.coalesce();
             slot.copy_from_slice(bytes.as_ref());
+        }
+        if let Some(plan) = atomic::rejection_plan(
+            super::Layout::V2.data_offset(),
+            virtual_len,
+            &physical_slots,
+        )? {
+            backing
+                .write_at_with_options(
+                    Self::backing_offset(plan.root_offset)?,
+                    plan.root[..7].to_vec(),
+                    WriteOptions::default(),
+                )
+                .await?;
+            backing
+                .write_at_with_options(
+                    Self::backing_offset(plan.root_offset + 8)?,
+                    plan.root[8..].to_vec(),
+                    WriteOptions::default(),
+                )
+                .await?;
+            backing.sync().await?;
+            backing
+                .write_at_with_options(
+                    Self::backing_offset(plan.root_offset + 7)?,
+                    plan.root[7..8].to_vec(),
+                    WriteOptions::SYNC,
+                )
+                .await?;
+            let slot_index = atomic::ROOT_OFFSETS
+                .iter()
+                .position(|offset| *offset == plan.root_offset)
+                .expect("rejection plans target one root slot");
+            physical_slots[slot_index][..atomic::ROOT_LEN].copy_from_slice(&plan.root);
+        }
+
+        let mut slots = [[0u8; atomic::ROOT_LEN]; atomic::ROOT_OFFSETS.len()];
+        for (header, slot) in slots.iter_mut().zip(&physical_slots) {
+            header.copy_from_slice(&slot[..atomic::ROOT_LEN]);
         }
         let (state, truncate_to) = atomic::State::recover_from_root_slots(
             super::Layout::V2.data_offset(),
@@ -259,16 +300,24 @@ where
         if let Some(witness) = witness {
             prepared.attach_batch_witness(witness)?;
         }
+        let (prefix, suffix) = prepared.batch_body()?;
         self.backing
             .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
-                prepared.prepared_root.clone(),
+                prefix.to_vec(),
+                WriteOptions::default(),
+            )
+            .await?;
+        self.backing
+            .write_at_with_options(
+                Self::backing_offset(prepared.root_offset + 8)?,
+                suffix.to_vec(),
                 WriteOptions::default(),
             )
             .await
     }
 
-    /// Durably stage a tombstone without imposing a barrier on discarded payload writes.
+    /// Stage a deletion candidate body without depending on discarded pending payload writes.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) async fn stage_batch_delete(
         &self,
@@ -276,11 +325,19 @@ where
         witness: &[u8],
     ) -> Result<(), Error> {
         prepared.attach_batch_witness(witness)?;
+        let (prefix, suffix) = prepared.batch_body()?;
         self.backing
             .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
-                prepared.prepared_root.clone(),
-                WriteOptions::SYNC,
+                prefix.to_vec(),
+                WriteOptions::default(),
+            )
+            .await?;
+        self.backing
+            .write_at_with_options(
+                Self::backing_offset(prepared.root_offset + 8)?,
+                suffix.to_vec(),
+                WriteOptions::default(),
             )
             .await
     }
@@ -288,6 +345,20 @@ where
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) async fn sync_batch_commit(&self) -> Result<(), Error> {
         self.backing.sync().await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn stage_batch_guard(
+        &self,
+        prepared: &atomic::PreparedCommit,
+    ) -> Result<(), Error> {
+        self.backing
+            .write_at_with_options(
+                Self::backing_offset(prepared.root_offset + 7)?,
+                vec![prepared.batch_guard()?],
+                WriteOptions::SYNC,
+            )
+            .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -321,11 +392,10 @@ where
         }))
     }
 
-    /// Conventional two-step publication used by simple backends and protocol tests.
+    /// Conventional direct prepare/final publication used by simple backends and protocol tests.
     ///
-    /// Filesystem publishers use the linked one-barrier UNO path instead. Keeping this helper in
-    /// the generic core gives non-filesystem backends a correctness-first implementation without
-    /// duplicating root or payload logic.
+    /// Filesystem publishers use the linked two-phase batch path. Keeping this helper in the
+    /// generic core avoids duplicating root and payload logic in non-filesystem backends.
     pub(super) async fn publish_direct(
         &self,
         state: &mut atomic::State,
@@ -351,10 +421,11 @@ where
                 )
                 .await?;
         }
+        let prepared_slot = prepared.canonical_direct_slot()?;
         self.backing
             .write_at_with_options(
                 Self::backing_offset(prepared.root_offset)?,
-                prepared.prepared_root.clone(),
+                prepared_slot,
                 WriteOptions::default(),
             )
             .await?;
@@ -932,6 +1003,17 @@ mod tests {
     struct Trace {
         writes: Vec<(u64, WriteOptions)>,
         resizes: Vec<u64>,
+        events: Vec<TraceEvent>,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TraceEvent {
+        Write {
+            offset: u64,
+            len: usize,
+            options: WriteOptions,
+        },
+        SyncCompleted,
     }
 
     #[derive(Clone)]
@@ -979,7 +1061,16 @@ mod tests {
             bufs: impl Into<IoBufs> + Send,
             options: WriteOptions,
         ) -> Result<(), Error> {
-            self.trace.lock().writes.push((offset, options));
+            let bufs = bufs.into();
+            {
+                let mut trace = self.trace.lock();
+                trace.writes.push((offset, options));
+                trace.events.push(TraceEvent::Write {
+                    offset,
+                    len: bufs.len(),
+                    options,
+                });
+            }
             self.inner.write_at_with_options(offset, bufs, options).await
         }
 
@@ -993,7 +1084,9 @@ mod tests {
                 gate.entered.notify_one();
                 gate.release.notified().await;
             }
-            self.inner.sync().await
+            self.inner.sync().await?;
+            self.trace.lock().events.push(TraceEvent::SyncCompleted);
+            Ok(())
         }
 
         async fn start_sync(&self) -> Handle<()> {
@@ -1193,6 +1286,129 @@ mod tests {
 
         assert!(trace.lock().resizes.is_empty());
         assert_eq!(blob.tag().await.unwrap(), tag);
+    }
+
+    #[tokio::test]
+    async fn batch_guard_is_written_only_after_the_body_barrier() {
+        let storage = memory::Storage::new(test_pool());
+        let (backing, len) = crate::Storage::open(&storage, "uno_batch_order", b"blob")
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        backing.resize(4096).await.unwrap();
+        backing.sync().await.unwrap();
+
+        let trace = Arc::new(Mutex::new(Trace::default()));
+        let backing = RecordingBlob {
+            inner: backing,
+            trace: trace.clone(),
+            sync_gate: None,
+        };
+        let mut state = Core::recover(&backing, 4096).await.unwrap();
+        let mutation = state
+            .prepare_append(IoBufs::from(b"payload".to_vec()))
+            .unwrap()
+            .unwrap();
+        state.finish_mutation(mutation.mutation, false);
+        let state_context = preflush::Context::new(state).unwrap();
+        let core = Core::new(backing, state_context);
+        let mut state = core.state().lock().await;
+        let mut prepared = core
+            .prepare_batch_commit(&mut state)
+            .await
+            .unwrap()
+            .unwrap();
+        let root_offset = Core::<RecordingBlob<memory::Blob>>::backing_offset(
+            prepared.root_offset,
+        )
+        .unwrap();
+
+        *trace.lock() = Trace::default();
+        core.stage_batch_commit(&mut prepared, Some(b"witness"))
+            .await
+            .unwrap();
+        core.sync_batch_commit().await.unwrap();
+        core.stage_batch_guard(&prepared).await.unwrap();
+
+        assert_eq!(
+            trace.lock().events,
+            [
+                TraceEvent::Write {
+                    offset: root_offset,
+                    len: 7,
+                    options: WriteOptions::default(),
+                },
+                TraceEvent::Write {
+                    offset: root_offset + 8,
+                    len: 2040,
+                    options: WriteOptions::default(),
+                },
+                TraceEvent::SyncCompleted,
+                TraceEvent::Write {
+                    offset: root_offset + 7,
+                    len: 1,
+                    options: WriteOptions::SYNC,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_recovery_publishes_abort_guard_last() {
+        let storage = memory::Storage::new(test_pool());
+        let (blob, trace) = recording_blob(&storage, "uno_abort_order").await;
+        blob.append(b"old").await.unwrap();
+        blob.sync().await.unwrap();
+        blob.append(b"-discarded").await.unwrap();
+
+        let mut state = blob.lock_state().await.unwrap();
+        let prepared = state.prepare_commit().unwrap().unwrap();
+        let rejected_root_offset = prepared.root_offset;
+        let rejected_slot = prepared.canonical_direct_slot().unwrap();
+        drop(state);
+        blob.core()
+            .backing()
+            .write_at(
+                Core::<RecordingBlob<memory::Blob>>::backing_offset(rejected_root_offset).unwrap(),
+                rejected_slot,
+            )
+            .await
+            .unwrap();
+        blob.core().backing().sync().await.unwrap();
+
+        *trace.lock() = Trace::default();
+        let mut recovered = Core::recover(blob.core().backing(), 4096 + b"old-discarded".len() as u64)
+            .await
+            .unwrap();
+        let mutation = recovered
+            .prepare_append(IoBufs::from(b"-later".to_vec()))
+            .unwrap()
+            .unwrap();
+        recovered.finish_mutation(mutation.mutation, false);
+        let next = recovered.prepare_commit().unwrap().unwrap();
+        assert_ne!(next.root_offset, rejected_root_offset);
+
+        assert_eq!(
+            trace.lock().events,
+            [
+                TraceEvent::Write {
+                    offset: 0,
+                    len: 7,
+                    options: WriteOptions::default(),
+                },
+                TraceEvent::Write {
+                    offset: 8,
+                    len: atomic::ROOT_LEN - 8,
+                    options: WriteOptions::default(),
+                },
+                TraceEvent::SyncCompleted,
+                TraceEvent::Write {
+                    offset: 7,
+                    len: 1,
+                    options: WriteOptions::SYNC,
+                },
+            ]
+        );
     }
 
     #[tokio::test]

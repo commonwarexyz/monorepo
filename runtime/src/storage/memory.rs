@@ -964,7 +964,7 @@ impl crate::BatchStorage for Storage {
                 drive_ready(crate::Blob::write_at(
                     core.backing(),
                     uno::Core::<Blob>::backing_offset(commit.root_offset)?,
-                    commit.prepared_root.clone(),
+                    commit.canonical_direct_slot()?,
                 ))??;
                 drive_ready(crate::Blob::sync(core.backing()))??;
                 drive_ready(crate::Blob::write_at(

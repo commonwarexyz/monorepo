@@ -130,34 +130,32 @@ and identifies the cases outside the intended theorem. In particular,
 absence is never a prepare vote. No path may disappear until every participant has an independent,
 durable final root. Thereafter each retained root selects the new value and each tombstone
 independently denotes logical absence, so out-of-order cleanup can strand physical garbage but
-cannot expose a mixed vector. The checked-in implementation is compared against that target rather
-than assumed to satisfy it. The audit exposes concrete refinement blockers, including stale-ring
-authority and unconsumed rejected witnesses, and records the reviewed repair for a filesystem-
-backend cancellation defect; \S\ref{sec:implementation-status} states the distinction explicitly.
-The former one-phase R14-1P proposal and checked-in generation-uncolored R13 format remain explicit
-nonconforming controls. R14-1P can splice an older witness topology with newly issued candidate
+cannot expose a mixed vector. The checked-in implementation now uses the R14 root grammar,
+two ordered prepare layers, exact-$B$ decision recovery, and code-last abort normalization.
+Section~\ref{sec:implementation-status} maps those mechanisms to source and keeps the remaining
+filesystem-refinement and model-checking obligations explicit. The former one-phase R14-1P proposal
+and generation-uncolored R13 design remain historical nonconforming controls; neither is a
+compatibility format. R14-1P can splice an older witness topology with newly issued candidate
 bytes into an exact, never-issued smaller ring. R14-2P closes that provenance gap by ordering the
 only write of the $B$ guard after the exact body and payload evidence are durable, clearing all live
 phase credit on crash, and forbidding recovery from writing $B$. The result is a reviewable
 reference specification and a manual safety conjecture. The current 42-harness Kani matrix is
 pending for its exact source snapshot; completed 30- and 36-harness matrices apply only to older
 snapshots. The physical, composed, and protocol abstractions remain separate, and an end-to-end
-refinement theorem and production refinement remain absent.
+refinement theorem remains absent, so these production anchors are implementation evidence rather
+than an end-to-end proof.
 \end{abstract}
 
 \noindent\fcolorbox{Accent}{AccentSoft}{%
   \parbox{\dimexpr\columnwidth-2\fboxsep-2\fboxrule\relax}{\small
   \textbf{Status.} UNO is an opt-in ALPHA API. Ordinary blob APIs and formats are unchanged.
-  The append/rewind mechanism corresponds in part to the current code, while the root format and
-  two-phase prepare below are the proposed R14-2P reference. Conjecture~\ref{thm:atomic} is stated
+  The root format, canonical slot image, two-phase prepare, final transition, and code-last abort
+  below have production anchors. Conjecture~\ref{thm:atomic} is stated
   for that transition system; its current bounded Kani obligations are pending, and the abstraction
-  layers are not joined by one mechanized refinement theorem. R14-1P is retained only as a
-  witness-splicing negative control, and R13 is a nonconforming implementation baseline.
-  Current implementation deviations---including stale-ring
-  authority, rejected-witness reuse, one integrity-boundary error, and unenforced
-  direct-file/no-alias namespace preconditions---are listed in
-  \S\ref{sec:implementation-status}. That section separately records a reviewed cancellation-
-  ownership repair; no R14 conformance claim follows from that narrower fix.}}
+  layers are not joined by one mechanized refinement theorem. R14-1P and R13 are retained only as
+  negative controls. Remaining implementation deviations---including unenforced direct-file and
+  no-alias namespace preconditions and the pending broad Kani invariant---are listed in
+  \S\ref{sec:implementation-status}.}}
 
 \section{Problem and scope}
 
@@ -520,11 +518,11 @@ that a torn write could splice. Assumption~\ref{a:fault} chooses that byte as ol
 not as independently torn bits. A decoder cross-checks the color against the encoded 64-bit
 generation before checking the root CRC32C.
 
-Let $D_{\mathrm{root}}$ be the ASCII checksum-domain string in Table~\ref{tab:root}. The proposed
+Let $D_{\mathrm{root}}$ be the ASCII checksum-domain string in Table~\ref{tab:root}. The current
 R14 fixture stores, in big-endian order,
 $\operatorname{CRC32C}(D_{\mathrm{root}}\mathbin\Vert\text{header}[0..108))$ at offsets 108--111.
 There is no intervening length or separator. This pins the representative byte vectors used by the
-executable model; it does not describe the checked-in R13 root codec as R14.
+executable model and the checked-in R14 root codec.
 
 The root states are:
 \begin{center}
@@ -672,9 +670,8 @@ external witness-intent premise is needed. A crash discards the live phase credi
 may finalize an already proved ring or publish $A$ code-last, but never writes $B$. A one-layer
 design would instead require a root-to-witness commitment over every decision-relevant topology
 byte and an explicit computational \emph{splice-binding} assumption; CRC32C or ordinary collision
-resistance is insufficient. That alternative is not the reference protocol. The checked-in R13
-format remains a separate generation-uncolored negative control and is not made conforming by this
-selection.
+resistance is insufficient. That alternative is not the reference protocol. The discarded R13
+design remains a generation-uncolored negative control, not a supported on-disk format.
 \end{limitation}
 
 \begin{definition}[Candidate]
@@ -792,7 +789,8 @@ A complete slot image is canonical exactly when it is one of: (a) the all-zero u
 header followed by its exact same-generation wrapped link and zeros after the declared link; or
 (d) an exact $A_h$ header, whose ignored suffix may retain the rejected witness. After
 recovery has selected authority at generation $g$, its opposite-parity slot is
-$g$-\emph{quiescent} only when it is all zero or is a canonical image of generation $h<g$.
+$g$-\emph{quiescent} only when it is all zero with $g\le 1$, or is a canonical image of exactly
+generation $g-1$.
 Every other opposite-slot byte string is an orphaned partial transition, even if no root or wrapper
 inside it validates. An exact canonical image with generation at least $g$ is resolved before this
 predicate is evaluated; it is not classified as inactive.
@@ -1803,13 +1801,13 @@ machine-checked end-to-end theorem, a production-Rust refinement, or an ext4/JBD
 current bounded Kani matrix is pending for its exact 42-harness source snapshot. Completed matrices
 for older 30- and 36-harness snapshots checked the three abstraction layers separately and found
 the paired R14-1P counterexample in Limitation~\ref{l:witness-provenance}; those results do not
-transfer to the current source. The R13 baseline at
-\code{26a532dd6} also has
-counterexamples to newer-$T$ authority, group-bound certificate selection, rejected-witness reuse,
-filesystem namespace ownership, and an ineligible integrity candidate. The reviewed branch repairs
-the namespace-ownership item without changing the storage format; the other counterexamples remain.
-Current code also relies on, but does not mechanically enforce, the direct-regular-file and no-alias
-namespace preconditions. Executable correspondence and each repair obligation are recorded in
+transfer to the current source. The production Rust now implements the R14 root encoding,
+two-phase prepare, exact-$B$/final certificate selection, newer-$T$ suppression, and code-last
+rejected-generation consumption. The reviewed cancellation repair separately makes admitted
+namespace and publication work self-driving. Current code still relies on, but does not
+mechanically enforce, the direct-regular-file and no-alias namespace preconditions, and the known
+integrity-geometry cases below remain independent refinement blockers. Executable correspondence
+and each remaining obligation are recorded in
 \S\ref{sec:implementation-status}.
 \end{remark}
 
@@ -1919,16 +1917,16 @@ gives the kernel all independent durability obligations in each layer without in
 coordinator record or group-wide filesystem barrier. Device, filesystem, scheduler, and backend
 behavior determine actual coalescing.
 
-The following scheduling fact describes the checked-in one-phase R13 baseline only, not either
-proposed R14 protocol. For nonempty work, let $m$ be the number of locked canonical operations in
-the current Tokio backend. It schedules at
-most $\min(m,32)$ chunks, each with at most $\lceil m/\min(m,32)\rceil$ locked operations, and
-awaits root writes and retained-file syncs sequentially within a chunk. If chunk $j$ contains
-$d_j$ actually prepared participants, its staging phase executes at most $2d_j$ such I/O awaits (a
-deletion's durable root write combines its obligation). Clean locked operations need not become
-ring participants, so this bound is intentionally stated in $m$ and $d_j$, not only in ring size
-$n$. The io\_uring backend uses broader future fanout. No corresponding R14-2P scheduling or await
-count is claimed until both ordered layers have a production implementation.
+For nonempty work, let $m$ be the number of locked canonical operations in the current Tokio
+backend. It schedules at most $\min(m,32)$ chunks, each with at most
+$\lceil m/\min(m,32)\rceil$ locked operations. Within a phase-1 chunk, each prepared participant
+writes the two non-guard slot ranges and then completes its file barrier; chunks run concurrently.
+The scheduler joins every phase-1 chunk before constructing any phase-2 job. Phase 2 then writes
+only byte 7 with a durability completion and joins every chunk before acknowledging the decision.
+Deletion follows the same two joins. Clean locked operations need not become ring participants, so
+the scheduling bound is intentionally stated in $m$, not only in ring size $n$. The io\_uring
+backend fans phase-1 participant futures out directly, joins them all, then independently fans out
+and joins the one-byte guard operations.
 
 \section{Overlapping groups and two slots}
 
@@ -1975,10 +1973,9 @@ the inode; they cannot authorize mutation of a same-name replacement.
 
 \section{Implementation correspondence}
 
-Table~\ref{tab:code} is an audit map, not a conformance map. In particular, the checked-in R13
-implementation has no executable anchor for either R14-2P prepare phase. The Kani files are
-specification-only Rust and are not production anchors. Function names are used instead of line
-numbers so ordinary edits do not stale the map.
+Table~\ref{tab:code} is an audit and refinement map, not a proof of conformance. It distinguishes
+production R14 mechanisms from specification-only Kani models. Function names are used instead of
+line numbers so ordinary edits do not stale the map.
 
 \begin{table*}[t]
 \centering
@@ -1989,41 +1986,41 @@ numbers so ordinary edits do not stale the map.
 \toprule
 Specification element & Source module & Executable anchor \\
 \midrule
-R14-2P phase-1 physical slot and payload/extent evidence & no production module & no R13 executable
-anchor; spec-only \path{docs/uno-kani-model/src/codec.rs} \path{prepare_body_after_crash},
-\path{mixed_payload_valid}, and the append/rewind evidence harnesses \\
-R14-2P phase-1 durability credit and group join & no production module & no R13 executable anchor;
-spec-only \path{docs/uno-kani-model/src/protocol.rs} \path{SyncPrepareBody} transition and
-\path{all_phase_one_durable} predicate \\
-R14-2P one-byte $B$ guard survival & no production module & no R13 executable anchor; spec-only
-\path{docs/uno-kani-model/src/codec.rs} \path{prepare_guard_after_crash} \\
-R14-2P phase-2 durability completion & no production module & no R13 executable anchor; spec-only
-\path{docs/uno-kani-model/src/protocol.rs} \path{SyncPrepareGuard} transition and
-\path{all_guard_done} live predicate; \path{guard_sync_succeeded} and
-\path{all_guard_sync_succeeded} are recovery-inert proof history used only for acknowledgement \\
-R14-2P live credit loss and no recovery $B$ writer & no production module & no R13 executable
-anchor; spec-only \path{docs/uno-kani-model/src/protocol.rs} transition relation \\
-R13 roots, slots, transitions (nonconforming control) & \path{runtime/src/storage/atomic.rs} & \path{encode_root},
-\path{recover_from_root_slots}, \path{candidate_root_is_transition},
-\path{candidate_root_is_batch_transition}, \path{candidate_root_is_delete_transition} \\
-R13 payload preflush and suffix proof (partial mechanism) & \path{runtime/src/storage/atomic.rs} & \path{PayloadChecksumTracker},
-\path{validate_payload_checksum} \\
-ordinary-blob wrapper (R13 baseline only) & \path{runtime/src/storage/uno.rs} & \path{Core}, \path{AtomicBlob},
-\path{stage_batch_commit}, \path{activate_batch_commit} \\
+R14 root, color, canonical slot, and final transition & \path{runtime/src/storage/atomic.rs} &
+\path{RootState}, \path{root_guard}, \path{encode_root}, \path{canonical_slot},
+\path{candidate_root_status} \\
+R14-2P phase-1 slot body and payload/extent evidence & \path{runtime/src/storage/atomic.rs},
+\path{runtime/src/storage/uno.rs} & \path{PreparedCommit::batch_body},
+\path{Core::stage_batch_commit}, \path{Core::stage_batch_delete},
+\path{PayloadChecksumTracker} \\
+R14-2P phase-1 durability and group join & \path{runtime/src/storage/tokio/mod.rs},
+\path{runtime/src/storage/iouring.rs} & \path{stage_batch_chunk}, first
+\path{join_all} in \path{start_apply_guarded} \\
+R14-2P one-byte $B$ guard and phase-2 join & same; \path{runtime/src/storage/uno.rs} &
+\path{PreparedCommit::batch_guard}, \path{Core::stage_batch_guard},
+\path{stage_batch_guard_chunk}, second \path{join_all} in \path{start_apply_guarded} \\
+code-last $A$ normalization and raw-slot quiescence & \path{runtime/src/storage/atomic.rs},
+\path{runtime/src/storage/uno.rs} & \path{rejection_plan},
+\path{normalize_rejected_generation}, \path{Core::recover} \\
+payload preflush and suffix proof & \path{runtime/src/storage/atomic.rs} &
+\path{PayloadChecksumTracker}, \path{validate_payload_checksum} \\
+ordinary-blob wrapper & \path{runtime/src/storage/uno.rs} & \path{Core}, \path{AtomicBlob},
+\path{activate_batch_commit} \\
 canonical operation set & \path{runtime/src/storage/batch.rs} & \path{canonicalize_operations} \\
-R13/L14 embedded preflight and ring format (nonconforming control) & \path{runtime/src/storage/batch/coordinator.rs} & \path{preflight},
+R14/L14 embedded preflight and ring format & \path{runtime/src/storage/batch/coordinator.rs} & \path{preflight},
 \path{encode_link}, \path{decode_link}, \path{prepare_embedded},
 \path{prepare_single_publish} \\
 ring discovery & same & \path{recover_linked_decision}, \path{matching_link} \\
-decision recovery & same & \path{recover_embedded},
+exact-$B$/final decision recovery & same; \path{runtime/src/storage/atomic.rs} & \path{recover_embedded},
+\path{recover_linked_decision}, \path{candidate_status},
 \path{validate_speculative_participant} \\
 materialization and eager deletion & same & \path{materialize_decision_participants},
 \path{unlink_deleted_participants}, \path{recover_ordered_delete_frontier} \\
 independent tombstone recovery & same & \path{recover_named_embedded},
 \path{recover_partition_embedded}, \path{unlink_exact_tombstone} \\
-Tokio one-phase batch scheduling (baseline only) & \path{runtime/src/storage/tokio/mod.rs}, \path{runtime/src/storage/uno.rs} &
-\path{start_apply_guarded}, \path{stage_batch_chunk}, \path{Core::sync_batch_commit} \\
-io\_uring one-phase batch scheduling (baseline only) & \path{runtime/src/storage/iouring.rs} & \path{start_apply_guarded} \\
+Tokio two-phase batch scheduling & \path{runtime/src/storage/tokio/mod.rs}, \path{runtime/src/storage/uno.rs} &
+\path{start_apply_guarded}, \path{stage_batch_chunk}, \path{stage_batch_guard_chunk} \\
+io\_uring two-phase batch scheduling & \path{runtime/src/storage/iouring.rs} & \path{start_apply_guarded} \\
 filesystem open and scan integration & \path{runtime/src/storage/tokio/mod.rs},
 \path{runtime/src/storage/iouring.rs} & \path{open_versioned_inner}, \path{scan} \\
 single-participant filesystem paths & \path{runtime/src/storage/tokio/unix.rs},
@@ -2032,7 +2029,7 @@ Linux file and directory barriers (backend mechanics only) &
 \path{runtime/src/storage/tokio/unix.rs}, \path{runtime/src/iouring/request.rs},
 \path{runtime/src/storage/tokio/mod.rs} & \path{sync_inner},
 \path{build_datasync_sqe}, \path{sync_dir} \\
-reviewed R13 cancellation ownership repair & \path{runtime/src/storage/tokio/mod.rs},
+reviewed cancellation ownership repair & \path{runtime/src/storage/tokio/mod.rs},
 \path{runtime/src/storage/uno.rs}, \path{runtime/src/storage/iouring.rs} &
 \path{open_versioned_guarded}, \path{remove_guarded}, \path{scan_guarded},
 \path{start_publication}, \path{Publisher::spawn} \\
@@ -2040,21 +2037,35 @@ public contract & \path{runtime/src/atomic_api.rs} & \path{AtomicStorage}, \path
 \path{BatchStorage} \\
 \bottomrule
 \end{tabularx}
-\caption{Reference-to-source audit. Baseline anchors do not implement or conform to R14-2P.}
+\caption{Reference-to-source audit. Production anchors implement the listed R14 mechanisms; the
+table is not an end-to-end refinement proof.}
 \label{tab:code}
 \end{table*}
 
 \section{Implementation refinement status}\label{sec:implementation-status}
 
-\subsection{Confirmed partial correspondence}
+\subsection{Implemented R14 mechanisms}
 
-At revision \code{26a532dd6}, \code{finish\_embedded\_decision} normally makes every present
-participant independent before eager unlink begins. Exact-name and partition recovery also
-recognize a current candidate tombstone as absent when that tombstone is the decision they reach,
-and exact incarnation/inode checks protect a replacement while namespace ownership is held.
-Focused regressions cover direct non-anchor tombstone open, ordinary reopen, and scan after one peer
-is recreated. These are useful local properties, but the counterexamples below show that they do
-not yet compose into full refinement.
+The production root codec uses the seven-byte \code{CWUNO14} prefix and the generation-colored
+$P/B/R/A/M/T$ guard at byte 7. Batch preparation constructs one canonical zero-padded 2 KiB slot.
+Both filesystem schedulers write the two non-guard ranges and complete every participant barrier,
+join that complete phase, then issue and durably join only the one-byte $B$ guards. The durable
+acknowledgement is sent after the second join. Single-participant filesystem publication uses the
+same ordering.
+
+Recovery requires exact $B$ or an operation-specific $B$-to-$M/T$ final transition; an ordinary
+$R$ is not group evidence. A newer exact $R/A/M/T$ suppresses an older witness, including the
+tombstone-over-older-ring case. Incomplete rings and wrapper-independent non-quiescent slots are
+normalized through a predecessor-equivalent $A$: 111 non-guard root bytes, a barrier, then the
+one-byte $A$ guard with its own durability completion. Generic ordinary-blob recovery applies the
+same plan, so a rejected direct prepare also consumes its generation before a mutable state is
+returned. Finalization still makes every participant independently $M/T$ before the first unlink.
+
+Native regressions pin the colored guard, canonical slot padding, phase ordering, all eight
+three-participant phase-2 guard-survival masks, direct and batch generation consumption, arbitrary
+torn final roots, newer-tombstone dominance, and broken deletion frontiers. These tests establish
+the named implementation properties; they do not replace the missing end-to-end refinement proof
+or discharge the namespace-shape assumptions below.
 
 \subsection{Unchecked namespace-shape preconditions}
 
@@ -2064,7 +2075,7 @@ both durability calls can succeed, and the last write leaves only one witness. A
 would then be followed by recovery of the old alternate root because no two-member ring remains.
 
 The runtime creates distinct inodes for distinct names and its exclusive-directory contract rules
-out external namespace mutation during operation, but revision \code{26a532dd6} does not detect a
+out external namespace mutation during operation, but the current code does not detect a
 hard-link alias already present at open or compare participant device/inode identities during batch
 preflight. The R14-2P conjecture therefore applies only when the owned namespace was created through
 conforming operations and has not been externally aliased. If arbitrary pre-populated directories
@@ -2105,30 +2116,21 @@ The normative R14-2P repair is code-last prepare: make all non-guard slot bytes 
 payload/length state durable, then issue the one-byte $B$ guard and make it durable. This gives the
 guard disk-observable provenance for the exact witness but requires two ordered per-file durability
 layers. Preserving one layer instead requires a new splice-binding cryptographic commitment and a
-stronger computational assumption; that is not the selected reference contract. No checked-in Rust
-implementation of either R14-2P phase is claimed here.
+stronger computational assumption; that is not the selected reference contract. The checked-in
+Rust schedulers implement both R14-2P phases as mapped in Table~\ref{tab:code}.
 
-\subsection{Blocker: newer tombstone can lose to an older ring}
+\subsection{Closed gap: newer tombstone versus an older ring}
 
-Stale-witness suppression in \code{candidate\_has\_embedded\_batch\_witness} recognizes newer exact
-$R/M$ roots but not a newer $T$. Consequently \code{recover\_embedded} can choose an older complete
-retained ring before \code{recover\_materialized\_witnesses} gives the tombstone authority.
+An earlier recovery predicate suppressed stale witnesses for newer exact $R/M$ roots but omitted
+$T$, allowing a broken newer deletion ring to lose to an older retained ring. Current candidate
+selection scans both slots and treats exact $R/A/M/T$ as newer authority before accepting a
+witness. The regression \path{newer_tombstone_suppresses_an_older_complete_ring} constructs
+$H=\{A,C\}$ followed by deletion $D=\{A,B\}$, removes $B$, and verifies that opening $A$ retains
+the newer tombstone rather than reinstalling $H$.
 
-A reachable acknowledged counterexample is:
-\begin{enumerate}
-  \item materialize an all-retained group $H=\{A,C\}$;
-  \item commit deletion group $D=\{A,B\}$, producing newer $T_A,T_B$;
-  \item unlink $B$ and crash before unlinking $A$; and
-  \item open $A$. The $D$ ring is broken by missing $B$, while $H$ remains complete. Because $T_A$
-  does not suppress $H$'s older witness, recovery may reinstall old $M_A$ and resurrect $A$.
-\end{enumerate}
-This violates the target recovery-selection rule and acknowledged deletion safety. A repair must
-make the newest exact $T$ suppress every older witness and must resolve that tombstone before an
-older non-delete verdict. The sequence above needs atomic-open, ordinary-open, and scan regressions.
+\subsection{Historical R13 negative control: exact unissued authority synthesis}
 
-\subsection{Blocker: R13 permits exact unissued authority synthesis}
-
-The checked-in R13 spellings use one generation-independent magic per state. Under arbitrary
+The discarded R13 spellings used one generation-independent magic per state. Under arbitrary
 byte-subset persistence, that is not enough to prove that a checksum-valid $M/T/R$ header was ever
 issued. A candidate slot can already contain an older same-parity $M$ header. A torn $B$ prepare
 can retain the old $M$ magic while taking the new generation and logical fields. A later torn
@@ -2143,31 +2145,30 @@ generations earlier and therefore has another color; $B$, $A$, $R$, $M$, and $T$
 color have distinct byte values. Consequently a crash may preserve any subset of all other root
 bytes and checksum bytes, but an exact state whose guard write was never issued is unreachable.
 Generation coloring alone does not close adjacent-witness splicing: R14-2P's code-last $B$ ordering
-in Invariant~\ref{i:prepareorder} is separately required. Both changes are prerequisites before
-Lemma~\ref{lem:certificate} can apply to an implementation.
-Regressions must enumerate every subset of the abstract spelling/body/checksum/witness cells across
-a torn prepare, repeated abort recovery, finalization, and subsequent slot reuse.
+in Invariant~\ref{i:prepareorder} is separately required. Production now implements both changes.
+The colored-guard, guard-subset, abort-publication, and torn-final regressions exercise their native
+byte encodings; the specification-only model retains R13 and R14-1P solely as negative controls.
 
-\subsection{Blocker: ordinary roots are not group certificates}
+\subsection{Closed gap: ordinary roots are not group certificates}
 
-The current recovery path also treats \code{candidate\_is\_committed} ($R$) as evidence that group
+An earlier recovery path treated \code{candidate\_is\_committed} ($R$) as evidence that group
 installation started, even though $R$ contains no group identifier. A rejected stale ring can
 remain beside a later direct publication at the same generation. If the later publication happens
 to reproduce the linked candidate's root fields, exact $R_i$ can masquerade as a certificate for
 the stale group and bypass a peer's failed suffix validation.
 
-The target protocol therefore uses only the generation-colored, group-bound $M/T$ pair in
+The protocol therefore uses only the generation-colored, group-bound $M/T$ pair in
 Definition~\ref{def:certificate}. Rejection consumes the stale generation through an $A$ root
 before a persistent direct $\mathsf{P}\to R$ publisher may proceed, and recovery never treats
-its $R$ as group evidence. The checked-in generic direct publisher and the current $R/M/T$
-installation test do not jointly prove those properties. A regression must reject a batch for a
-bad peer suffix, attempt direct republication, crash at each abort/publication boundary, and verify
-that the stale batch is still rejected.
+its $R$ as group evidence. Production removed \code{candidate\_is\_committed} from decision
+recovery: \code{candidate\_status} accepts only exact $B$ or the operation-specific final
+transition, while code-last normalization consumes rejected generations before direct reuse.
 
-\subsection{Blocker: rejected witnesses survive payload reuse}
+\subsection{Closed gap: rejected witnesses survive payload reuse}
 
-When \code{recover\_embedded} finds a structurally complete ring whose speculative suffix fails
-validation, it currently continues to an older authority without durably invalidating any wrapper.
+An earlier \code{recover\_embedded} path could find a structurally complete ring whose speculative
+suffix failed validation and continue to an older authority without durably consuming the rejected
+generation.
 Ordinary recovery may then truncate to the predecessor length while leaving that root-page witness
 intact. The in-memory write stamps used during the original preparation are not persistent evidence.
 
@@ -2178,29 +2179,27 @@ reuses the same offsets for $P'\mathbin\Vert S$, where $P'\ne P$, and crashes be
 own root. The old witness can now validate $S$ and treats the prefix as preflushed, causing recovery
 to publish $P'\mathbin\Vert S$ as $G$'s candidate even though $G$ proposed $P\mathbin\Vert S$.
 
-The target reject-and-consume transition prevents this by first making any linked predecessor
+The implemented reject-and-consume transition prevents this by first making any linked predecessor
 independent, then consuming the rejected generation with a generation-colored, code-last $A$ root.
 Writing the complete $A$ header in one unordered phase would still be insufficient: its surviving
 $A$ guard could combine with candidate body bytes and mixed checksum bytes to form a valid
 $A$-spelled candidate value. The non-guard barrier followed by the one-byte guard barrier removes
 that source combination. Merely
-zeroing a wrapper is not sufficient under repeated arbitrary-subset slot rewrites. The current
-implementation needs that abort protocol and regressions covering invalid-suffix rollback,
-changed-prefix reuse, same-slot reuse after an intervening generation, and repeated crashes.
+zeroing a wrapper is not sufficient under repeated arbitrary-subset slot rewrites. Production uses
+the two code-last $A$ writes in both filesystem namespace recovery and runtime-agnostic ordinary
+recovery; the direct and partial-ring regressions verify that the next mutation uses the opposite
+slot rather than reusing the rejected generation.
 
 The abort root alone is insufficient unless recovery can recognize a crash \emph{during} its
-write. The current batch witness write is intentionally short rather than a canonical zero-padded
-full-slot prepare, and ordinary fallback has no raw-slot orphan classification. A torn recovery
-write can therefore destroy the recognizable witness and remain invalid. The target additionally
-requires canonical full-slot prepare images, Definition~\ref{def:quiescent}'s wrapper-independent
-normalization branch, the colored-guard issuance invariant, and code-last abort ordering. A
-regression must tear every non-guard cell in the first phase and the guard in the second, crash
-again during retry, then reuse the payload and slot; no trace may revive the rejected
-group or expose a value that no admitted operation built.
+write. Production therefore pads every candidate slot canonically, classifies the complete raw
+opposite slot independently of wrapper validity, and publishes $A$ body-first and guard-last. The
+native abort test verifies that an abort body without its guard has no authority and that the exact
+guard advances the internal generation without changing the logical projection. Exhaustive
+repeated-crash coverage remains a validation obligation rather than an unimplemented format step.
 
 \subsection{Reviewed cancellation repair: self-driving namespace ownership}
 
-The R13 baseline originally kept the Tokio namespace guard in the cancelable observer for
+The earlier implementation kept the Tokio namespace guard in the cancelable observer for
 \code{open}, \code{scan}, and \code{remove}. Already admitted recovery, unlink, directory-barrier,
 or blocking \code{set\_len} work could therefore outlive that guard. The synchronous atomic-write
 path also awaited carried-decision materialization inline in both Tokio and io\_uring. Those gaps
@@ -2242,11 +2241,9 @@ self-driving work is not a promise that an observer canceled after admission can
 assumption. An armed publication guard poisons its local generation when a detached task is dropped,
 but detached namespace-worker panic is not automatically converted into a storage-wide poison
 signal after its observer has gone away; the fail-stop response remains an implementation
-precondition at that boundary. Nor does this R13 implementation acquire the proposed R14 generation-colored guard,
-R14-2P code-last prepare, crash-cleared phase credit, no-recovery-$B$ rule, code-last abort
-normalization, or the other format and integrity repairs in this section. It is therefore not a
-refinement proof from the checked-in implementation to the proposed R14-2P conditions or
-Conjecture~\ref{thm:atomic}.
+precondition at that boundary. The subsequent R14 work adds the colored guard, code-last prepare,
+no-recovery-$B$ rule, and code-last abort normalization, but neither change by itself is a
+refinement proof from filesystem behavior to Conjecture~\ref{thm:atomic}.
 
 \subsection{Availability deviation: missing successor partition}
 
@@ -2281,8 +2278,16 @@ and wrong-width rewind regressions are required for direct sync and group public
 
 \section{Evidence and validation obligations}
 
-The checked-in R13 Rust tests exercise useful implementation mechanisms and regression partitions:
+The checked-in R14 Rust tests exercise the production encoding, ordering, recovery mechanisms, and
+regression partitions:
 \begin{itemize}
+  \item all six state guards follow the generation-color formula, reject a checksum-correct wrong
+  color, and same-slot reuse has a distinct color;
+  \item phase 1 writes exactly the two non-guard ranges, its barrier completes before the one-byte
+  phase-2 guard, and all eight three-participant guard-survival masks yield old except the complete
+  mask, which yields new;
+  \item code-last abort body without its guard has no authority, while exact $A$ consumes the
+  generation without changing the logical projection; delayed participants normalize independently;
   \item selected retained-subset payload and non-prefix prepared-root fixtures reject incomplete
   groups;
   \item complete rings larger than the 32-worker fanout recover, while one missing link at either
@@ -2292,6 +2297,7 @@ The checked-in R13 Rust tests exercise useful implementation mechanisms and regr
   ordinal zero;
   \item a surviving non-anchor tombstone cannot resurrect old payload through atomic or ordinary
   exact-name open;
+  \item a newer tombstone suppresses an older complete retained ring;
   \item partition recovery does not enumerate a stranded tombstone after another participant is
   recreated;
   \item selected bytewise mixtures of prepared, materialized, and tombstone roots are repaired
@@ -2301,21 +2307,20 @@ The checked-in R13 Rust tests exercise useful implementation mechanisms and regr
   \item large pending epochs preflush so unresolved group validation remains within 64 MiB.
 \end{itemize}
 
-These tests are finite evidence for their exact R13 paths. They do not implement either R14-2P
-durability phase, reproduce every R14-1P/R13 negative control, or prove refinement to
-Conjecture~\ref{thm:atomic}. In particular, the proper-subset fixtures recover one anchor and inspect
-the immediate predecessor vector; they do not then advance that anchor through later generations
-and recover a previously unopened peer.
+These tests are finite evidence for their exact R14 paths. They do not reproduce every historical
+R14-1P/R13 negative control or prove refinement to Conjecture~\ref{thm:atomic}. Repeated crashes at
+every individual abort-body byte, every backend cancellation boundary, and every multi-generation
+overlap remain broader obligations than the focused native matrix.
 
 \subsection{Executable Kani reference model (current matrix pending)}
 
 The active executable checker is Kani 0.67.0 with bundled CBMC 6.8.0. The nested crate
 \path{docs/uno-kani-model} is specification-only Rust: it is isolated from the Commonware workspace,
-does not call production R13 code, and supplies no ext4/JBD2 or public-API refinement. Its three
+does not call production R14 code, and supplies no ext4/JBD2 or public-API refinement. Its three
 layers intentionally separate physical encoding, decoded ring observations, and lifecycle
 induction.
 
-The physical layer in \path{src/codec.rs} fixes three participants and the proposed R14 encoding.
+The physical layer in \path{src/codec.rs} fixes three participants and an independently encoded R14 fixture.
 Native tests use real CRC32C and complete 2,048-byte candidate slots. Kani retains the 466-byte
 decoded prefix containing the 112-byte root, 16-byte wrapper, and 338-byte link; the omitted suffix
 is zero in every modeled source and target and is never read. Each addressed byte has an independent
@@ -2417,7 +2422,7 @@ every arbitrary disk image. The protocol layer retains semantic provenance after
 harness proves consistency of that abstraction but does not derive the retained field from bytes in
 one composed theorem. The codec layer fixes generations one through three and four-byte payload
 pieces; the protocol layer fixes at most three participants. Later overlap and recreation,
-generation wraparound, arbitrary payload geometry, production R13 transitions, cancellation,
+generation wraparound, arbitrary payload geometry, production Rust transitions, cancellation,
 namespace aliasing, Linux syscalls, ext4 journal replay, and device refinement are outside the
 model. Consequently any final Kani results can support the manual R14-2P argument only as separate
 bounded obligations and cannot convert Conjecture~\ref{thm:atomic} into a machine-checked
@@ -2540,15 +2545,12 @@ insufficient. Alternating slots, payload coverage, code-last abort, final-before
 materialization, tombstone dominance, and incarnation-safe cleanup remain necessary alongside that
 prepare order.
 
-The refinement audit also found independent implementation gaps. Revision \code{26a532dd6} still
-allows a newer tombstone to lose to an older complete ring, accepts an unbound ordinary $R$ as group
-evidence, uses generation-independent R13 spellings that permit exact unissued-root reconstruction,
-can reactivate a rejected witness after payload-offset reuse, can let admitted namespace work or an
-ordinary recovery truncate outlive its guard, and can construct noncanonical fixed-chunk or rewind
-candidates. The reviewed branch repairs the cancellation-ownership item only. It does not enforce
-the R14-2P conjecture's direct-regular-file and no-alias preconditions for a pre-populated directory,
-and it does not implement either R14-2P durability phase. No claim is made that R13 satisfies the
-proposed R14 conditions.
+The production implementation now follows that physical ordering and recovery discipline: colored
+R14 states, canonical full-slot bodies, two group-wide durability joins, exact-$B$/final decision
+evidence, newer-authority suppression, and code-last $A$ consumption. The independent
+direct-regular-file/no-alias namespace preconditions are still not enforced for arbitrary
+pre-populated directories, the integrity-geometry issues above remain open, and no filesystem or
+end-to-end mechanized refinement is claimed.
 
 The correctness-first trade is now selected: two serial durability layers preserve the existing
 noncryptographic fault model and one-copy payload without introducing a coordinator. A
@@ -2558,8 +2560,8 @@ not this reference protocol. The Kani 0.67.0 artifacts are specification-only, a
 hashes.
 Even after a fresh current run, the physical, composed, and lifecycle layers remain connected only
 by selected bridge obligations rather than one general refinement theorem. Thus R14-2P has a
-coherent manual per-group conjecture, not a claimed end-to-end machine proof, ext4 refinement, or
-R13 conformance result.
+coherent manual per-group conjecture with production mechanism anchors, not a claimed end-to-end
+machine proof, ext4 refinement, or complete implementation-refinement result.
 
 \appendix
 

@@ -283,10 +283,24 @@ async fn stage_batch_chunk(
         }
     }
     for participant in &states {
-        if !participant.removed
-            && participant.prepared.as_ref().is_ok_and(Option::is_some)
+        if participant.prepared.as_ref().is_ok_and(Option::is_some)
             && let Err(error) = participant.blob.sync_batch_commit().await
         {
+            errors.push(error);
+        }
+    }
+    (states, errors)
+}
+
+async fn stage_batch_guard_chunk(
+    states: Vec<BatchParticipantState>,
+) -> (Vec<BatchParticipantState>, Vec<Error>) {
+    let mut errors = Vec::new();
+    for participant in &states {
+        let Ok(Some(prepared)) = &participant.prepared else {
+            continue;
+        };
+        if let Err(error) = participant.blob.stage_batch_guard(prepared).await {
             errors.push(error);
         }
     }
@@ -1019,6 +1033,20 @@ impl Storage {
                 )
                 .await;
                 for (states, errors) in stage_jobs {
+                    prepared_states.extend(states);
+                    if staging_error.is_none() {
+                        staging_error = errors.into_iter().next();
+                    }
+                }
+            }
+            if staging_error.is_none() {
+                let guard_jobs = futures::future::join_all(
+                    split_batch_work(std::mem::take(&mut prepared_states))
+                        .into_iter()
+                        .map(stage_batch_guard_chunk),
+                )
+                .await;
+                for (states, errors) in guard_jobs {
                     prepared_states.extend(states);
                     if staging_error.is_none() {
                         staging_error = errors.into_iter().next();

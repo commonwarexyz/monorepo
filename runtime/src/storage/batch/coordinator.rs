@@ -10,7 +10,7 @@
 //! ```text
 //!       blob A                    blob B                    blob C
 //! +----------------+       +----------------+       +----------------+
-//! | P | A state |--+------>| P | B state |--+------>| P | C state |--+
+//! | B | A state |--+------>| B | B state |--+------>| B | C state |--+
 //! +----------------+       +----------------+       +----------------+ |
 //!        ^                                                              |
 //!        +--------------------------------------------------------------+
@@ -30,23 +30,26 @@
 //! lexicographically increasing participant keys, and closure back to the opener after exactly the
 //! declared count. The count is decoded before traversal, and recovery grows its state only after
 //! validating each exact successor. It never scans unrelated names or historical payload. A
-//! missing, torn, duplicated, out-of-order, or differently incarnated link leaves a prepared (`P`)
-//! root invisible, so ordinary root recovery selects the preceding slot.
+//! missing, torn, guardless, duplicated, out-of-order, or differently incarnated link rejects the
+//! prepared (`B`) ring. Before ordinary recovery returns the predecessor for mutation, code-last
+//! abort normalization consumes the rejected generation with a predecessor-equivalent `A` root.
 //!
-//! A complete ring commits only when every candidate root and bounded pending-payload suffix
-//! validates. Once installation starts, a materialized (`M`) root or tombstone (`T`) proves that
-//! every participant's prepare barrier completed, so the intact ring repairs all remaining roots.
-//! Candidate validation accepts arbitrary bytewise mixtures of the exact `P`, committed, `M`, and
-//! `T` spellings rather than assuming a prefix survived.
+//! Batch publication has two ordered durability layers. Every participant first writes and syncs
+//! its candidate payload evidence and all canonical slot bytes except the generation-colored guard
+//! at byte 7. Only after the group-wide first join does each participant write and durably complete
+//! that one `B` guard. A complete exact-`B` ring commits when every candidate and bounded pending-
+//! payload suffix validates. A target-only byte in an operation-specific `B`-to-`M/T` transition
+//! also proves that final installation began after a complete decision. Ordinary `R` roots are not
+//! group certificates, and recovery never writes a missing `B` guard.
 //!
 //! Materialization writes and synchronizes every final root before the first unlink:
 //!
 //! ```text
 //! complete durable ring
 //!          |
-//!          +---- retained: P -> M (independent visible root)
+//!          +---- retained: B -> M (independent visible root)
 //!          |
-//!          +---- deleted:  P -> T (payload-preserving tombstone)
+//!          +---- deleted:  B -> T (payload-preserving tombstone)
 //!          |
 //!      every M/T durable
 //!          |
@@ -729,6 +732,7 @@ fn matching_link(
                 &link.participant.candidate,
                 &embedded.witness,
             )?
+            || atomic::candidate_status(file, &link.participant.candidate, link.removed)?.is_none()
         {
             continue;
         }
@@ -817,6 +821,7 @@ fn recover_linked_decision(
             &first.participant.candidate,
             witness,
         )?
+        || atomic::candidate_status(file, &first.participant.candidate, first.removed)?.is_none()
     {
         return Ok(None);
     }
@@ -1417,13 +1422,16 @@ pub(crate) fn recover_embedded(
     embedded_decisions.sort_by_key(|(generation, _, _)| std::cmp::Reverse(*generation));
 
     for (_, local_deleted, decision) in embedded_decisions {
-        let mut install_started = false;
+        let mut decision_proven = false;
+        let mut statuses_complete = true;
         for (ordinal, participant) in decision.participants.iter().enumerate() {
             let removed = participant_is_removed(&decision, participant);
             let participant_file = match inspect_participant(root, participant)? {
                 Some(file) => file,
-                None if removed => continue,
-                None => continue,
+                None => {
+                    statuses_complete = false;
+                    break;
+                }
             };
             let witness = encode_link(&decision, ordinal)?;
             if !atomic::candidate_has_embedded_batch_witness(
@@ -1431,23 +1439,28 @@ pub(crate) fn recover_embedded(
                 &participant.candidate,
                 &witness,
             )? {
-                continue;
+                statuses_complete = false;
+                break;
             }
-            if !removed {
-                install_started |=
-                    atomic::candidate_is_committed(&participant_file, &participant.candidate)?
-                        || atomic::candidate_is_materialized(
-                            &participant_file,
-                            &participant.candidate,
-                        )?;
-            } else {
-                install_started |=
-                    atomic::candidate_is_tombstoned(&participant_file, &participant.candidate)?;
+            let Some(status) =
+                atomic::candidate_status(&participant_file, &participant.candidate, removed)?
+            else {
+                statuses_complete = false;
+                break;
+            };
+            if status == atomic::CandidateStatus::Finalizing {
+                decision_proven = true;
             }
         }
-        if install_started {
+        if statuses_complete && decision_proven {
             finish_embedded_decision(root, &decision)?;
+            if !local_deleted {
+                atomic::normalize_rejected_generation(file, data_offset)?;
+            }
             return Ok(local_deleted);
+        }
+        if !statuses_complete {
+            continue;
         }
 
         let mut complete = true;
@@ -1465,10 +1478,17 @@ pub(crate) fn recover_embedded(
         }
         if complete {
             finish_embedded_decision(root, &decision)?;
+            if !local_deleted {
+                atomic::normalize_rejected_generation(file, data_offset)?;
+            }
             return Ok(local_deleted);
         }
     }
-    recover_materialized_witnesses(root, partition, name, file)
+    let local_deleted = recover_materialized_witnesses(root, partition, name, file)?;
+    if !local_deleted {
+        atomic::normalize_rejected_generation(file, data_offset)?;
+    }
+    Ok(local_deleted)
 }
 
 pub(crate) fn recover_named_embedded(
@@ -1897,6 +1917,41 @@ mod tests {
             self.write_selected(blobs, |_| true);
         }
 
+        fn write_bodies(&self, blobs: &[TestBlob]) {
+            for ((blob, participant), record) in blobs
+                .iter()
+                .zip(&self.participants)
+                .zip(&self.records)
+            {
+                blob.file
+                    .write_all_at(&record[..7], participant.candidate.root_offset)
+                    .unwrap();
+                blob.file
+                    .write_all_at(&record[8..], participant.candidate.root_offset + 8)
+                    .unwrap();
+                blob.file.sync_all().unwrap();
+            }
+        }
+
+        fn write_guards(&self, blobs: &[TestBlob], mask: u64) {
+            for (index, ((blob, participant), record)) in blobs
+                .iter()
+                .zip(&self.participants)
+                .zip(&self.records)
+                .enumerate()
+            {
+                if mask & (1 << index) == 0 {
+                    continue;
+                }
+                atomic::write_durable_at(
+                    &blob.file,
+                    participant.candidate.root_offset + 7,
+                    &record[7..8],
+                )
+                .unwrap();
+            }
+        }
+
         fn witness(&self, ordinal: usize) -> Vec<u8> {
             encode_link(&self.decision, ordinal).unwrap()
         }
@@ -2236,6 +2291,95 @@ mod tests {
     }
 
     #[test]
+    fn partial_phase_two_consumes_the_rejected_generation_before_reuse() {
+        let root = TestRoot::new("partial-phase-two-abort");
+        let mut blobs = vec![
+            TestBlob::create(root.path(), b"a", 3, b"a-old"),
+            TestBlob::create(root.path(), b"b", 23, b"b-old"),
+            TestBlob::create(root.path(), b"c", 43, b"c-old"),
+        ];
+        let group = stage_group(
+            &mut blobs,
+            &[
+                Role::Retain(b"-group".to_vec()),
+                Role::Retain(b"-group".to_vec()),
+                Role::Retain(b"-group".to_vec()),
+            ],
+        );
+        group.write_bodies(&blobs);
+        group.write_guards(&blobs, 0b101);
+
+        assert!(!recover_from(root.path(), &blobs[0]));
+        assert_eq!(blobs[0].recovered_payload(), b"a-old");
+
+        let mut recovered = atomic::State::recover(&blobs[0].file, data_offset()).unwrap();
+        let mutation = recovered
+            .prepare_append(IoBufs::from(b"-later".to_vec()))
+            .unwrap()
+            .unwrap();
+        blobs[0]
+            .file
+            .write_all_at(b"-later", mutation.file_offset)
+            .unwrap();
+        recovered.finish_mutation(mutation.mutation, false);
+        let next = recovered.prepare_commit().unwrap().unwrap();
+        assert_ne!(
+            next.root_offset, group.participants[0].candidate.root_offset,
+            "recovery must consume the rejected generation before reusing its slot"
+        );
+        blobs[0]
+            .file
+            .write_all_at(&next.canonical_direct_slot().unwrap(), next.root_offset)
+            .unwrap();
+        blobs[0].file.sync_all().unwrap();
+        atomic::write_durable_at(&blobs[0].file, next.root_offset, &next.committed_root).unwrap();
+        recovered.finish_commit(next);
+
+        assert!(!recover_from(root.path(), &blobs[2]));
+        assert_eq!(blobs[2].recovered_payload(), b"c-old");
+    }
+
+    #[test]
+    fn every_phase_two_guard_subset_recovers_one_atomic_vector() {
+        for mask in 0u64..0b1000 {
+            let root = TestRoot::new(&format!("phase-two-mask-{mask:03b}"));
+            let mut blobs = vec![
+                TestBlob::create(root.path(), b"a", 4, b"a-old"),
+                TestBlob::create(root.path(), b"b", 24, b"b-old"),
+                TestBlob::create(root.path(), b"c", 44, b"c-old"),
+            ];
+            let group = stage_group(
+                &mut blobs,
+                &[
+                    Role::Retain(b"-new".to_vec()),
+                    Role::Retain(b"-new".to_vec()),
+                    Role::Retain(b"-new".to_vec()),
+                ],
+            );
+            group.write_bodies(&blobs);
+            group.write_guards(&blobs, mask);
+
+            for blob in &blobs {
+                assert!(!recover_from(root.path(), blob), "mask {mask:03b}");
+            }
+            let expected: &[u8] = if mask == 0b111 {
+                b"a-old-new"
+            } else {
+                b"a-old"
+            };
+            for (index, blob) in blobs.iter().enumerate() {
+                let mut participant_expected = expected.to_vec();
+                participant_expected[0] = b'a' + index as u8;
+                assert_eq!(
+                    blob.recovered_payload(),
+                    participant_expected,
+                    "mask {mask:03b}, participant {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn arbitrary_prepared_record_write_subsets_cannot_commit_a_group() {
         let root = TestRoot::new("prepared-record-subsets");
         let mut blobs = vec![
@@ -2278,7 +2422,9 @@ mod tests {
                 .zip(mask)
                 .map(|(byte, retained)| if retained { *byte } else { 0 })
                 .collect::<Vec<_>>();
-            assert_ne!(partial, *record, "case {case} must be observably partial");
+            if partial == *record {
+                continue;
+            }
             blobs[1]
                 .file
                 .write_all_at(&partial, group.participants[1].candidate.root_offset)
@@ -2448,6 +2594,47 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(blobs[0].recovered_payload(), b"a-old-new");
+    }
+
+    #[test]
+    fn newer_tombstone_suppresses_an_older_complete_ring() {
+        let root = TestRoot::new("newer-tombstone-suppresses-old-ring");
+        let mut older_blobs = vec![
+            TestBlob::create(root.path(), b"a", 15, b"a-old"),
+            TestBlob::create(root.path(), b"c", 55, b"c-old"),
+        ];
+        let older = stage_group(
+            &mut older_blobs,
+            &[
+                Role::Retain(b"-older".to_vec()),
+                Role::Retain(b"-older".to_vec()),
+            ],
+        );
+        older.write_all(&older_blobs);
+        materialize_decision_participants(root.path(), &older.decision).unwrap();
+        for blob in &mut older_blobs {
+            blob.state = atomic::State::recover(&blob.file, data_offset()).unwrap();
+        }
+
+        let a = older_blobs.remove(0);
+        let _c = older_blobs.remove(0);
+        let b = TestBlob::create(root.path(), b"b", 35, b"b-old");
+        let mut deletion_blobs = vec![a, b];
+        let deletion = stage_group(&mut deletion_blobs, &[Role::Delete, Role::Delete]);
+        deletion.write_all(&deletion_blobs);
+        materialize_decision_participants(root.path(), &deletion.decision).unwrap();
+        fs::remove_file(&deletion_blobs[1].path).unwrap();
+        sync_directory(&root.path().join(PARTITION)).unwrap();
+
+        assert!(recover_from(root.path(), &deletion_blobs[0]));
+        assert!(
+            atomic::candidate_is_tombstoned(
+                &deletion_blobs[0].file,
+                &deletion.participants[0].candidate,
+            )
+            .unwrap()
+        );
+        assert!(!deletion_blobs[1].path.exists());
     }
 
     #[test]
@@ -2803,7 +2990,6 @@ mod tests {
 
         let candidate = &group.participants[2].candidate;
         let prepared = candidate.prepared_root;
-        let materialized = atomic::materialized_candidate_root(candidate).unwrap();
         atomic::materialize_tombstone_candidate(&blobs[2].file, data_offset(), candidate).unwrap();
         let tombstone = read_candidate_root(&blobs[2], candidate);
         group.write_all(&blobs);
@@ -2814,24 +3000,22 @@ mod tests {
                     .map(|index| {
                         if index < split {
                             0
-                        } else if (index - split) % 2 == 0 {
-                            1
                         } else {
-                            2
+                            1
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        selectors.push((0..atomic::ROOT_LEN).map(|index| index % 3).collect());
+        selectors.push((0..atomic::ROOT_LEN).map(|index| index % 2).collect());
         selectors.push(
             (0..atomic::ROOT_LEN)
-                .map(|index| (index * 7 + index / 5) % 3)
+                .map(|index| (index * 7 + index / 5) % 2)
                 .collect(),
         );
         selectors.push(
             (0..atomic::ROOT_LEN)
-                .map(|index| index.count_ones() as usize % 3)
+                .map(|index| index.count_ones() as usize % 2)
                 .collect(),
         );
 
@@ -2847,8 +3031,7 @@ mod tests {
             for (index, source) in selector.into_iter().enumerate() {
                 torn[index] = match source {
                     0 => prepared[index],
-                    1 => materialized[index],
-                    2 => tombstone[index],
+                    1 => tombstone[index],
                     _ => unreachable!(),
                 };
             }

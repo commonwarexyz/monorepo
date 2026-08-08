@@ -684,13 +684,27 @@ impl uno::Publisher<BackingBlob> for V2Publisher {
             .witness(&self.blob.partition, &self.blob.name)
             .expect("single-participant batches retain their local witness");
         prepared.attach_batch_witness(witness)?;
+        let (prefix, suffix) = prepared.batch_body()?;
         core.backing()
             .write_at(
                 uno::Core::<BackingBlob>::backing_offset(prepared.root_offset)?,
-                prepared.prepared_root.clone(),
+                prefix.to_vec(),
+            )
+            .await?;
+        core.backing()
+            .write_at(
+                uno::Core::<BackingBlob>::backing_offset(prepared.root_offset + 8)?,
+                suffix.to_vec(),
             )
             .await?;
         core.backing().sync().await?;
+        core.backing()
+            .write_at_with_options(
+                uno::Core::<BackingBlob>::backing_offset(prepared.root_offset + 7)?,
+                vec![prepared.batch_guard()?],
+                WriteOptions::SYNC,
+            )
+            .await?;
 
         let raw_len = prepared.raw_len();
         let requires_truncate = prepared.requires_truncate();
@@ -797,6 +811,13 @@ impl AtomicBlob {
 
     pub(super) async fn sync_batch_commit(&self) -> Result<(), Error> {
         self.inner.core().sync_batch_commit().await
+    }
+
+    pub(super) async fn stage_batch_guard(
+        &self,
+        prepared: &atomic::PreparedCommit,
+    ) -> Result<(), Error> {
+        self.inner.core().stage_batch_guard(prepared).await
     }
 
     pub(super) async fn activate_batch_commit(

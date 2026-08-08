@@ -50,6 +50,13 @@
 //! 0           112            128                                      2048
 //! ```
 //!
+//! Every nonzero R14 root starts with `CWUNO14`; byte 7 jointly encodes its state and generation
+//! modulo three. A batch candidate is one canonical zero-padded slot. Publication first writes and
+//! synchronizes every byte except byte 7 across the complete group, then writes only the prepared
+//! guard after that group-wide barrier. Recovery never writes a prepared guard. Rejected or raw
+//! non-quiescent slots are consumed with the same body-first, guard-last ordering using a
+//! predecessor-equivalent abort root.
+//!
 //! The batch-prepared root spelling is deliberately invisible to ordinary recovery. Once the group
 //! decision is known, materialization durably rewrites only the 112-byte header to an independently
 //! recoverable spelling and leaves the linked witness available to repair peers. The batch
@@ -286,6 +293,9 @@ mod tests {
         let recovered = State::recover(&file, DATA_OFFSET).unwrap();
         assert_eq!(read(&file, &recovered), b"abc");
         assert_eq!(file.metadata().unwrap().len(), DATA_OFFSET + 3);
+
+        let reopened = State::recover(&file, DATA_OFFSET).unwrap();
+        assert_eq!(read(&file, &reopened), b"abc");
         fs::remove_file(path).unwrap();
     }
 
@@ -366,6 +376,33 @@ mod tests {
             );
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn direct_prepare_is_consumed_before_recovery_returns_mutable_state() {
+        let (path, file) = test_file();
+        let mut state = State::empty(DATA_OFFSET);
+        append(&file, &mut state, b"old");
+        commit(&file, &mut state);
+
+        append(&file, &mut state, b"-discarded");
+        let prepared = state.prepare_commit().unwrap().unwrap();
+        file.write_all_at(
+            &prepared.canonical_direct_slot().unwrap(),
+            prepared.root_offset,
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+
+        let mut recovered = State::recover(&file, DATA_OFFSET).unwrap();
+        assert_eq!(read(&file, &recovered), b"old");
+        append(&file, &mut recovered, b"-later");
+        let next = recovered.prepare_commit().unwrap().unwrap();
+        assert_ne!(
+            next.root_offset, prepared.root_offset,
+            "recovery must consume an invisible direct prepare before reusing its slot"
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -652,7 +689,147 @@ mod tests {
     }
 
     #[test]
-    fn batch_witness_write_is_not_padded_to_the_root_slot() {
+    fn root_state_guard_is_colored_by_generation() {
+        let encode = |state, generation| {
+            encode_root(
+                state,
+                generation,
+                0,
+                0,
+                0,
+                IntegrityScheme::Unbound,
+                [0; ATOMIC_BLOB_TAG_LEN],
+            )
+        };
+        let generation_one = [
+            encode(RootState::DirectPrepared, 1),
+            encode(RootState::BatchPrepared, 1),
+            encode(RootState::Committed, 1),
+            encode(RootState::Aborted, 1),
+            encode(RootState::Materialized, 1),
+            encode(RootState::Tombstone, 1),
+        ];
+
+        for (index, root) in generation_one.iter().enumerate() {
+            for other in &generation_one[index + 1..] {
+                assert_ne!(
+                    root[7], other[7],
+                    "root states must have distinct single-byte guards"
+                );
+            }
+        }
+
+        let old_materialized = encode(RootState::Materialized, 1);
+        let reused_slot_prepare = encode(RootState::BatchPrepared, 3);
+        assert_ne!(
+            old_materialized[7], reused_slot_prepare[7],
+            "same-slot generations must not share a state guard"
+        );
+
+        for generation in 1..=6 {
+            for state in [
+                RootState::DirectPrepared,
+                RootState::BatchPrepared,
+                RootState::Committed,
+                RootState::Aborted,
+                RootState::Materialized,
+                RootState::Tombstone,
+            ] {
+                let root = encode(state, generation);
+                assert_eq!(
+                    root[7],
+                    1 + 6 * (generation % 3) as u8 + state.index()
+                );
+                assert!(decode_root_with_state(&root, state).is_some());
+            }
+        }
+
+        let mut wrong_color = encode(RootState::Committed, 1);
+        wrong_color[7] = root_guard(2, RootState::Committed);
+        let root_checksum = checksum(&[ROOT_DOMAIN, &wrong_color[..ROOT_BODY_LEN]]);
+        wrong_color[ROOT_BODY_LEN..].copy_from_slice(&root_checksum.to_be_bytes());
+        assert!(decode_committed_root(&wrong_color).is_none());
+    }
+
+    #[test]
+    fn abort_guard_is_the_only_rollback_publication_point() {
+        let mut slots = [[0u8; ROOT_SLOT_LEN as usize]; ROOT_OFFSETS.len()];
+        let predecessor = encode_root(
+            RootState::Committed,
+            1,
+            0,
+            0,
+            0,
+            IntegrityScheme::Unbound,
+            [0; ATOMIC_BLOB_TAG_LEN],
+        );
+        slots[1][..ROOT_LEN].copy_from_slice(&predecessor);
+        slots[0][0] = 0x5a;
+
+        let plan = rejection_plan(DATA_OFFSET, DATA_OFFSET, &slots)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.root_offset, ROOT_OFFSETS[0]);
+        assert!(decode_aborted_root(&plan.root).is_some());
+
+        slots[0][..ROOT_GUARD_OFFSET].copy_from_slice(&plan.root[..ROOT_GUARD_OFFSET]);
+        slots[0][ROOT_GUARD_OFFSET + 1..ROOT_LEN]
+            .copy_from_slice(&plan.root[ROOT_GUARD_OFFSET + 1..]);
+        let headers = [
+            slots[0][..ROOT_LEN].try_into().unwrap(),
+            slots[1][..ROOT_LEN].try_into().unwrap(),
+        ];
+        let (body_only, _) =
+            State::recover_from_root_slots(DATA_OFFSET, DATA_OFFSET, &headers).unwrap();
+        assert_eq!(body_only.generation, 1);
+
+        slots[0][ROOT_GUARD_OFFSET] = plan.root[ROOT_GUARD_OFFSET];
+        let headers = [
+            slots[0][..ROOT_LEN].try_into().unwrap(),
+            slots[1][..ROOT_LEN].try_into().unwrap(),
+        ];
+        let (published, _) =
+            State::recover_from_root_slots(DATA_OFFSET, DATA_OFFSET, &headers).unwrap();
+        assert_eq!(published.generation, 2);
+        assert_eq!(published.logical_len(), body_only.logical_len());
+        assert_eq!(published.tag(), body_only.tag());
+    }
+
+    #[test]
+    fn rejected_suffix_over_an_exact_old_root_is_consumed() {
+        let mut slots = [[0u8; ROOT_SLOT_LEN as usize]; ROOT_OFFSETS.len()];
+        let old = encode_root(
+            RootState::Committed,
+            1,
+            0,
+            0,
+            0,
+            IntegrityScheme::Unbound,
+            [0; ATOMIC_BLOB_TAG_LEN],
+        );
+        let authority = encode_root(
+            RootState::Committed,
+            2,
+            0,
+            0,
+            0,
+            IntegrityScheme::Unbound,
+            [0; ATOMIC_BLOB_TAG_LEN],
+        );
+        slots[1][..ROOT_LEN].copy_from_slice(&old);
+        slots[1][ROOT_LEN] = 0x5a;
+        slots[0][..ROOT_LEN].copy_from_slice(&authority);
+
+        let plan = rejection_plan(DATA_OFFSET, DATA_OFFSET, &slots)
+            .unwrap()
+            .expect("a partially replaced old slot must consume the rejected generation");
+        let aborted = decode_aborted_root(&plan.root).unwrap();
+        assert_eq!(plan.root_offset, ROOT_OFFSETS[1]);
+        assert_eq!(aborted.generation, 3);
+    }
+
+    #[test]
+    fn batch_witness_write_is_padded_to_the_root_slot() {
         let mut state = State::empty(DATA_OFFSET);
         let append = state
             .prepare_append(IoBufs::from(b"new".to_vec()))
@@ -664,12 +841,12 @@ mod tests {
         let witness = b"group witness";
         prepared.attach_batch_witness(witness).unwrap();
 
-        assert_eq!(
-            prepared.prepared_root.len(),
-            ROOT_LEN + BATCH_WITNESS_HEADER_LEN + witness.len()
-        );
-        let mut slot = [0; ROOT_SLOT_LEN as usize];
-        slot[..prepared.prepared_root.len()].copy_from_slice(&prepared.prepared_root);
+        assert_eq!(prepared.prepared_root.len(), ROOT_SLOT_LEN as usize);
+        let slot: [u8; ROOT_SLOT_LEN as usize] = prepared
+            .prepared_root
+            .clone()
+            .try_into()
+            .expect("batch prepares use one canonical slot");
         assert_eq!(
             decode_batch_witness(&slot),
             Some((ROOT_LEN + BATCH_WITNESS_HEADER_LEN, witness.as_slice()))
@@ -851,7 +1028,11 @@ mod tests {
         let ((recovered, read_bytes), durable_writes) =
             track_durable_writes(|| track_read_bytes(|| State::recover(&file, DATA_OFFSET)));
         assert_eq!(recovered.unwrap().logical_len(), 4 * 1024 * 1024);
-        assert!(read_bytes < 1024, "recovery read {read_bytes} bytes");
+        let metadata_bound = 2 * ROOT_SLOT_LEN + 2 * ROOT_LEN as u64;
+        assert!(
+            read_bytes <= metadata_bound,
+            "recovery read {read_bytes} bytes"
+        );
         assert!(durable_writes.is_empty());
         fs::remove_file(path).unwrap();
     }
@@ -863,7 +1044,7 @@ mod tests {
         let integrity_checksum = 0x1020_3040;
         let integrity_scheme = IntegrityScheme::Chunked(std::num::NonZeroU32::new(4092).unwrap());
         let encoded = encode_root(
-            ROOT_MAGIC,
+            RootState::Committed,
             7,
             11,
             integrity_start,
@@ -873,7 +1054,8 @@ mod tests {
         );
 
         assert_eq!(ROOT_LEN, 112);
-        assert_eq!(&encoded[..8], ROOT_MAGIC);
+        assert_eq!(&encoded[..7], ROOT_MAGIC);
+        assert_eq!(encoded[7], root_guard(7, RootState::Committed));
         assert_eq!(&encoded[8..16], &7u64.to_be_bytes());
         assert_eq!(&encoded[16..24], &11u64.to_be_bytes());
         assert_eq!(&encoded[24..32], &integrity_start.to_be_bytes());
@@ -963,7 +1145,7 @@ mod tests {
         }
 
         let mut invalid_scheme = encode_root(
-            ROOT_MAGIC,
+            RootState::Committed,
             1,
             0,
             0,
@@ -975,31 +1157,6 @@ mod tests {
         let root_checksum = checksum(&[ROOT_DOMAIN, &invalid_scheme[..ROOT_BODY_LEN]]);
         invalid_scheme[ROOT_BODY_LEN..].copy_from_slice(&root_checksum.to_be_bytes());
         assert!(decode_committed_root(&invalid_scheme).is_none());
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn legacy_atomic_root_fails_without_truncating_payload() {
-        const LEGACY_ROOT_LEN: usize = 40;
-        const LEGACY_BODY_LEN: usize = 36;
-        let (path, file) = test_file();
-        let payload = b"legacy experimental V2 payload";
-        file.write_all_at(payload, DATA_OFFSET).unwrap();
-
-        let mut root = [0u8; LEGACY_ROOT_LEN];
-        root[..8].copy_from_slice(b"CWUNOR11");
-        root[8..16].copy_from_slice(&1u64.to_be_bytes());
-        root[16..24].copy_from_slice(&(payload.len() as u64).to_be_bytes());
-        root[24..36].copy_from_slice(&[0xA5; 12]);
-        let root_checksum = checksum(&[ROOT_DOMAIN, &root[..LEGACY_BODY_LEN]]);
-        root[LEGACY_BODY_LEN..].copy_from_slice(&root_checksum.to_be_bytes());
-        file.write_all_at(&root, ROOT_OFFSETS[1]).unwrap();
-        file.sync_all().unwrap();
-
-        let before = fs::read(&path).unwrap();
-        let error = State::recover(&file, DATA_OFFSET).expect_err("R11 must not open as empty R13");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_file(path).unwrap();
     }
 
@@ -1149,7 +1306,7 @@ mod tests {
                 stage
                     .write_all_at(
                         &encode_root(
-                            ROOT_MAGIC,
+                            RootState::Committed,
                             1,
                             PAYLOAD.len() as u64,
                             0,
@@ -1196,33 +1353,18 @@ mod tests {
     }
 }
 
-const ROOT_MAGIC: &[u8; 8] = b"CWUNOR13";
-const PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOP13";
-const BATCH_PREPARED_ROOT_MAGIC: &[u8; 8] = b"CWUNOB13";
-const MATERIALIZED_ROOT_MAGIC: &[u8; 8] = b"CWUNOM13";
-const TOMBSTONE_ROOT_MAGIC: &[u8; 8] = b"CWUNOT13";
+const ROOT_MAGIC: &[u8; 7] = b"CWUNO14";
 const BATCH_WITNESS_MAGIC: &[u8; 8] = b"CWUNOW13";
-const LEGACY_ROOT_MAGICS: [[u8; 8]; 10] = [
-    *b"CWUNOR11",
-    *b"CWUNOP11",
-    *b"CWUNOB11",
-    *b"CWUNOM11",
-    *b"CWUNOT11",
-    *b"CWUNOR12",
-    *b"CWUNOP12",
-    *b"CWUNOB12",
-    *b"CWUNOM12",
-    *b"CWUNOT12",
-];
 #[cfg(unix)]
 const CREATION_PREFIX: &str = ".commonware-uno-create-";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
 const BATCH_WITNESS_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_BATCH_WITNESS";
 const ROOT_PREFIX_LEN: usize = 44;
+const ROOT_GUARD_OFFSET: usize = 7;
 const ROOT_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
 const ROOT_BODY_LEN: usize = ROOT_PREFIX_LEN + ATOMIC_BLOB_TAG_LEN;
 pub(super) const ROOT_LEN: usize = ROOT_BODY_LEN + ROOT_CHECKSUM_LEN;
-const ROOT_SLOT_LEN: u64 = 2048;
+pub(super) const ROOT_SLOT_LEN: u64 = 2048;
 const BATCH_WITNESS_HEADER_LEN: usize = 16;
 pub(super) const MAX_BATCH_WITNESS_LEN: usize =
     ROOT_SLOT_LEN as usize - ROOT_LEN - BATCH_WITNESS_HEADER_LEN;
@@ -1235,6 +1377,33 @@ pub(super) const BACKGROUND_PREFLUSH_INTERVAL: u64 =
     MAX_VALIDATED_PAYLOAD_LEN / TARGET_PREFLUSH_PARTICIPANTS;
 const PAYLOAD_CHECKSUM_READ_LEN: usize = 64 * 1024;
 const INTEGRITY_CHECKSUM_LEN: usize = std::mem::size_of::<u32>();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootState {
+    DirectPrepared,
+    BatchPrepared,
+    Committed,
+    Aborted,
+    Materialized,
+    Tombstone,
+}
+
+impl RootState {
+    const fn index(self) -> u8 {
+        match self {
+            Self::DirectPrepared => 0,
+            Self::BatchPrepared => 1,
+            Self::Committed => 2,
+            Self::Aborted => 3,
+            Self::Materialized => 4,
+            Self::Tombstone => 5,
+        }
+    }
+}
+
+const fn root_guard(generation: u64, state: RootState) -> u8 {
+    1 + 6 * (generation % 3) as u8 + state.index()
+}
 #[commonware_macros::stability(ALPHA)]
 #[cfg(unix)]
 const MIGRATION_COPY_LEN: usize = 1024 * 1024;
@@ -1504,6 +1673,12 @@ pub(crate) struct CandidateMetadata {
     payload_end: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CandidateStatus {
+    Prepared,
+    Finalizing,
+}
+
 pub(super) struct PreparedCommit {
     payload_start: u64,
     pub(super) root_offset: u64,
@@ -1554,7 +1729,7 @@ impl PreparedCommit {
 
     /// Mark this commit as carrying a participant-embedded batch witness.
     pub(super) fn mark_batch_prepared(&mut self) {
-        self.prepared_root[..8].copy_from_slice(BATCH_PREPARED_ROOT_MAGIC);
+        self.prepared_root[7] = root_guard(self.commit.generation, RootState::BatchPrepared);
         let root_checksum = checksum(&[ROOT_DOMAIN, &self.prepared_root[..ROOT_BODY_LEN]]);
         self.prepared_root[ROOT_BODY_LEN..ROOT_LEN].copy_from_slice(&root_checksum.to_be_bytes());
     }
@@ -1569,7 +1744,12 @@ impl PreparedCommit {
 
     /// Append a checksummed batch witness immediately after this root.
     pub(super) fn attach_batch_witness(&mut self, witness: &[u8]) -> io::Result<()> {
-        if self.prepared_root.get(..8) != Some(BATCH_PREPARED_ROOT_MAGIC) {
+        let header: &[u8; ROOT_LEN] = self
+            .prepared_root
+            .get(..ROOT_LEN)
+            .and_then(|header| header.try_into().ok())
+            .ok_or_else(|| invalid_input("atomic batch-prepared root is truncated"))?;
+        if decode_batch_prepared_root(header).is_none() {
             return Err(invalid_input(
                 "atomic batch witness requires a batch-prepared root",
             ));
@@ -1597,8 +1777,51 @@ impl PreparedCommit {
         self.prepared_root
             .extend_from_slice(&witness_checksum.to_be_bytes());
         self.prepared_root.extend_from_slice(witness);
-        debug_assert!(self.prepared_root.len() <= ROOT_SLOT_LEN as usize);
+        self.prepared_root.resize(ROOT_SLOT_LEN as usize, 0);
         Ok(())
+    }
+
+    /// Return the two candidate-slot ranges written before the prepared guard is issued.
+    pub(super) fn batch_body(&self) -> io::Result<(&[u8], &[u8])> {
+        if self.prepared_root.len() != ROOT_SLOT_LEN as usize
+            || decode_batch_prepared_root(
+                self.prepared_root[..ROOT_LEN]
+                    .try_into()
+                    .expect("a full slot contains one root header"),
+            )
+            .is_none()
+        {
+            return Err(invalid_input(
+                "atomic batch body requires one canonical prepared slot",
+            ));
+        }
+        Ok((
+            &self.prepared_root[..ROOT_GUARD_OFFSET],
+            &self.prepared_root[ROOT_GUARD_OFFSET + 1..],
+        ))
+    }
+
+    /// Return the generation-colored prepared guard issued after every batch body is durable.
+    pub(super) fn batch_guard(&self) -> io::Result<u8> {
+        self.batch_body()?;
+        Ok(self.prepared_root[ROOT_GUARD_OFFSET])
+    }
+
+    /// Expand an invisible direct prepare to its canonical zero-padded slot image.
+    pub(super) fn canonical_direct_slot(&self) -> io::Result<Vec<u8>> {
+        let header: &[u8; ROOT_LEN] = self
+            .prepared_root
+            .get(..ROOT_LEN)
+            .and_then(|header| header.try_into().ok())
+            .ok_or_else(|| invalid_input("atomic direct prepare is truncated"))?;
+        if self.prepared_root.len() != ROOT_LEN
+            || decode_root_with_state(header, RootState::DirectPrepared).is_none()
+        {
+            return Err(invalid_input("atomic direct prepare is not canonical"));
+        }
+        let mut slot = self.prepared_root.clone();
+        slot.resize(ROOT_SLOT_LEN as usize, 0);
+        Ok(slot)
     }
 
     /// Return the fixed-size identity needed to validate and install this candidate after a group
@@ -1669,6 +1892,7 @@ impl State {
 
     #[cfg(all(test, unix))]
     pub(super) fn recover(file: &File, data_offset: u64) -> io::Result<Self> {
+        normalize_rejected_generation(file, data_offset)?;
         if data_offset < ROOT_OFFSETS[1] + ROOT_SLOT_LEN {
             return Err(invalid_input(
                 "V2 data offset does not reserve both root slots",
@@ -1720,12 +1944,6 @@ impl State {
             if encoded.iter().all(|byte| *byte == 0) {
                 slot_zero[index] = true;
                 continue;
-            }
-            if LEGACY_ROOT_MAGICS
-                .iter()
-                .any(|magic| encoded.starts_with(magic))
-            {
-                return Err(invalid_data("unsupported atomic root format"));
             }
             if let Some(root) = decode_root(&encoded) {
                 if ROOT_OFFSETS[(root.generation as usize) & 1] != offset {
@@ -2383,7 +2601,7 @@ impl State {
         let root_offset = ROOT_OFFSETS[(generation as usize) & 1];
         let integrity_checksum = self.integrity_checksum();
         let committed_root = encode_root(
-            ROOT_MAGIC,
+            RootState::Committed,
             generation,
             self.logical_len,
             self.integrity_start,
@@ -2392,7 +2610,7 @@ impl State {
             self.tag,
         );
         let prepared_root = encode_root(
-            PREPARED_ROOT_MAGIC,
+            RootState::DirectPrepared,
             generation,
             self.logical_len,
             self.integrity_start,
@@ -2449,7 +2667,7 @@ impl State {
             payload_start: payload_end,
             root_offset,
             prepared_root: encode_root(
-                PREPARED_ROOT_MAGIC,
+                RootState::DirectPrepared,
                 generation,
                 self.committed_len,
                 self.committed_integrity_start,
@@ -2459,7 +2677,7 @@ impl State {
             )
             .to_vec(),
             committed_root: encode_root(
-                ROOT_MAGIC,
+                RootState::Committed,
                 generation,
                 self.committed_len,
                 self.committed_integrity_start,
@@ -2502,7 +2720,7 @@ impl State {
 }
 
 fn encode_root(
-    magic: &[u8; 8],
+    state: RootState,
     generation: u64,
     logical_len: u64,
     integrity_start: u64,
@@ -2511,7 +2729,8 @@ fn encode_root(
     tag: [u8; ATOMIC_BLOB_TAG_LEN],
 ) -> [u8; ROOT_LEN] {
     let mut root = [0u8; ROOT_LEN];
-    root[..8].copy_from_slice(magic);
+    root[..7].copy_from_slice(ROOT_MAGIC);
+    root[7] = root_guard(generation, state);
     root[8..16].copy_from_slice(&generation.to_be_bytes());
     root[16..24].copy_from_slice(&logical_len.to_be_bytes());
     root[24..32].copy_from_slice(&integrity_start.to_be_bytes());
@@ -2539,8 +2758,12 @@ struct Root {
     tag: [u8; ATOMIC_BLOB_TAG_LEN],
 }
 
-fn decode_root_with_magic(encoded: &[u8; ROOT_LEN], magic: &[u8; 8]) -> Option<Root> {
-    if &encoded[..8] != magic {
+fn decode_root_with_state(encoded: &[u8; ROOT_LEN], state: RootState) -> Option<Root> {
+    if &encoded[..7] != ROOT_MAGIC {
+        return None;
+    }
+    let generation = u64::from_be_bytes(encoded[8..16].try_into().unwrap());
+    if encoded[7] != root_guard(generation, state) {
         return None;
     }
     let root_checksum = u32::from_be_bytes(encoded[ROOT_BODY_LEN..ROOT_LEN].try_into().unwrap());
@@ -2575,24 +2798,47 @@ fn decode_root_fields(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
 }
 
 fn decode_committed_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
-    decode_root_with_magic(encoded, ROOT_MAGIC)
+    decode_root_with_state(encoded, RootState::Committed)
 }
 
 fn decode_materialized_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
-    decode_root_with_magic(encoded, MATERIALIZED_ROOT_MAGIC)
+    decode_root_with_state(encoded, RootState::Materialized)
+}
+
+fn decode_aborted_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
+    decode_root_with_state(encoded, RootState::Aborted)
+}
+
+fn decode_tombstone_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
+    decode_root_with_state(encoded, RootState::Tombstone)
 }
 
 fn decode_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
-    decode_committed_root(encoded).or_else(|| decode_materialized_root(encoded))
+    decode_committed_root(encoded)
+        .or_else(|| decode_aborted_root(encoded))
+        .or_else(|| decode_materialized_root(encoded))
 }
 
 fn decode_prepared_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
-    decode_root_with_magic(encoded, PREPARED_ROOT_MAGIC)
-        .or_else(|| decode_root_with_magic(encoded, BATCH_PREPARED_ROOT_MAGIC))
+    decode_root_with_state(encoded, RootState::DirectPrepared)
+        .or_else(|| decode_root_with_state(encoded, RootState::BatchPrepared))
 }
 
 fn decode_batch_prepared_root(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
-    decode_root_with_magic(encoded, BATCH_PREPARED_ROOT_MAGIC)
+    decode_root_with_state(encoded, RootState::BatchPrepared)
+}
+
+fn decode_root_state(encoded: &[u8; ROOT_LEN]) -> Option<(RootState, Root)> {
+    [
+        RootState::DirectPrepared,
+        RootState::BatchPrepared,
+        RootState::Committed,
+        RootState::Aborted,
+        RootState::Materialized,
+        RootState::Tombstone,
+    ]
+    .into_iter()
+    .find_map(|state| decode_root_with_state(encoded, state).map(|root| (state, root)))
 }
 
 fn decode_batch_witness(slot: &[u8]) -> Option<(usize, &[u8])> {
@@ -2606,9 +2852,187 @@ fn decode_batch_witness(slot: &[u8]) -> Option<(usize, &[u8])> {
     let witness_offset = header_end;
     let witness_end = witness_offset.checked_add(witness_len)?;
     let witness = slot.get(witness_offset..witness_end)?;
+    if slot.get(witness_end..)?.iter().any(|byte| *byte != 0) {
+        return None;
+    }
     let stored_checksum = u32::from_be_bytes(header[12..16].try_into().unwrap());
     let expected_checksum = checksum(&[BATCH_WITNESS_DOMAIN, &header[..12], witness]);
     (stored_checksum == expected_checksum).then_some((witness_offset, witness))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CanonicalSlot {
+    Zero,
+    Root(RootState, Root),
+}
+
+fn canonical_slot(slot: &[u8; ROOT_SLOT_LEN as usize]) -> Option<CanonicalSlot> {
+    if slot.iter().all(|byte| *byte == 0) {
+        return Some(CanonicalSlot::Zero);
+    }
+    let header: &[u8; ROOT_LEN] = slot[..ROOT_LEN]
+        .try_into()
+        .expect("root slots contain a complete root header");
+    let (state, root) = decode_root_state(header)?;
+    let suffix_is_canonical = match state {
+        RootState::DirectPrepared | RootState::Committed => {
+            slot[ROOT_LEN..].iter().all(|byte| *byte == 0)
+        }
+        RootState::BatchPrepared | RootState::Materialized | RootState::Tombstone => {
+            decode_batch_witness(slot).is_some()
+        }
+        RootState::Aborted => true,
+    };
+    if !suffix_is_canonical {
+        // A partial candidate-body write can retain an exact predecessor header while replacing
+        // only part of its suffix. The complete slot is raw and must be consumed by the abort
+        // publication path before this generation is reused.
+        return None;
+    }
+    Some(CanonicalSlot::Root(state, root))
+}
+
+pub(super) struct RejectionPlan {
+    pub(super) root_offset: u64,
+    pub(super) root: [u8; ROOT_LEN],
+}
+
+pub(super) fn rejection_plan(
+    data_offset: u64,
+    raw_len: u64,
+    slots: &[[u8; ROOT_SLOT_LEN as usize]; ROOT_OFFSETS.len()],
+) -> io::Result<Option<RejectionPlan>> {
+    if data_offset < ROOT_OFFSETS[1] + ROOT_SLOT_LEN {
+        return Err(invalid_input(
+            "V2 data offset does not reserve both root slots",
+        ));
+    }
+    if raw_len < data_offset {
+        return Err(invalid_data("atomic blob is shorter than its V2 header"));
+    }
+
+    let mut canonical = [None; ROOT_OFFSETS.len()];
+    for (index, (&slot, root_offset)) in slots.iter().zip(ROOT_OFFSETS).enumerate() {
+        canonical[index] = canonical_slot(&slot);
+        if let Some(CanonicalSlot::Root(_, root)) = canonical[index]
+            && ROOT_OFFSETS[(root.generation as usize) & 1] != root_offset
+        {
+            return Err(invalid_data("atomic root generation is in the wrong slot"));
+        }
+    }
+
+    let mut authority = None;
+    let mut recovery_error = None;
+    for (index, spelling) in canonical.iter().copied().enumerate() {
+        let Some(CanonicalSlot::Root(state, root)) = spelling else {
+            continue;
+        };
+        if !matches!(
+            state,
+            RootState::Committed
+                | RootState::Aborted
+                | RootState::Materialized
+                | RootState::Tombstone
+        ) {
+            continue;
+        }
+        match recover_root(data_offset, raw_len, ROOT_OFFSETS[index], root) {
+            Ok(_) => {}
+            Err(error) if invalid_candidate(&error) => {
+                recovery_error.get_or_insert(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        if authority
+            .as_ref()
+            .is_none_or(|(_, _, selected): &(usize, RootState, Root)| {
+                root.generation > selected.generation
+            })
+        {
+            authority = Some((index, state, root));
+        }
+    }
+
+    let (authority_index, authority_state, authority_root) = match authority {
+        Some(authority) => authority,
+        None if matches!(canonical[0], Some(CanonicalSlot::Zero)) => (
+            0,
+            RootState::Committed,
+            Root {
+                generation: 0,
+                logical_len: 0,
+                integrity_start: 0,
+                integrity_checksum: 0,
+                integrity_scheme: IntegrityScheme::Unbound,
+                tag: [0; ATOMIC_BLOB_TAG_LEN],
+            },
+        ),
+        None => {
+            return Err(recovery_error
+                .unwrap_or_else(|| invalid_data("atomic blob has no recoverable root")));
+        }
+    };
+
+    // A tombstone is already an independently durable absence certificate. It is never returned
+    // as a mutable blob, so stale state in the alternate slot cannot authorize an older open.
+    if authority_state == RootState::Tombstone {
+        return Ok(None);
+    }
+
+    let target_index = 1 - authority_index;
+    match canonical[target_index] {
+        Some(CanonicalSlot::Zero) if authority_root.generation <= 1 => return Ok(None),
+        Some(CanonicalSlot::Zero) => {
+            return Err(invalid_data(
+                "atomic root generation skipped its zero predecessor",
+            ));
+        }
+        Some(CanonicalSlot::Root(_, root)) if root.generation < authority_root.generation => {
+            if root.generation.checked_add(1) == Some(authority_root.generation) {
+                return Ok(None);
+            }
+            return Err(invalid_data("atomic root generations are not consecutive"));
+        }
+        Some(CanonicalSlot::Root(state, root))
+            if matches!(
+                state,
+                RootState::Committed
+                    | RootState::Aborted
+                    | RootState::Materialized
+                    | RootState::Tombstone
+            ) && root.generation >= authority_root.generation =>
+        {
+            return Err(invalid_data(
+                "atomic recovery left a newer independent authority unresolved",
+            ));
+        }
+        Some(CanonicalSlot::Root(_, root))
+            if authority_root.generation.checked_add(1) != Some(root.generation) =>
+        {
+            return Err(invalid_data(
+                "atomic rejected candidate does not follow its predecessor generation",
+            ));
+        }
+        Some(CanonicalSlot::Root(_, _)) | None => {}
+    }
+
+    let abort_generation = authority_root
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| invalid_data("atomic generation overflow"))?;
+    Ok(Some(RejectionPlan {
+        root_offset: ROOT_OFFSETS[target_index],
+        root: encode_root(
+            RootState::Aborted,
+            abort_generation,
+            authority_root.logical_len,
+            authority_root.integrity_start,
+            authority_root.integrity_checksum,
+            authority_root.integrity_scheme,
+            authority_root.tag,
+        ),
+    }))
 }
 
 #[cfg(unix)]
@@ -2622,6 +3046,36 @@ fn read_root_slot(
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Consume one non-quiescent generation before its predecessor is returned for mutation.
+///
+/// Namespace recovery resolves every complete linked decision before calling this function. Any
+/// remaining candidate slot therefore represents a rejected direct or batch publication. The
+/// predecessor-equivalent abort header is published body-first and guard-last so every surviving
+/// exact abort selects the predecessor value.
+#[cfg(unix)]
+pub(crate) fn normalize_rejected_generation(file: &File, data_offset: u64) -> io::Result<()> {
+    let raw_len = file.metadata()?.len();
+    let mut slots = [[0u8; ROOT_SLOT_LEN as usize]; ROOT_OFFSETS.len()];
+    for (index, root_offset) in ROOT_OFFSETS.into_iter().enumerate() {
+        slots[index] = read_root_slot(file, root_offset)?
+            .ok_or_else(|| invalid_data("atomic blob has a truncated root slot"))?;
+    }
+    let Some(plan) = rejection_plan(data_offset, raw_len, &slots)? else {
+        return Ok(());
+    };
+    file.write_all_at(&plan.root[..ROOT_GUARD_OFFSET], plan.root_offset)?;
+    file.write_all_at(
+        &plan.root[ROOT_GUARD_OFFSET + 1..],
+        plan.root_offset + ROOT_GUARD_OFFSET as u64 + 1,
+    )?;
+    file.sync_all()?;
+    write_durable_at(
+        file,
+        plan.root_offset + ROOT_GUARD_OFFSET as u64,
+        &plan.root[ROOT_GUARD_OFFSET..ROOT_GUARD_OFFSET + 1],
+    )
 }
 
 fn candidate_roots_match(candidate: &Candidate, prepared: Root, committed: Root) -> bool {
@@ -2642,7 +3096,7 @@ fn candidate_materialized_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> 
         return None;
     }
     Some(encode_root(
-        MATERIALIZED_ROOT_MAGIC,
+        RootState::Materialized,
         committed.generation,
         committed.logical_len,
         committed.integrity_start,
@@ -2659,7 +3113,7 @@ fn candidate_tombstone_root(candidate: &Candidate) -> Option<[u8; ROOT_LEN]> {
         return None;
     }
     Some(encode_root(
-        TOMBSTONE_ROOT_MAGIC,
+        RootState::Tombstone,
         committed.generation,
         committed.logical_len,
         committed.integrity_start,
@@ -2675,61 +3129,30 @@ pub(super) fn materialized_candidate_root(candidate: &Candidate) -> io::Result<[
         .ok_or_else(|| invalid_data("transaction candidate cannot be materialized"))
 }
 
-fn candidate_root_is_transition(installed: &[u8; ROOT_LEN], candidate: &Candidate) -> bool {
-    installed
-        .iter()
-        .zip(
-            candidate
-                .prepared_root
-                .iter()
-                .zip(&candidate.committed_root),
-        )
-        .all(|(installed, (prepared, committed))| installed == prepared || installed == committed)
-}
-
-fn candidate_root_is_batch_transition(installed: &[u8; ROOT_LEN], candidate: &Candidate) -> bool {
-    let Some(materialized) = candidate_materialized_root(candidate) else {
-        return candidate_root_is_transition(installed, candidate);
+fn candidate_root_status(
+    installed: &[u8; ROOT_LEN],
+    candidate: &Candidate,
+    deletion: bool,
+) -> Option<CandidateStatus> {
+    let final_root = if deletion {
+        candidate_tombstone_root(candidate)?
+    } else {
+        candidate_materialized_root(candidate)?
     };
-    installed
+    if installed == &candidate.prepared_root {
+        return Some(CandidateStatus::Prepared);
+    }
+    let mut target_byte_survived = false;
+    for (installed, (prepared, final_byte)) in installed
         .iter()
-        .zip(
-            candidate
-                .prepared_root
-                .iter()
-                .zip(&candidate.committed_root)
-                .zip(materialized),
-        )
-        .all(|(installed, ((prepared, committed), materialized))| {
-            installed == prepared || installed == committed || *installed == materialized
-        })
-}
-
-fn candidate_root_is_delete_transition(installed: &[u8; ROOT_LEN], candidate: &Candidate) -> bool {
-    let Some(materialized) = candidate_materialized_root(candidate) else {
-        return candidate_root_is_transition(installed, candidate);
-    };
-    let Some(tombstone) = candidate_tombstone_root(candidate) else {
-        return false;
-    };
-    installed
-        .iter()
-        .zip(
-            candidate
-                .prepared_root
-                .iter()
-                .zip(&candidate.committed_root)
-                .zip(materialized)
-                .zip(tombstone),
-        )
-        .all(
-            |(installed, (((prepared, committed), materialized), tombstone))| {
-                installed == prepared
-                    || installed == committed
-                    || *installed == materialized
-                    || *installed == tombstone
-            },
-        )
+        .zip(candidate.prepared_root.iter().zip(final_root))
+    {
+        if installed != prepared && *installed != final_byte {
+            return None;
+        }
+        target_byte_survived |= final_byte != *prepared && *installed == final_byte;
+    }
+    target_byte_survived.then_some(CandidateStatus::Finalizing)
 }
 
 #[cfg(unix)]
@@ -2756,11 +3179,13 @@ fn embedded_batch_candidates_with_materialized(
         let encoded: [u8; ROOT_LEN] = slot[..ROOT_LEN]
             .try_into()
             .expect("root slots contain a complete root header");
-        let Some(root) = decode_root_fields(&encoded) else {
+        let Some(root) = decode_materialized_root(&encoded)
+            .or_else(|| decode_tombstone_root(&encoded))
+        else {
             continue;
         };
         let prepared_root = encode_root(
-            BATCH_PREPARED_ROOT_MAGIC,
+            RootState::BatchPrepared,
             root.generation,
             root.logical_len,
             root.integrity_start,
@@ -2769,7 +3194,7 @@ fn embedded_batch_candidates_with_materialized(
             root.tag,
         );
         let committed_root = encode_root(
-            ROOT_MAGIC,
+            RootState::Committed,
             root.generation,
             root.logical_len,
             root.integrity_start,
@@ -2787,9 +3212,6 @@ fn embedded_batch_candidates_with_materialized(
             continue;
         };
         if encoded == materialized_root && !include_materialized {
-            continue;
-        }
-        if !candidate_root_is_delete_transition(&encoded, &candidate) {
             continue;
         }
         let Some((witness_offset, witness)) = decode_batch_witness(&slot) else {
@@ -2911,10 +3333,13 @@ pub(crate) fn candidate_has_embedded_batch_witness(
         let encoded: [u8; ROOT_LEN] = slot[..ROOT_LEN]
             .try_into()
             .expect("root slots contain a complete root header");
-        if decode_root(&encoded).is_some_and(|root| {
+        if decode_root(&encoded)
+            .or_else(|| decode_tombstone_root(&encoded))
+            .is_some_and(|root| {
             ROOT_OFFSETS[(root.generation as usize) & 1] == root_offset
                 && root.generation > committed.generation
-        }) {
+            })
+        {
             return Ok(false);
         }
         if root_offset == candidate.root_offset {
@@ -2927,32 +3352,61 @@ pub(crate) fn candidate_has_embedded_batch_witness(
     let installed: [u8; ROOT_LEN] = slot[..ROOT_LEN]
         .try_into()
         .expect("root slots contain a complete root header");
-    if !candidate_root_is_delete_transition(&installed, candidate) {
+    if decode_root(&installed)
+        .or_else(|| decode_tombstone_root(&installed))
+        .is_some_and(|root| {
+            root.generation == committed.generation
+                && installed != candidate.prepared_root
+                && decode_materialized_root(&installed).is_none()
+                && decode_tombstone_root(&installed).is_none()
+        })
+    {
         return Ok(false);
     }
     Ok(decode_batch_witness(&slot)
         .is_some_and(|(offset, found)| offset >= ROOT_LEN && found == witness))
 }
 
-/// Return whether a candidate's exact committed header is installed in its generation slot.
+/// Classify the candidate root using only the prepared base and its operation-specific final root.
 #[cfg(unix)]
-pub(crate) fn candidate_is_committed(file: &File, candidate: &Candidate) -> io::Result<bool> {
-    let Some(prepared) = decode_prepared_root(&candidate.prepared_root) else {
-        return Ok(false);
+pub(crate) fn candidate_status(
+    file: &File,
+    candidate: &Candidate,
+    deletion: bool,
+) -> io::Result<Option<CandidateStatus>> {
+    let Some(prepared) = decode_batch_prepared_root(&candidate.prepared_root) else {
+        return Ok(None);
     };
     let Some(committed) = decode_committed_root(&candidate.committed_root) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !candidate_roots_match(candidate, prepared, committed) {
-        return Ok(false);
+        return Ok(None);
     }
-
-    let mut installed = [0u8; ROOT_LEN];
-    match read_exact_at(file, candidate.root_offset, &mut installed) {
-        Ok(()) => Ok(installed == candidate.committed_root),
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(error) => Err(error),
+    let mut candidate_root = None;
+    for root_offset in ROOT_OFFSETS {
+        let Some(slot) = read_root_slot(file, root_offset)? else {
+            continue;
+        };
+        let encoded: [u8; ROOT_LEN] = slot[..ROOT_LEN]
+            .try_into()
+            .expect("root slots contain a complete root header");
+        if decode_root(&encoded)
+            .or_else(|| decode_tombstone_root(&encoded))
+            .is_some_and(|root| {
+                ROOT_OFFSETS[(root.generation as usize) & 1] == root_offset
+                    && root.generation > committed.generation
+            })
+        {
+            return Ok(None);
+        }
+        if root_offset == candidate.root_offset {
+            candidate_root = Some(encoded);
+        }
     }
+    Ok(candidate_root.and_then(|installed| {
+        candidate_root_status(&installed, candidate, deletion)
+    }))
 }
 
 /// Return whether a batch candidate's exact materialized header is installed.
@@ -3017,7 +3471,7 @@ pub(crate) fn materialize_tombstone_candidate(
     }
     let mut installed = [0u8; ROOT_LEN];
     read_exact_at(file, candidate.root_offset, &mut installed)?;
-    if !candidate_root_is_delete_transition(&installed, candidate) {
+    if candidate_root_status(&installed, candidate, true).is_none() {
         return Err(invalid_data(
             "transaction candidate root is not a recoverable tombstone transition",
         ));
@@ -3157,8 +3611,9 @@ pub(super) fn write_durable_at(file: &File, offset: u64, bytes: &[u8]) -> io::Re
 /// Validate a transaction-bound candidate without changing its root.
 ///
 /// A prepared root is deliberately invisible to ordinary blob recovery. An exact durable batch
-/// witness supplies the prepared and committed headers, allowing validation to accept any
-/// bytewise prefix-independent transition between those headers.
+/// witness supplies the exact `B` base and candidate fields. Validation accepts that base or an
+/// operation-specific bytewise transition from `B` to `M/T` containing at least one target-only
+/// byte.
 #[cfg(unix)]
 fn validate_candidate_transition(
     file: &File,
@@ -3186,11 +3641,7 @@ fn validate_candidate_transition(
     // The durable batch witness is the authority for this exact self-contained
     // candidate. Its prior base root may already have been reused while preparing a later batch,
     // so validation must not depend on finding that base in the other root slot.
-    let torn_transition = if deletion {
-        candidate_root_is_delete_transition(&installed, candidate)
-    } else {
-        candidate_root_is_batch_transition(&installed, candidate)
-    };
+    let torn_transition = candidate_root_status(&installed, candidate, deletion).is_some();
     if !torn_transition {
         return Err(invalid_data(
             "transaction candidate root is not a recoverable publication transition",
@@ -3415,7 +3866,7 @@ pub(super) fn migrate_live(
         copied += len as u64;
     }
     let initial_root = encode_root(
-        ROOT_MAGIC,
+        RootState::Committed,
         1,
         logical_len,
         state.integrity_start,

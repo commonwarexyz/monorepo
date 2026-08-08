@@ -96,6 +96,12 @@ pub trait AtomicStorage: Storage {
 /// deleted participant first becomes a durable tombstone and is unlinked only after every
 /// participant has an independently recoverable final root.
 ///
+/// Publication uses two ordered durability layers. Every participant first makes its candidate
+/// payload evidence and non-guard root-slot bytes durable. After all of those completions, each
+/// participant durably publishes one generation-colored guard byte. `start_apply` reports `Ok`
+/// only after every guard completion. Recovery either validates a complete ring or consumes an
+/// incomplete generation with a predecessor-equivalent abort before returning a mutable handle.
+///
 /// Before links are constructed, participants are ordered lexicographically by partition and then
 /// raw blob-name bytes. The same order determines ring ordinals and filesystem lock acquisition,
 /// so equivalent participant sets produce the same ring regardless of caller order.

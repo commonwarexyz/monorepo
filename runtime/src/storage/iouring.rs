@@ -764,11 +764,11 @@ impl Storage {
                                     prepared,
                                     witness.expect("eligible deletions have an embedded witness"),
                                 )
-                                .await
+                                .await?;
                             } else {
                                 blob.stage_batch_commit(prepared, witness).await?;
-                                blob.sync_batch_commit().await
                             }
+                            blob.sync_batch_commit().await
                         })
                     });
             let commit_error = join_all(participant_commits)
@@ -776,6 +776,26 @@ impl Storage {
                 .into_iter()
                 .find_map(Result::err);
             if let Some(error) = commit_error {
+                for (_, operation, _, _) in &mut prepared_states {
+                    operation.poison();
+                }
+                let _ = commit_sender.send(Err(error.clone()));
+                drop(guard);
+                on_complete();
+                let _ = completion_sender.send(Err(error));
+                return;
+            }
+
+            let guard_error = join_all(prepared_states.iter().filter_map(
+                |(blob, _, prepared, _)| {
+                    let prepared = prepared.as_ref().unwrap().as_ref()?;
+                    Some(blob.stage_batch_guard(prepared))
+                },
+            ))
+            .await
+            .into_iter()
+            .find_map(Result::err);
+            if let Some(error) = guard_error {
                 for (_, operation, _, _) in &mut prepared_states {
                     operation.poison();
                 }
@@ -1824,13 +1844,27 @@ impl uno::Publisher<AtomicBacking> for V2Publisher {
             .witness(&self.blob.partition, &self.blob.name)
             .expect("single-participant batches retain their local witness");
         prepared.attach_batch_witness(witness)?;
+        let (prefix, suffix) = prepared.batch_body()?;
         core.backing()
             .write_at(
                 uno::Core::<AtomicBacking>::backing_offset(prepared.root_offset)?,
-                prepared.prepared_root.clone(),
+                prefix.to_vec(),
+            )
+            .await?;
+        core.backing()
+            .write_at(
+                uno::Core::<AtomicBacking>::backing_offset(prepared.root_offset + 8)?,
+                suffix.to_vec(),
             )
             .await?;
         core.backing().sync().await?;
+        core.backing()
+            .write_at_with_options(
+                uno::Core::<AtomicBacking>::backing_offset(prepared.root_offset + 7)?,
+                vec![prepared.batch_guard()?],
+                WriteOptions::SYNC,
+            )
+            .await?;
 
         let raw_len = prepared.raw_len();
         let requires_truncate = prepared.requires_truncate();
@@ -1937,6 +1971,13 @@ impl AtomicBlob {
 
     async fn sync_batch_commit(&self) -> Result<(), Error> {
         self.inner.core().sync_batch_commit().await
+    }
+
+    async fn stage_batch_guard(
+        &self,
+        prepared: &super::atomic::PreparedCommit,
+    ) -> Result<(), Error> {
+        self.inner.core().stage_batch_guard(prepared).await
     }
 
     async fn activate_batch_commit(
