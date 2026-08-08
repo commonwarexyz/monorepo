@@ -119,6 +119,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// For [`CertifiableAutomaton`] implementations, returning a payload from
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
+        ///
+        /// A consensus engine that runs ahead optimistically (see [`simplex`])
+        /// may request a payload while the parent named in the context is only
+        /// notarized, or only voted for locally, and before consensus enters
+        /// the context's view. Build on the named parent regardless; if the
+        /// parent is later abandoned, this proposal is abandoned with it.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -140,6 +146,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Closing the channel is also terminal for this request and should be reserved for cases
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
+        ///
+        /// The parent caveat on [`Self::propose`] applies here too: an
+        /// optimistic request may arrive before consensus enters the context's
+        /// view. A `false` verdict (or a closed channel) for such a view is
+        /// remembered and nullifies the view once consensus enters it.
+        /// Rejecting a payload that cannot be validated *yet* therefore
+        /// forfeits the view.
         fn verify(
             &mut self,
             context: Self::Context,

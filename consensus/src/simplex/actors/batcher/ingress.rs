@@ -16,7 +16,7 @@ pub enum Message<S: Scheme, D: Digest> {
         current: View,
         leader: Participant,
         finalized: View,
-        certified_proposal: Option<Proposal<D>>,
+        forwardable_proposal: Option<Proposal<D>>,
     },
     /// A durable locally constructed vote for certificate assembly.
     Constructed(Vote<S, D>),
@@ -177,14 +177,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         current: View,
         leader: Participant,
         finalized: View,
-        certified_proposal: Option<Proposal<D>>,
+        forwardable_proposal: Option<Proposal<D>>,
     ) {
         let _ = self.sender.enqueue(Message::Update {
             span,
             current,
             leader,
             finalized,
-            certified_proposal,
+            forwardable_proposal,
         });
     }
 
@@ -246,7 +246,7 @@ mod tests {
             current,
             leader: Participant::new(0),
             finalized,
-            certified_proposal: None,
+            forwardable_proposal: None,
         }
     }
 
