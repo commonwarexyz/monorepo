@@ -343,7 +343,15 @@
 //!
 //! Proposal verification repairs this split by requesting the first missing nullification or named
 //! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
-//! full ancestry after each delivery and votes only once it is valid.
+//! full ancestry after each delivery and votes only once it is valid. The voter does not request
+//! an uncertified parent inside the optimistic issuance window: its certificate is still forming
+//! from live votes (see [Optimistic Validation](#optimistic-validation)).
+//!
+//! Certification repairs a missed certificate the same way. A notarized view certifies only after
+//! its parent certifies, which requires the parent's exact-view notarization. When the voter holds
+//! a view's notarization but not its parent's, the parent's votes have stopped circulating.
+//! Peers broadcast a certificate only once, so the voter requests the parent's notarization from
+//! the term's leader, or from any peer when the term's leader is unknown.
 //!
 //! A resolver key identifies a view, not a certificate. A notarization and a covering nullification
 //! for one view answer opposite questions, so a peer can return valid evidence that does not settle

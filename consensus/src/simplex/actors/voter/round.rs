@@ -313,7 +313,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the payload of ancestry this round's certificate supports
     /// (see [`Self::has_usable_certificate`]), read from the certificate
     /// rather than the slot's proposal.
-    pub fn certified_ancestry_payload(&self) -> Option<&D> {
+    pub fn certificate_ancestry_payload(&self) -> Option<&D> {
         if !self.has_usable_certificate() {
             return None;
         }
@@ -353,7 +353,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns true if certification completed and rejected the proposal.
-    pub const fn is_failed_certification(&self) -> bool {
+    const fn is_failed_certification(&self) -> bool {
         matches!(self.certify, CertifyState::Certified(false))
     }
 

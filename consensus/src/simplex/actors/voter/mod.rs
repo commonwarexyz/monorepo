@@ -3248,6 +3248,104 @@ mod tests {
         no_resolver_boomerang::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// Regression: a voter that misses one mid-term notarization must request
+    /// it from the resolver. Certification of every later view in the term
+    /// requires the exact-view certificate, so without a fetch the voter can
+    /// never certify or advance again. A quorum-critical voter wedged this
+    /// way halts the network.
+    fn missed_notarization_is_fetched<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n);
+        let namespace = b"missed_notarization_is_fetched".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            // Stable leader with optimistic validation enabled. Participant 0
+            // (the voter under test) is a follower for term 1.
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _reporter) =
+                setup_voter(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    VoterOptions::default(),
+                )
+                .await;
+
+            // Build the term's proposal chain.
+            let epoch = Epoch::new(333);
+            let proposal = |view: u64, parent: u64| {
+                Proposal::new(
+                    Round::new(epoch, View::new(view)),
+                    View::new(parent),
+                    Sha256::hash(&[&view.to_be_bytes()]),
+                )
+            };
+            let (_, notarization_1) = build_notarization(&schemes, &proposal(1, 0), quorum);
+            let (_, notarization_3) = build_notarization(&schemes, &proposal(3, 2), quorum);
+
+            // Deliver notarization(1) and wait for the voter to certify it and
+            // enter view 2.
+            mailbox.recovered(Certificate::Notarization(notarization_1));
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current == View::new(2) => break,
+                    _ => continue,
+                }
+            }
+
+            // Deliver notarization(3), skipping notarization(2): the voter
+            // observed the certificate broadcast for view 3 but missed the one
+            // for view 2. Certifying view 3 requires view 2's exact-view
+            // certificate, so the voter must fetch it.
+            mailbox.recovered(Certificate::Notarization(notarization_3));
+            loop {
+                select! {
+                    message = resolver_receiver.recv() => {
+                        let MailboxMessage::Resolve { view, kind, .. } = message.unwrap() else {
+                            continue;
+                        };
+                        assert_eq!(view, View::new(2));
+                        assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
+                        break;
+                    },
+                    _ = context.sleep(Duration::from_secs(20)) => {
+                        panic!("voter never requested the missed notarization");
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_missed_notarization_is_fetched() {
+        missed_notarization_is_fetched(bls12381_multisig::fixture::<MinPk, _>);
+        missed_notarization_is_fetched(bls12381_multisig::fixture::<MinSig, _>);
+        missed_notarization_is_fetched(ed25519::fixture);
+        missed_notarization_is_fetched(secp256r1::fixture);
+    }
+
     /// Tests that when proposal verification fails, the voter emits a nullify vote
     /// immediately rather than waiting for the timeout.
     fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F)

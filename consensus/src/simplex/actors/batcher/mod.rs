@@ -2266,8 +2266,8 @@ mod tests {
 
     /// Regression: a valid notarization for a view beyond the admission
     /// window creates a round with a certificate proposal but no leader. The
-    /// batcher must survive processing it (it previously panicked unwrapping
-    /// the missing leader) and forward the certificate-established proposal.
+    /// batcher must not panic on the missing leader and must forward the
+    /// certificate-established proposal.
     fn future_notarization_without_leader_does_not_panic<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

@@ -1,7 +1,7 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{Config as StateConfig, State, Verify},
+    state::{CertificateFetch, Config as StateConfig, State, Verify},
 };
 use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
@@ -385,7 +385,7 @@ impl<
                 kind,
                 target,
             } => {
-                resolver.resolve(proposal, view, kind, target);
+                resolver.resolve(proposal, view, kind, Some(target));
                 return None;
             }
             Verify::Wait => return None,
@@ -1127,7 +1127,11 @@ impl<
                 // Even our own proposals are certified through the automaton: that
                 // is the durability barrier that makes a block recoverable before
                 // we cast a finalize vote for it.
-                for proposal in self.state.certify_candidates() {
+                let (candidates, fetches) = self.state.certify_candidates();
+                for CertificateFetch { proposal, view, kind, target } in fetches {
+                    resolver.resolve(proposal, view, kind, target);
+                }
+                for proposal in candidates {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1286,8 +1290,8 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
-                    // If we skip a view, we don't worry about forwarding our latest forwardable proposal
-                    // because the network has already moved on
+                    // Forward only the previous view's proposal. After a
+                    // multi-view jump, the network has moved past anything older.
                     let forwardable_proposal = current_view
                         .previous()
                         .and_then(|view| self.state.forwardable_proposal(view));
