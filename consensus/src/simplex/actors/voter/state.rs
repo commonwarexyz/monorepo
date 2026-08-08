@@ -1270,8 +1270,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Serve directly-certified ancestry from the stored certificate so it
         // is always payload the certificate actually supports, independent of
-        // the slot's proposal bookkeeping. The acceptance rule is shared with
-        // `optimistic_parent_ready`.
+        // the slot's proposal bookkeeping.
         if round.is_directly_notarized() {
             return round.certificate_ancestry_payload();
         }
@@ -3494,6 +3493,43 @@ mod tests {
         });
     }
 
+    /// Certification exempts term-start candidates from the parent precheck
+    /// (see [`State::certification_parent_ready`]): a term-start proposal
+    /// dispatches even when its cross-term parent is uncertified and the
+    /// skipped views' nullifications are not held.
+    #[test]
+    fn certify_candidates_exempts_term_start_from_parent_precheck() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                20,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+            );
+
+            // Term 2 starts at view 6. Its parent (view 1) is not certified
+            // and no nullification for views 2..=5 is tracked.
+            let term_start = fetch_proposal(6, 1, 61);
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &term_start))
+                    .0
+            );
+            let (ready, fetches) = state.certify_candidates();
+            assert_eq!(ready, vec![term_start]);
+            assert!(fetches.is_empty());
+        });
+    }
+
     /// A certificate is adversarial input: a notarization whose proposal is
     /// structurally invalid must be dropped by certification, with no fetch
     /// and no requeue.
@@ -4004,6 +4040,7 @@ mod tests {
                 state.construct_notarize(View::new(2)).is_none(),
                 "failed-certified parent must not unlock optimistic child notarize"
             );
+            // Certification of the notarized child is blocked the same way.
             let child_notarization = build_notarization(&verifier, &schemes, &child);
             assert!(state.add_notarization(child_notarization).0);
             assert!(state.certify_candidates().0.is_empty());
