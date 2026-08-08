@@ -19,6 +19,190 @@ module tests {
         assumptions_valid
     }
 
+    // `on_certificate` accepts a finalization solely from its shape: kind,
+    // signature-set size, and block validity. Two threshold-shaped finalizations for
+    // different blocks in the same view can therefore be stored by different replicas,
+    // even though no corresponding votes were observed.
+    //
+    // This state is NOT reachable from `init` via `step`: both certificates name n0..n4,
+    // and `byzantine_replica_step` draws `agg_sig` from the signatures of real votes united
+    // with BYZANTINE, while a correct replica notarizes at most once per view -- so n0..n4
+    // can never back both "val_b0" and "val_b1" in view 0. What the test pins down is that
+    // `on_certificate` does not *preserve* the invariants when handed a certificate whose
+    // signatures are not backed: safety here rests entirely on unforgeability, which
+    // `certificates_are_backed` states explicitly. If a future change lets an unbacked
+    // certificate reach a replica -- a sync or catch-up path, state transfer, an extra
+    // adversary action -- these two steps are all it takes to break `validity`.
+    run forgedFinalizationCertificatesViolateValidityTest = {
+        pure val proposal_b0 = {
+            block: "val_b0", view: 0,
+            view_parent: GENESIS_VIEW, block_parent: GENESIS_BLOCK, sig: sig_of("n0")
+        }
+        pure val proposal_b1 = {
+            block: "val_b1", view: 0,
+            view_parent: GENESIS_VIEW, block_parent: GENESIS_BLOCK, sig: sig_of("n0")
+        }
+        pure val forged_finalization_b0 = {
+            view: 0,
+            kind: FinalizationKind,
+            proposal: Some(proposal_b0),
+            signatures: Set("n0", "n1", "n2", "n3", "n4"),
+            ghost_sender: sig_of("n5"),
+        }
+        pure val forged_finalization_b1 = {
+            view: 0,
+            kind: FinalizationKind,
+            proposal: Some(proposal_b1),
+            signatures: Set("n0", "n1", "n2", "n3", "n4"),
+            ghost_sender: sig_of("n5"),
+        }
+
+        initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n0"))
+            .then(on_certificate("n0", forged_finalization_b0))
+            .then(on_certificate("n1", forged_finalization_b1))
+            .then(all {
+                assert(assumptions_valid),
+                assert(forged_finalization_b0.in(store_certificate.get("n0"))),
+                assert(forged_finalization_b1.in(store_certificate.get("n1"))),
+                assert(certificates_are_valid_inv),
+                // the certificates are well-shaped but their signatures are not backed:
+                // only n0 and n1 ever voted, and only because `_process_certificate` made
+                // them notarize the certificate's own proposal on accepting the forgery
+                assert(not(certificates_are_backed)),
+                assert(not(validity)),
+                assert(not(all_invariants)),
+                unchanged_all,
+            })
+            .expect(not(certificates_are_backed))
+            .expect(not(validity))
+            .expect(not(all_invariants))
+    }
+
+    // The companion of the test above: when the same finalization is assembled from votes
+    // that were really cast, `certificates_are_backed` holds. This is what pins the
+    // invariant down -- without it the property could be satisfied by never forming a
+    // certificate at all.
+    run genuineFinalizationIsBackedTest = {
+        pure val proposal_from_n0 = {
+            block: "val_b0",
+            view: 0,
+            view_parent: GENESIS_VIEW,
+            block_parent: GENESIS_BLOCK,
+            sig: sig_of("n0")
+        }
+
+        initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3",
+                           4 -> "n4", 5 -> "n0", 6 -> "n1", 7 -> "n2", 8 -> "n3"))
+            .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
+            .then(on_proposal("n1", proposal_from_n0))
+            .then(on_proposal("n2", proposal_from_n0))
+            .then(on_proposal("n3", proposal_from_n0))
+            .then(on_proposal("n4", proposal_from_n0))
+            // n0 assembles finalization(val_b0, 0) from the L = 5 votes it observed
+            .then(replica_receives_notarize_votes("n0", proposal_from_n0, Set("n0","n1","n2","n3","n4")))
+            .then(all {
+                assert(replica_state.get("n0").last_finalized == 0),
+                assert(store_certificate.get("n0").exists(c => and {
+                    c.kind == FinalizationKind,
+                    c.view == 0,
+                    c.proposal == Some(proposal_from_n0),
+                })),
+                assert(certificates_are_backed),
+                assert(all_invariants),
+                unchanged_all,
+            })
+            .expect(certificates_are_backed)
+            .expect(all_invariants)
+    }
+
+    // Regression test for the "one byzantine proposal un-commits a finalized block" defect.
+    //
+    // The parent link of a committed block used to be derived from the global
+    // `sent_proposal` by `claimed_view_parent`, which returned None as soon as two proposals
+    // for the same (block, view) disagreed about `view_parent`. `byzantine_replica_step`
+    // injects one proposal per step, choosing `view` and `view_parent` freely from VIEWS,
+    // and nothing requires `view_parent < view`. A single such message aimed at an already
+    // finalized (block, view) turned its link into None -- permanently, because
+    // `sent_proposal` is never pruned. The committed chain is rebuilt from scratch whenever
+    // a replica stores a new certificate, so the next certificate any replica processed
+    // dropped every block it had committed, and no conjunct of `all_invariants` noticed:
+    // `agreement` only asks that the shorter chain be a prefix of the longer one, and the
+    // empty list is a prefix of everything.
+    //
+    // A certificate now carries the proposal it certifies, and `next_committable_cert` reads
+    // the parent link off that proposal, so the link is decided when the block is proposed
+    // and nothing outside the certificate can move it afterwards. The shadow below names an
+    // already finalized block with a different parent, which makes it a *different*
+    // proposal: no certificate names it, and `sent_proposal` is not consulted while
+    // rebuilding at all, so the committed chain is untouched and keeps growing. This closes
+    // the byzantine LEADER case as well -- a second leader-signed proposal for the same
+    // (block, view) is likewise a different proposal, and votes for it never join the first
+    // one's quorum.
+    run committedChainRollbackTest = {
+        pure val proposal_0 = {
+            block: "val_b0", view: 0,
+            view_parent: GENESIS_VIEW, block_parent: GENESIS_BLOCK, sig: sig_of("n0")
+        }
+        pure val proposal_1 = {
+            block: "val_b1", view: 1,
+            view_parent: 0, block_parent: "val_b0", sig: sig_of("n1")
+        }
+        // The byzantine shadow of the already finalized (val_b0, view 0), claiming a
+        // different parent view. Every field is one byzantine_replica_step can produce:
+        // view and view_parent in VIEWS, block and block_parent in AllBlocks, sig in BYZANTINE.
+        pure val byz_shadow_of_view_0 = {
+            block: "val_b0", view: 0,
+            view_parent: 1, block_parent: "val_b1", sig: "n5"
+        }
+
+        initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3",
+                           4 -> "n4", 5 -> "n0", 6 -> "n1", 7 -> "n2", 8 -> "n3"))
+            // === view 0: proposed, notarized by everyone, finalized by everyone ===
+            .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
+            .then(on_proposal("n1", proposal_0))
+            .then(on_proposal("n2", proposal_0))
+            .then(on_proposal("n3", proposal_0))
+            .then(on_proposal("n4", proposal_0))
+            .then(replica_receives_notarize_votes("n0", proposal_0, Set("n0","n1","n2","n3","n4")))
+            .then(replica_receives_notarize_votes("n1", proposal_0, Set("n0","n1","n2","n3","n4")))
+            .then(replica_receives_notarize_votes("n2", proposal_0, Set("n0","n1","n2","n3","n4")))
+            .then(replica_receives_notarize_votes("n3", proposal_0, Set("n0","n1","n2","n3","n4")))
+            .then(replica_receives_notarize_votes("n4", proposal_0, Set("n0","n1","n2","n3","n4")))
+            .then(all {
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id) == List(proposal_0))),
+                assert(all_invariants),
+                unchanged_all,
+            })
+
+            // === the byzantine message that used to do the damage ===
+            .then(inject_proposal(byz_shadow_of_view_0))
+            .then(all {
+                // the shadow is a different proposal from the finalized one, and no
+                // certificate certifies it, so the committed chain cannot see it at all
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id) == List(proposal_0))),
+                assert(all_invariants),
+                unchanged_all,
+            })
+
+            // === view 1 runs normally; n0 is simply the first to finalize it ===
+            .then(proposer_step("n1", "val_b1", "val_b0", 0))
+            .then(on_proposal("n0", proposal_1))
+            .then(on_proposal("n2", proposal_1))
+            .then(on_proposal("n3", proposal_1))
+            .then(on_proposal("n4", proposal_1))
+            .then(replica_receives_notarize_votes("n0", proposal_1, Set("n0","n1","n2","n3","n4")))
+            .then(all {
+                assert(replica_state.get("n0").last_finalized == 1),
+                // the chain GROWS -- before the fix this rebuilt to List()
+                assert(ghost_committed_blocks.get("n0") == List(proposal_0, proposal_1)),
+                // its peers, which processed no new certificate, still hold the prefix
+                assert(ghost_committed_blocks.get("n2") == List(proposal_0)),
+                assert(all_invariants),
+                unchanged_all,
+            })
+            .expect(all_invariants)
+    }
+
     run contradictionTest = {
         pure val proposal_from_n0 = {
             block: "val_b0",
@@ -41,7 +225,6 @@ module tests {
             block_parent: "val_b0",
             sig: sig_of("n5")
         }
-
         initWithLeader(Map(0 -> "n0", 1 -> "n5", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n1"))
             // === view 0 ===
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
@@ -50,25 +233,25 @@ module tests {
             .then(on_proposal("n3", proposal_from_n0))
             .then(on_proposal("n4", proposal_from_n0))
             // n0-n4 notarize 0 and move to view 1
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n0, "n0"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n0, "n1"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n0, "n2"))
 
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n1", proposal_from_n0, "n0"))
+            .then(replica_receives_notarize_vote("n1", proposal_from_n0, "n1"))
+            .then(replica_receives_notarize_vote("n1", proposal_from_n0, "n2"))
 
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n2", proposal_from_n0, "n0"))
+            .then(replica_receives_notarize_vote("n2", proposal_from_n0, "n1"))
+            .then(replica_receives_notarize_vote("n2", proposal_from_n0, "n2"))
 
-            .then(replica_receives_notarize_vote("n3", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n3", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n3", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n3", proposal_from_n0, "n0"))
+            .then(replica_receives_notarize_vote("n3", proposal_from_n0, "n1"))
+            .then(replica_receives_notarize_vote("n3", proposal_from_n0, "n2"))
 
-            .then(replica_receives_notarize_vote("n4", "val_b0", 0, "n0"))
-            .then(replica_receives_notarize_vote("n4", "val_b0", 0, "n1"))
-            .then(replica_receives_notarize_vote("n4", "val_b0", 0, "n2"))
+            .then(replica_receives_notarize_vote("n4", proposal_from_n0, "n0"))
+            .then(replica_receives_notarize_vote("n4", proposal_from_n0, "n1"))
+            .then(replica_receives_notarize_vote("n4", proposal_from_n0, "n2"))
             .then(all {
                 assert(replica_state.get("n0").view == 1),
                 assert(replica_state.get("n1").view == 1),
@@ -91,27 +274,25 @@ module tests {
             // n3, n4, n5 notarize proposal n5-2
             .then(on_proposal("n3", proposal_from_n5_2))
             .then(on_proposal("n4", proposal_from_n5_2))
-            .then(inject_vote({ view: proposal_from_n5_2.view, sig: sig_of("n5"), kind: NotarizeKind, block: proposal_from_n5_2.block }))
+            .then(inject_vote(notarize(proposal_from_n5_2, sig_of("n5"))))
 
             .expect(all_invariants)
 
-            // n0-n2 receive 2 votes each for b0
-            .then(replica_receives_notarize_vote("n0", "val_b0", 1, "n0"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 1, "n1"))
-
-
-            .then(replica_receives_notarize_vote("n1", "val_b0", 1, "n0"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", 1, "n1"))
-
-
-            .then(replica_receives_notarize_vote("n2", "val_b0", 1, "n0"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", 1, "n1"))
-
-
-            // n0 receives 2 other votes for b1 and 1 nullify
-            .then(replica_receives_nullify_vote("n0", 1, "n3"))
-            .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n4"))
-            .then(replica_receives_notarize_vote("n0", "val_b1", 1, "n5"))
+            // n0 collects the conflicting evidence. Every vote below is one its signer
+            // really broadcast above, which is what `step` would deliver: both
+            // `on_vote_notarize` and `on_vote_nullify` are handed a subset of `sent_vote`.
+            //
+            // The evidence has to stay SPLIT across two shapes. Three notarize votes for one
+            // proposal would reach M, assemble a notarization and carry n0 into view 2, and
+            // 8.6 would never be needed. Two notarize votes for n5-2 (2 < M) plus one
+            // nullify from the byzantine n5 -- free to send both for the same view -- give n0
+            // exactly M = 3 distinct conflicting signers while no proof(1) exists yet. That
+            // is the state 8.6 is for: n0 is locked on n5-1, can no longer reach L, and
+            // nothing exists to move it to the next view.
+            .then(inject_vote(nullify(1, sig_of("n5"))))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n5_2, "n3"))
+            .then(replica_receives_notarize_vote("n0", proposal_from_n5_2, "n4"))
+            .then(replica_receives_nullify_vote("n0", 1, "n5"))
 
             .then(all {
                 assert(replica_state.get("n0").view == 1),
@@ -124,7 +305,8 @@ module tests {
             .expect(all_invariants)
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==1).size() == 5),
+                assert(store_vote.get("n0").filter(v=>v.view==1).size() == 3),
+                assert(store_vote.get("n0").subseteq(sent_vote)),
                 assert(replica_state.get("n0").nullified == true),
                 unchanged_all,
             })
@@ -166,8 +348,8 @@ module tests {
 
             // n3 and n4 only ever see that sub-quorum. They assemble a notarization,
             // vote for it themselves, and enter view 1 without finalizing anything.
-            .then(replica_receives_notarize_votes("n3", "val_b0", 0, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_votes("n4", "val_b0", 0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n3", proposal_from_n0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n4", proposal_from_n0, Set("n0", "n1", "n2")))
             .then(all {
                 assert(replica_state.get("n3").view == 1),
                 assert(replica_state.get("n3").last_finalized == GENESIS_VIEW),
@@ -176,31 +358,31 @@ module tests {
             })
 
             // n0 sees all L = 5 votes, finalizes view 0 and commits val_b0.
-            .then(replica_receives_notarize_votes("n0", "val_b0", 0, Set("n0", "n1", "n2", "n3", "n4")))
+            .then(replica_receives_notarize_votes("n0", proposal_from_n0, Set("n0", "n1", "n2", "n3", "n4")))
             .then(all {
                 assert(replica_state.get("n0").last_finalized == 0),
-                assert(ghost_committed_blocks.get("n0") == List("val_b0")),
+                assert(ghost_committed_blocks.get("n0") == List(proposal_from_n0)),
                 unchanged_all,
             })
 
             // n1 and n2 also advance on the sub-quorum only, so they never commit view 0.
-            .then(replica_receives_notarize_votes("n1", "val_b0", 0, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_votes("n2", "val_b0", 0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n1", proposal_from_n0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n2", proposal_from_n0, Set("n0", "n1", "n2")))
 
             // === view 1 ===
             // n1 proposes on top of the view-0 notarization, and all of n0-n4 notarize.
             .then(proposer_step("n1", "val_b1", "val_b0", 0))
             .then(on_proposal("n3", proposal_from_n1))
             .then(on_proposal("n4", proposal_from_n1))
-            .then(replica_receives_notarize_votes("n0", "val_b1", 1, Set("n1", "n3", "n4")))
+            .then(replica_receives_notarize_votes("n0", proposal_from_n1, Set("n1", "n3", "n4")))
             .then(on_proposal("n2", proposal_from_n1))
 
             // n3 sees all L = 5 votes for view 1 and finalizes it, but it holds only
             // notarization(val_b0, 0), so the walk from genesis cannot reach val_b1.
-            .then(replica_receives_notarize_votes("n3", "val_b1", 1, Set("n0", "n1", "n2", "n3", "n4")))
+            .then(replica_receives_notarize_votes("n3", proposal_from_n1, Set("n0", "n1", "n2", "n3", "n4")))
             .then(all {
                 assert(replica_state.get("n3").last_finalized == 1),
-                assert(ghost_committed_blocks.get("n0") == List("val_b0")),
+                assert(ghost_committed_blocks.get("n0") == List(proposal_from_n0)),
                 assert(ghost_committed_blocks.get("n3") == List()),
                 unchanged_all,
             })
@@ -237,7 +419,7 @@ module tests {
         // assembled by n0 on the last rung of the nullification ladder
         pure val nullification_7 = {
             view: 7,
-            block: DUMMY_BLOCK,
+            proposal: None,
             signatures: Set("n0", "n1", "n5"),
             ghost_sender: "n0",
             kind: NullificationKind
@@ -245,7 +427,7 @@ module tests {
         // assembled and broadcast by n4 when it finalizes view 0, after view 8
         pure val finalization_0 = {
             view: 0,
-            block: "val_b0",
+            proposal: Some(proposal_from_n0),
             signatures: Set("n0", "n1", "n2", "n3", "n4"),
             ghost_sender: "n4",
             kind: FinalizationKind
@@ -262,8 +444,8 @@ module tests {
             .then(on_proposal("n4", proposal_from_n0))
             // n0 and n1 see only a sub-quorum of M = 3 votes, so they assemble a
             // notarization and enter view 1 without committing anything.
-            .then(replica_receives_notarize_votes("n0", "val_b0", 0, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_votes("n1", "val_b0", 0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n0", proposal_from_n0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n1", proposal_from_n0, Set("n0", "n1", "n2")))
 
             // === views 1-7 are nullified, walking n0 and n1 up to the top view ===
             .then(walkers_nullify_view(1))
@@ -287,14 +469,14 @@ module tests {
             .then(on_certificate("n4", nullification_7))
             .then(proposer_step("n0", "val_b1", "val_b0", 0))
             .then(on_proposal("n1", proposal_at_top_view))
-            .then(inject_vote(notarize(8, sig_of("n5"), "val_b1")))
+            .then(inject_vote(notarize(proposal_at_top_view, sig_of("n5"))))
             // n2 and n3 vote for the block on seeing notarization(val_b1, 8)
-            .then(replica_receives_notarize_votes("n2", "val_b1", 8, Set("n0", "n1", "n5")))
-            .then(replica_receives_notarize_votes("n3", "val_b1", 8, Set("n0", "n1", "n5")))
+            .then(replica_receives_notarize_votes("n2", proposal_at_top_view, Set("n0", "n1", "n5")))
+            .then(replica_receives_notarize_votes("n3", proposal_at_top_view, Set("n0", "n1", "n5")))
 
             // n4 sees all L = 5 votes and finalizes view 8. `enter_new_view` bails out
             // because view 9 is not in VIEWS, so n4.last_finalized is NOT advanced.
-            .then(replica_receives_notarize_votes("n4", "val_b1", 8, Set("n0", "n1", "n5", "n2", "n3")))
+            .then(replica_receives_notarize_votes("n4", proposal_at_top_view, Set("n0", "n1", "n5", "n2", "n3")))
             .then(all {
                 // val_b1's parent is view 0, which n4 has not finalized, so the walk
                 // from genesis cannot reach it and n4 commits nothing yet.
@@ -306,12 +488,12 @@ module tests {
             // n4 now finalizes the *earlier* view 0. The chain is rebuilt from scratch,
             // so val_b0 lands first; val_b1 still cannot follow it, because n4 is missing
             // nullifications for views 1-6 and the gap (0, 8) is not covered.
-            .then(replica_receives_notarize_votes("n4", "val_b0", 0, Set("n0", "n1", "n2", "n3", "n4")))
+            .then(replica_receives_notarize_votes("n4", proposal_from_n0, Set("n0", "n1", "n2", "n3", "n4")))
             // n0 picks up that finalization certificate and commits val_b0 too.
             .then(on_certificate("n0", finalization_0))
             .then(all {
-                assert(ghost_committed_blocks.get("n4") == List("val_b0")),
-                assert(ghost_committed_blocks.get("n0") == List("val_b0")),
+                assert(ghost_committed_blocks.get("n4") == List(proposal_from_n0)),
+                assert(ghost_committed_blocks.get("n0") == List(proposal_from_n0)),
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -351,11 +533,11 @@ module tests {
         replica_state' = replica_state,
     }
 
-     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool =
-        on_vote_notarize(id, view, block,  Set(notarize(view, src, block)))
+     action replica_receives_notarize_vote(id: ReplicaId, proposal: Proposal, src: ReplicaId): bool =
+        on_vote_notarize(id, proposal,  Set(notarize(proposal, src)))
 
-    action replica_receives_notarize_votes(id: ReplicaId, block: Block, view: ViewNumber, srcs: Set[ReplicaId]): bool =
-        on_vote_notarize(id, view, block, srcs.map(src => notarize(view, src, block)))
+    action replica_receives_notarize_votes(id: ReplicaId, proposal: Proposal, srcs: Set[ReplicaId]): bool =
+        on_vote_notarize(id, proposal, srcs.map(src => notarize(proposal, src)))
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: str): bool =
         on_vote_nullify(id, view, Set(nullify(view, src)))

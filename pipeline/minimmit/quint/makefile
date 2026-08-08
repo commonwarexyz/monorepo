@@ -10,7 +10,7 @@ typecheck:
 	quint typecheck tests/tests_n7f1b1.qnt
 	quint typecheck main_n6f1b0.qnt
 	quint typecheck main_n6f1b1.qnt
-	quint typecheck main_n6f2b2.qnt
+	quint typecheck main_n6f1b2.qnt
 	quint typecheck main_n7f1b1.qnt
 
 test:

@@ -10,8 +10,8 @@ BASEDIR=$(dirname "$SCRIPT")
 # Default output directory
 QUINT_LOGS="./out_inv"
 
-# Default invariants list
-DEFAULT_INVARIANTS="no_proposal_equivocation,agreement,no_vote_equivocation_inv,no_nullification_and_finalization_in_the_same_view,validity,valid_last_finalized,certificates_are_valid_inv,notarized_consistency,safe_finalization"
+# Default invariants list. Keep in sync with `all_invariants` in replica.qnt, same order.
+DEFAULT_INVARIANTS="no_proposal_equivocation,agreement,no_vote_equivocation_inv,no_nullification_and_finalization_in_the_same_view,validity,valid_last_finalized,certificates_are_valid_inv,certificates_are_backed,notarized_consistency,safe_finalization,committed_blocks_are_finalized,committed_chain_is_connected,no_nullification_and_finalization_globally"
 
 # Display usage information
 usage() {

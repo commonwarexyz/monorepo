@@ -17,7 +17,7 @@ module twins {
   ) as i from "./replica"
 
   action init = all {
-    i::initWithLeader(Map(0 -> "n5_1", 1 -> "n5_2", 2 -> "n0", 3 -> "n5_1", 4 -> "n5_2", 5 -> "n1")),
+    i::initWithLeader(Map(0 -> "n5_1", 1 -> "n5_2", 2 -> "n0", 3 -> "n5_1", 4 -> "n5_2", 5 -> "n1", 6 -> "n2")),
             
     // 2 replicas from the CORRECT set have twins that makes them byzantine
     assert(i::N + 1 == i::CORRECT.size()),
@@ -25,7 +25,7 @@ module twins {
   }
 
 
-  action step = i::correct_replica_step
+  action step = i::correct_step
 
   val safe = i::safe
   val all_invariants = safe
@@ -38,4 +38,8 @@ module twins {
   val certificates_are_valid_inv = i::certificates_are_valid_inv
   val notarized_consistency = i::notarized_consistency
   val safe_finalization = i::safe_finalization
+  val certificates_are_backed = i::certificates_are_backed
+  val committed_blocks_are_finalized = i::committed_blocks_are_finalized
+  val committed_chain_is_connected = i::committed_chain_is_connected
+  val no_nullification_and_finalization_globally = i::no_nullification_and_finalization_globally
 }

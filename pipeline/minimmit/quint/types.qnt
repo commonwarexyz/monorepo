@@ -34,10 +34,41 @@ module types {
     pure val NullificationKind = "NULLIFICATION_KIND"
     pure val FinalizationKind = "FINALIZATION_KIND"
 
-    // Vote for a block at height h
+    // Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
+    //
+    // A proposal, not a block, is what the protocol votes on. `build(c')` produces a block
+    // that commits to its parent and `verify(c, c')` checks that link, so the parent is part
+    // of what a replica signs over. Carrying it here is what stops one block from having two
+    // parents: a second proposal naming the same block with a different parent is a
+    // different proposal, so votes for it never join the same quorum and it cannot rewrite
+    // the first one's ancestry.
+    type Proposal = {
+        // proposed block
+        block: Block,
+        // The view in which this proposal is made
+        view: ViewNumber,
+        // parent block
+        block_parent: Block,
+        // The view of the parent proposal that this one builds upon
+        view_parent: ViewNumber,
+        // Leader's identity
+        sig: Signature
+    }
+
+    // The root the committed chain is anchored at, finalized at view `< 0`.
+    pure val GENESIS_PROPOSAL: Proposal = {
+        block: GENESIS_BLOCK,
+        view: GENESIS_VIEW,
+        block_parent: GENESIS_BLOCK,
+        view_parent: GENESIS_VIEW,
+        sig: ""
+    }
+
+    // Vote for a proposal at height h. A `notarize` names the whole proposal it votes for;
+    // a `nullify` is about the view alone and carries None.
     type Vote = {
         view: ViewNumber,
-        block: Block,
+        proposal: Option[Proposal],
         sig: Signature,
         kind: Kind
     }
@@ -45,41 +76,29 @@ module types {
     pure def nullify(v: ViewNumber,  id: Signature): Vote = {
         {
             view: v,
+            proposal: None,
             sig: id,
-            block: DUMMY_BLOCK,
             kind: NullifyKind
         }
     }
 
-    pure def notarize(v: ViewNumber, id: Signature, block: Block): Vote = {
+    pure def notarize(p: Proposal, id: Signature): Vote = {
         {
-            view: v,
+            view: p.view,
+            proposal: Some(p),
             sig: id,
-            block: block,
             kind: NotarizeKind
         }
     }
 
+    // A notarization or finalization certifies one proposal; a nullification certifies a
+    // view and carries None.
     type Certificate = {
         view: ViewNumber,
+        proposal: Option[Proposal],
         kind: Kind,
-        block: Block,
         signatures: Set[Signature],
         ghost_sender: Signature
-    }
-
-    // Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
-    type Proposal = {
-        // proposed block
-        block: Block,
-        // The view in which this proposal is made
-        view: ViewNumber,   
-        // parent block
-        block_parent: Block,  
-        // The view of the parent proposal that this one builds upon
-        view_parent: ViewNumber,  
-        // Leader's identity
-        sig: Signature
     }
 
     // Local state kept by each replica
@@ -95,13 +114,13 @@ module types {
 
         // not in the original spec, the latest view that this replica has seen notarization votes for
         ghost_last_seen_notarization: ViewNumber,
-        // sequence if the sent votes
-        ghost_sent_votes: ViewNumber -> List[Block],
+        // sequence of the sent votes: Some(p) for a notarize, None for a nullify
+        ghost_sent_votes: ViewNumber -> List[Option[Proposal]],
         // not in the original spec, the last view this replica has finalized
         last_finalized: ViewNumber,
         // not in the original spec, whether this replica has sent a proposal
         propose_sent: bool,
-        // blocks that the replica notarized per view
-        notarized: ViewNumber -> Block
+        // the proposal this replica notarized per view, None if it has not notarized
+        notarized: ViewNumber -> Option[Proposal]
     }
 }

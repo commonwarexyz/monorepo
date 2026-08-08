@@ -2,10 +2,10 @@
 
 /// A few handy small models that are good for debugging and inspection
 module main {
-    // A specification instance for n=6 and f=2
+    // A specification instance for n=6 and f=1
     import replica(
         N = 6,
-        F = 2,
+        F = 1,
         CORRECT = Set("n0", "n1", "n2", "n3"),
         BYZANTINE = Set("n4", "n5"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5"->"n5"),
