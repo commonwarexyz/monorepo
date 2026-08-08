@@ -1174,7 +1174,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
-                &db.journal.journal,
+                &db.journal.items,
             )
             .await
             .unwrap()
@@ -1190,7 +1190,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
-                &db.journal.journal,
+                &db.journal.items,
             )
             .await
             .unwrap()

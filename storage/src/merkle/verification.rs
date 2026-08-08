@@ -287,7 +287,7 @@ pub async fn range_proof<
     F: Family,
     D: Digest,
     H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
+    S: Storage<Family = F, Digest = D>,
 >(
     hasher: &H,
     merkle: &S,
@@ -311,7 +311,7 @@ pub async fn historical_range_proof<
     F: Family,
     D: Digest,
     H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
+    S: Storage<Family = F, Digest = D>,
 >(
     hasher: &H,
     merkle: &S,
@@ -354,7 +354,7 @@ pub async fn historical_range_proof<
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `merkle.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
-pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
+pub async fn multi_proof<F: Family, D: Digest, S: Storage<Family = F, Digest = D>>(
     merkle: &S,
     inactive_peaks: usize,
     bagging: Bagging,

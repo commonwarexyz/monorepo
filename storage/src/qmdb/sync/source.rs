@@ -6,7 +6,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _, Write,
+    EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -478,13 +478,12 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
+impl<F, C, M, H> Source for authenticated::Authenticated<C, M, H>
 where
     F: Family,
-    E: Context,
-    C: Contiguous<Item: EncodeShared + Floored<F>>,
+    C: Contiguous<Item: Floored<F>>,
+    M: crate::merkle::storage::Storage<Family = F, Digest = H::Digest>,
     H: Hasher,
-    S: Strategy,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -511,7 +510,7 @@ where
         if request.size() > self.size() {
             return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
         }
-        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size()).await?;
+        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(&self.items, request.size()).await?;
         let response = match request {
             Request::Operations {
                 size,
@@ -530,7 +529,7 @@ where
                 let op = operations
                     .pop()
                     .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
-                let pinned_nodes = self.merkle.pinned_nodes_at(start).await?;
+                let pinned_nodes = self.pinned_nodes_at(start).await?;
                 Response::Boundary {
                     proof,
                     op,
@@ -848,6 +847,29 @@ pub(crate) mod tests {
         assert_source_variants!(KeylessVariableCompactDb);
         assert_source_variants!(ImmutableFixedCompactDb);
         assert_source_variants!(ImmutableVariableCompactDb);
+
+        type AnyUnorderedFixedOp =
+            crate::qmdb::any::unordered::fixed::Operation<mmr::Family, ShaDigest, ShaDigest>;
+        type SnapshotReader = crate::journal::contiguous::fixed::Reader<
+            'static,
+            deterministic::Context,
+            AnyUnorderedFixedOp,
+        >;
+        type AnyUnorderedFixedSnapshot = crate::journal::authenticated::Snapshot<
+            mmr::Family,
+            deterministic::Context,
+            SnapshotReader,
+            Sha256,
+        >;
+        assert_serves::<AnyUnorderedFixedSnapshot>();
+        assert_serves::<Arc<AnyUnorderedFixedSnapshot>>();
+
+        type KeylessCompactSnapshot = crate::qmdb::compact::Snapshot<
+            mmr::Family,
+            crate::qmdb::keyless::fixed::Operation<mmr::Family, ShaDigest>,
+            ShaDigest,
+        >;
+        assert_serves::<KeylessCompactSnapshot>();
     }
 
     /// The request codec refuses frames whose start reaches their size, and unknown tags.

@@ -67,7 +67,10 @@ mod test {
     use super::*;
     use crate::{
         merkle::{Location, mmb, mmr},
-        qmdb::keyless::tests,
+        qmdb::{
+            keyless::tests,
+            sync::{self, Target},
+        },
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::{boxed, test_traced};
@@ -79,10 +82,13 @@ mod test {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use core::future::Future;
     use futures::FutureExt as _;
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
@@ -486,6 +492,14 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("storage")).await;
             tests::test_keyless_db_proof(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_snapshot() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("storage")).await;
+            tests::test_keyless_db_snapshot(db).await;
         });
     }
 
@@ -1217,13 +1231,6 @@ mod test {
     /// [`super::super::sync::tests`]; this test covers the fixed-size code path.
     #[test_traced("WARN")]
     fn test_keyless_fixed_sync() {
-        use crate::{
-            merkle::Location,
-            qmdb::sync::{self, Target, engine::Config},
-        };
-        use commonware_utils::{non_empty_range, sequence::U64};
-        use std::sync::Arc;
-
         deterministic::Runner::default().start(|ctx| async move {
             let target_config = db_config("sync-target", &ctx, Sequential);
             let target_db: TestDb<mmr::Family> = TestDb::init(ctx.child("target"), target_config)
@@ -1245,7 +1252,7 @@ mod test {
 
             let client_config = db_config("sync-client", &ctx, Sequential);
             let target_db = Arc::new(target_db);
-            let config = Config {
+            let config = sync::engine::Config {
                 db_config: client_config,
                 fetch_batch_size: NZU64!(5),
                 target: Target {

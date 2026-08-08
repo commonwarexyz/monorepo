@@ -146,10 +146,12 @@ pub(crate) mod test {
                 },
                 unordered::{Update, fixed::Operation},
             },
+            sync::{Request, Source as _},
             verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
@@ -1505,7 +1507,7 @@ pub(crate) mod test {
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.snapshot.get(&k);
+        let iter = db.index.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 
@@ -1695,6 +1697,143 @@ pub(crate) mod test {
         });
     }
 
+    /// A snapshot stays byte-stable and verifiable against its captured root while the live
+    /// database rewrites its keys, commits, and prunes past it, evidence that it carries
+    /// neither the keyed index nor the activity bitmap.
+    #[test]
+    fn test_any_fixed_db_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let ops = create_test_ops(20);
+            let mut db = apply_ops(db, ops.clone()).await;
+            let root = db.root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            assert_eq!(snapshot.size(), op_count);
+
+            let (proof, proof_ops) =
+                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                    .await
+                    .unwrap();
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &proof_ops,
+                &root,
+            ));
+
+            // Update every captured key (rewriting index entries and retroactively flipping
+            // activity bits), commit, and prune the live database past the capture.
+            let mut rng = TestRng::new(7);
+            let updates: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    Operation::Update(Update(key, _)) => {
+                        Some(Operation::Update(Update(*key, Digest::random(&mut rng))))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!updates.is_empty());
+            db = apply_ops(db, updates).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert_ne!(db.root(), root);
+            assert!(db.bounds().start > Location::new(0));
+
+            // The snapshot still serves the identical proof, verifiable against the captured
+            // root, including for operations the live database has since pruned.
+            let (proof2, proof_ops2) =
+                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                    .await
+                    .unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof2,
+                Location::new(0),
+                &proof_ops2,
+                &root,
+            ));
+
+            // Anything at or above the frozen size is rejected.
+            assert!(
+                crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
+                    .await
+                    .is_err()
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Snapshot serving is byte-identical to live serving at the captured generation, for both
+    /// request arms, and stays identical after the live database advances and prunes past it.
+    #[test]
+    fn test_any_fixed_snapshot_serves_like_live_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let mut db = apply_ops(db, create_test_ops(20)).await;
+            let op_count = db.bounds().end;
+
+            let ops_request = Request::Operations {
+                size: op_count,
+                start: Location::new(3),
+                max_ops: NZU64!(5),
+            };
+            let boundary_request = Request::Boundary {
+                size: op_count,
+                start: Location::new(3),
+            };
+
+            let (live_ops, _) = db.serve(ops_request).await.unwrap();
+            let (live_boundary, _) = db.serve(boundary_request).await.unwrap();
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+
+            let (snap_ops, _) = snapshot.serve(ops_request).await.unwrap();
+            let (snap_boundary, _) = snapshot.serve(boundary_request).await.unwrap();
+            assert_eq!(snap_ops.encode(), live_ops.encode());
+            assert_eq!(snap_boundary.encode(), live_boundary.encode());
+
+            // Advance and prune the live database past the capture, then confirm the
+            // snapshot's output is byte-identical to its pre-mutation output.
+            db = apply_ops(db, create_test_ops(30)).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start > Location::new(3));
+
+            let (snap_ops2, _) = snapshot.serve(ops_request).await.unwrap();
+            let (snap_boundary2, _) = snapshot.serve(boundary_request).await.unwrap();
+            assert_eq!(snap_ops2.encode(), snap_ops.encode());
+            assert_eq!(snap_boundary2.encode(), snap_boundary.encode());
+
+            // Requests above the frozen size are rejected.
+            let above = Request::Operations {
+                size: op_count + 1,
+                start: Location::new(0),
+                max_ops: NZU64!(1),
+            };
+            assert!(matches!(
+                snapshot.serve(above).await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
@@ -1842,7 +1981,7 @@ pub(crate) mod test {
             type Merkle = TestMmr;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.merkle, self.log.items)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {

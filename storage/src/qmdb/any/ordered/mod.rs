@@ -91,13 +91,13 @@ where
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
         let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
             return Ok(Some(span));
         }
 
-        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
+        let Some((iter, _)) = self.index.prev_translated_key(key) else {
             // DB is empty.
             return Ok(None);
         };
@@ -125,7 +125,7 @@ where
         key: &K,
     ) -> Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
         for loc in locs {
             let op = self.log.read(*loc).await?;
             assert!(
@@ -156,7 +156,7 @@ where
         V: 'a,
     {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let start_locs: Vec<Location<F>> = self.snapshot.get(&start).copied().collect();
+        let start_locs: Vec<Location<F>> = self.index.get(&start).copied().collect();
         let mut init_pending = self.fetch_all_updates(start_locs.iter()).await?;
         init_pending.retain(|x| x.key >= start);
 
@@ -170,8 +170,7 @@ where
 
                 // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
                 let locs: Vec<Location<F>> = {
-                    let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key)
-                    else {
+                    let Some((iter, wrapped)) = self.index.next_translated_key(&driver_key) else {
                         return None; // DB is empty
                     };
                     if wrapped {
