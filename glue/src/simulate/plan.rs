@@ -473,6 +473,7 @@ impl<D: EngineDefinition> Plan<D> {
             ctx.child("network"),
             simulated::Config {
                 max_size: self.max_message_size,
+                max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

@@ -16,9 +16,9 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with
 /// the exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`,
-/// `mailbox_size`, `send_batch_size`, and `dial_timeout`). If this is not synchronized,
-/// connections could be unnecessarily dropped, messages could be parsed incorrectly,
-/// and/or peers will rate limit each other during normal operation.
+/// `max_peers_per_set`, `mailbox_size`, `send_batch_size`, and `dial_timeout`). If this is not
+/// synchronized, connections could be unnecessarily dropped, messages could be parsed
+/// incorrectly, and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
 pub struct Config<C: Signer> {
     /// Cryptographic primitives.
@@ -54,14 +54,24 @@ pub struct Config<C: Signer> {
     /// the limit, so the resulting network message will be larger.
     pub max_message_size: u32,
 
-    /// Message backlog allowed for internal actors.
+    /// Maximum number of distinct identities at one peer-set index, including the local identity.
     ///
-    /// When there are more messages in a mailbox than this value, messages may be rejected before
-    /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
-    /// [`commonware_actor::mailbox`] for a signal this is occurring.
+    /// This applies to the deduplicated union of a peer set's primary and secondary identities.
+    /// The local identity counts even when omitted from the registered set. Configure only this
+    /// per-set value; do not multiply it or add bootstrappers separately. The network derives its
+    /// retained identity bound by multiplying it by [`Config::tracked_peer_sets`] and adding the
+    /// distinct configured bootstrappers other than the local identity. Tracking an oversized peer
+    /// set panics.
     ///
-    /// This does not control an application channel's inbound backlog. That capacity is passed to
-    /// [`Network::register`](super::Network::register).
+    /// The derived bound sizes every application channel's inbound mailbox and its contribution
+    /// to the shared outbound router mailbox. It also limits primary peer-set bit vectors decoded
+    /// from the network.
+    pub max_peers_per_set: NonZeroUsize,
+
+    /// Capacity for internal actor mailboxes.
+    ///
+    /// This does not affect inbound application message capacity, which is derived from channel
+    /// rate limits and [`Config::max_peers_per_set`].
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
@@ -119,12 +129,6 @@ pub struct Config<C: Signer> {
     /// key).
     pub tracked_peer_sets: NonZeroUsize,
 
-    /// Maximum number of peers to track in a single peer set.
-    ///
-    /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
-    /// the set. This number can be set to a reasonably high value that we never expect to reach.
-    pub max_peer_set_size: u64,
-
     /// Frequency we gossip about known peers.
     ///
     /// If there is no other network activity, this message is used as a ping
@@ -152,6 +156,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+        max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
@@ -164,6 +169,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: false,
             max_message_size,
+            max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -177,7 +183,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_secs(1),
             dial_fail_limit: 2,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(4),
@@ -196,6 +201,7 @@ impl<C: Signer> Config<C> {
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+        max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
@@ -208,6 +214,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
+            max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -221,7 +228,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(500),
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(1),
@@ -245,6 +251,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
+            max_peers_per_set: NZUsize!(32),
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -258,7 +265,6 @@ impl<C: Signer> Config<C> {
             dial_frequency: Duration::from_millis(200),
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
-            max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_mins(1),
