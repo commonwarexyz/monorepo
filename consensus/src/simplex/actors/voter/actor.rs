@@ -274,7 +274,10 @@ impl<
     /// Syncs the journal section written by this iteration, if any.
     ///
     /// Called after construction and before publication so every appended artifact
-    /// is durable by the end of the iteration. A single sync coalesces all appends.
+    /// is durable by the end of the iteration. The next iteration cannot dispatch
+    /// work made eligible here until this sync completes, so a durable child
+    /// certification also implies its parent anchor is durable. A single sync
+    /// coalesces all appends.
     async fn sync_journal(mut self) -> Self {
         let Some(view) = self.dirty_section else {
             return self;
@@ -553,7 +556,11 @@ impl<
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
-        // Skip if the resolver just sent us this certificate (avoid boomerang).
+        // For a certificate from the batcher, this update is enqueued before
+        // the next loop iteration can emit any targeted ancestry repair it
+        // exposes. The resolver's unrestricted backfill therefore cannot be
+        // narrowed by that later target. Skip if the resolver just sent us
+        // this certificate (avoid boomerang).
         if resolved != Resolved::Notarization {
             resolver.updated(Certificate::Notarization(notarization.clone()));
         }
@@ -1096,8 +1103,10 @@ impl<
             self.context,
             on_start => {
                 // Drop any pending items if we have moved past their view (work
-                // for optimistic future views is kept). A view is exited only on
-                // successful certification, nullification, or finalization.
+                // for optimistic future views is kept). This runs before the
+                // waiters are rebuilt, so a verification completion cannot be
+                // polled after another branch exits its view. A view is exited
+                // only on successful certification, nullification, or finalization.
                 // Nullification does not cancel certification work for the
                 // exited view, so the automaton must tolerate a dropped verify
                 // receiver while certify still wants the result.
@@ -1126,7 +1135,9 @@ impl<
                 //
                 // Even our own proposals are certified through the automaton: that
                 // is the durability barrier that makes a block recoverable before
-                // we cast a finalize vote for it.
+                // we cast a finalize vote for it. Because the prior iteration's
+                // journal sync completed before this block runs, a child made
+                // eligible by its parent cannot become durable first.
                 let (candidates, fetches) = self.state.certify_candidates();
                 for CertificateFetch { proposal, view, kind, target } in fetches {
                     resolver.resolve(proposal, view, kind, target);

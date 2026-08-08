@@ -120,11 +120,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
         ///
-        /// A consensus engine that runs ahead optimistically (see [`simplex`])
-        /// may request a payload while the parent named in the context is only
-        /// notarized, or only voted for locally, and before consensus enters
-        /// the context's view. Build on the named parent regardless; if the
-        /// parent is later abandoned, this proposal is abandoned with it.
+        /// Consensus may request a payload for a future context before earlier
+        /// contexts complete. Honor any dependencies supplied in the context
+        /// rather than rebuilding them from current local state. If consensus
+        /// later abandons a dependency, it also abandons the proposal.
+        ///
+        /// Closing the response declines this request, which consensus may
+        /// treat as final for the context. Keep the response pending when
+        /// temporary unavailability should not abandon the context.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -147,12 +150,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
         ///
-        /// The parent caveat on [`Self::propose`] applies here too: an
-        /// optimistic request may arrive before consensus enters the context's
-        /// view. A `false` verdict (or a closed channel) for such a view is
-        /// remembered and nullifies the view once consensus enters it.
-        /// Rejecting a payload that cannot be validated *yet* therefore
-        /// forfeits the view.
+        /// The future-context requirement on [`Self::propose`] applies here
+        /// too: the context's dependencies may not be resolvable locally yet.
         fn verify(
             &mut self,
             context: Self::Context,
