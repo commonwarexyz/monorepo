@@ -17,6 +17,7 @@ use commonware_utils::{
 use std::{
     collections::VecDeque,
     fmt,
+    ops::Deref,
     sync::{Arc, OnceLock},
 };
 
@@ -102,12 +103,12 @@ impl<P: PublicKey> Mailbox<P> {
 
 // Registered channels subscribe before the router mailbox exists. Retain those subscriptions
 // until start binds the mailbox.
-struct MessengerState<P: PublicKey> {
-    mailbox: OnceLock<Mailbox<P>>,
+struct Shared<P: PublicKey> {
+    mailbox: OnceLock<Option<Mailbox<P>>>,
     pending_subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
 }
 
-impl<P: PublicKey> MessengerState<P> {
+impl<P: PublicKey> Shared<P> {
     const fn new() -> Self {
         Self {
             mailbox: OnceLock::new(),
@@ -119,11 +120,11 @@ impl<P: PublicKey> MessengerState<P> {
         // Publish the mailbox before draining pending subscriptions. Subscribers that observed it
         // unbound recheck while holding the same lock, so they are either queued or send directly.
         assert!(
-            self.mailbox.set(mailbox).is_ok(),
-            "router messenger already bound"
+            self.mailbox.set(Some(mailbox)).is_ok(),
+            "router messenger already bound or closed"
         );
         let mut pending_subscriptions = self.pending_subscriptions.lock();
-        let mailbox = self.mailbox.get().unwrap();
+        let mailbox = self.mailbox.get().unwrap().as_ref().unwrap();
         for sender in pending_subscriptions.drain(..) {
             let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
         }
@@ -134,27 +135,58 @@ impl<P: PublicKey> MessengerState<P> {
 #[derive(Clone)]
 pub struct Messenger<P: PublicKey> {
     pool: BufferPool,
-    state: Arc<MessengerState<P>>,
+    shared: Arc<Shared<P>>,
+}
+
+#[derive(Debug)]
+pub(in crate::authenticated) struct OwnedMessenger<P: PublicKey> {
+    messenger: Messenger<P>,
+}
+
+impl<P: PublicKey> Drop for OwnedMessenger<P> {
+    fn drop(&mut self) {
+        let shared = &self.messenger.shared;
+        if shared.mailbox.set(None).is_ok() {
+            shared.pending_subscriptions.lock().clear();
+        }
+    }
+}
+
+impl<P: PublicKey> OwnedMessenger<P> {
+    pub(in crate::authenticated) fn handle(&self) -> Messenger<P> {
+        self.messenger.clone()
+    }
+
+    pub(in crate::authenticated) fn bind(&self, mailbox: Mailbox<P>) {
+        self.messenger.shared.bind(mailbox);
+    }
+}
+
+impl<P: PublicKey> Deref for OwnedMessenger<P> {
+    type Target = Messenger<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.messenger
+    }
 }
 
 impl<P: PublicKey> fmt::Debug for Messenger<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mailbox = self.shared.mailbox.get();
         f.debug_struct("Messenger")
-            .field("bound", &self.state.mailbox.get().is_some())
+            .field("bound", &mailbox.is_some_and(Option::is_some))
+            .field("closed", &mailbox.is_some_and(Option::is_none))
             .finish_non_exhaustive()
     }
 }
 
 impl<P: PublicKey> Messenger<P> {
-    pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Self {
-        Self {
+    pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Arc<OwnedMessenger<P>> {
+        let messenger = Self {
             pool,
-            state: Arc::new(MessengerState::new()),
-        }
-    }
-
-    pub(in crate::authenticated) fn bind(&self, mailbox: Mailbox<P>) {
-        self.state.bind(mailbox);
+            shared: Arc::new(Shared::new()),
+        };
+        Arc::new(OwnedMessenger { messenger })
     }
 
     /// Sends a message to the given `recipients`.
@@ -170,8 +202,11 @@ impl<P: PublicKey> Messenger<P> {
     ) -> Unreliable<Feedback> {
         // Treat sends before the router is bound as sends with no connected peers. Nothing can
         // receive the content, so accept the submission without encoding or enqueueing it.
-        let Some(mailbox) = self.state.mailbox.get() else {
+        let Some(mailbox) = self.shared.mailbox.get() else {
             return Unreliable::new(Feedback::Ok);
+        };
+        let Some(mailbox) = mailbox else {
+            return Unreliable::new(Feedback::Closed);
         };
 
         // Encode the data frame once for all recipients
@@ -190,17 +225,21 @@ impl<P: PublicKey> Connected for Messenger<P> {
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
-        if let Some(mailbox) = self.state.mailbox.get() {
-            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+        if let Some(mailbox) = self.shared.mailbox.get() {
+            if let Some(mailbox) = mailbox {
+                let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+            }
             return receiver;
         }
 
-        let mut pending_subscriptions = self.state.pending_subscriptions.lock();
-        if let Some(mailbox) = self.state.mailbox.get() {
-            drop(pending_subscriptions);
-            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
-        } else {
-            pending_subscriptions.push(sender);
+        let mut pending_subscriptions = self.shared.pending_subscriptions.lock();
+        match self.shared.mailbox.get() {
+            Some(Some(mailbox)) => {
+                drop(pending_subscriptions);
+                let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+            }
+            Some(None) => {}
+            None => pending_subscriptions.push(sender),
         }
         receiver
     }

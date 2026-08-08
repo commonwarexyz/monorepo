@@ -1,4 +1,4 @@
-use super::router::Messenger;
+use super::router::{Messenger, OwnedMessenger};
 use crate::{
     Channel, Message as NetworkMessage, Recipients,
     utils::limited::{CheckedSender, LimitedSender},
@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
     num::NonZeroUsize,
+    sync::Arc,
     time::SystemTime,
 };
 use thiserror::Error;
@@ -160,7 +161,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 #[derive(Clone, Debug)]
 pub struct Channels<P: PublicKey> {
-    messenger: Messenger<P>,
+    messenger: Arc<OwnedMessenger<P>>,
     max_size: u32,
     max_peers: NonZeroUsize,
     outbound_capacity: usize,
@@ -168,7 +169,11 @@ pub struct Channels<P: PublicKey> {
 }
 
 impl<P: PublicKey> Channels<P> {
-    pub const fn new(messenger: Messenger<P>, max_size: u32, max_peers: NonZeroUsize) -> Self {
+    pub const fn new(
+        messenger: Arc<OwnedMessenger<P>>,
+        max_size: u32,
+        max_peers: NonZeroUsize,
+    ) -> Self {
         Self {
             messenger,
             max_size,
@@ -216,7 +221,7 @@ impl<P: PublicKey> Channels<P> {
             Sender::new(
                 channel,
                 self.max_size,
-                self.messenger.clone(),
+                self.messenger.handle(),
                 context,
                 rate,
             ),

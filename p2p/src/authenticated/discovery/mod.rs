@@ -325,6 +325,43 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_drop_before_start_closes_channels() {
+        deterministic::Runner::default().start(|context| async move {
+            // Register a channel without starting the network.
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let config = Config::test(
+                signer,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                MAX_MESSAGE_SIZE,
+            );
+            let (mut network, _oracle) = Network::new(context.child("network"), config);
+            let (mut sender, mut receiver) = network.register(0, Quota::per_second(NZU32!(100)));
+
+            // Drop the network while retaining its channel handles.
+            drop(network);
+
+            // Verify both send paths observe closure.
+            let recipient = ed25519::PrivateKey::from_seed(1).public_key();
+            let sent = sender.send(Recipients::One(recipient), IoBuf::from(b"message"), false);
+            assert!(sent.is_empty());
+
+            let recipient = ed25519::PrivateKey::from_seed(2).public_key();
+            let feedback = sender
+                .check(Recipients::One(recipient))
+                .unwrap()
+                .send(IoBuf::from(b"message"), false);
+            assert_eq!(feedback, Unreliable::new(Feedback::Closed));
+
+            // Verify the receiver observes closure.
+            assert!(matches!(
+                receiver.recv().await,
+                Err(channels::Error::NetworkClosed)
+            ));
+        });
+    }
+
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
