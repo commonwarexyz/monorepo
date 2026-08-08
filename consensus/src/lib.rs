@@ -125,6 +125,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// notarized, or only voted for locally, and before consensus enters
         /// the context's view. Build on the named parent regardless; if the
         /// parent is later abandoned, this proposal is abandoned with it.
+        /// Within a Simplex run, dropping the response is terminal for this
+        /// request and declines the view. For an optimistic future request,
+        /// the missing proposal is remembered and causes nullification once
+        /// Simplex enters that view. Keep the response pending when temporary
+        /// unavailability should not forfeit the view.
         fn propose(
             &mut self,
             context: Self::Context,

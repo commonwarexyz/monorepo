@@ -773,7 +773,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn targeted_fetch_does_not_restrict_existing_backfill() {
+    async fn self_targeted_fetch_does_not_restrict_existing_backfill() {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -894,14 +894,14 @@ mod tests {
             };
             assert_eq!(requester_key, participants[0]);
 
-            // Add a targeted ancestry ask for the same key and silent peer.
-            // It must attach a subscriber without narrowing the in-flight
-            // unrestricted fetch.
+            // A stable leader can later ask for the same ancestry targeted at
+            // its own key. It must attach a subscriber without narrowing the
+            // in-flight unrestricted fetch; self is not an eligible peer.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
                 Kind::Nullification,
-                Some(participants[1].clone()),
+                Some(participants[0].clone()),
             );
             context.sleep(Duration::from_millis(10)).await;
 
