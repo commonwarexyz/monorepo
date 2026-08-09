@@ -109,10 +109,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
             }
             Certificate::Finalization(finalization) => {
-                let view = finalization.view();
-                let certificate = Certificate::Finalization(finalization);
                 // Retain the proof, not just its view: it may need to be served
                 // after a higher certified notarization advances the floor.
+                let view = finalization.view();
+                let certificate = Certificate::Finalization(finalization);
                 if self
                     .finalization
                     .as_ref()
