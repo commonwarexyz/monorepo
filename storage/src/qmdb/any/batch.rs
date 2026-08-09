@@ -2802,7 +2802,14 @@ where
         let index_batch = Arc::clone(&batch);
         let index_bitmap = Arc::clone(&self.bitmap);
         let last_commit_loc = self.last_commit_loc;
-        let index_job = strategy.spawn(batch.diff.len(), move |_| {
+        // The job merges or scans every ancestor diff in addition to the tip diff, so
+        // size the spawn from all of them.
+        let work_hint = batch
+            .ancestor_diffs
+            .iter()
+            .map(|diff| diff.len())
+            .fold(batch.diff.len(), usize::saturating_add);
+        let index_job = strategy.spawn(work_hint, move |_| {
             let batch = index_batch;
             let mut snapshot = snapshot;
             let mut bitmap = index_bitmap.write();
