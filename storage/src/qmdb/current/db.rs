@@ -401,7 +401,7 @@ where
     F: merkle::Graftable,
     E: Context,
     C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     U: Update,
     S: Strategy,
