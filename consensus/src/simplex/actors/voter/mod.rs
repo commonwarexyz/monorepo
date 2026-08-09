@@ -3094,6 +3094,8 @@ mod tests {
         let term_length = TermLength::new(NZU32!(5));
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
+            // Build a stable-leader network with a follower whose application
+            // rejects certification for view 1.
             let Fixture {
                 participants,
                 schemes,
@@ -3141,6 +3143,8 @@ mod tests {
                 batcher::Message::Update { .. }
             ));
 
+            // Locally notarize view 1 so its child enters the optimistic
+            // issuance window.
             let genesis = mocks::application::genesis::<Sha256>(epoch);
             let proposal_1 = Proposal::new(
                 Round::new(epoch, View::new(1)),
@@ -3166,6 +3170,8 @@ mod tests {
                 }
             }
 
+            // Extend the chain optimistically before view 1's certificate
+            // arrives.
             let proposal_2 = Proposal::new(
                 Round::new(epoch, View::new(2)),
                 View::new(1),
@@ -3190,6 +3196,9 @@ mod tests {
                 }
             }
 
+            // Prepare both certificates, but deliver only view 1. Its
+            // certification rejection must emit a nullify before view 2
+            // becomes directly notarized.
             let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
             let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
             mailbox.resolved(Certificate::Notarization(notarization_1));
@@ -3209,6 +3218,9 @@ mod tests {
                 }
             }
 
+            // Deliver view 2's certificate and extend the direct chain. The
+            // unresolved view-1 rejection must block view 3 before application
+            // verification.
             mailbox.resolved(Certificate::Notarization(notarization_2));
             let proposal_3 = Proposal::new(
                 Round::new(epoch, View::new(3)),
@@ -3236,6 +3248,8 @@ mod tests {
                 "rejected ancestry must not reach application verification"
             );
 
+            // Nullify the failed ancestor to abandon the term and confirm the
+            // voter can advance.
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(epoch, View::new(1)), quorum);
             mailbox.resolved(Certificate::Nullification(nullification));

@@ -4122,12 +4122,16 @@ mod tests {
                 ViewDelta::new(2),
             );
 
+            // Directly notarize two consecutive views in the same term.
             let ancestor = fetch_proposal(1, 0, 116);
             let descendant = fetch_proposal(2, 1, 117);
             for proposal in [&ancestor, &descendant] {
                 let notarization = build_notarization(&verifier, &schemes, proposal);
                 assert!(state.add_notarization(notarization).0);
             }
+
+            // Restore a rejected certification for the ancestor. It must veto
+            // the descendant's otherwise certificate-backed ancestry.
             state.replay(&Artifact::Certification(ancestor.round, false));
             assert!(
                 state
@@ -4135,6 +4139,8 @@ mod tests {
                     .is_none()
             );
 
+            // A descendant finalization covers the rejection and makes that
+            // certificate usable again.
             let finalization = build_finalization(&verifier, &schemes, &descendant);
             assert!(state.add_finalization(finalization).0);
             assert_eq!(
@@ -4302,8 +4308,11 @@ mod tests {
                 ViewDelta::new(3),
             );
 
+            // Certify view 1 so only view 2 is initially ready.
             certify_first_view(&mut state, &verifier, &schemes);
 
+            // Deliver the remaining chain in reverse, leaving each descendant
+            // blocked on its immediate parent.
             let proposals = [
                 fetch_proposal(2, 1, 102),
                 fetch_proposal(3, 2, 103),
@@ -4314,6 +4323,8 @@ mod tests {
                 assert!(state.add_notarization(notarization).0);
             }
 
+            // Each successful certification wakes only its immediate child.
+            // More distant descendants remain dormant.
             for proposal in proposals {
                 let (ready, fetches) = state.certify_candidates();
                 assert_eq!(ready, vec![proposal.clone()]);
