@@ -1017,17 +1017,18 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// likewise be displaced before it certifies. In either case, the
     /// completion says nothing about the proposal and ancestry we now hold.
     ///
-    /// The proposal is not re-queued for verification under the
-    /// replacement parent: displacement implies the leader equivocated, and
-    /// the proposal commits to the parent it was built on. The view instead
-    /// resolves through a peer's notarization of the proposal or the normal
-    /// timeout/nullification path.
+    /// A replacement proposal is certificate-backed and proceeds through
+    /// certification. A proposal with a displaced parent still commits to its
+    /// original parent, so it cannot be reverified under the replacement parent.
+    /// The proposal's view resolves through a peer's notarization of that proposal
+    /// or the timeout/nullification path.
     ///
-    /// The discard trades latency, not safety. A discarded rejection leaves
-    /// the view to the certification timeout instead of an immediate nullify.
-    /// The displacing certificate also identifies the equivocating leader,
-    /// whom the voter blocks. A Byzantine leader therefore pays this delay at
-    /// most once: later views skip at the leader timeout.
+    /// Discarding a stale rejection trades latency, not safety. Only parent
+    /// displacement can delay the view until the certification timeout instead
+    /// of an immediate nullify. The displacing certificate identifies the
+    /// equivocating leader, whom the voter blocks. Each Byzantine leader can
+    /// cause this delay at most once. Later views skip that leader at the leader
+    /// timeout.
     fn verification_is_stale(&mut self, view: View) -> bool {
         if self.verification_matches(view) {
             return false;
@@ -1051,9 +1052,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Latches `reason` after the automaton rejected or dropped a proposal.
     ///
-    /// A stale completion is discarded rather than latched: nullifying on a
-    /// verdict about a parent we have already replaced would forfeit the view
-    /// over ancestry that no longer applies.
+    /// Discards a stale verdict so it cannot forfeit the view after its
+    /// proposal or resolved parent has been replaced.
     pub fn verification_failed(&mut self, view: View, reason: TimeoutReason) {
         if self.verification_is_stale(view) {
             return;
