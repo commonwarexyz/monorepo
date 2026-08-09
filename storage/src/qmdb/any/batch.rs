@@ -3385,7 +3385,7 @@ where
     F: Family,
     E: Context,
     C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     U: update::Update,
     S: Strategy,
@@ -3436,24 +3436,26 @@ where
         let db_size = *self.log.size();
         let start_loc = Location::new(db_size);
 
-        // Apply journal (handles its own partial ancestor skipping).
-        self.log = self.log.apply_batch(&batch.journal_batch).await?;
-
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
-            let mut bitmap = self.bitmap.write();
+        // The journal append and the in-memory index application touch disjoint state
+        // (the log vs the snapshot and bitmap), so run them concurrently: the index
+        // application is one job on the strategy while the journal append proceeds on
+        // this task. A storage failure leaves the instance unusable either way, so the
+        // index job's effects on error do not need to be rolled back.
+        let strategy = self.strategy().clone();
+        let log = self.log;
+        let snapshot = self.snapshot;
+        let index_batch = Arc::clone(&batch);
+        let index_bitmap = Arc::clone(&self.bitmap);
+        let index_job = strategy.spawn(batch.diff.len(), move |_| {
+            let batch = index_batch;
+            let mut snapshot = snapshot;
+            let mut bitmap = index_bitmap.write();
             bitmap.extend_to(*batch.bounds.tip.size);
 
             if batch.ancestor_diffs.is_empty() {
                 // Fast path: no ancestors to merge, no fixups to look up.
                 for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.snapshot,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
+                    apply_diff(&mut snapshot, &mut bitmap, key, entry, entry.base_old_loc());
                 }
             } else {
                 // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
@@ -3477,7 +3479,7 @@ where
                             .resolve(key)
                             .map(DiffEntry::loc)
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut snapshot, &mut bitmap, key, entry, old);
                     }
                 } else {
                     let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
@@ -3504,7 +3506,7 @@ where
                             },
                             DiffEntry::loc,
                         );
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut snapshot, &mut bitmap, key, entry, old);
                     }
                 }
             }
@@ -3514,7 +3516,14 @@ where
             // `extend_to`.
             bitmap.set_bit(db_size - 1, false);
             bitmap.set_bit(*batch.bounds.tip.size - 1, true);
-        }
+            drop(bitmap);
+            snapshot
+        });
+
+        // Apply journal (handles its own partial ancestor skipping) while the index job runs.
+        let (log, snapshot) = futures::join!(log.apply_batch(&batch.journal_batch), index_job);
+        self.log = log?;
+        self.snapshot = snapshot;
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
@@ -3628,7 +3637,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -3659,7 +3668,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
+        I: OrderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
