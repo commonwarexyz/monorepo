@@ -197,10 +197,10 @@ mod spinner;
 pub use spinner::Config as SpinnerConfig;
 use spinner::Spinner;
 
-/// Maximum requested ring size accepted by [`Config::size`].
+/// Ring-size ceiling imposed by submission-sequence ordering.
 ///
-/// This is a power of two, so rounding an accepted value up to the next power
-/// of two remains within the limit.
+/// Its power-of-two value prevents ring-size rounding from crossing the
+/// sequence-ordering boundary.
 pub const MAX_RING_SIZE: u32 = HALF_SUBMISSION_SEQUENCE_DOMAIN / 2;
 
 /// Packed `io_uring` `user_data` value.
@@ -1300,9 +1300,8 @@ mod tests {
     #[test]
     fn test_config_size_rejects_values_above_max_ring_size() {
         // The wake state reserves 29 bits for the submission sequence, and
-        // `pending()` relies on half-range modular ordering. The rounded
-        // request channel size must therefore stay at or below
-        // `MAX_RING_SIZE`.
+        // `pending()` relies on half-range modular ordering. `MAX_RING_SIZE`
+        // preserves that ordering after power-of-two rounding.
         let size = commonware_utils::Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE)
             .expect("maximum ring size should be valid");
         let cfg = Config {

@@ -1,8 +1,7 @@
 use arbitrary::Arbitrary;
-use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{Signer, ed25519};
 use commonware_p2p::{
-    Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
+    Address, AddressableManager as _, Blocker, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
         discovery,
         lookup::{self, Network as LookupNetwork},
@@ -485,8 +484,9 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     // Normalize sender index to valid range
                     let from_idx = (from_idx as usize) % peers.len();
 
-                    // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
+                    // Clamp message size to the configured payload limit (channel framing is added
+                    // separately).
+                    let msg_size = msg_size.min(MAX_MSG_SIZE as usize);
 
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];

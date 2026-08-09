@@ -1,11 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{Signer, ed25519};
-use commonware_p2p::{
-    Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait, simulated,
-};
+use commonware_p2p::{Receiver as ReceiverTrait, Recipients, Sender as SenderTrait, simulated};
 use commonware_runtime::{Clock, IoBuf, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{Bounded, NZUsize};
 use libfuzzer_sys::fuzz_target;
@@ -180,8 +177,9 @@ fn fuzz(input: FuzzInput) {
                     let from_idx = (peer_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
-                    // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
+                    // Clamp message size to the configured payload limit (channel framing is added
+                    // separately).
+                    let msg_size = msg_size.min(MAX_MSG_SIZE as usize);
 
                     // Skip if receiver hasn't registered this channel - they won't be able to receive
                     if !channels.contains_key(&(to_idx, channel_id)) {

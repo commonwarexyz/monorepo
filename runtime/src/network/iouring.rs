@@ -69,9 +69,8 @@ pub struct Config {
     /// Size of the read buffer for batching network reads.
     ///
     /// A larger buffer reduces syscall overhead by reading more data per call,
-    /// but uses more memory per connection. The size cannot exceed `u32::MAX`,
-    /// the largest length accepted by a Linux recv SQE. A size of zero disables
-    /// buffering. Defaults to 64 KB.
+    /// but uses more memory per connection. Linux recv SQEs represent buffer
+    /// lengths as `u32`. A value of zero disables buffering. Defaults to 64 KB.
     pub read_buffer_size: Bounded<usize, 0, { u32::MAX }>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
