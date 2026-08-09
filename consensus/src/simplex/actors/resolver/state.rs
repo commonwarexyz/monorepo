@@ -189,10 +189,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.covering_nullification(view)
     }
 
-    /// Returns the full highest finalization retained for serving requests.
-    ///
-    /// Its view alone is insufficient because the resolver may need to return
-    /// the certificate after the construction floor advances beyond it.
+    /// Returns the highest finalization certificate retained independently of
+    /// the construction floor.
     pub const fn finalization(&self) -> Option<&Certificate<S, D>> {
         self.finalization.as_ref()
     }
