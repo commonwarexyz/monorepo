@@ -11,10 +11,10 @@
 /// This configuration deliberately violates the protocol assumption that at most F replicas are Byzantine.
 /// Do NOT use this configuration when analyzing protocol safety, searching for counterexamples,
 /// validating invariants, or drawing conclusions about protocol correctness under its stated assumptions.
+/// Violations here are expected and just confirm the quint-based tools or the model can detect breaks.
 ///
 /// This instance has N = 6 and F = 1, but contains 2 Byzantine replicas.
 module main {
-    // A specification instance for n=6 and f=1
     import replica(
         N = 6,
         F = 1,
