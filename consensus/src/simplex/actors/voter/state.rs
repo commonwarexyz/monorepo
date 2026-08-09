@@ -667,7 +667,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.in_issuance_window(view) && !self.optimistic_parent_ready(view) {
             return None;
         }
-        if !self.verified_parent_matches(view) {
+        if !self.verification_matches(view) {
             return None;
         }
         let candidate = self
@@ -996,7 +996,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             if !round.request_verify() {
                 continue;
             }
-            round.set_verifying_parent(proposal.parent, parent_payload);
+            round.set_verifying(proposal.clone(), parent_payload);
             return Verify::Ready(
                 Context {
                     round: proposal.round,
@@ -1009,13 +1009,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         Verify::Wait
     }
 
-    /// Returns true when a verification completion describes a parent we have
-    /// since replaced, discarding the stale binding.
+    /// Returns true when a verification completion describes a proposal or
+    /// parent we have since replaced, discarding the stale binding.
     ///
-    /// An optimistic child is verified before its parent is certified, so a
-    /// conflicting parent certificate can land while the request is in flight.
-    /// The completion then reports on ancestry we no longer hold and says
-    /// nothing about the proposal under the parent we now accept.
+    /// A same-view certificate can replace the proposal while the request is in
+    /// flight without advancing the voter. An optimistic child's parent can
+    /// likewise be displaced before it certifies. In either case, the
+    /// completion says nothing about the proposal and ancestry we now hold.
     ///
     /// The proposal is not re-queued for verification under the
     /// replacement parent: displacement implies the leader equivocated, and
@@ -1029,11 +1029,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// whom the voter blocks. A Byzantine leader therefore pays this delay at
     /// most once: later views skip at the leader timeout.
     fn verification_is_stale(&mut self, view: View) -> bool {
-        if self.verified_parent_matches(view) {
+        if self.verification_matches(view) {
             return false;
         }
         if let Some(round) = self.views.get_mut(&view) {
-            round.clear_verifying_parent();
+            round.clear_verifying();
         }
         true
     }
@@ -1322,20 +1322,19 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
     }
 
-    fn verified_parent_matches(&self, view: View) -> bool {
-        // Parents are recorded only for peer proposals (in try_verify). A locally
-        // built proposal's parent can only be displaced by conflicting certificates
-        // for the parent view, which requires more than f faults.
+    fn verification_matches(&self, view: View) -> bool {
+        // Bindings are recorded only for peer proposals (in try_verify). A locally
+        // built proposal is never completed through this verification path.
         let Some(round) = self.views.get(&view) else {
             return true;
         };
-        let Some((parent_view, parent_payload)) = round.verifying_parent() else {
+        let Some((verifying, parent_payload)) = round.verifying() else {
             return true;
         };
         let Some(proposal) = round.proposal() else {
             return false;
         };
-        if proposal.parent != *parent_view {
+        if proposal != verifying {
             return false;
         }
         self.parent_payload(proposal)

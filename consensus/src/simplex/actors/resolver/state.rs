@@ -39,13 +39,23 @@ pub(crate) enum Effect {
     RetainAbove(View),
 }
 
-/// Tracks all known certificates from the last
-/// certified notarization or finalized view to the current view.
+/// Tracks the construction floor, retained finalization, and certificates
+/// needed to repair views through the current view.
+///
+/// The construction floor and retained finalization have different lifetimes.
+/// A higher certified notarization advances the floor, but it does not replace
+/// the finalization as a settling response for requests at or below the
+/// finalized view. The full finalization certificate is therefore retained
+/// independently so it remains servable after the floor advances. Only the
+/// highest finalization is needed because it settles every request that a
+/// lower finalization would settle.
 pub struct State<S: Scheme, D: Digest> {
     /// Highest seen view.
     current_view: View,
-    /// Most recent certified notarization or finalization.
+    /// Highest certificate used as the construction floor.
     floor: Option<Certificate<S, D>>,
+    /// Full highest finalization, retained independently of the movable floor.
+    finalization: Option<Certificate<S, D>>,
     /// Notarizations pending certification (possible floors).
     notarizations: BTreeMap<View, Notarization<S, D>>,
     /// Nullifications that cover any view greater than the floor.
@@ -66,6 +76,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         Self {
             current_view: View::zero(),
             floor: None,
+            finalization: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
             fetch_floor: View::zero(),
@@ -99,8 +110,18 @@ impl<S: Scheme, D: Digest> State<S, D> {
             }
             Certificate::Finalization(finalization) => {
                 let view = finalization.view();
+                let certificate = Certificate::Finalization(finalization);
+                // Retain the proof, not just its view: it may need to be served
+                // after a higher certified notarization advances the floor.
+                if self
+                    .finalization
+                    .as_ref()
+                    .is_none_or(|known| view > known.view())
+                {
+                    self.finalization = Some(certificate.clone());
+                }
                 if view > self.floor_view() || self.can_upgrade_floor(view) {
-                    self.floor = Some(Certificate::Finalization(finalization));
+                    self.floor = Some(certificate);
                     effects.push(self.prune());
                 }
             }
@@ -146,10 +167,18 @@ impl<S: Scheme, D: Digest> State<S, D> {
         effects
     }
 
-    /// Get the best certificate for a given view (or the floor
-    /// if the view is below the floor).
+    /// Get the best certificate for a given view.
+    ///
+    /// The retained finalization is preferred at or below its view because it
+    /// settles those requests. A higher notarization may be the current floor
+    /// without settling a targeted request for older ancestry.
     pub fn get(&self, view: View) -> Option<&Certificate<S, D>> {
-        // If view is <= floor, return the floor
+        if let Some(finalization) = &self.finalization
+            && view <= finalization.view()
+        {
+            return Some(finalization);
+        }
+
         if let Some(floor) = &self.floor
             && view <= floor.view()
         {
@@ -158,6 +187,14 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
         // Otherwise, return the nullification covering the view if it exists.
         self.covering_nullification(view)
+    }
+
+    /// Returns the full highest finalization retained for serving requests.
+    ///
+    /// Its view alone is insufficient because the resolver may need to return
+    /// the certificate after the construction floor advances beyond it.
+    pub const fn finalization(&self) -> Option<&Certificate<S, D>> {
+        self.finalization.as_ref()
     }
 
     /// Returns the stored nullification covering `view`, if any.
