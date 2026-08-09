@@ -21,11 +21,13 @@
 //! # Conversions
 //!
 //! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy: the
-//! payload is never copied and the cost is at most one small owner
-//! allocation. Conversions into [`IoBufMut`] or [`IoBufsMut`] are zero-copy
-//! where the source allocation can back a mutable handle and copy otherwise.
-//! Each mutable conversion documents which one it is, and conversions out of
-//! the handles document their cost on each impl.
+//! payload is never copied. Most conversions require at most one small owner
+//! allocation. A `Vec<u8>` that cannot host an inline owner may require two
+//! small metadata allocations: one for `bytes` shared ownership and one for
+//! the external owner. Conversions into [`IoBufMut`] or [`IoBufsMut`] are
+//! zero-copy where the source allocation can back a mutable handle and copy
+//! otherwise. Each mutable conversion documents which one it is, and
+//! conversions out of the handles document their cost on each impl.
 //!
 //! Because untracked heap buffers embed their owner header in the same
 //! allocation, a power-of-two capacity request may land in the allocator's
