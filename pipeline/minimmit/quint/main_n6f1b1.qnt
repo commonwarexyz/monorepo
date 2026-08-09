@@ -1,8 +1,15 @@
 // -*- mode: Bluespec; -*-
 
-/// A few handy small models that are good for debugging and inspection
+/// A small adversarial configuration intended for debugging, inspection, and protocol analysis.
+///
+/// Here, N is the total number of replicas in the system, and F is the maximum number of Byzantine
+/// replicas the protocol is designed to tolerate while preserving its stated safety guarantees.
+///
+/// This instance has N = 6 and F = 1, with exactly 1 Byzantine replica.
+///
+/// It represents a valid execution within the protocol's fault assumptions and is suitable for
+/// safety analysis, invariant checking, and counterexample search.
 module main {
-    // A specification instance for n=6 and f=1
     import replica(
         N = 6,
         F = 1,

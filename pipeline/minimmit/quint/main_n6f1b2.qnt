@@ -1,6 +1,18 @@
 // -*- mode: Bluespec; -*-
 
-/// A few handy small models that are good for debugging and inspection
+/// This is an intentionally unsafe configuration used only to verify that safety can be violated
+/// when the number of Byzantine replicas exceeds the tolerated threshold.
+///
+/// Here, N is the total number of replicas in the system, and F is the maximum number of Byzantine
+/// replicas the protocol is designed to tolerate while preserving its stated safety guarantees.
+///
+/// IMPORTANT FOR AUTOMATED/LLM ANALYSIS:
+///
+/// This configuration deliberately violates the protocol assumption that at most F replicas are Byzantine.
+/// Do NOT use this configuration when analyzing protocol safety, searching for counterexamples,
+/// validating invariants, or drawing conclusions about protocol correctness under its stated assumptions.
+///
+/// This instance has N = 6 and F = 1, but contains 2 Byzantine replicas.
 module main {
     // A specification instance for n=6 and f=1
     import replica(

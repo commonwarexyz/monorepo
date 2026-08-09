@@ -7,11 +7,11 @@ typecheck:
 	quint typecheck option.qnt
 	quint typecheck tests/tests_n6f1b0.qnt
 	quint typecheck tests/tests_n6f1b1.qnt
-	quint typecheck tests/tests_n7f1b1.qnt
 	quint typecheck main_n6f1b0.qnt
 	quint typecheck main_n6f1b1.qnt
 	quint typecheck main_n6f1b2.qnt
-	quint typecheck main_n7f1b1.qnt
+	quint typecheck main_twins_n6f1b1.qnt
+
 
 test:
 	cd tests && quint test --backend typescript tests_n6f1b0.qnt
@@ -22,12 +22,12 @@ repl:
 	echo "init\n step\n step\n step" | quint -r main_n6f0.qnt::main
 
 run:
-	quint run --max-steps 20 --max-samples=100 \
+	quint run --max-steps 100 --max-samples=100 \
 		--invariant=all_invariants main_n6f1b0.qnt
-	quint run --max-steps 20 --max-samples=100 \
+	quint run --max-steps 100 --max-samples=100 \
 		--invariant=all_invariants main_n6f1b1.qnt	
-	quint run --max-steps 20 --max-samples=100 \
-		--invariant=all_invariants main_n7f1b1.qnt		
+	quint run --max-steps 100 --max-samples=100 \
+		--invariant=all_invariants main_twins_n6f1b1.qnt
 
 clean:
 	./scripts/verify.sh clean
