@@ -592,8 +592,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 /// Parameters for a one-time state-sync pass.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
-    /// Maximum operations fetched per source request, bounded by the response's encoded vector
-    /// length.
+    /// Maximum operations fetched per source request.
     pub fetch_batch_size: AtMost<NonZeroU64, { u32::MAX }>,
 
     /// Number of operations applied per local apply step.

@@ -25,9 +25,7 @@ use tracing::debug;
 const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
 const CLOUDPING_DIVISOR: f64 = 2.0; // cloudping.co reports ping times not latency
 
-/// Maximum raw message size accepted by the task DSL.
-///
-/// This reserves space for the encoded vector's length prefix within the simulated P2P payload.
+/// Maximum message size accepted by task commands.
 pub const MAX_COMMAND_MESSAGE_SIZE: u32 =
     commonware_p2p::simulated::MAX_SIZE - commonware_codec::varint::MAX_U32_VARINT_SIZE as u32;
 const MILLISECONDS_TO_SECONDS: f64 = 1000.0;

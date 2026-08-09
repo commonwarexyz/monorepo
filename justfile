@@ -24,15 +24,7 @@ pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    git ls-files -z --cached --others --exclude-standard -- '*.rs' |
-        while IFS= read -r -d '' file; do
-            if [[ -f "$file" ]]; then
-                printf './%s\0' "$file"
-            fi
-        done |
-        xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -55,11 +47,7 @@ fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
 # Runs all lints (fmt, clippy, docs, features, toml, custom, publish order, and stability)
-lint: check-fmt test-fix-fmt check-toml-fmt clippy check-docs check-features dylint check-publish-order check-stability
-
-# Tests formatter file selection against tracked worktree deletions.
-test-fix-fmt:
-    bash .github/scripts/test_fix_fmt.sh
+lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-publish-order check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features

@@ -150,9 +150,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: 1.0,
             },
-            max_message_size: (1024 * 1024)
-                .try_into()
-                .expect("default max message size is valid"),
+            max_message_size: AtMost!(1024 * 1024),
             engine,
             crashes: vec![],
             required_finalizations: 10,

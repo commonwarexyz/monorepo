@@ -67,8 +67,7 @@ where
     /// Retry cadence for pending fetches.
     pub fetch_retry_timeout: Duration,
 
-    /// Maximum number of operations to serve in a single response, bounded by the response's
-    /// encoded vector length.
+    /// Maximum number of operations to serve in a single response.
     pub max_serve_ops: AtMost<NonZeroU64, { u32::MAX }>,
 
     /// Send fetch requests with network priority.
