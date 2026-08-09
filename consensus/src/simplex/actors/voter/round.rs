@@ -78,10 +78,9 @@ pub struct Round<S: Scheme, D: Digest> {
     certify: CertifyState,
     last_ancestry_request: Option<View>,
 
-    // Parent selected when peer proposal verification was started. Used to
-    // detect the parent being displaced by a conflicting certificate before
-    // we sign (see `State::verified_parent_matches`).
-    verifying_parent: Option<(View, D)>,
+    // Proposal and resolved parent payload selected when peer verification
+    // started. A certificate may replace either while the request is in flight.
+    verifying: Option<(Proposal<D>, D)>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -110,7 +109,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_finalization: false,
             certify: CertifyState::Ready,
             last_ancestry_request: None,
-            verifying_parent: None,
+            verifying: None,
         }
     }
 
@@ -171,19 +170,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         true
     }
 
-    /// Records the parent selected when peer proposal verification started.
-    pub const fn set_verifying_parent(&mut self, parent: View, payload: D) {
-        self.verifying_parent = Some((parent, payload));
+    /// Records the proposal and parent payload selected when verification started.
+    pub const fn set_verifying(&mut self, proposal: Proposal<D>, parent_payload: D) {
+        self.verifying = Some((proposal, parent_payload));
     }
 
-    /// Returns the parent recorded when verification started, if any.
-    pub const fn verifying_parent(&self) -> Option<&(View, D)> {
-        self.verifying_parent.as_ref()
+    /// Returns the proposal binding recorded when verification started, if any.
+    pub const fn verifying(&self) -> Option<&(Proposal<D>, D)> {
+        self.verifying.as_ref()
     }
 
-    /// Clears the recorded verification parent.
-    pub const fn clear_verifying_parent(&mut self) {
-        self.verifying_parent = None;
+    /// Clears the recorded verification binding.
+    pub const fn clear_verifying(&mut self) {
+        self.verifying = None;
     }
 
     /// Attempt to certify this round's proposal.

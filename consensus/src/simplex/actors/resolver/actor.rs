@@ -58,10 +58,6 @@ pub struct Actor<
     /// applies to the resolver (see [Self::apply_effects]).
     state: State<S, D>,
 
-    /// Highest finalized view observed. Targeted ancestry at or below this
-    /// view can no longer be required by a valid proposal.
-    last_finalized: View,
-
     /// Encoded nullifications retained while they cover an unfinalized view.
     /// This cache survives floor raises so asks below the floor remain servable.
     nullifications: BTreeMap<View, Bytes>,
@@ -106,7 +102,6 @@ impl<
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.term_length),
-                last_finalized: View::zero(),
                 nullifications: BTreeMap::new(),
                 pending_notarizations: BTreeMap::new(),
                 certified_notarizations: BTreeMap::new(),
@@ -210,6 +205,13 @@ impl<
         }
     }
 
+    /// Returns the highest finalized view, or zero if none is known.
+    fn last_finalized(&self) -> View {
+        self.state
+            .finalization()
+            .map_or(View::zero(), |certificate| certificate.view())
+    }
+
     /// Records a certificate and applies its resolver lifecycle effects.
     fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
@@ -217,6 +219,7 @@ impl<
         certificate: Certificate<S, D>,
     ) {
         let term_length = self.state.term_length();
+        let last_finalized = self.last_finalized();
 
         // Retain encoded certificates for as long as a peer can still ask for them.
         // [State] prunes at the floor, which rises sooner than finalization and
@@ -224,7 +227,7 @@ impl<
         match &certificate {
             Certificate::Nullification(nullification) => {
                 let view = nullification.view();
-                if view.term_end(term_length) > self.last_finalized {
+                if view.term_end(term_length) > last_finalized {
                     self.nullifications.insert(view, certificate.encode());
                     let covered = view..=view.term_end(term_length);
                     Self::retire(resolver, move |view, ask| {
@@ -234,7 +237,7 @@ impl<
             }
             Certificate::Notarization(notarization) => {
                 let view = notarization.view();
-                if view > self.last_finalized && !self.uncertifiable_notarizations.contains(&view) {
+                if view > last_finalized && !self.uncertifiable_notarizations.contains(&view) {
                     if !self.certified_notarizations.contains_key(&view) {
                         self.pending_notarizations
                             .insert(view, certificate.encode());
@@ -248,8 +251,7 @@ impl<
                 // Finalization is the global retirement boundary: a valid proposal
                 // can no longer name ancestry at or below it, so nothing here can
                 // still be asked for.
-                self.last_finalized = self.last_finalized.max(finalization.view());
-                let finalized = self.last_finalized;
+                let finalized = last_finalized.max(finalization.view());
                 self.nullifications
                     .retain(|view, _| view.term_end(term_length) > finalized);
                 self.pending_notarizations
@@ -276,9 +278,10 @@ impl<
     ) {
         // Every verdict clears the pending payload. Only successful
         // notarizations above finalization become servable.
+        let last_finalized = self.last_finalized();
         if let Some(notarization) = self.pending_notarizations.remove(&view)
             && success
-            && view > self.last_finalized
+            && view > last_finalized
         {
             self.certified_notarizations.insert(view, notarization);
         }
@@ -287,7 +290,7 @@ impl<
         // is not an answer to an exact-parent request.
         if !success {
             self.certified_notarizations.remove(&view);
-            if view > self.last_finalized {
+            if view > last_finalized {
                 self.uncertifiable_notarizations.insert(view);
             }
             Self::retire(resolver, move |asked, ask| {
@@ -421,9 +424,9 @@ impl<
     /// evidence the actor records, but not what was asked for.
     fn settled(&self, view: View, kind: Kind) -> bool {
         // Finalization rules out any further need for the view. This is also
-        // what settles an ask answered by a finalization, since recording one
-        // raises [Self::last_finalized].
-        if view <= self.last_finalized {
+        // what settles an ask answered by a finalization, since resolver state
+        // retains the highest one independently of its construction floor.
+        if view <= self.last_finalized() {
             return true;
         }
         match kind {
@@ -452,14 +455,14 @@ impl<
 
     /// Selects the best certificate to serve for `view`.
     ///
-    /// An active finalization floor settles every ask at or below it. Otherwise
+    /// The highest finalization settles every ask at or below it. Otherwise
     /// an exact certified notarization is preferred to a covering
     /// nullification, matching proposal construction. If neither is retained,
     /// the current floor is served. Pending notarizations and notarizations
     /// that fail certification are never served.
     fn produce_certificate(&self, view: View) -> Option<Bytes> {
-        // A current finalization floor settles either kind, so retained
-        // ancestry cannot improve the answer.
+        // Prefer the retained finalization because a higher notarization does
+        // not settle an older ancestry request.
         if let Some(certificate @ Certificate::Finalization(_)) = self.state.get(view) {
             return Some(certificate.encode());
         }
@@ -473,8 +476,8 @@ impl<
             return Some(nullification.clone());
         }
 
-        // The floor advances by view, so this can serve a higher certified
-        // notarization after it supersedes an older finalization.
+        // Above retained finalization, the movable floor may still serve a
+        // higher certified notarization.
         self.state.get(view).map(|certificate| certificate.encode())
     }
 
@@ -1452,36 +1455,52 @@ mod tests {
     }
 
     #[test_async]
-    async fn higher_certified_floor_is_served_over_older_finalization() {
+    async fn higher_certified_floor_does_not_hide_older_finalization() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
-            let mut resolver = RecordingResolver::default();
+            let mut responder =
+                build_actor(context.child("responder"), verifier.clone(), TERM_LENGTH);
+            let mut responder_resolver = RecordingResolver::default();
 
             let requested = View::new(3);
             let finalization = Certificate::Finalization(build_finalization(
                 &schemes, &verifier, EPOCH, requested,
             ));
-            let expected_finalization = finalization.encode();
-            actor.updated(&mut resolver, finalization);
-            assert_eq!(
-                actor.produce_certificate(requested),
-                Some(expected_finalization)
-            );
+            responder.updated(&mut responder_resolver, finalization);
 
             let floor = View::new(6);
             let notarization =
                 Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, floor));
-            let expected = notarization.encode();
-            actor.updated(&mut resolver, notarization);
-            actor.certified(&mut resolver, floor, true);
+            responder.updated(&mut responder_resolver, notarization);
+            responder.certified(&mut responder_resolver, floor, true);
 
-            // The floor advances by view, so the higher certified
-            // notarization supersedes the older finalization.
-            assert_eq!(actor.produce_certificate(requested), Some(expected));
+            // The notarization is now the construction floor, but returning it
+            // for view 3 would leave the targeted ask ambiguous. The retained
+            // finalization settles that ask instead.
+            let data = responder
+                .produce_certificate(requested)
+                .expect("responder should retain settling finalization");
+
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut requester = build_actor(context.child("requester"), verifier, TERM_LENGTH);
+            let mut requester_resolver = RecordingResolver::default();
+            let (response, receiver) = oneshot::channel();
+            requester.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data,
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut requester_resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
         });
     }
 

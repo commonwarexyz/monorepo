@@ -196,6 +196,8 @@ mod tests {
         certify_latency_ms: f64,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
+        /// Whether every mock application verification should fail.
+        fail_verification: bool,
         certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
@@ -212,6 +214,7 @@ mod tests {
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
                 verify_requests: None,
+                fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
             }
         }
@@ -258,6 +261,7 @@ mod tests {
         };
         let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
+        actor.set_fail_verification(options.fail_verification);
         if let Some(verify_requests) = verify_requests {
             actor.set_verify_observer(Box::new(move |context, _| {
                 verify_requests.lock().push(context.view());
@@ -6730,6 +6734,100 @@ mod tests {
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(ed25519::fixture);
         certification_cancelled_on_finalization::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    #[test_traced]
+    fn test_stale_same_parent_verification_failure_does_not_nullify_replacement() {
+        let n = 5;
+        let quorum = quorum(n);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"stale-same-parent-verification", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let verify_requests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_mins(60),
+                    verify_latency_ms: 100.0,
+                    certify_latency_ms: 500.0,
+                    verify_requests: Some(verify_requests.clone()),
+                    fail_verification: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
+            let view = View::new(5);
+            let parent_payload =
+                advance_to_view(&mut mailbox, &mut batcher_receiver, &schemes, quorum, view).await;
+
+            let proposal_a = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                view.previous().unwrap(),
+                Sha256::hash(&[b"proposal-a"]),
+            );
+            relay.broadcast(
+                &participants[1],
+                Recipients::All,
+                (
+                    proposal_a.payload,
+                    (proposal_a.round, parent_payload, 1u64).encode(),
+                ),
+            );
+            mailbox.proposal(proposal_a);
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(*verify_requests.lock(), vec![view]);
+
+            let proposal_b = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                view.previous().unwrap(),
+                Sha256::hash(&[b"proposal-b"]),
+            );
+            let (_, notarization) = build_notarization(&schemes, &proposal_b, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization));
+
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == view =>
+                        {
+                            panic!("stale verification failure nullified the replacement proposal");
+                        }
+                        batcher::Message::Update { .. }
+                        | batcher::Message::Constructed(_) => {}
+                    },
+                    message = resolver_receiver.recv() => match message.unwrap() {
+                        MailboxMessage::Certified { view: certified, success, .. }
+                            if certified == view =>
+                        {
+                            assert!(success);
+                            break;
+                        }
+                        MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Certified { .. }
+                        | MailboxMessage::Resolve { .. } => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(3)) => {
+                        panic!("replacement proposal did not finish certification");
+                    },
+                }
+            }
+        });
     }
 
     /// Test that in-flight certification is still reported to resolver after nullification.
