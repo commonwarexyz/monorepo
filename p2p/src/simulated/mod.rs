@@ -62,7 +62,7 @@
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{AtMost, NZU32, NZUsize};
+//! use commonware_utils::{Bounded, NZU32, NZUsize};
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -75,7 +75,7 @@
 //!
 //! // Configure network
 //! let p2p_cfg = Config {
-//!     max_size: AtMost!(1024 * 1024), // 1MB
+//!     max_size: Bounded!(1024 * 1024), // 1MB
 //!     max_peers_per_set: NZUsize!(4),
 //!     disconnect_on_block: true,
 //!     tracked_peer_sets: NZUsize!(3),
@@ -197,7 +197,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        AtMost, NZU32, NZUsize,
+        Bounded, NZU32, NZUsize,
         channel::mpsc,
         hostname, ordered,
         ordered::{Map, Set},
@@ -212,7 +212,7 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-    const MAX_MESSAGE_SIZE: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(NZU32!(1024 * 1024));
+    const MAX_MESSAGE_SIZE: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(NZU32!(1024 * 1024));
 
     async fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, peers: I)
     where

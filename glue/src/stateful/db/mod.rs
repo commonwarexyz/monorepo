@@ -84,7 +84,7 @@ use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
 use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
 use commonware_utils::{
-    AtMost,
+    Bounded,
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
@@ -593,7 +593,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
     /// Maximum operations fetched per source request.
-    pub fetch_batch_size: AtMost<NonZeroU64, { u32::MAX }>,
+    pub fetch_batch_size: Bounded<NonZeroU64, 1, { u32::MAX }>,
 
     /// Number of operations applied per local apply step.
     pub apply_batch_size: NonZeroU64,
@@ -1963,7 +1963,7 @@ mod tests {
         deterministic, reschedule,
     };
     use commonware_utils::{
-        AtMost, NZU64,
+        Bounded, NZU64,
         channel::{mpsc, oneshot, ring},
     };
     use futures::{FutureExt, SinkExt, pin_mut};
@@ -3887,7 +3887,7 @@ mod tests {
                         0,
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -3926,7 +3926,7 @@ mod tests {
                 0,
                 tip_rx,
                 SyncEngineConfig {
-                    fetch_batch_size: AtMost!(1),
+                    fetch_batch_size: Bounded!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -3963,7 +3963,7 @@ mod tests {
                         0,
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
@@ -4013,7 +4013,7 @@ mod tests {
                         7,
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
@@ -4063,7 +4063,7 @@ mod tests {
                             0,
                             tip_rx,
                             SyncEngineConfig {
-                                fetch_batch_size: AtMost!(1),
+                                fetch_batch_size: Bounded!(1),
                                 apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
@@ -4114,7 +4114,7 @@ mod tests {
                         (0, 0),
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
@@ -4173,7 +4173,7 @@ mod tests {
                         (0, 0),
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
@@ -4231,7 +4231,7 @@ mod tests {
                 (7, 7),
                 tip_rx,
                 SyncEngineConfig {
-                    fetch_batch_size: AtMost!(1),
+                    fetch_batch_size: Bounded!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -4269,7 +4269,7 @@ mod tests {
                     (0, 0),
                     tip_rx,
                     SyncEngineConfig {
-                        fetch_batch_size: AtMost!(1),
+                        fetch_batch_size: Bounded!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -4311,7 +4311,7 @@ mod tests {
                 (0, 0),
                 tip_rx,
                 SyncEngineConfig {
-                    fetch_batch_size: AtMost!(1),
+                    fetch_batch_size: Bounded!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -4353,7 +4353,7 @@ mod tests {
                     (0, 0),
                     tip_rx,
                     SyncEngineConfig {
-                        fetch_batch_size: AtMost!(1),
+                        fetch_batch_size: Bounded!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -4486,7 +4486,7 @@ mod tests {
                         (0, 0),
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -4555,7 +4555,7 @@ mod tests {
                         (target, target),
                         tip_rx,
                         SyncEngineConfig {
-                            fetch_batch_size: AtMost!(1),
+                            fetch_batch_size: Bounded!(1),
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
@@ -4618,7 +4618,7 @@ mod tests {
                             (0, 7),
                             tip_rx,
                             SyncEngineConfig {
-                                fetch_batch_size: AtMost!(1),
+                                fetch_batch_size: Bounded!(1),
                                 apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),

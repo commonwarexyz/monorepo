@@ -16,7 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{AtMost, TryCollect, ordered::Set, union};
+use commonware_utils::{Bounded, TryCollect, ordered::Set, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
@@ -132,7 +132,7 @@ fn main() {
             SocketAddr::new(*ip, config.port),
             bootstrappers,
             max_peers_per_set,
-            AtMost!(config.message_size.get()),
+            Bounded!(config.message_size.get()),
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 

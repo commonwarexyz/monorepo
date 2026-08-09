@@ -253,7 +253,7 @@ mod tests {
         Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
     use commonware_utils::{
-        AtMost, NZU64, NZUsize,
+        Bounded, NZU64, NZUsize,
         channel::{oneshot, ring},
     };
     use std::{convert::Infallible, time::Duration};
@@ -750,7 +750,7 @@ mod tests {
                     context: context.child("syncer"),
                     db_config: 0,
                     sync_config: SyncEngineConfig {
-                        fetch_batch_size: AtMost!(1),
+                        fetch_batch_size: Bounded!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NZUsize!(1),

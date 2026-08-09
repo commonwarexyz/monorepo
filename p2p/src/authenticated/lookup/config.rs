@@ -2,7 +2,7 @@ use crate::authenticated::{MAX_PAYLOAD_OVERHEAD, MAX_SIZE};
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_stream::encrypted::MAX_SIZE as STREAM_MAX_SIZE;
-use commonware_utils::{AtMost, NZU32, NZUsize};
+use commonware_utils::{Bounded, NZU32, NZUsize};
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
@@ -48,7 +48,7 @@ pub struct Config<C: Signer> {
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
-    pub max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
+    pub max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
 
     /// Maximum number of distinct identities at one peer-set index, including the local identity.
     ///
@@ -130,8 +130,8 @@ pub struct Config<C: Signer> {
 
 impl<C: Signer> Config<C> {
     /// Returns the encrypted-stream payload limit for this configuration.
-    pub(super) fn max_frame_size(&self) -> AtMost<NonZeroU32, STREAM_MAX_SIZE> {
-        AtMost!(self.max_message_size.get() + MAX_PAYLOAD_OVERHEAD)
+    pub(super) fn max_frame_size(&self) -> Bounded<NonZeroU32, 1, STREAM_MAX_SIZE> {
+        Bounded!(self.max_message_size.get() + MAX_PAYLOAD_OVERHEAD)
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
@@ -140,7 +140,7 @@ impl<C: Signer> Config<C> {
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
-        max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
+        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -180,7 +180,7 @@ impl<C: Signer> Config<C> {
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
-        max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
+        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -213,7 +213,7 @@ impl<C: Signer> Config<C> {
     pub fn test(
         crypto: C,
         listen: SocketAddr,
-        max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
+        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -247,7 +247,7 @@ impl<C: Signer> Config<C> {
 mod tests {
     use super::*;
     use commonware_cryptography::ed25519::PrivateKey;
-    use commonware_utils::AtMost;
+    use commonware_utils::Bounded;
     use std::net::{Ipv4Addr, SocketAddr};
 
     #[test]
@@ -255,7 +255,7 @@ mod tests {
         let config = Config::test(
             PrivateKey::from_seed(0),
             SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
-            AtMost!(MAX_SIZE),
+            Bounded!(MAX_SIZE),
         );
 
         assert_eq!(config.max_message_size.get(), MAX_SIZE);

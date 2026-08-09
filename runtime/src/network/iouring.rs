@@ -27,7 +27,7 @@ use crate::{
     telemetry::metrics::Register,
     utils,
 };
-use commonware_utils::AtMost;
+use commonware_utils::Bounded;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
@@ -72,7 +72,7 @@ pub struct Config {
     /// but uses more memory per connection. The size cannot exceed `u32::MAX`,
     /// the largest length accepted by a Linux recv SQE. A size of zero disables
     /// buffering. Defaults to 64 KB.
-    pub read_buffer_size: AtMost<usize, { u32::MAX }>,
+    pub read_buffer_size: Bounded<usize, 0, { u32::MAX }>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated send and receive io_uring threads.
@@ -88,7 +88,7 @@ impl Default for Config {
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
-            read_buffer_size: AtMost!(DEFAULT_READ_BUFFER_SIZE),
+            read_buffer_size: Bounded!(DEFAULT_READ_BUFFER_SIZE),
             thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
@@ -586,7 +586,7 @@ mod tests {
         thread,
     };
     use commonware_macros::{select, test_group};
-    use commonware_utils::AtMost;
+    use commonware_utils::Bounded;
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_read_buffer_size_bounds() {
-        type ReadBufferSize = AtMost<usize, { u32::MAX }>;
+        type ReadBufferSize = Bounded<usize, 0, { u32::MAX }>;
 
         let zero = ReadBufferSize::try_from(0).unwrap();
         let maximum =
@@ -668,7 +668,7 @@ mod tests {
         tests::stress_test_network_trait(|| {
             test_network(Config {
                 iouring_config: iouring::Config {
-                    size: AtMost!(256),
+                    size: Bounded!(256),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -752,7 +752,7 @@ mod tests {
         // Verify disabling the internal read buffer preserves direct recv behavior.
         // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
         let network = test_network(Config {
-            read_buffer_size: AtMost!(0),
+            read_buffer_size: Bounded!(0),
             ..Default::default()
         })
         .expect("Failed to start io_uring");
@@ -976,7 +976,7 @@ mod tests {
         // Verify reads that are at least as large as the internal buffer go
         // straight into the caller-owned output buffer.
         let network = test_network(Config {
-            read_buffer_size: AtMost!(8),
+            read_buffer_size: Bounded!(8),
             ..Default::default()
         })
         .expect("Failed to start io_uring");

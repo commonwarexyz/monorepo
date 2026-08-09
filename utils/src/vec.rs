@@ -23,7 +23,7 @@ pub struct Bounded<T> {
 }
 
 impl<T> Bounded<T> {
-    /// Creates an empty [`Bounded`] with the given capacity.
+    /// Creates an empty [`struct@Bounded`] with the given capacity.
     pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
             deque: VecDeque::with_capacity(capacity.get()),

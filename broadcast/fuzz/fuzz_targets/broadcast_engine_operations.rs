@@ -13,7 +13,9 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Recipients, simulated::Network};
 use commonware_runtime::{Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::{AtMost, NZUsize, TestRng, channel::oneshot, futures::Pool, vec::Bounded};
+use commonware_utils::{
+    Bounded, NZUsize, TestRng, channel::oneshot, futures::Pool, vec::Bounded as BoundedVec,
+};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
@@ -94,7 +96,7 @@ enum Source {
 impl Source {
     /// Resolve to a concrete digest. Returns `None` when `Recent` is selected
     /// before any messages have been broadcast.
-    fn resolve(self, recent: &Bounded<Digest>) -> Option<Digest> {
+    fn resolve(self, recent: &BoundedVec<Digest>) -> Option<Digest> {
         match self {
             Source::Random(message) => Some(message.digest()),
             Source::Recent(_) if recent.is_empty() => None,
@@ -226,7 +228,7 @@ fn fuzz(input: FuzzInput) {
         let (network, oracle) = Network::<deterministic::Context, PublicKey>::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: AtMost!(1024 * 1024),
+                max_size: Bounded!(1024 * 1024),
                 max_peers_per_set: NZUsize!(peers.len()),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
@@ -279,7 +281,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Execute fuzzed actions
-        let mut recent_digests = Bounded::new(NZUsize!(MAX_RECENT_DIGESTS));
+        let mut recent_digests = BoundedVec::new(NZUsize!(MAX_RECENT_DIGESTS));
         let mut pending_subscriptions = Pool::default();
         for action in input.actions {
             match action {

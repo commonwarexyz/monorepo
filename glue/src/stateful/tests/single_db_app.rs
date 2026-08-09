@@ -55,7 +55,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    AtMost, NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex,
+    Bounded, NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex,
     test_rng,
 };
 use futures::StreamExt;
@@ -303,7 +303,7 @@ impl SingleDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: AtMost!(16),
+                fetch_batch_size: Bounded!(16),
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: 8,
                 update_channel_size: NZUsize!(256),
@@ -323,7 +323,7 @@ impl SingleDbEngine {
     /// Forces state sync to progress in the smallest possible batches.
     pub(crate) fn with_slow_state_sync(mut self) -> Self {
         self.sync_config = SyncEngineConfig {
-            fetch_batch_size: AtMost!(1),
+            fetch_batch_size: Bounded!(1),
             apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(4),
@@ -500,7 +500,7 @@ impl EngineDefinition for SingleDbEngine {
                     initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: AtMost!(16),
+                    max_serve_ops: Bounded!(16),
                     priority_requests: false,
                     priority_responses: false,
                 },

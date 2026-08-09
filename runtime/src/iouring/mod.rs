@@ -160,7 +160,7 @@ use crate::{
     telemetry::metrics::{Gauge, Register, raw},
 };
 use commonware_utils::{
-    AtMost,
+    Bounded,
     channel::{
         mpsc::{self, error::TryRecvError},
         oneshot,
@@ -238,7 +238,7 @@ pub struct Config {
     /// This value is rounded up to the next power of two when constructing
     /// [IoUringLoop], with zero rounding to one, so the configured in-flight
     /// waiter capacity matches the effective ring sizing behavior.
-    pub size: AtMost<u32, MAX_RING_SIZE>,
+    pub size: Bounded<u32, 0, MAX_RING_SIZE>,
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
     /// If true, use single issuer mode.
@@ -1274,7 +1274,7 @@ mod tests {
         // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
         let cfg = Config {
-            size: AtMost!(1_000),
+            size: Bounded!(1_000),
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
@@ -1282,7 +1282,7 @@ mod tests {
 
         // Already-power-of-two size is preserved.
         let cfg = Config {
-            size: AtMost!(1_024),
+            size: Bounded!(1_024),
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
@@ -1290,7 +1290,7 @@ mod tests {
 
         // Zero remains valid and rounds to one.
         let cfg = Config {
-            size: AtMost!(0),
+            size: Bounded!(0),
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
@@ -1303,7 +1303,7 @@ mod tests {
         // `pending()` relies on half-range modular ordering. The rounded
         // request channel size must therefore stay at or below
         // `MAX_RING_SIZE`.
-        let size = commonware_utils::AtMost::<u32, MAX_RING_SIZE>::try_from(MAX_RING_SIZE)
+        let size = commonware_utils::Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE)
             .expect("maximum ring size should be valid");
         let cfg = Config {
             size,
@@ -1311,7 +1311,8 @@ mod tests {
         };
         assert_eq!(cfg.size.get(), MAX_RING_SIZE);
         assert!(
-            commonware_utils::AtMost::<u32, MAX_RING_SIZE>::try_from(MAX_RING_SIZE + 1).is_err()
+            commonware_utils::Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE + 1)
+                .is_err()
         );
     }
 
@@ -1356,7 +1357,7 @@ mod tests {
         // Verify cancel staging reports waiter pressure when the waiter table
         // is already full, even if the SQ is also saturated.
         let cfg = Config {
-            size: AtMost!(8),
+            size: Bounded!(8),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1399,7 +1400,7 @@ mod tests {
         // Verify requeued work reports waiter pressure when the waiter table is
         // already full, even if the SQ is also saturated.
         let cfg = Config {
-            size: AtMost!(8),
+            size: Bounded!(8),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1447,7 +1448,7 @@ mod tests {
         // - ready-queue staging fills the local SQ with restaged requests
         for path in [EarlyReturnPath::Cancel, EarlyReturnPath::Ready] {
             let cfg = Config {
-                size: AtMost!(8),
+                size: Bounded!(8),
                 ..Default::default()
             };
             let mut registry = Registry::default();
@@ -1530,7 +1531,7 @@ mod tests {
     fn test_fill_submission_queue_returns_submission_queue_capacity_when_fresh_staging_fills_sq() {
         // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
         let cfg = Config {
-            size: AtMost!(8),
+            size: Bounded!(8),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1570,7 +1571,7 @@ mod tests {
         // Verify staging reports waiter pressure even when the SQ itself still
         // has room.
         let cfg = Config {
-            size: AtMost!(8),
+            size: Bounded!(8),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1604,7 +1605,7 @@ mod tests {
         // Verify a full fresh staging pass reports waiter pressure when both
         // the SQ and waiter table saturate in the same iteration.
         let cfg = Config {
-            size: AtMost!(8),
+            size: Bounded!(8),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1760,7 +1761,7 @@ mod tests {
         let cfg = Config {
             // Keep ring size realistic; size=1 can deadlock progress in some setups.
             // Waiter slot reuse is still exercised because we complete op1 before op2.
-            size: AtMost!(8),
+            size: Bounded!(8),
             max_request_timeout: Duration::from_millis(200),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
@@ -2091,7 +2092,7 @@ mod tests {
         // If the publish wake were lost, the second recv would stall until the
         // first recv was manually released.
         let cfg = Config {
-            size: AtMost!(2),
+            size: Bounded!(2),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -2182,7 +2183,7 @@ mod tests {
         // reinstall attempt must fail without consuming the retry flag.
         {
             let cfg = Config {
-                size: AtMost!(8),
+                size: Bounded!(8),
                 ..Default::default()
             };
             let mut registry = Registry::default();
@@ -2216,7 +2217,7 @@ mod tests {
         // on the futex path before entering the kernel, so the reinstall only
         // becomes live on a later non-idle iteration.
         let cfg = Config {
-            size: AtMost!(2),
+            size: Bounded!(2),
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -2524,7 +2525,7 @@ mod tests {
         // path without ever calling `try_recv()`. This is the exact shape that
         // previously hid producer disconnect forever.
         let cfg = Config {
-            size: AtMost!(1),
+            size: Bounded!(1),
             shutdown_timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         };
@@ -2577,7 +2578,7 @@ mod tests {
         // straight to shutdown if there is still buffered channel work that
         // has not yet been admitted into the waiter table.
         let cfg = Config {
-            size: AtMost!(1),
+            size: Bounded!(1),
             shutdown_timeout: None,
             ..Default::default()
         };
@@ -2746,7 +2747,7 @@ mod tests {
         // Verify timed requests are still drained correctly when timeout-driven
         // cancel traffic exceeds the ring's SQ capacity in a single pass.
         let cfg = Config {
-            size: AtMost!(8),
+            size: Bounded!(8),
             max_request_timeout: Duration::from_millis(50),
             ..Default::default()
         };

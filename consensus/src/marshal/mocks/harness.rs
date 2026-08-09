@@ -49,7 +49,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{AtMost, NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
+use commonware_utils::{Bounded, NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
     RngExt as _,
@@ -143,7 +143,7 @@ where
     let (network, oracle) = Network::new_with_peers(
         context.child("network"),
         simulated::Config {
-            max_size: AtMost!(1024 * 1024),
+            max_size: Bounded!(1024 * 1024),
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: true,
             tracked_peer_sets,

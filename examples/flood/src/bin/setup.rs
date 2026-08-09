@@ -5,7 +5,7 @@ use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{Within, sys_rng};
+use commonware_utils::{Bounded, sys_rng};
 use rand::seq::IteratorRandom;
 use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::info;
@@ -156,11 +156,11 @@ fn main() {
     let storage_throughput = matches.get_one::<i32>("storage_throughput").copied();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
     let message_size = *matches.get_one::<u32>("message-size").unwrap();
-    let message_size: Within<
+    let message_size: Bounded<
         u32,
         { size_of::<u64>() as u32 },
         { commonware_p2p::authenticated::MAX_SIZE },
-    > = Within!(message_size);
+    > = Bounded!(message_size);
     let message_rate = *matches.get_one::<NonZeroU32>("message-rate").unwrap();
     let mailbox_size = *matches.get_one::<NonZeroUsize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();

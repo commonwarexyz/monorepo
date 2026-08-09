@@ -10,7 +10,7 @@ use commonware_cryptography::{
     ed25519::{self, PublicKey},
 };
 use commonware_p2p::Recipients;
-use commonware_utils::AtMost;
+use commonware_utils::Bounded;
 use reqwest::blocking::Client;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -70,9 +70,9 @@ struct PeerState {
 
 #[derive(Clone)]
 pub enum Command {
-    Propose(u32, Option<AtMost<usize, MAX_COMMAND_MESSAGE_SIZE>>), // id, size in bytes
-    Broadcast(u32, Option<AtMost<usize, MAX_COMMAND_MESSAGE_SIZE>>), // id, size in bytes
-    Reply(u32, Option<AtMost<usize, MAX_COMMAND_MESSAGE_SIZE>>),   // id, size in bytes
+    Propose(u32, Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>), // id, size in bytes
+    Broadcast(u32, Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>), // id, size in bytes
+    Reply(u32, Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>),   // id, size in bytes
     Collect(u32, Threshold, Option<(Duration, Duration)>),
     Wait(u32, Threshold, Option<(Duration, Duration)>),
     Or(Box<Self>, Box<Self>),
@@ -255,7 +255,7 @@ fn parse_single_command(line: &str) -> Command {
 /// Parses and validates an optional message size.
 fn parse_message_size(
     parsed_args: &HashMap<String, String>,
-) -> Option<AtMost<usize, MAX_COMMAND_MESSAGE_SIZE>> {
+) -> Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>> {
     parsed_args.get("size").map(|size| {
         size.parse::<usize>()
             .expect("Invalid size")

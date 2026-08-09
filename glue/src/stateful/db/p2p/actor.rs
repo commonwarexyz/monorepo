@@ -17,7 +17,7 @@ use commonware_storage::{
     qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
-    AtMost,
+    Bounded,
     channel::{fallible::OneshotExt, oneshot},
 };
 use futures::future;
@@ -68,7 +68,7 @@ where
     pub fetch_retry_timeout: Duration,
 
     /// Maximum number of operations to serve in a single response.
-    pub max_serve_ops: AtMost<NonZeroU64, { u32::MAX }>,
+    pub max_serve_ops: Bounded<NonZeroU64, 1, { u32::MAX }>,
 
     /// Send fetch requests with network priority.
     pub priority_requests: bool,
@@ -398,7 +398,7 @@ mod tests {
         qmdb::any::{FixedConfig, unordered::fixed},
         translator::TwoCap,
     };
-    use commonware_utils::{AtMost, NZU16, NZU64, NZUsize, channel::oneshot};
+    use commonware_utils::{Bounded, NZU16, NZU64, NZUsize, channel::oneshot};
     use std::time::Duration;
 
     #[derive(Clone, Debug)]
@@ -460,7 +460,7 @@ mod tests {
             initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
-            max_serve_ops: AtMost!(16),
+            max_serve_ops: Bounded!(16),
             priority_requests: false,
             priority_responses: false,
         }
@@ -468,10 +468,11 @@ mod tests {
 
     #[test]
     fn max_serve_ops_is_bounded_by_wire_length() {
-        assert!(AtMost::<NonZeroU64, { u32::MAX }>::try_from(0).is_err());
-        assert!(AtMost::<NonZeroU64, { u32::MAX }>::try_from(u64::from(u32::MAX) + 1).is_err());
+        assert!(Bounded::<NonZeroU64, 1, { u32::MAX }>::try_from(0).is_err());
+        assert!(Bounded::<NonZeroU64, 1, { u32::MAX }>::try_from(u64::from(u32::MAX) + 1).is_err());
 
-        let maximum = AtMost::<NonZeroU64, { u32::MAX }>::try_from(u64::from(u32::MAX)).unwrap();
+        let maximum =
+            Bounded::<NonZeroU64, 1, { u32::MAX }>::try_from(u64::from(u32::MAX)).unwrap();
         let config = Config {
             max_serve_ops: maximum,
             ..test_config(None)

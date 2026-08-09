@@ -102,7 +102,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_utils::Within;
+use commonware_utils::Bounded;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -110,7 +110,7 @@ const MIN_MESSAGE_SIZE: u32 = size_of::<u64>() as _;
 
 fn deserialize_message_size<'de, D>(
     deserializer: D,
-) -> Result<Within<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>, D::Error>
+) -> Result<Bounded<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -124,7 +124,7 @@ where
 }
 
 fn serialize_message_size<S>(
-    message_size: &Within<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>,
+    message_size: &Bounded<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -145,7 +145,7 @@ pub struct Config {
         deserialize_with = "deserialize_message_size",
         serialize_with = "serialize_message_size"
     )]
-    pub message_size: Within<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>,
+    pub message_size: Bounded<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>,
     pub message_rate: NonZeroU32,
     pub mailbox_size: NonZeroUsize,
     pub instrument: bool,

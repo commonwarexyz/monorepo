@@ -76,7 +76,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::{Within, ordered::Set};
+use commonware_utils::{Bounded, ordered::Set};
 use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet},
@@ -386,7 +386,7 @@ impl Framework {
     ///
     /// Returns `None` if `faults` is greater than or equal to `participants`.
     pub const fn new(
-        participants: Within<usize, 2, 64>,
+        participants: Bounded<usize, 2, 64>,
         faults: NonZeroUsize,
         rounds: NonZeroUsize,
         mode: Mode,
@@ -1303,7 +1303,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{NZU32, NZUsize, TestRng, Within, ordered::Set, test_rng};
+    use commonware_utils::{Bounded, NZU32, NZUsize, TestRng, ordered::Set, test_rng};
     use std::{collections::HashSet, time::Duration};
 
     fn framework(
@@ -1314,7 +1314,7 @@ mod tests {
         max_cases: usize,
     ) -> Framework {
         Framework::new(
-            Within!(participants),
+            Bounded!(participants),
             NZUsize!(faults),
             NZUsize!(rounds),
             mode,
@@ -2124,8 +2124,8 @@ mod tests {
 
     #[test]
     fn framework_participants_enforce_construction_bounds() {
-        let minimum: Within<usize, 2, 64> = Within!(2);
-        let maximum: Within<usize, 2, 64> = Within!(MAX_PARTICIPANTS);
+        let minimum: Bounded<usize, 2, 64> = Bounded!(2);
+        let maximum: Bounded<usize, 2, 64> = Bounded!(MAX_PARTICIPANTS);
         let framework = Framework::new(
             maximum,
             NZUsize!(1),
@@ -2137,8 +2137,8 @@ mod tests {
 
         assert_eq!(minimum.get(), 2);
         assert_eq!(framework.participants(), MAX_PARTICIPANTS);
-        assert!(Within::<usize, 2, 64>::try_from(1).is_err());
-        assert!(Within::<usize, 2, 64>::try_from(MAX_PARTICIPANTS + 1).is_err());
+        assert!(Bounded::<usize, 2, 64>::try_from(1).is_err());
+        assert!(Bounded::<usize, 2, 64>::try_from(MAX_PARTICIPANTS + 1).is_err());
     }
 
     #[test]
@@ -2150,7 +2150,7 @@ mod tests {
     #[test]
     fn framework_rejects_faults_not_less_than_participants() {
         let framework = Framework::new(
-            Within!(2),
+            Bounded!(2),
             NZUsize!(2),
             NZUsize!(1),
             Mode::Sampled,

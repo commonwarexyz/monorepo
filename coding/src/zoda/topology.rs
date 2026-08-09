@@ -1,7 +1,7 @@
 use super::Error;
 use crate::Config;
 use commonware_math::fields::goldilocks::F;
-use commonware_utils::{AtMost, BigRationalExt as _};
+use commonware_utils::{BigRationalExt as _, Bounded};
 use num_rational::BigRational;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -14,9 +14,9 @@ const MAX_ENCODED_ROWS: u32 = 1 << 31;
 const MAX_TOTAL_SHARDS: u32 = 65_536;
 
 /// A non-zero encoded row count supported by row shuffling.
-type EncodedRows = AtMost<NonZeroUsize, MAX_ENCODED_ROWS>;
+type EncodedRows = Bounded<NonZeroUsize, 1, MAX_ENCODED_ROWS>;
 /// A non-zero shard count addressable by `u16` shard indices.
-type TotalShards = AtMost<NonZeroUsize, MAX_TOTAL_SHARDS>;
+type TotalShards = Bounded<NonZeroUsize, 1, MAX_TOTAL_SHARDS>;
 
 /// Contains the sizes of various objects in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

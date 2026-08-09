@@ -13,7 +13,7 @@ use commonware_runtime::{
     deterministic::{self, Context},
 };
 use commonware_utils::{
-    AtMost, NZU32, NZUsize, TryCollect,
+    Bounded, NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
 };
 use rand::{RngExt as _, seq::SliceRandom};
@@ -244,7 +244,7 @@ impl NetworkScheme for Discovery {
                 .len()
                 .try_into()
                 .expect("topology must contain at least one peer"),
-            AtMost!(MAX_MSG_SIZE),
+            Bounded!(MAX_MSG_SIZE),
         );
         // Override some settings for fuzzing environment
         config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
@@ -320,7 +320,7 @@ impl NetworkScheme for Lookup {
                 .len()
                 .try_into()
                 .expect("topology must contain at least one peer"),
-            AtMost!(MAX_MSG_SIZE),
+            Bounded!(MAX_MSG_SIZE),
         );
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());

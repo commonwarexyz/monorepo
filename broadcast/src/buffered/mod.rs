@@ -56,7 +56,7 @@ mod tests {
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{AtMost, NZUsize};
+    use commonware_utils::{Bounded, NZUsize};
     use std::{
         collections::{BTreeMap, VecDeque},
         num::NonZeroU32,
@@ -100,7 +100,7 @@ mod tests {
         let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
             context,
             commonware_p2p::simulated::Config {
-                max_size: AtMost!(1024 * 1024),
+                max_size: Bounded!(1024 * 1024),
                 max_peers_per_set: NZUsize!(num_peers),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -1220,7 +1220,7 @@ mod tests {
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -1349,7 +1349,7 @@ mod tests {
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1488,7 +1488,7 @@ mod tests {
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),

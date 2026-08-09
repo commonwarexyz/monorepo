@@ -13,7 +13,7 @@ use commonware_runtime::{
     deterministic,
 };
 use commonware_utils::{
-    AtMost, NZUsize,
+    Bounded, NZUsize,
     channel::{mpsc, oneshot},
 };
 use estimator::{
@@ -42,7 +42,7 @@ const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 /// Configure the network for the estimator's static peer set.
 fn network_config(max_peers_per_set: NonZeroUsize) -> Config {
     Config {
-        max_size: AtMost!(MAX_SIZE),
+        max_size: Bounded!(MAX_SIZE),
         max_peers_per_set,
         disconnect_on_block: true,
         tracked_peer_sets: NZUsize!(1),
@@ -56,7 +56,7 @@ type Message = Vec<u8>;
 /// padded to the given size.
 fn create_message(
     id: u32,
-    target_size: Option<AtMost<usize, MAX_COMMAND_MESSAGE_SIZE>>,
+    target_size: Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>,
 ) -> Message {
     target_size.map_or_else(
         || id.to_be_bytes().to_vec(),

@@ -75,42 +75,42 @@ pub fn quorum(n: Nodes) -> u32 {
 mod tests {
     use super::*;
     use crate::Configuration;
-    use commonware_utils::{AtMost, Faults, N3f1};
+    use commonware_utils::{Bounded, Faults, N3f1};
     use std::num::NonZeroU32;
 
     #[test]
     fn configuration_counts_enforce_construction_bounds() {
-        let minimum: AtMost<NonZeroU32, 21> = AtMost!(1);
-        let maximum: AtMost<NonZeroU32, 21> = AtMost!(21);
-        let zero: AtMost<u32, 21> = AtMost!(0);
-        let maximum_subset: AtMost<u32, 21> = AtMost!(21);
+        let minimum: Bounded<NonZeroU32, 1, 21> = Bounded!(1);
+        let maximum: Bounded<NonZeroU32, 1, 21> = Bounded!(21);
+        let zero: Bounded<u32, 0, 21> = Bounded!(0);
+        let maximum_subset: Bounded<u32, 0, 21> = Bounded!(21);
 
-        assert_eq!(Configuration::new(minimum, zero, AtMost!(1)).n.get(), 1);
+        assert_eq!(Configuration::new(minimum, zero, Bounded!(1)).n.get(), 1);
         let configuration = Configuration::new(maximum, zero, maximum_subset);
         assert_eq!(configuration.n.get(), 21);
         assert_eq!(configuration.faults.get(), 0);
         assert_eq!(configuration.correct.get(), 21);
-        assert!(AtMost::<NonZeroU32, 21>::try_from(0).is_err());
-        assert!(AtMost::<NonZeroU32, 21>::try_from(22).is_err());
-        assert!(AtMost::<u32, 21>::try_from(22).is_err());
+        assert!(Bounded::<NonZeroU32, 1, 21>::try_from(0).is_err());
+        assert!(Bounded::<NonZeroU32, 1, 21>::try_from(22).is_err());
+        assert!(Bounded::<u32, 0, 21>::try_from(22).is_err());
     }
 
     #[test]
     #[should_panic(expected = "faults must not exceed n")]
     fn configuration_rejects_faults_greater_than_nodes() {
-        let _ = Configuration::new(AtMost!(4), AtMost!(5), AtMost!(0));
+        let _ = Configuration::new(Bounded!(4), Bounded!(5), Bounded!(0));
     }
 
     #[test]
     #[should_panic(expected = "faults + correct must equal n")]
     fn configuration_rejects_mismatched_counts() {
-        let _ = Configuration::new(AtMost!(4), AtMost!(1), AtMost!(2));
+        let _ = Configuration::new(Bounded!(4), Bounded!(1), Bounded!(2));
     }
 
     #[test]
     fn test_hardcoded_values_match_upstream() {
         for n in 1..=21u32 {
-            let count = AtMost!(n);
+            let count = Bounded!(n);
             let expected_f = max_faults(count);
             let expected_q = quorum(count);
             let actual_f = N3f1::max_faults(n);
@@ -143,14 +143,14 @@ mod tests {
     #[test]
     fn test_specific_configurations() {
         // N4F1C3: 4 nodes, 1 faulty, 3 correct
-        assert_eq!(max_faults(AtMost!(4)), 1);
-        assert_eq!(quorum(AtMost!(4)), 3);
+        assert_eq!(max_faults(Bounded!(4)), 1);
+        assert_eq!(quorum(Bounded!(4)), 3);
 
         // Standard BFT configurations
-        assert_eq!(max_faults(AtMost!(3)), 0); // 3f+1 = 1, so f=0
-        assert_eq!(max_faults(AtMost!(4)), 1); // 3f+1 = 4, so f=1
-        assert_eq!(max_faults(AtMost!(7)), 2); // 3f+1 = 7, so f=2
-        assert_eq!(max_faults(AtMost!(10)), 3); // 3f+1 = 10, so f=3
+        assert_eq!(max_faults(Bounded!(3)), 0); // 3f+1 = 1, so f=0
+        assert_eq!(max_faults(Bounded!(4)), 1); // 3f+1 = 4, so f=1
+        assert_eq!(max_faults(Bounded!(7)), 2); // 3f+1 = 7, so f=2
+        assert_eq!(max_faults(Bounded!(10)), 3); // 3f+1 = 10, so f=3
     }
 
     #[test]
@@ -164,13 +164,13 @@ mod tests {
         assert!(!N4F3C1.can_finalize());
 
         // Edge cases
-        let zero_faults = Configuration::new(AtMost!(4), AtMost!(0), AtMost!(4));
+        let zero_faults = Configuration::new(Bounded!(4), Bounded!(0), Bounded!(4));
         assert!(zero_faults.can_finalize()); // 0 <= 1
 
-        let exact_max = Configuration::new(AtMost!(4), AtMost!(1), AtMost!(3));
+        let exact_max = Configuration::new(Bounded!(4), Bounded!(1), Bounded!(3));
         assert!(exact_max.can_finalize()); // 1 <= 1
 
-        let over_max = Configuration::new(AtMost!(4), AtMost!(2), AtMost!(2));
+        let over_max = Configuration::new(Bounded!(4), Bounded!(2), Bounded!(2));
         assert!(!over_max.can_finalize()); // 2 > 1
     }
 }

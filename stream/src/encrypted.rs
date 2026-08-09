@@ -70,7 +70,7 @@ use commonware_runtime::{
     BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
     Stream,
 };
-use commonware_utils::{AtMost, SystemTimeExt};
+use commonware_utils::{Bounded, SystemTimeExt};
 use rand_core::CryptoRng;
 use std::{future::Future, num::NonZeroU32, ops::Range, time::Duration};
 use thiserror::Error;
@@ -145,7 +145,7 @@ pub struct Config<S> {
     ///
     /// Fixed-size handshake frames use their protocol-defined sizes instead of
     /// inheriting this limit.
-    pub max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
+    pub max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
 
     /// Maximum time drift allowed for future timestamps. Handles clock skew.
     pub synchrony_bound: Duration,
@@ -536,7 +536,7 @@ mod test {
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{AtMost, NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{Bounded, NZU32, NZUsize, sync::Mutex};
     use std::{
         num::NonZeroU32,
         sync::{
@@ -553,7 +553,7 @@ mod test {
         Config {
             signing_key,
             namespace: NAMESPACE.to_vec(),
-            max_message_size: AtMost!(MAX_MESSAGE_SIZE),
+            max_message_size: Bounded!(MAX_MESSAGE_SIZE),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
@@ -562,11 +562,11 @@ mod test {
 
     #[test]
     fn test_max_message_size_bounds() {
-        type MessageSize = AtMost<NonZeroU32, MAX_SIZE>;
+        type MessageSize = Bounded<NonZeroU32, 1, MAX_SIZE>;
 
         assert_eq!(MAX_SIZE + TAG_SIZE, crate::utils::codec::MAX_SIZE);
 
-        let maximum: MessageSize = AtMost!(MAX_SIZE);
+        let maximum: MessageSize = Bounded!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
         assert!(MessageSize::try_from(0).is_err());
         assert!(MessageSize::try_from(MAX_SIZE + 1).is_err());
@@ -1023,7 +1023,7 @@ mod test {
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
             let mut listener_config = transport_config(listener_crypto);
-            listener_config.max_message_size = AtMost!(1024 * 1024);
+            listener_config.max_message_size = Bounded!(1024 * 1024);
 
             // Advertise a frame that is one byte larger than the encoded public
             // key and send no payload. The old behavior accepted this because it
@@ -1062,7 +1062,7 @@ mod test {
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
             let mut dialer_config = transport_config(dialer_crypto);
-            dialer_config.max_message_size = AtMost!(1024 * 1024);
+            dialer_config.max_message_size = Bounded!(1024 * 1024);
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.

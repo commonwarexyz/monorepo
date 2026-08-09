@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{AtMost, FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{Bounded, FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -63,10 +63,10 @@ const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
 /// Number of nodes supported by the fuzz harness.
-pub type Nodes = AtMost<NonZeroU32, 21>;
+pub type Nodes = Bounded<NonZeroU32, 1, 21>;
 
 /// Number of nodes in a subset of the fuzz harness.
-pub type Subset = AtMost<u32, 21>;
+pub type Subset = Bounded<u32, 0, 21>;
 
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,10 +120,10 @@ impl Configuration {
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
 pub const N4F1C3: Configuration =
-    Configuration::new(AtMost!(NZU32!(4)), AtMost!(1u32), AtMost!(3u32));
+    Configuration::new(Bounded!(NZU32!(4)), Bounded!(1u32), Bounded!(3u32));
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration =
-    Configuration::new(AtMost!(NZU32!(4)), AtMost!(3u32), AtMost!(1u32));
+    Configuration::new(Bounded!(NZU32!(4)), Bounded!(3u32), Bounded!(1u32));
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,
@@ -259,7 +259,7 @@ async fn setup_network<P: simplex::Simplex>(
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
         NetworkConfig {
-            max_size: AtMost!(1024 * 1024),
+            max_size: Bounded!(1024 * 1024),
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),

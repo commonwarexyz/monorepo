@@ -127,7 +127,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        AtMost, NZU32, NZUsize,
+        Bounded, NZU32, NZUsize,
         channel::{
             fallible::{FallibleExt, OneshotExt},
             mpsc, oneshot,
@@ -207,7 +207,7 @@ mod tests {
         let (network, oracle) = Network::new(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: AtMost!(1024 * 1024),
+                max_size: Bounded!(1024 * 1024),
                 max_peers_per_set: NZUsize!(peer_seeds.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
@@ -1372,7 +1372,7 @@ mod tests {
             let (network, mut oracle) = Network::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -3465,7 +3465,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -3569,7 +3569,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -3700,7 +3700,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
-                    max_size: AtMost!(1024 * 1024),
+                    max_size: Bounded!(1024 * 1024),
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),

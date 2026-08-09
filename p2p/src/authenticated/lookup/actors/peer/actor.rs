@@ -349,7 +349,7 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{AtMost, NZUsize};
+    use commonware_utils::{Bounded, NZUsize};
     use std::{
         num::NonZeroU32,
         sync::{
@@ -395,7 +395,7 @@ mod tests {
         StreamConfig {
             signing_key: key,
             namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: AtMost!(MAX_MESSAGE_SIZE),
+            max_message_size: Bounded!(MAX_MESSAGE_SIZE),
             synchrony_bound: Duration::from_secs(10),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),

@@ -119,7 +119,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{AtMost, NZU32, NZUsize, ordered::Map};
+//! use commonware_utils::{Bounded, NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -158,7 +158,7 @@
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
-//!     AtMost!(MAX_MESSAGE_SIZE),
+//!     Bounded!(MAX_MESSAGE_SIZE),
 //! );
 //!
 //! // Start context
@@ -226,7 +226,7 @@ mod tests {
         Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{
-        AtMost, Hostname, NZU32, NZUsize, TryCollect,
+        Bounded, Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
@@ -246,7 +246,7 @@ mod tests {
         One,
     }
 
-    const MAX_MESSAGE_SIZE: AtMost<NonZeroU32, MAX_SIZE> = AtMost!(NZU32!(1_024 * 1_024)); // 1MB
+    const MAX_MESSAGE_SIZE: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(NZU32!(1_024 * 1_024)); // 1MB
 
     #[test]
     fn test_drop_before_start_closes_channels() {
@@ -305,7 +305,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: AtMost<NonZeroU32, MAX_SIZE>,
+        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
         base_port: u16,
         n: usize,
         mode: Mode,
