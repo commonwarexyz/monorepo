@@ -1,4 +1,13 @@
 //! Shared sync types and functionality for authenticated databases.
+//!
+//! # Trust Model
+//!
+//! Sources are untrusted, and their responses are verified against the requested target. The
+//! target itself is a trusted input chosen by the caller: sync does not select or authenticate it.
+//!
+//! Target updates form a forward-only sequence. Sync adopts only strictly advancing targets and
+//! discards the rest. Selecting a single target before this boundary lets sync focus on fetching
+//! and verifying its data instead of reconciling competing targets.
 
 use crate::qmdb::sync::engine::Config;
 use commonware_codec::Encode;
@@ -8,53 +17,49 @@ pub mod engine;
 pub(crate) use engine::Engine;
 
 mod error;
-pub use error::{EngineError, Error};
+pub use error::{EngineError, Error, ServeError};
 
 mod gaps;
-mod journal;
+pub(crate) mod journal;
 pub(crate) use journal::Journal;
 
 mod metrics;
 pub use metrics::Metrics;
 
 mod database;
-pub(crate) use database::{
-    Config as DatabaseConfig, Database, journal_covers_range, local_boundary_nodes,
-};
+pub use database::Database;
+pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
 
-pub mod resolver;
-pub(crate) use resolver::{FetchResult, Resolver};
+pub mod source;
+pub use source::{FeedbackTx, Request, Response, Source};
 
 mod target;
-pub use target::Target;
+pub use target::{CompactTarget, Target};
 
-pub mod compact;
 mod requests;
 
-/// A [`Resolver`] whose associated types match a specific `Database`.
-///
-/// Blanket-impled for any matching `Resolver`, so callers never implement this directly.
-pub trait DbResolver<DB: Database>:
-    Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>
+/// A [`Source`] of operations for the given database.
+pub trait SourceFor<DB: Database>:
+    Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
 {
 }
 
-impl<DB, R> DbResolver<DB> for R
+impl<DB, S> SourceFor<DB> for S
 where
     DB: Database,
-    R: Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
+    S: Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static,
 {
 }
 
 /// Create/open a database and sync it to a target state
 #[boxed]
-pub async fn sync<DB, R>(
-    config: Config<DB, R>,
-) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
+pub async fn sync<DB, S>(
+    config: Config<DB, S>,
+) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
-    R: DbResolver<DB>,
+    S: SourceFor<DB>,
 {
-    Box::pin(Engine::new(config).await?.sync()).await
+    Engine::new(config).await?.sync().await
 }

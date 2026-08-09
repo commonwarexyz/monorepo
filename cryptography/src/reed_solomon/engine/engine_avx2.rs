@@ -33,8 +33,7 @@ impl Avx2 {
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
-        cpufeatures::new!(has_avx2_for_engine, "avx2");
-        assert!(has_avx2_for_engine::get());
+        assert!(super::cpu_features::avx2());
 
         let mul128 = tables::get_mul128();
         let skew = tables::get_skew();

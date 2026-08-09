@@ -81,11 +81,11 @@
 //!     // Put values at specific indices
 //!     let value1 = FixedBytes::new([1u8; 32]);
 //!     let value2 = FixedBytes::new([2u8; 32]);
-//!     store.put(0, value1).await.unwrap();
-//!     store.put(5, value2).await.unwrap();
+//!     store = store.put(0, value1).await.unwrap();
+//!     store = store.put(5, value2).await.unwrap();
 //!
 //!     // Sync to disk
-//!     store.sync().await.unwrap();
+//!     store = store.sync().await.unwrap();
 //!
 //!     // Check for gaps
 //!     let (current_end, next_start) = store.next_gap(0);
@@ -145,7 +145,8 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _, deterministic,
+        Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions,
+        deterministic,
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;
@@ -178,7 +179,7 @@ mod tests {
             assert!(!store.has(0));
 
             // Put the value at index 0
-            store
+            store = store
                 .put(0, value.clone())
                 .await
                 .expect("Failed to put data");
@@ -195,7 +196,7 @@ mod tests {
             assert_eq!(retrieved, value);
 
             // Force a sync
-            store.sync().await.expect("Failed to sync data");
+            store = store.sync().await.expect("Failed to sync data");
 
             // Check metrics
             let buffer = context.encode();
@@ -230,7 +231,7 @@ mod tests {
                     .await
                     .expect("Failed to initialize store");
 
-            store
+            store = store
                 .put(0, FixedBytes::new([42u8; 32]))
                 .await
                 .expect("Failed to put data");
@@ -274,14 +275,14 @@ mod tests {
             ];
 
             for (index, value) in &indices {
-                store
+                store = store
                     .put(*index, value.clone())
                     .await
                     .expect("Failed to put data");
             }
 
             // Sync to disk
-            store.sync().await.expect("Failed to sync");
+            store = store.sync().await.expect("Failed to sync");
 
             // Retrieve all values and verify
             for (index, value) in &indices {
@@ -321,7 +322,7 @@ mod tests {
             ];
 
             for (index, value) in &indices {
-                store
+                store = store
                     .put(*index, value.clone())
                     .await
                     .expect("Failed to put data");
@@ -334,7 +335,7 @@ mod tests {
             assert!(!store.has(499));
 
             // Sync and verify
-            store.sync().await.expect("Failed to sync");
+            store = store.sync().await.expect("Failed to sync");
 
             for (index, value) in &indices {
                 let retrieved = store
@@ -365,10 +366,10 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Insert values with gaps
-            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
-            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
-            store.put(11, FixedBytes::new([11u8; 32])).await.unwrap();
-            store.put(14, FixedBytes::new([14u8; 32])).await.unwrap();
+            store = store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+            store = store.put(11, FixedBytes::new([11u8; 32])).await.unwrap();
+            store = store.put(14, FixedBytes::new([14u8; 32])).await.unwrap();
 
             // Check gaps
             let (current_end, start_next) = store.next_gap(0);
@@ -419,11 +420,11 @@ mod tests {
             assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
 
             // Test 2: Insert values with gaps
-            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
-            store.put(2, FixedBytes::new([2u8; 32])).await.unwrap();
-            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
-            store.put(6, FixedBytes::new([6u8; 32])).await.unwrap();
-            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+            store = store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store = store.put(2, FixedBytes::new([2u8; 32])).await.unwrap();
+            store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+            store = store.put(6, FixedBytes::new([6u8; 32])).await.unwrap();
+            store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
 
             // Test 3: Find missing items from the beginning
             assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
@@ -444,7 +445,7 @@ mod tests {
             assert_eq!(store.missing_items(100, 10), Vec::<u64>::new());
 
             // Test 7: Large gap scenario
-            store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
+            store = store.put(1000, FixedBytes::new([100u8; 32])).await.unwrap();
 
             // Gap between 10 and 1000
             let items = store.missing_items(11, 10);
@@ -458,13 +459,13 @@ mod tests {
             );
 
             // Test 8: After syncing (data should remain consistent)
-            store.sync().await.unwrap();
+            store = store.sync().await.unwrap();
             assert_eq!(store.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
             assert_eq!(store.missing_items(3, 3), vec![3, 4, 7]);
 
             // Test 9: Cross-blob boundary scenario
-            store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
-            store
+            store = store.put(9999, FixedBytes::new([99u8; 32])).await.unwrap();
+            store = store
                 .put(10001, FixedBytes::new([101u8; 32]))
                 .await
                 .unwrap();
@@ -501,7 +502,7 @@ mod tests {
                 ];
 
                 for (index, value) in &values {
-                    store
+                    store = store
                         .put(*index, value.clone())
                         .await
                         .expect("Failed to put data");
@@ -572,7 +573,7 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store
+                store = store
                     .put(0, FixedBytes::new([42u8; 32]))
                     .await
                     .expect("Failed to put data");
@@ -586,7 +587,9 @@ mod tests {
                     .await
                     .unwrap();
                 // Corrupt the CRC by changing a byte
-                blob.write_at_sync(32, vec![0xFF]).await.unwrap();
+                blob.write_at(32, vec![0xFF], WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen without bits, deleting the stored corrupted data before replay.
@@ -649,11 +652,11 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store
+                store = store
                     .put(0, FixedBytes::new([0u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store
+                store = store
                     .put(1000, FixedBytes::new([100u8; 32]))
                     .await
                     .expect("Failed to put data");
@@ -697,11 +700,11 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store
+                store = store
                     .put(0, FixedBytes::new([42u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store
+                store = store
                     .put(1, FixedBytes::new([43u8; 32]))
                     .await
                     .expect("Failed to put data");
@@ -715,7 +718,9 @@ mod tests {
                     .await
                     .unwrap();
                 // Overwrite second record with partial data (32 bytes instead of 36)
-                blob.write_at_sync(36, vec![0xFF; 32]).await.unwrap();
+                blob.write_at(36, vec![0xFF; 32], WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen without bits and verify uncheckpointed data is deleted.
@@ -729,10 +734,9 @@ mod tests {
                 assert!(!store.has(1));
 
                 // Store should still be functional
-                let mut store_mut = store;
-                store_mut.put(1, FixedBytes::new([44u8; 32])).await.unwrap();
+                let store = store.put(1, FixedBytes::new([44u8; 32])).await.unwrap();
                 assert_eq!(
-                    store_mut.get(1).await.unwrap().unwrap(),
+                    store.get(1).await.unwrap().unwrap(),
                     FixedBytes::new([44u8; 32])
                 );
             }
@@ -758,11 +762,11 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store
+                store = store
                     .put(0, FixedBytes::new([42u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store
+                store = store
                     .put(1, FixedBytes::new([43u8; 32]))
                     .await
                     .expect("Failed to put data");
@@ -776,7 +780,7 @@ mod tests {
                     .await
                     .unwrap();
                 // Corrupt some bytes in the value of the first record
-                blob.write_at_sync(10, hex!("0xFFFFFFFF").to_vec())
+                blob.write_at(10, hex!("0xFFFFFFFF").to_vec(), WriteOptions::SYNC)
                     .await
                     .unwrap();
             }
@@ -814,10 +818,10 @@ mod tests {
                         .expect("Failed to initialize store");
 
                 // Add values across 2 blobs
-                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
-                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
-                store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
-                store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
+                store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+                store = store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
                 store.sync().await.expect("Failed to sync store");
             }
 
@@ -828,14 +832,18 @@ mod tests {
                     .open("test-ordinal", &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                blob.write_at_sync(32, vec![0xFF]).await.unwrap(); // Corrupt CRC of index 0
+                blob.write_at(32, vec![0xFF], WriteOptions::SYNC)
+                    .await
+                    .unwrap(); // Corrupt CRC of index 0
 
                 // Corrupt value in second blob (which will invalidate CRC)
                 let (blob, _) = context
                     .open("test-ordinal", &1u64.to_be_bytes())
                     .await
                     .unwrap();
-                blob.write_at_sync(5, vec![0xFF; 4]).await.unwrap(); // Corrupt value of index 10
+                blob.write_at(5, vec![0xFF; 4], WriteOptions::SYNC)
+                    .await
+                    .unwrap(); // Corrupt value of index 10
             }
 
             // Reopen without bits and verify uncheckpointed data is deleted.
@@ -872,11 +880,11 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store
+                store = store
                     .put(0, FixedBytes::new([42u8; 32]))
                     .await
                     .expect("Failed to put data");
-                store
+                store = store
                     .put(1, FixedBytes::new([43u8; 32]))
                     .await
                     .expect("Failed to put data");
@@ -895,7 +903,9 @@ mod tests {
                 let invalid_crc = 0xDEADBEEFu32;
                 garbage.extend_from_slice(&invalid_crc.to_be_bytes());
                 assert_eq!(garbage.len(), 36); // Full record size
-                blob.write_at_sync(size, garbage).await.unwrap();
+                blob.write_at(size, garbage, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reopen without bits and verify uncheckpointed data is deleted.
@@ -909,10 +919,9 @@ mod tests {
                 assert!(!store.has(1));
 
                 // Store should still be functional
-                let mut store_mut = store;
-                store_mut.put(2, FixedBytes::new([44u8; 32])).await.unwrap();
+                let store = store.put(2, FixedBytes::new([44u8; 32])).await.unwrap();
                 assert_eq!(
-                    store_mut.get(2).await.unwrap().unwrap(),
+                    store.get(2).await.unwrap().unwrap(),
                     FixedBytes::new([44u8; 32])
                 );
             }
@@ -940,13 +949,15 @@ mod tests {
 
                 // Write zeros for several record positions
                 let zeros = vec![0u8; 36 * 5]; // 5 records worth of zeros
-                blob.write_at_sync(0, zeros).await.unwrap();
+                blob.write_at(0, zeros, WriteOptions::SYNC).await.unwrap();
 
                 // Write a valid record after the zeros
                 let mut valid_record = vec![44u8; 32];
                 let crc = Crc32::checksum(&valid_record);
                 valid_record.extend_from_slice(&crc.to_be_bytes());
-                blob.write_at_sync(36 * 5, valid_record).await.unwrap();
+                blob.write_at(36 * 5, valid_record, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Initialize with bits and verify it handles zero-filled records
@@ -1013,7 +1024,7 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<128>::new(value);
 
-                store
+                store = store
                     .put(index, value.clone())
                     .await
                     .expect("Failed to put data");
@@ -1021,7 +1032,7 @@ mod tests {
             }
 
             // Sync data
-            store.sync().await.expect("Failed to sync");
+            store = store.sync().await.expect("Failed to sync");
 
             // Verify all values can be retrieved
             for (index, value) in &values {
@@ -1040,7 +1051,6 @@ mod tests {
 
             // Sync and drop the store
             store.sync().await.expect("Failed to sync store");
-            drop(store);
 
             // Reopen the store
             let owned_bits = bits_for_indices(NZU64!(100), values.iter().map(|(index, _)| *index));
@@ -1073,7 +1083,7 @@ mod tests {
                 context.fill_bytes(&mut value);
                 let value = FixedBytes::<128>::new(value);
 
-                store.put(index, value).await.expect("Failed to put data");
+                store = store.put(index, value).await.expect("Failed to put data");
             }
 
             // Final sync
@@ -1120,12 +1130,12 @@ mod tests {
             ];
 
             for (index, value) in &values {
-                store
+                store = store
                     .put(*index, value.clone())
                     .await
                     .expect("Failed to put data");
             }
-            store.sync().await.unwrap();
+            store = store.sync().await.unwrap();
 
             // Verify all values exist
             for (index, value) in &values {
@@ -1133,7 +1143,7 @@ mod tests {
             }
 
             // Prune up to index 150 (should remove blob 0 only)
-            store.prune(150).await.unwrap();
+            store = store.prune(150).await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 1"));
 
@@ -1154,7 +1164,7 @@ mod tests {
             assert_eq!(store.get(300).await.unwrap().unwrap(), values[5].1);
 
             // Prune more aggressively - up to index 250 (should remove blob 1)
-            store.prune(250).await.unwrap();
+            store = store.prune(250).await.unwrap();
             let buffer = context.encode();
             assert!(buffer.contains("pruned_total 2"));
 
@@ -1190,10 +1200,10 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Insert sparse data with gaps
-            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
-            store.put(105, FixedBytes::new([105u8; 32])).await.unwrap();
-            store.put(305, FixedBytes::new([49u8; 32])).await.unwrap();
-            store.sync().await.unwrap();
+            store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+            store = store.put(105, FixedBytes::new([105u8; 32])).await.unwrap();
+            store = store.put(305, FixedBytes::new([49u8; 32])).await.unwrap();
+            store = store.sync().await.unwrap();
 
             // Check gaps before pruning
             let (current_end, next_start) = store.next_gap(0);
@@ -1205,7 +1215,7 @@ mod tests {
             assert_eq!(next_start, Some(105));
 
             // Prune up to index 150 (should remove blob 0)
-            store.prune(150).await.unwrap();
+            store = store.prune(150).await.unwrap();
 
             // Verify pruned data is gone
             assert!(!store.has(5));
@@ -1243,12 +1253,12 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Insert data
-            store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
-            store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
-            store.sync().await.unwrap();
+            store = store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
+            store = store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
+            store = store.sync().await.unwrap();
 
             // Try to prune before any data - should be no-op
-            store.prune(50).await.unwrap();
+            store = store.prune(50).await.unwrap();
 
             // Verify no data was actually pruned
             assert!(store.has(100));
@@ -1257,7 +1267,7 @@ mod tests {
             assert!(buffer.contains("pruned_total 0"));
 
             // Try to prune exactly at blob boundary - should be no-op
-            store.prune(100).await.unwrap();
+            store = store.prune(100).await.unwrap();
 
             // Verify still no data pruned
             assert!(store.has(100));
@@ -1285,10 +1295,10 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Try to prune empty store
-            store.prune(1000).await.unwrap();
+            store = store.prune(1000).await.unwrap();
 
             // Store should still be functional
-            store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+            store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
             assert!(store.has(0));
         });
     }
@@ -1312,9 +1322,9 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
-                store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
-                store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
+                store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store = store.put(100, FixedBytes::new([100u8; 32])).await.unwrap();
+                store = store.put(200, FixedBytes::new([200u8; 32])).await.unwrap();
                 store.sync().await.unwrap();
             }
 
@@ -1347,7 +1357,7 @@ mod tests {
                 assert!(store.has(200));
 
                 // Prune up to index 150
-                store.prune(150).await.unwrap();
+                store = store.prune(150).await.unwrap();
 
                 // Verify pruning worked
                 assert!(!store.has(0));
@@ -1410,15 +1420,15 @@ mod tests {
             for i in 0..10 {
                 let index = i * 50 + 25; // Middle of each blob
                 let value = FixedBytes::new([i as u8; 32]);
-                store.put(index, value.clone()).await.unwrap();
+                store = store.put(index, value.clone()).await.unwrap();
                 values.push((index, value));
             }
-            store.sync().await.unwrap();
+            store = store.sync().await.unwrap();
 
             // Prune incrementally
             for i in 1..5 {
                 let prune_index = i * 50 + 10;
-                store.prune(prune_index).await.unwrap();
+                store = store.prune(prune_index).await.unwrap();
 
                 // Verify appropriate data is pruned
                 for (index, _) in &values {
@@ -1464,17 +1474,17 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Insert data at blob boundaries
-            store.put(0, FixedBytes::new([0u8; 32])).await.unwrap(); // Start of blob 0
-            store.put(99, FixedBytes::new([99u8; 32])).await.unwrap(); // End of blob 0
-            store.put(100, FixedBytes::new([100u8; 32])).await.unwrap(); // Start of blob 1
-            store.put(199, FixedBytes::new([199u8; 32])).await.unwrap(); // End of blob 1
-            store.put(200, FixedBytes::new([200u8; 32])).await.unwrap(); // Start of blob 2
-            store.sync().await.unwrap();
+            store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap(); // Start of blob 0
+            store = store.put(99, FixedBytes::new([99u8; 32])).await.unwrap(); // End of blob 0
+            store = store.put(100, FixedBytes::new([100u8; 32])).await.unwrap(); // Start of blob 1
+            store = store.put(199, FixedBytes::new([199u8; 32])).await.unwrap(); // End of blob 1
+            store = store.put(200, FixedBytes::new([200u8; 32])).await.unwrap(); // Start of blob 2
+            store = store.sync().await.unwrap();
 
             // Test various pruning points around boundaries
 
             // Prune exactly at blob boundary (100) - should prune blob 0
-            store.prune(100).await.unwrap();
+            store = store.prune(100).await.unwrap();
             assert!(!store.has(0));
             assert!(!store.has(99));
             assert!(store.has(100));
@@ -1482,13 +1492,13 @@ mod tests {
             assert!(store.has(200));
 
             // Prune just before next boundary (199) - should not prune blob 1
-            store.prune(199).await.unwrap();
+            store = store.prune(199).await.unwrap();
             assert!(store.has(100));
             assert!(store.has(199));
             assert!(store.has(200));
 
             // Prune exactly at next boundary (200) - should prune blob 1
-            store.prune(200).await.unwrap();
+            store = store.prune(200).await.unwrap();
             assert!(!store.has(100));
             assert!(!store.has(199));
             assert!(store.has(200));
@@ -1516,11 +1526,11 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Insert data in non-contiguous sections (0, 2, 5, 7)
-            store.put(0, FixedBytes::new([0u8; 32])).await.unwrap(); // Section 0
-            store.put(250, FixedBytes::new([50u8; 32])).await.unwrap(); // Section 2 (250/100 = 2)
-            store.put(500, FixedBytes::new([44u8; 32])).await.unwrap(); // Section 5 (500/100 = 5)
-            store.put(750, FixedBytes::new([45u8; 32])).await.unwrap(); // Section 7 (750/100 = 7)
-            store.sync().await.unwrap();
+            store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap(); // Section 0
+            store = store.put(250, FixedBytes::new([50u8; 32])).await.unwrap(); // Section 2 (250/100 = 2)
+            store = store.put(500, FixedBytes::new([44u8; 32])).await.unwrap(); // Section 5 (500/100 = 5)
+            store = store.put(750, FixedBytes::new([45u8; 32])).await.unwrap(); // Section 7 (750/100 = 7)
+            store = store.sync().await.unwrap();
 
             // Verify all data exists initially
             assert!(store.has(0));
@@ -1529,7 +1539,7 @@ mod tests {
             assert!(store.has(750));
 
             // Prune up to section 3 (index 300) - should remove sections 0 and 2
-            store.prune(300).await.unwrap();
+            store = store.prune(300).await.unwrap();
 
             // Verify correct data was pruned
             assert!(!store.has(0)); // Section 0 pruned
@@ -1541,7 +1551,7 @@ mod tests {
             assert!(buffer.contains("pruned_total 2"));
 
             // Prune up to section 6 (index 600) - should remove section 5
-            store.prune(600).await.unwrap();
+            store = store.prune(600).await.unwrap();
 
             // Verify section 5 was pruned
             assert!(!store.has(500)); // Section 5 pruned
@@ -1551,7 +1561,7 @@ mod tests {
             assert!(buffer.contains("pruned_total 3"));
 
             // Prune everything - should remove section 7
-            store.prune(1000).await.unwrap();
+            store = store.prune(1000).await.unwrap();
 
             // Verify all data is gone
             assert!(!store.has(750)); // Section 7 pruned
@@ -1578,12 +1588,12 @@ mod tests {
                     .expect("Failed to initialize store");
 
             // Insert and sync some data in blob 0
-            store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
-            store.sync().await.unwrap();
+            store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+            store = store.sync().await.unwrap();
 
             // Add pending entries to blob 0 and blob 1
-            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap(); // blob 0
-            store.put(110, FixedBytes::new([110u8; 32])).await.unwrap(); // blob 1
+            store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap(); // blob 0
+            store = store.put(110, FixedBytes::new([110u8; 32])).await.unwrap(); // blob 1
 
             // Verify all data is visible before pruning
             assert!(store.has(5));
@@ -1591,7 +1601,7 @@ mod tests {
             assert!(store.has(110));
 
             // Prune up to index 100, which should remove blob 0 (indices 0-99).
-            store.prune(150).await.unwrap();
+            store = store.prune(150).await.unwrap();
 
             // Verify that synced and pending entries in blob 0 are removed.
             assert!(!store.has(5));
@@ -1605,7 +1615,7 @@ mod tests {
             );
 
             // Sync the remaining pending entry and verify it's still there.
-            store.sync().await.unwrap();
+            store = store.sync().await.unwrap();
             assert!(store.has(110));
             assert_eq!(
                 store.get(110).await.unwrap().unwrap(),
@@ -1634,16 +1644,16 @@ mod tests {
                         .expect("Failed to initialize store");
 
                 // Section 0 (indices 0-9)
-                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
-                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
-                store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
+                store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store = store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
 
                 // Section 1 (indices 10-19)
-                store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
-                store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
+                store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+                store = store.put(15, FixedBytes::new([15u8; 32])).await.unwrap();
 
                 // Section 2 (indices 20-29)
-                store.put(25, FixedBytes::new([25u8; 32])).await.unwrap();
+                store = store.put(25, FixedBytes::new([25u8; 32])).await.unwrap();
 
                 store.sync().await.unwrap();
             }
@@ -1687,9 +1697,9 @@ mod tests {
                         .await
                         .expect("Failed to initialize store");
 
-                store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
-                store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
-                store.put(20, FixedBytes::new([20u8; 32])).await.unwrap();
+                store = store.put(0, FixedBytes::new([0u8; 32])).await.unwrap();
+                store = store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+                store = store.put(20, FixedBytes::new([20u8; 32])).await.unwrap();
 
                 store.sync().await.unwrap();
             }
@@ -1750,17 +1760,17 @@ mod tests {
 
                 // Section 0 (indices 0-9)
                 for i in 0..10 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 // Section 1 (indices 10-19)
                 for i in 10..20 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 // Section 2 (indices 20-29)
                 for i in 20..30 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 store.sync().await.unwrap();
@@ -1863,7 +1873,7 @@ mod tests {
 
                 // Fill section 1 completely (indices 5-9)
                 for i in 5..10 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 store.sync().await.unwrap();
@@ -1916,11 +1926,11 @@ mod tests {
                         .expect("Failed to initialize store");
 
                 // Fill section 1 partially (skip index 6)
-                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
                 // Skip index 6
-                store.put(7, FixedBytes::new([7u8; 32])).await.unwrap();
-                store.put(8, FixedBytes::new([8u8; 32])).await.unwrap();
-                store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
+                store = store.put(7, FixedBytes::new([7u8; 32])).await.unwrap();
+                store = store.put(8, FixedBytes::new([8u8; 32])).await.unwrap();
+                store = store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
 
                 store.sync().await.unwrap();
             }
@@ -1964,17 +1974,17 @@ mod tests {
 
                 // Section 0: indices 0-4 (fill completely)
                 for i in 0..5 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 // Section 1: indices 5-9 (fill partially)
-                store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
-                store.put(7, FixedBytes::new([7u8; 32])).await.unwrap();
-                store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
+                store = store.put(5, FixedBytes::new([5u8; 32])).await.unwrap();
+                store = store.put(7, FixedBytes::new([7u8; 32])).await.unwrap();
+                store = store.put(9, FixedBytes::new([9u8; 32])).await.unwrap();
 
                 // Section 2: indices 10-14 (fill completely)
                 for i in 10..15 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 store.sync().await.unwrap();
@@ -2052,7 +2062,7 @@ mod tests {
 
                 // Section 0: indices 0-4
                 for i in 0..5 {
-                    store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+                    store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
                 }
 
                 store.sync().await.unwrap();
@@ -2066,7 +2076,9 @@ mod tests {
                     .unwrap();
                 // Corrupt the CRC of record at index 2
                 let offset = 2 * 36 + 32; // 2 * record_size + value_size
-                blob.write_at_sync(offset, vec![0xFF]).await.unwrap();
+                blob.write_at(offset, vec![0xFF], WriteOptions::SYNC)
+                    .await
+                    .unwrap();
             }
 
             // Reinitialize with bits that include the corrupted record
@@ -2143,11 +2155,11 @@ mod tests {
                         .expect("Failed to initialize store");
 
                 // Add records at indices 1, 2, 4
-                store.put(1, DummyValue { value: 1 }).await.unwrap();
-                store.put(2, DummyValue { value: 0 }).await.unwrap(); // will fail parsing
-                store.put(4, DummyValue { value: 4 }).await.unwrap();
+                store = store.put(1, DummyValue { value: 1 }).await.unwrap();
+                store = store.put(2, DummyValue { value: 0 }).await.unwrap(); // will fail parsing
+                store = store.put(4, DummyValue { value: 4 }).await.unwrap();
 
-                store.sync().await.unwrap();
+                store = store.sync().await.unwrap();
 
                 // A record whose CRC matches but whose value fails to parse is invalid
                 assert!(matches!(store.get(2).await, Err(Error::InvalidRecord(2))));

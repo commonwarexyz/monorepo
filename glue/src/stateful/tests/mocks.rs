@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,8 +12,9 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, deterministic};
-use std::convert::Infallible;
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_utils::{channel::oneshot, sync::Mutex};
+use std::{convert::Infallible, sync::Arc};
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -47,8 +48,66 @@ impl Merkleized for TestMerkleized {
     }
 }
 
+/// Completes one parked flush when released by the test.
+pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
+
+/// Signals that pruning has started, then blocks it until the test releases it.
+struct PruneGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
+/// prune targets.
+#[derive(Clone, Default)]
+pub(crate) struct FlushControl {
+    pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
+    pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    prune_gate: Arc<Mutex<Option<PruneGate>>>,
+}
+
+impl FlushControl {
+    /// Gates the next prune. The receiver reports entry, and sending on the
+    /// returned sender lets pruning continue. Only one gate may be active.
+    pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        assert!(
+            self.prune_gate
+                .lock()
+                .replace(PruneGate {
+                    started,
+                    release: release_rx,
+                })
+                .is_none(),
+            "prune gate already installed",
+        );
+        (started_rx, release)
+    }
+}
+
 #[derive(Default)]
-pub(crate) struct TestDb;
+pub(crate) struct TestDb {
+    finalize: Mutex<Option<Handle<()>>>,
+    control: Option<FlushControl>,
+}
+
+impl TestDb {
+    pub(crate) fn with_finalize(handle: Handle<()>) -> Self {
+        Self {
+            finalize: Mutex::new(Some(handle)),
+            control: None,
+        }
+    }
+
+    /// A database with test-controlled finalize flushes and pruning.
+    pub(crate) fn gated(control: FlushControl) -> Self {
+        Self {
+            finalize: Mutex::new(None),
+            control: Some(control),
+        }
+    }
+}
 
 impl<E: Send> ManagedDb<E> for TestDb {
     type Unmerkleized = TestUnmerkleized;
@@ -62,10 +121,10 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-        Ok(Self)
+        Ok(Self::default())
     }
 
-    async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -73,7 +132,29 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+        if let Some(control) = &self.control {
+            let (release, released) = oneshot::channel();
+            control.flushes.lock().push(release);
+            return Ok((self, Handle::from_receiver(released)));
+        }
+        let handle = self
+            .finalize
+            .lock()
+            .take()
+            .unwrap_or_else(|| Handle::ready(Ok(())));
+        Ok((self, handle))
+    }
+
+    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
+        if let Some(control) = &self.control {
+            let gate = control.prune_gate.lock().take();
+            if let Some(mut gate) = gate {
+                gate.started.send(()).expect("test must await prune");
+                let _ = (&mut gate.release).await;
+            }
+            control.pruned.lock().push(*target);
+        }
         Ok(self)
     }
 
@@ -102,6 +183,22 @@ impl TestBlock {
                 parent: (View::zero(), Sha256Digest::EMPTY),
             },
             height: Height::new(height),
+            digest: Sha256Digest::from([digest_byte; 32]),
+        }
+    }
+
+    pub(crate) fn child(parent: &Self, digest_byte: u8) -> Self {
+        let height = parent.height.next();
+        Self {
+            context: SimplexContext {
+                round: commonware_consensus::types::Round::new(
+                    Epoch::zero(),
+                    View::new(height.get()),
+                ),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (parent.context.round.view(), parent.digest),
+            },
+            height,
             digest: Sha256Digest::from([digest_byte; 32]),
         }
     }
@@ -153,7 +250,7 @@ impl Heightable for TestBlock {
 
 impl ConsensusBlock for TestBlock {
     fn parent(&self) -> Self::Digest {
-        Sha256Digest::EMPTY
+        self.context.parent.1
     }
 }
 
@@ -168,7 +265,15 @@ impl CertifiableBlock for TestBlock {
 #[derive(Clone)]
 pub(crate) struct TestApp;
 
-impl Application<deterministic::Context> for TestApp {
+impl<
+    E: rand_core::Rng
+        + commonware_runtime::Spawner
+        + commonware_runtime::Metrics
+        + commonware_runtime::Clock
+        + Send
+        + Sync,
+> Application<E> for TestApp
+{
     type SigningScheme = TestScheme;
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
@@ -176,9 +281,7 @@ impl Application<deterministic::Context> for TestApp {
     type Provider = ();
     type Input = ();
 
-    fn sync_targets(
-        block: &Self::Block,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         block.height().get()
     }
 
@@ -188,35 +291,35 @@ impl Application<deterministic::Context> for TestApp {
 
     async fn propose(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
+    ) -> Option<Proposed<Self, E>> {
         None
     }
 
     async fn verify(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         None
     }
 
     async fn apply(
         &mut self,
-        _context: (deterministic::Context, Self::Context),
+        _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         TestMerkleized
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb)
+    Shared::new("test", TestDb::default())
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

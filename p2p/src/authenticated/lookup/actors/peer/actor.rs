@@ -1,10 +1,8 @@
 use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
+    channels::{self, Channels},
     data::EncodedData,
-    lookup::{
-        channels::{self, Channels},
-        metrics, types,
-    },
+    lookup::{metrics, types},
     relay::{Message as RelayMessage, Prioritized, Relay, try_recv},
 };
 use commonware_actor::mailbox;
@@ -340,7 +338,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::lookup::{actors::router, channels::Channels};
+    use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -410,11 +408,9 @@ mod tests {
         >(
             context.child("router_mailbox"), NZUsize!(10)
         );
-        let messenger = router::Messenger::new(
-            context.network_buffer_pool().clone(),
-            router::Mailbox::new(router_sender),
-        );
-        Channels::new(messenger, MAX_MESSAGE_SIZE)
+        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        messenger.bind(router::Mailbox::new(router_sender));
+        Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
     }
 
     #[test]
@@ -485,7 +481,7 @@ mod tests {
             let mut channels = create_channels(context.child("channels"));
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
+            let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
 
             // Simulate the attack: send a Data message with an arbitrary
             // unregistered channel value. Before the fix, this would create
@@ -586,13 +582,13 @@ mod tests {
 
             let mut channels = create_channels(context.child("channels"));
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
+            let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
 
             let pool = context.network_buffer_pool().clone();
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
                         false,
                     )
                     .accepted(),
@@ -601,7 +597,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
+                        EncodedData::new(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
                         false,
                     )
                     .accepted(),

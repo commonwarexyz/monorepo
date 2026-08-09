@@ -118,14 +118,19 @@ pub struct SimplexConfig<L> {
     /// Time to wait for a peer to respond to a resolver request.
     pub fetch_timeout: Duration,
 
-    /// Number of concurrent resolver requests.
-    pub fetch_concurrent: NonZeroUsize,
-
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
 
     /// Time a leader may remain inactive before triggering immediate nullification.
     pub skip_timeout: Duration,
+
+    /// Track individual votes after certification.
+    ///
+    /// By default, full vote evidence is released when the corresponding certificate
+    /// is constructed or received, making later conflict reporting and peer blocking
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage.
+    pub track_historical_votes: bool,
 
     /// Policy for proactively forwarding certified blocks.
     pub forwarding: ForwardingPolicy,
@@ -714,10 +719,10 @@ where
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
-                fetch_concurrent: self.simplex.fetch_concurrent,
                 view_retention: self.simplex.view_retention,
                 skip_timeout: self.simplex.skip_timeout,
                 forwarding: self.simplex.forwarding,
+                track_historical_votes: self.simplex.track_historical_votes,
             },
         );
 

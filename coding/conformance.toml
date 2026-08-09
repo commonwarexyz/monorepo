@@ -16,4 +16,4 @@ hash = "0571442797c611b3822c8a9c54138de9f54fc5b9daaf01796f611a5c74466710"
 
 ["commonware_coding::zoda::tests::conformance::EncodeCheck"]
 n_cases = 256
-hash = "53215b81fa0da82160cefcc3b090a7cabbf6305777fdd2e103a770cc7b904b2c"
+hash = "70f7c614f3f7cebfe5f8f7c25d88943e59f93a45b69afad10bde405e29303c39"

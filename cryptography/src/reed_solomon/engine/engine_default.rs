@@ -28,21 +28,18 @@ impl DefaultEngine {
     pub fn new() -> Self {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            cpufeatures::new!(has_avx2, "avx2");
-            if has_avx2::get() {
+            if super::cpu_features::avx2() {
                 return Self(Box::new(Avx2::new()));
             }
 
-            cpufeatures::new!(has_ssse3, "ssse3");
-            if has_ssse3::get() {
+            if super::cpu_features::ssse3() {
                 return Self(Box::new(Ssse3::new()));
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
-            cpufeatures::new!(has_neon, "neon");
-            if has_neon::get() {
+            if super::cpu_features::neon() {
                 return Self(Box::new(Neon::new()));
             }
         }
@@ -93,21 +90,18 @@ impl Engine for DefaultEngine {
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            cpufeatures::new!(has_avx2, "avx2");
-            if has_avx2::get() {
+            if super::cpu_features::avx2() {
                 return Avx2::eval_poly(erasures, truncated_size);
             }
 
-            cpufeatures::new!(has_ssse3, "ssse3");
-            if has_ssse3::get() {
+            if super::cpu_features::ssse3() {
                 return Ssse3::eval_poly(erasures, truncated_size);
             }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
-            cpufeatures::new!(has_neon, "neon");
-            if has_neon::get() {
+            if super::cpu_features::neon() {
                 return Neon::eval_poly(erasures, truncated_size);
             }
         }

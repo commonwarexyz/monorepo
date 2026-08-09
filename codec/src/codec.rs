@@ -207,8 +207,12 @@ pub trait Read: Sized {
     /// Implementations should consume the exact number of bytes required from `buf` to reconstruct
     /// the value.
     ///
-    /// Returns [Error] if decoding fails due to invalid data, insufficient bytes in the buffer,
-    /// or violation of constraints imposed by the `cfg`.
+    /// Implementations must return [Error] if decoding fails due to invalid data, insufficient
+    /// bytes in the buffer, or violation of constraints imposed by the `cfg`.
+    ///
+    /// # Warning
+    ///
+    /// Parsing a message (often untrusted) should never result in a panic.
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 
     /// Reads `len` values from the buffer into a vector.

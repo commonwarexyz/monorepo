@@ -12,7 +12,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{N3f1, channel::oneshot, union};
+use commonware_utils::{channel::oneshot, union};
 use rand_core::CryptoRng;
 use std::hash::Hash;
 
@@ -28,9 +28,6 @@ pub enum Error {
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(Epoch, String),
-    /// The local node is not a signer in the scheme for the specified epoch.
-    #[error("Not a signer at epoch {0}")]
-    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -326,7 +323,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+        let certificate = scheme.assemble(attestations, strategy)?;
 
         Some(Self { item, certificate })
     }
@@ -337,7 +334,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)
+        scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate, strategy)
     }
 }
 

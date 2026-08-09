@@ -23,6 +23,7 @@ stability_scope!(BETA {
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
+    mod sizing;
     pub mod authenticated;
     pub mod types;
     pub mod utils;
@@ -58,6 +59,10 @@ stability_scope!(BETA {
         /// If a recipient is offline at the time a message is sent, the message
         /// will be dropped. It is up to the application to handle retries (if
         /// necessary).
+        ///
+        /// # Panics
+        ///
+        /// Panics if `message` exceeds the sender's configured maximum application payload size.
         ///
         /// # Returns
         ///
@@ -118,6 +123,10 @@ stability_scope!(BETA {
         /// will be dropped. It is up to the application to handle retries (if
         /// necessary).
         ///
+        /// # Panics
+        ///
+        /// Panics if `message` exceeds the sender's configured maximum application payload size.
+        ///
         /// # Returns
         ///
         /// Feedback from submitting the message for delivery.
@@ -140,6 +149,10 @@ stability_scope!(BETA {
         ///
         /// Recipients that exceed their rate limit will be skipped. The message is
         /// still sent to non-limited recipients.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `message` exceeds the sender's configured maximum application payload size.
         ///
         /// # Returns
         ///

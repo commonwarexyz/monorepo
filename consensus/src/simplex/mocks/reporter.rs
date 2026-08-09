@@ -20,7 +20,6 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    N3f1,
     channel::{
         fallible::AsyncFallibleExt,
         mpsc::{Receiver, Sender},
@@ -57,6 +56,7 @@ pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     pub certified: Arc<Mutex<HashSet<View>>>,
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
+    pub certifications: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
@@ -87,6 +87,7 @@ where
             certified: self.certified.clone(),
             notarizes: self.notarizes.clone(),
             notarizations: self.notarizations.clone(),
+            certifications: self.certifications.clone(),
             nullifies: self.nullifies.clone(),
             nullifications: self.nullifications.clone(),
             finalizes: self.finalizes.clone(),
@@ -119,6 +120,7 @@ where
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
+            certifications: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
             nullifications: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
@@ -190,7 +192,7 @@ where
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut *self.context.lock(),
                     Subject::Notarize {
                         proposal: &notarization.proposal,
@@ -205,6 +207,11 @@ where
                 Notarization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.notarizations.lock().insert(view, notarization.clone());
+                if matches!(&activity, Activity::Certification(_)) {
+                    self.certifications
+                        .lock()
+                        .insert(view, notarization.clone());
+                }
                 self.certified(
                     notarization.round(),
                     notarization.view().next(),
@@ -228,7 +235,7 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut *self.context.lock(),
                     Subject::Nullify {
                         round: nullification.round,
@@ -272,7 +279,7 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.scheme.verify_certificate::<_, D, N3f1>(
+                if !self.scheme.verify_certificate::<_, D>(
                     &mut *self.context.lock(),
                     Subject::Finalize {
                         proposal: &finalization.proposal,

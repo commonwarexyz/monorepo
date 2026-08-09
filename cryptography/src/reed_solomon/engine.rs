@@ -32,6 +32,29 @@
 //! [`Decoder`]: crate::reed_solomon::Decoder
 //! [`rate`]: crate::reed_solomon::rate
 
+// TODO(https://github.com/commonwarexyz/monorepo/issues/4414): Bump cpufeatures and remove this workaround.
+#[allow(
+    unfulfilled_lint_expectations,
+    reason = "stable Rust does not emit this nightly-only deprecation"
+)]
+#[expect(
+    deprecated,
+    reason = "tracked by https://github.com/commonwarexyz/monorepo/issues/4414"
+)]
+mod cpu_features {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    cpufeatures::new!(has_avx2, "avx2");
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    cpufeatures::new!(has_ssse3, "ssse3");
+    #[cfg(target_arch = "aarch64")]
+    cpufeatures::new!(has_neon, "neon");
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub(super) use self::{has_avx2::get as avx2, has_ssse3::get as ssse3};
+    #[cfg(target_arch = "aarch64")]
+    pub(super) use has_neon::get as neon;
+}
+
 #[cfg(target_arch = "aarch64")]
 pub use self::engine_neon::Neon;
 pub(crate) use self::shards::Shards;
