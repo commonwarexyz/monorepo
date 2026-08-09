@@ -205,6 +205,13 @@ impl<
         }
     }
 
+    /// Returns the highest finalized view, or zero if none is known.
+    fn last_finalized(&self) -> View {
+        self.state
+            .finalization()
+            .map_or(View::zero(), |certificate| certificate.view())
+    }
+
     /// Records a certificate and applies its resolver lifecycle effects.
     fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
@@ -212,10 +219,7 @@ impl<
         certificate: Certificate<S, D>,
     ) {
         let term_length = self.state.term_length();
-        let last_finalized = self
-            .state
-            .finalization()
-            .map_or(View::zero(), |certificate| certificate.view());
+        let last_finalized = self.last_finalized();
 
         // Retain encoded certificates for as long as a peer can still ask for them.
         // [State] prunes at the floor, which rises sooner than finalization and
@@ -274,10 +278,7 @@ impl<
     ) {
         // Every verdict clears the pending payload. Only successful
         // notarizations above finalization become servable.
-        let last_finalized = self
-            .state
-            .finalization()
-            .map_or(View::zero(), |certificate| certificate.view());
+        let last_finalized = self.last_finalized();
         if let Some(notarization) = self.pending_notarizations.remove(&view)
             && success
             && view > last_finalized
@@ -425,11 +426,7 @@ impl<
         // Finalization rules out any further need for the view. This is also
         // what settles an ask answered by a finalization, since resolver state
         // retains the highest one independently of its construction floor.
-        let last_finalized = self
-            .state
-            .finalization()
-            .map_or(View::zero(), |certificate| certificate.view());
-        if view <= last_finalized {
+        if view <= self.last_finalized() {
             return true;
         }
         match kind {
@@ -464,12 +461,8 @@ impl<
     /// the current floor is served. Pending notarizations and notarizations
     /// that fail certification are never served.
     fn produce_certificate(&self, view: View) -> Option<Bytes> {
-        // Resolver state retains the full highest finalization independently
-        // of its movable construction floor. A higher notarization can advance
-        // that floor without settling a request for older ancestry, so the
-        // retained finalization must remain available here. It also subsumes
-        // every lower finalization because it settles all requests at or below
-        // its view.
+        // Prefer the retained finalization because a higher notarization does
+        // not settle an older ancestry request.
         if let Some(certificate @ Certificate::Finalization(_)) = self.state.get(view) {
             return Some(certificate.encode());
         }
