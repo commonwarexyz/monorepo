@@ -62,8 +62,8 @@ module replica {
     // unreachable: `should_send_notarize_vote` only fires for a notarization or finalization.
     pure def cert_notarize_vote(id: ReplicaId, c: Certificate): Vote = {
         match c.proposal {
-            | Some(p) => notarize(p, id)
-            | None => nullify(c.view, id)
+            | Some(p) => notarize(p, sig_of(id))
+            | None => nullify(c.view, sig_of(id))
         }
     }
 
@@ -73,7 +73,7 @@ module replica {
     }
 
     def has_notarized_view(id: ReplicaId, view:ViewNumber, votes: Set[Vote]): bool = {
-        votes.exists(v=> v.view == view and v.kind == NotarizeKind and v.sig == id)
+        votes.exists(v=> v.view == view and v.kind == NotarizeKind and v.sig == sig_of(id))
     }
 
     // Does a set of certificates have a notarization certificate for a view?
@@ -428,7 +428,7 @@ module replica {
                     ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(Some(proposal)))
                 }),
                 // "Treat propose(r, c, v, (c', v')) as r's notarize(c, v)"
-                sent_vote' = sent_vote.union(Set(notarize(proposal, id))),
+                sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
                 ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
                 // unchanged
                 sent_certificate' = sent_certificate,
@@ -448,7 +448,7 @@ module replica {
     action on_proposal(id: ReplicaId, proposal: Proposal): bool = all {
         val self = replica_state.get(id)
         val certificates = store_certificate.get(id)
-        val notarize_vote = notarize(proposal, id)
+        val notarize_vote = notarize(proposal, sig_of(id))
         all {
             not(self.has_notarized()),
             not(self.nullified),
@@ -501,7 +501,7 @@ module replica {
             not(self.nullified),
             is_contradicted(self, view, store_vote.get(id)),
 
-            sent_vote' = sent_vote.union(Set(nullify(view, id))),
+            sent_vote' = sent_vote.union(Set(nullify(view, sig_of(id)))),
             replica_state' = replica_state.set(id, {
                 ...self,
                 nullified: true,
@@ -691,7 +691,7 @@ module replica {
 
     action on_timer_expired(id: ReplicaId): bool = all {
         val self = replica_state.get(id)
-        val vote = nullify(self.view, id)
+        val vote = nullify(self.view, sig_of(id))
 
         all {
             not(self.timer_cancelled),
@@ -733,7 +733,7 @@ module replica {
             nondet p = oneOf(sent_proposal.union(Set(GENESIS_PROPOSAL)))
             nondet k = oneOf(Set(NotarizeKind, NullifyKind))
             val votes = senders.map(sender =>
-                if (k == NullifyKind) nullify(view, sender) else notarize(p, sender))
+                if (k == NullifyKind) nullify(view, sig_of(sender)) else notarize(p, sig_of(sender)))
             sent_vote' = sent_vote.union(votes),
         },
         // Adversary may inject arbitrary certificates.
@@ -749,7 +749,7 @@ module replica {
                 v.proposal == cert_prop,
                 v.kind == kind
             })
-            nondet agg_sig = votes.map(v => v.sig).union(BYZANTINE).powerset().oneOf()
+            nondet agg_sig = votes.map(v => v.sig).union(BYZANTINE.map(id => sig_of(id))).powerset().oneOf()
             val cert_kind = if (kind == NullifyKind) {
                 NullificationKind
             } else if (agg_sig.size()>= L) FinalizationKind else NotarizationKind
@@ -890,7 +890,7 @@ module replica {
             select_votes(cert.view, NullifyKind, sent_vote)
         else
             select_votes(cert.view, NotarizeKind, sent_vote).filter(v => v.proposal == cert.proposal)
-        votes.map(v => v.sig).union(BYZANTINE)
+        votes.map(v => v.sig).union(BYZANTINE.map(id => sig_of(id)))
     }
 
     // Certificate signatures cannot be forged. `on_certificate` accepts a certificate by its
