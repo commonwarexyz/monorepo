@@ -7,21 +7,23 @@
 /// a single correct process each. The sixth logical replica, n5, is represented by two
 /// independent twins, n5_1 and n5_2, which share the same replica key ("n5").
 ///
-/// The twins are both placed in CORRECT and BYZANTINE is intentionally empty. Byzantine
-/// behavior is modeled by allowing the two independent twins to act under the same logical
-/// identity, which can produce equivocation and other Byzantine behavior without using the
-/// explicit Byzantine actions of the base model.
+/// The twins are placed in REPLICA_IDS and BYZANTINE is intentionally empty. Byzantine
+/// behavior is modeled by allowing the two independent twins to act under the same faulty
+/// logical identity, which can produce equivocation and other Byzantine behavior without
+/// using the explicit Byzantine actions of the base model.
 ///
-/// Consequently, N remains 6 even though CORRECT contains 7 modeled processes:
+/// Consequently, N remains 6 even though REPLICA_IDS contains 7 modeled processes:
 /// 5 ordinary replicas + 2 twins representing a single logical replica.
 ///
 /// This is a valid adversarial configuration within the F = 1 fault assumption and is
 /// intended for safety analysis, invariant checking, and counterexample exploration.
 module twins {
   import replica(
-    CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5_1", "n5_2"),
+    REPLICA_IDS = Set("n0", "n1", "n2", "n3", "n4", "n5_1", "n5_2"),
+    CORRECT = Set("n0", "n1", "n2", "n3", "n4"),
     REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5_1"->"n5", "n5_2"->"n5"),
     BYZANTINE = Set(),
+    TWINS = Set("n5_1", "n5_2"),
     N = 6,
     F = 1,
     VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
@@ -32,7 +34,8 @@ module twins {
   action init = all {
     i::initWithLeader(Map(0 -> "n5_1", 1 -> "n5_2", 2 -> "n0", 3 -> "n5_1", 4 -> "n5_2", 5 -> "n1", 6 -> "n2")),
             
-    assert(i::N + 1 == i::CORRECT.size()),
+    assert(i::N + 1 == i::REPLICA_IDS.size()),
+    assert(i::assumptions_valid),
     assert(i::BYZANTINE.size()==0)
   }
   

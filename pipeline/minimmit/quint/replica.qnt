@@ -7,16 +7,20 @@ module replica {
     const N: int
     // Maximum number of byzantine(faulty) replicas.
     const F: int
-    // Identities of the correct replicas.
+    // Identities with local replica state and correct-style transitions.
+    const REPLICA_IDS: Set[ReplicaId]
+    // Identities of the honest replicas checked by the safety invariants.
     const CORRECT: Set[ReplicaId]
     // Identities of the byzantine replicas.
     const BYZANTINE: Set[ReplicaId]
+    // Twin actors run correct-style transitions but represent faulty logical replicas.
+    const TWINS: Set[ReplicaId]
     // The set of all views.
     const VIEWS: Set[ViewNumber]
     // the set of all blocks
     const VALID_BLOCKS: Set[Block]
     // All replicas.
-    pure val Replicas = CORRECT.union(BYZANTINE)
+    pure val Replicas = REPLICA_IDS.union(BYZANTINE)
     // The keys of the replicas, normally, one unique key per replica.
     // For modeling byzantine behaviour via twin replicas use the same keys.
     const REPLICA_KEYS: ReplicaId -> ReplicaKey
@@ -28,10 +32,13 @@ module replica {
     // Produce replica's signature
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
+    pure val CORRECT_KEYS = CORRECT.map(id => sig_of(id))
+    pure val FAULTY_KEYS = BYZANTINE.union(TWINS).map(id => sig_of(id))
+
     const INVALID_BLOCKS: Set[Block]
     pure val AllBlocks = VALID_BLOCKS.union(INVALID_BLOCKS)
 
-    // The states of the correct replicas
+    // The states of the local correct-style actors
     var replica_state: ReplicaId -> ReplicaState
     // the leader function from the view to the replicas identities
     var leader: ViewNumber -> ReplicaId
@@ -43,14 +50,14 @@ module replica {
     // `notarization` and `nullification` messages sent by the replicas, correct and byzantine
     var sent_certificate: Set[Certificate]
 
-    // notarize and nullify votes received by the correct replicas
+    // notarize and nullify votes received by the local correct-style actors
     var store_vote: ReplicaId -> Set[Vote]
-    // notarization and nullification certificates received or assembled by the correct replicas
+    // notarization and nullification certificates received or assembled by the local correct-style actors
     var store_certificate: ReplicaId -> Set[Certificate]
 
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
-    // sequences of committed proposals for every correct replica
+    // sequences of committed proposals for every local correct-style actor
     var ghost_committed_blocks: ReplicaId -> List[Proposal]
 
     // Filter votes by view and kind.
@@ -216,7 +223,7 @@ module replica {
                 view: view,
                 proposal: None,
                 signatures: similar_votes.map(v => v.sig),
-                ghost_sender: id,
+                ghost_sender: sig_of(id),
                 kind: NullificationKind
             })
     }
@@ -238,7 +245,7 @@ module replica {
                 view: proposal.view,
                 proposal: Some(proposal),
                 signatures: similar_votes.map(v => v.sig),
-                ghost_sender: id,
+                ghost_sender: sig_of(id),
                 kind: if (votes_count >= L) FinalizationKind else NotarizationKind
             })
     }
@@ -308,7 +315,7 @@ module replica {
         }
     }
 
-    // Initialize all replicas with genesis.
+    // Initialize all local correct-style actors with genesis.
     action init = {
         // Non‑deterministically choose any total leader function (View → ReplicaId)
         nondet l = VIEWS.setOfMaps(Replicas).oneOf()
@@ -316,7 +323,7 @@ module replica {
     }
 
     action initWithLeader(l: ViewNumber -> ReplicaId): bool = all {
-        replica_state' = CORRECT.mapBy(id => {
+        replica_state' = REPLICA_IDS.mapBy(id => {
             view  : 0,
             ghost_last_seen_notarization: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
@@ -329,14 +336,14 @@ module replica {
         sent_proposal' = Set(),
         sent_vote'    = Set(),
         sent_certificate' = Set(),
-        store_vote'   = CORRECT.mapBy(_ => Set()),
-        store_certificate'   = CORRECT.mapBy(_ => Set()),
-        ghost_committed_blocks' = CORRECT.mapBy(id => List()),
-        ghost_proposal' = CORRECT.mapBy(id => Set()),
+        store_vote'   = REPLICA_IDS.mapBy(_ => Set()),
+        store_certificate'   = REPLICA_IDS.mapBy(_ => Set()),
+        ghost_committed_blocks' = REPLICA_IDS.mapBy(id => List()),
+        ghost_proposal' = REPLICA_IDS.mapBy(id => Set()),
         leader'       = l
     }
 
-    // A step by a correct or byzantine replica.
+    // A step by a correct-style actor or byzantine replica.
     action step = {
         any {
             correct_step,
@@ -348,9 +355,9 @@ module replica {
     }
 
     action correct_step = any {
-            correct_replica_step,
+        correct_replica_step,
         all {
-            nondet id = oneOf(CORRECT)
+            nondet id = oneOf(REPLICA_IDS)
             // Non-deterministically choose the next block, use it only for the case of None below.
             nondet new_block = oneOf(VALID_BLOCKS)
             // Non-deterministically choose the parent block and parent view (checked in proposer_step)
@@ -360,9 +367,9 @@ module replica {
         }
     }
 
-    // A step by a correct replica, except for the proposer step.
+    // A step by a correct-style actor, except for the proposer step.
     action correct_replica_step(): bool = all {
-        nondet id = oneOf(CORRECT)
+        nondet id = oneOf(REPLICA_IDS)
         // Non‑deterministically pick one enabled internal action
         any {
             {
@@ -757,7 +764,7 @@ module replica {
                 view: cert_view,
                 proposal: cert_prop,
                 signatures: agg_sig,
-                ghost_sender: sender,
+                ghost_sender: sig_of(sender),
                 kind: cert_kind
             }
             sent_certificate' = sent_certificate.union(Set(cert))
@@ -796,9 +803,15 @@ module replica {
 
     // Assumptions and thresholds.
     val assumptions_valid = all {
-        CORRECT.size() + BYZANTINE.size() == N,
-        BYZANTINE.size() <= F,
+        Replicas.forall(r => REPLICA_KEYS.keys().contains(r)),
+        REPLICA_IDS == CORRECT.union(TWINS),
+        CORRECT.intersect(TWINS) == Set(),
         CORRECT.intersect(BYZANTINE) == Set(),
+        TWINS.intersect(BYZANTINE) == Set(),
+        CORRECT_KEYS.intersect(FAULTY_KEYS) == Set(),
+        CORRECT_KEYS.size() == CORRECT.size(),
+        CORRECT_KEYS.size() + FAULTY_KEYS.size() == N,
+        FAULTY_KEYS.size() <= F,
         N >= 5*F+1,
         2*M <= L + 1, // Liveness guard, prevents equivocation stall.
         M + L > N + F, // Every M-quorum and every L-quorum share at least one honest replica.
@@ -847,8 +860,7 @@ module replica {
     // `m1 == m2` amounts to comparing (block, block_parent, view_parent).
     val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
         not(m1.view == m2.view and m1.sig == m2.sig),
-        Replicas.exists(r => sig_of(r) == m1.sig and BYZANTINE.contains(r)),
-        Replicas.filter(r => sig_of(r) == m1.sig).size() > 1, // twins mode enabled
+        FAULTY_KEYS.contains(m1.sig),
         m1 == m2,
     })
 
@@ -890,7 +902,7 @@ module replica {
             select_votes(cert.view, NullifyKind, sent_vote)
         else
             select_votes(cert.view, NotarizeKind, sent_vote).filter(v => v.proposal == cert.proposal)
-        votes.map(v => v.sig).union(BYZANTINE.map(id => sig_of(id)))
+        votes.map(v => v.sig).union(FAULTY_KEYS)
     }
 
     // Certificate signatures cannot be forged. `on_certificate` accepts a certificate by its
@@ -1027,9 +1039,11 @@ module replica {
 
     // Test invariants.
 
-    val correct_nodes_sent_certificates_valid = sent_certificate.filter(cert => cert.ghost_sender.in(CORRECT)).forall(cert => {
-        cert.signatures.size() >= M
-    })
+    val correct_nodes_sent_certificates_valid = sent_certificate
+        .filter(cert => CORRECT_KEYS.contains(cert.ghost_sender))
+        .forall(cert => {
+            cert.signatures.size() >= M
+        })
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         certs.forall(cert => cert.signatures.size() >= M)

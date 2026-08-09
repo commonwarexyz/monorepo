@@ -5,9 +5,11 @@ module tests {
     import replica(
         N = 6,
         F = 1,
+        REPLICA_IDS = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5"->"n5"),
         BYZANTINE = Set(),
+        TWINS = Set(),
         VIEWS = 0.to(5),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set("inv_b3")

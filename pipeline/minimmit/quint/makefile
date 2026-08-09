@@ -19,7 +19,7 @@ test:
 	cd tests && quint test --backend typescript tests_n7f1b1.qnt
 
 repl:
-	echo "init\n step\n step\n step" | quint -r main_n6f0.qnt::main
+	echo "init\n step\n step\n step" | quint -r main_n6f1b0.qnt::main
 
 run:
 	quint run --max-steps 100 --max-samples=100 \

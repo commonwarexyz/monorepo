@@ -3,8 +3,10 @@ module tests {
     import defs.* from "../defs"
     import option.* from "../option"
     import replica(
+        REPLICA_IDS = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         CORRECT = Set("n0", "n1", "n2", "n3", "n4", "n5"),
         BYZANTINE = Set("n6"),
+        TWINS = Set(),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5"->"n5", "n6"->"n6"),
         N = 7,
         F = 1,
