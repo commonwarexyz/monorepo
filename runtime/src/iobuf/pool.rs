@@ -4293,6 +4293,30 @@ mod loom_tests {
         });
     }
 
+    // Models the multi-entry TLS teardown edge without using OS thread-local
+    // state, which loom cannot reset between model executions. Dropping the
+    // production cache takes each real pooled-owner lease, batch-parks both
+    // slots, and only then releases the lease references. The final class-handle
+    // release races that batch return, so either side may perform the final
+    // SizeClass drop and reclaim the parked buffers.
+    #[test]
+    fn tls_batch_drop_races_pool_teardown() {
+        loom::model(|| {
+            let class = SizeClassHandle::new(1, 64, 64, NZU32!(2), NZUsize!(1), 2, false);
+            let mut cache = TlsSizeClassCache::new(2);
+
+            for _ in 0..2 {
+                let buffer = class.try_create(false).expect("tracked slot");
+                cache.push(buffer);
+            }
+            assert_eq!(cache.len, 2);
+
+            let t = thread::spawn(move || drop(cache));
+            drop(class);
+            t.join().unwrap();
+        });
+    }
+
     // Models a re-checkout racing the final drop of a shared pooled buffer.
     // The final drop leaves the refcount at the sentinel (the losing handle's
     // Release decrement lands on 1, or the race-final path re-stores it with
