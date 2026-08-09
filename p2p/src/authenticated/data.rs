@@ -120,16 +120,15 @@ mod tests {
     #[test]
     fn test_max_size_bounds() {
         use commonware_utils::Bounded;
-        use std::num::NonZeroU32;
 
         assert_eq!(
             MAX_SIZE,
             commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD
         );
-        let maximum: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(MAX_SIZE);
+        let maximum: Bounded<u32, 1, MAX_SIZE> = Bounded!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
-        assert!(Bounded::<NonZeroU32, 1, MAX_SIZE>::try_from(0).is_err());
-        assert!(Bounded::<NonZeroU32, 1, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
+        assert!(Bounded::<u32, 1, MAX_SIZE>::try_from(0).is_err());
+        assert!(Bounded::<u32, 1, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
     }
 
     #[test]

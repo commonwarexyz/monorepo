@@ -1302,17 +1302,14 @@ mod tests {
         // The wake state reserves 29 bits for the submission sequence, and
         // `pending()` relies on half-range modular ordering. `MAX_RING_SIZE`
         // preserves that ordering after power-of-two rounding.
-        let size = commonware_utils::Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE)
+        let size = Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE)
             .expect("maximum ring size should be valid");
         let cfg = Config {
             size,
             ..Default::default()
         };
         assert_eq!(cfg.size.get(), MAX_RING_SIZE);
-        assert!(
-            commonware_utils::Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE + 1)
-                .is_err()
-        );
+        assert!(Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE + 1).is_err());
     }
 
     #[test]

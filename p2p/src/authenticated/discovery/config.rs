@@ -56,7 +56,7 @@ pub struct Config<C: Signer> {
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
-    pub max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+    pub max_message_size: Bounded<u32, 1, MAX_SIZE>,
 
     /// Maximum number of distinct identities at one peer-set index, including the local identity.
     ///
@@ -154,7 +154,7 @@ pub struct Config<C: Signer> {
 
 impl<C: Signer> Config<C> {
     /// Returns the encrypted-stream payload limit for this configuration.
-    pub(super) fn max_frame_size(&self) -> Bounded<NonZeroU32, 1, STREAM_MAX_SIZE> {
+    pub(super) fn max_frame_size(&self) -> Bounded<u32, 1, STREAM_MAX_SIZE> {
         Bounded!(self.max_message_size.get() + MAX_PAYLOAD_OVERHEAD)
     }
 
@@ -166,7 +166,7 @@ impl<C: Signer> Config<C> {
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
-        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+        max_message_size: Bounded<u32, 1, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -211,7 +211,7 @@ impl<C: Signer> Config<C> {
         dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
-        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+        max_message_size: Bounded<u32, 1, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,
@@ -248,7 +248,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+        max_message_size: Bounded<u32, 1, MAX_SIZE>,
     ) -> Self {
         Self {
             crypto,

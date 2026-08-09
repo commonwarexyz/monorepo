@@ -22,11 +22,7 @@ use commonware_utils::{
 };
 use futures::future;
 use rand_core::Rng;
-use std::{
-    collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
-    time::Duration,
-};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info};
 
 type Op<DB> = <Shared<DB> as Source>::Op;
@@ -68,7 +64,7 @@ where
     pub fetch_retry_timeout: Duration,
 
     /// Maximum number of operations to serve in a single response.
-    pub max_serve_ops: Bounded<NonZeroU64, 1, { u32::MAX }>,
+    pub max_serve_ops: Bounded<u64, 1, { u32::MAX }>,
 
     /// Send fetch requests with network priority.
     pub priority_requests: bool,
@@ -399,7 +395,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{Bounded, NZU16, NZU64, NZUsize, channel::oneshot};
-    use std::time::Duration;
+    use std::{num::NonZeroU64, time::Duration};
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -468,11 +464,10 @@ mod tests {
 
     #[test]
     fn max_serve_ops_is_bounded_by_wire_length() {
-        assert!(Bounded::<NonZeroU64, 1, { u32::MAX }>::try_from(0).is_err());
-        assert!(Bounded::<NonZeroU64, 1, { u32::MAX }>::try_from(u64::from(u32::MAX) + 1).is_err());
+        assert!(Bounded::<u64, 1, { u32::MAX }>::try_from(0).is_err());
+        assert!(Bounded::<u64, 1, { u32::MAX }>::try_from(u64::from(u32::MAX) + 1).is_err());
 
-        let maximum =
-            Bounded::<NonZeroU64, 1, { u32::MAX }>::try_from(u64::from(u32::MAX)).unwrap();
+        let maximum = Bounded::<u64, 1, { u32::MAX }>::try_from(u64::from(u32::MAX)).unwrap();
         let config = Config {
             max_serve_ops: maximum,
             ..test_config(None)

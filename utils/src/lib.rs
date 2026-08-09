@@ -201,17 +201,16 @@ commonware_macros::stability_scope!(BETA {
 
     /// An integer value within the inclusive range `MIN..=MAX`.
     ///
-    /// The wrapped type can provide additional invariants. For example,
-    /// `Bounded<NonZeroU32, 1, 1024>` preserves the standard library's non-zero invariant while
-    /// also enforcing the upper bound.
+    /// A positive minimum already excludes zero, so a primitive inner type is sufficient for
+    /// `Bounded<u32, 1, 1024>`. A non-zero inner type remains useful when the bounds permit zero:
+    /// `Bounded<NonZeroU32, 0, 1024>` also enforces the wrapped type's non-zero invariant.
     ///
     /// # Examples
     ///
     /// ```
     /// use commonware_utils::Bounded;
-    /// use core::num::NonZeroU32;
     ///
-    /// type MessageSize = Bounded<NonZeroU32, 1, 1024>;
+    /// type MessageSize = Bounded<u32, 1, 1024>;
     ///
     /// let size: MessageSize = Bounded!(512);
     /// assert_eq!(size.get(), 512);
@@ -231,6 +230,16 @@ commonware_macros::stability_scope!(BETA {
         const OUTPUT: Self;
     }
 
+    /// Expression construction support for [`Bounded!`].
+    #[doc(hidden)]
+    pub trait __BoundedExpression: Sized {
+        /// Primitive type accepted by the expression constructor.
+        type Input;
+
+        /// Validates and wraps an expression value.
+        fn from_input(value: Self::Input) -> Option<Self>;
+    }
+
     impl<T: Copy, const MIN: u32, const MAX: u32> Bounded<T, MIN, MAX> {
         /// Returns the wrapped value.
         pub const fn into_inner(self) -> T {
@@ -245,6 +254,12 @@ commonware_macros::stability_scope!(BETA {
                     /// Returns the value.
                     pub const fn get(self) -> $ty {
                         self.0
+                    }
+
+                    /// Creates a value from its primitive representation.
+                    #[doc(hidden)]
+                    pub const fn __from_primitive(value: $ty) -> Option<Self> {
+                        Self::new(value)
                     }
 
                     /// Creates a value if it is within `MIN..=MAX`.
@@ -268,6 +283,16 @@ commonware_macros::stability_scope!(BETA {
                     }
                 }
 
+                impl<const MIN: u32, const MAX: u32> __BoundedExpression
+                    for Bounded<$ty, MIN, MAX>
+                {
+                    type Input = $ty;
+
+                    fn from_input(value: Self::Input) -> Option<Self> {
+                        Self::new(value)
+                    }
+                }
+
                 impl<const MIN: u32, const MAX: u32, const VALUE: i128>
                     __BoundedLiteral<VALUE> for Bounded<$ty, MIN, MAX>
                 {
@@ -285,6 +310,15 @@ commonware_macros::stability_scope!(BETA {
                     /// Returns the value.
                     pub const fn get(self) -> $inner {
                         self.0.get()
+                    }
+
+                    /// Creates a value from its primitive representation.
+                    #[doc(hidden)]
+                    pub const fn __from_primitive(value: $inner) -> Option<Self> {
+                        match <$ty>::new(value) {
+                            Some(value) => Self::new(value),
+                            None => None,
+                        }
                     }
 
                     /// Creates a value if it is within `MIN..=MAX`.
@@ -315,6 +349,16 @@ commonware_macros::stability_scope!(BETA {
 
                     fn try_from(value: $inner) -> Result<Self, Self::Error> {
                         <$ty>::new(value).and_then(Self::new).ok_or(value)
+                    }
+                }
+
+                impl<const MIN: u32, const MAX: u32> __BoundedExpression
+                    for Bounded<$ty, MIN, MAX>
+                {
+                    type Input = $inner;
+
+                    fn from_input(value: Self::Input) -> Option<Self> {
+                        <$ty>::new(value).and_then(Self::new)
                     }
                 }
 
@@ -374,8 +418,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
 /// Creates a [`Bounded`](struct@Bounded) value, panicking unless it is within the inclusive range.
 ///
-/// Primitive and `NZU*` literals can be used in const contexts. The one-argument expression form
-/// infers the result type and validates at runtime.
+/// Primitive literals can be used in const contexts. The one-argument expression form infers the
+/// result type and validates at runtime.
 ///
 /// # Panics
 ///
@@ -384,15 +428,65 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 /// # Examples
 ///
 /// ```
-/// use commonware_utils::{Bounded, NZU32};
-/// use core::num::NonZeroU32;
+/// use commonware_utils::Bounded;
 ///
-/// type MessageSize = Bounded<NonZeroU32, 1, 1024>;
-/// const MESSAGE_SIZE: MessageSize = Bounded!(NZU32!(512));
+/// type MessageSize = Bounded<u32, 1, 1024>;
+/// const MESSAGE_SIZE: MessageSize = Bounded!(512);
 /// assert_eq!(MESSAGE_SIZE.get(), 512);
 ///
 /// let inferred: MessageSize = Bounded!(256);
 /// assert_eq!(inferred.get(), 256);
+/// ```
+///
+/// Pass a primitive value directly when the wrapped type is non-zero; nesting an `NZU*` macro is
+/// rejected.
+///
+/// ```compile_fail
+/// use commonware_utils::{Bounded, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = Bounded<NonZeroU32, 0, 1024>;
+/// const _: MessageSize = Bounded!(NZU32!(512));
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::{Bounded, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = Bounded<NonZeroU32, 0, 1024>;
+/// let _: MessageSize = Bounded!(commonware_utils::NZU32!(512));
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::{Bounded, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = Bounded<NonZeroU32, 0, 1024>;
+/// let _: MessageSize = Bounded!((NZU32!(512)));
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::{Bounded, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = Bounded<NonZeroU32, 0, 1024>;
+/// let _: MessageSize = Bounded!(NonZeroU32, NZU32!(512));
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::Bounded;
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = Bounded<NonZeroU32, 0, 1024>;
+/// let _: MessageSize = Bounded!(NonZeroU32, NonZeroU32::new(512).unwrap());
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::{Bounded, NZU32};
+/// use core::num::NonZeroU32;
+///
+/// type MessageSize = Bounded<NonZeroU32, 0, 1024>;
+/// let _: MessageSize = Bounded!(NonZeroU32, (NZU32!(512)));
 /// ```
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -402,61 +496,40 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 )))] // BETA
 #[macro_export]
 macro_rules! Bounded {
-    (NZUsize!($val:literal)) => {
-        const {
-            $crate::Bounded::<::core::num::NonZeroUsize, _, _>::new($crate::NZUsize!($val))
-                .expect("value is outside allowed range")
-        }
+    (NZUsize!($($val:tt)*)) => {
+        compile_error!(
+            "pass the primitive value directly to Bounded! instead of nesting an NZU* macro"
+        )
     };
-    (NZUsize!($val:expr)) => {
-        $crate::Bounded::<::core::num::NonZeroUsize, _, _>::new($crate::NZUsize!($val))
-            .expect("value is outside allowed range")
+    (NZU8!($($val:tt)*)) => {
+        compile_error!(
+            "pass the primitive value directly to Bounded! instead of nesting an NZU* macro"
+        )
     };
-    (NZU8!($val:literal)) => {
-        const {
-            $crate::Bounded::<::core::num::NonZeroU8, _, _>::new($crate::NZU8!($val))
-                .expect("value is outside allowed range")
-        }
+    (NZU16!($($val:tt)*)) => {
+        compile_error!(
+            "pass the primitive value directly to Bounded! instead of nesting an NZU* macro"
+        )
     };
-    (NZU8!($val:expr)) => {
-        $crate::Bounded::<::core::num::NonZeroU8, _, _>::new($crate::NZU8!($val))
-            .expect("value is outside allowed range")
+    (NZU32!($($val:tt)*)) => {
+        compile_error!(
+            "pass the primitive value directly to Bounded! instead of nesting an NZU* macro"
+        )
     };
-    (NZU16!($val:literal)) => {
-        const {
-            $crate::Bounded::<::core::num::NonZeroU16, _, _>::new($crate::NZU16!($val))
-                .expect("value is outside allowed range")
-        }
-    };
-    (NZU16!($val:expr)) => {
-        $crate::Bounded::<::core::num::NonZeroU16, _, _>::new($crate::NZU16!($val))
-            .expect("value is outside allowed range")
-    };
-    (NZU32!($val:literal)) => {
-        const {
-            $crate::Bounded::<::core::num::NonZeroU32, _, _>::new($crate::NZU32!($val))
-                .expect("value is outside allowed range")
-        }
-    };
-    (NZU32!($val:expr)) => {
-        $crate::Bounded::<::core::num::NonZeroU32, _, _>::new($crate::NZU32!($val))
-            .expect("value is outside allowed range")
-    };
-    (NZU64!($val:literal)) => {
-        const {
-            $crate::Bounded::<::core::num::NonZeroU64, _, _>::new($crate::NZU64!($val))
-                .expect("value is outside allowed range")
-        }
-    };
-    (NZU64!($val:expr)) => {
-        $crate::Bounded::<::core::num::NonZeroU64, _, _>::new($crate::NZU64!($val))
-            .expect("value is outside allowed range")
+    (NZU64!($($val:tt)*)) => {
+        compile_error!(
+            "pass the primitive value directly to Bounded! instead of nesting an NZU* macro"
+        )
     };
     ($ty:ty, $val:literal) => {
-        const { $crate::Bounded::<$ty, _, _>::new($val).expect("value is outside allowed range") }
+        const {
+            $crate::Bounded::<$ty, _, _>::__from_primitive($val)
+                .expect("value is outside allowed range or violates wrapped type invariant")
+        }
     };
     ($ty:ty, $val:expr) => {
-        $crate::Bounded::<$ty, _, _>::new($val).expect("value is outside allowed range")
+        $crate::Bounded::<$ty, _, _>::__from_primitive($val)
+            .expect("value is outside allowed range or violates wrapped type invariant")
     };
     ($val:literal) => {
         const {
@@ -478,15 +551,16 @@ macro_rules! Bounded {
     };
     ($val:expr) => {{
         fn infer_bounded<T, const MIN: u32, const MAX: u32>(
-            value: $crate::Bounded<T, MIN, MAX>,
-        ) -> $crate::Bounded<T, MIN, MAX> {
-            value
+            value: <$crate::Bounded<T, MIN, MAX> as $crate::__BoundedExpression>::Input,
+        ) -> $crate::Bounded<T, MIN, MAX>
+        where
+            $crate::Bounded<T, MIN, MAX>: $crate::__BoundedExpression,
+        {
+            <$crate::Bounded<T, MIN, MAX> as $crate::__BoundedExpression>::from_input(value)
+                .expect("value is outside allowed range or violates wrapped type invariant")
         }
 
-        infer_bounded(match ::core::convert::TryInto::try_into($val) {
-            ::core::result::Result::Ok(value) => value,
-            ::core::result::Result::Err(_) => panic!("value is outside allowed range"),
-        })
+        infer_bounded($val)
     }};
 }
 
@@ -769,39 +843,56 @@ mod tests {
         const VALUE: Bounded<u32, 0, 21> = Bounded!(1);
         const MAXIMUM: Bounded<u32, 0, { u32::MAX }> = Bounded!(4_294_967_295);
         const PARTICIPANTS: Bounded<usize, 2, 64> = Bounded!(usize, 4);
+        const NON_ZERO: Bounded<core::num::NonZeroU32, 0, 64> = Bounded!(core::num::NonZeroU32, 4);
 
         assert_eq!(VALUE.get(), 1);
         assert_eq!(MAXIMUM.get(), u32::MAX);
         assert_eq!(PARTICIPANTS.get(), 4);
+        assert_eq!(NON_ZERO.get(), 4);
     }
 
     #[test]
     fn test_bounded_bounds() {
-        type MessageSize = Bounded<core::num::NonZeroU32, 1, 1024>;
+        type MessageSize = Bounded<u32, 1, 1024>;
+        type NonZeroMessageSize = Bounded<core::num::NonZeroU32, 0, 1024>;
         type OptionalSize = Bounded<u32, 0, 1024>;
         type Participants = Bounded<usize, 2, 64>;
         type SignedRange = Bounded<i16, 2, 64>;
 
-        const MAXIMUM: MessageSize = Bounded!(NZU32!(1024));
+        const MAXIMUM: MessageSize = Bounded!(1024);
         const MAXIMUM_VALUE: u32 = MAXIMUM.get();
-        const MAXIMUM_INNER: core::num::NonZeroU32 = MAXIMUM.into_inner();
-        const ZERO: OptionalSize = Bounded!(u32, 0);
-        const MINIMUM: Participants = Bounded!(usize, 2);
+        const MAXIMUM_INNER: u32 = MAXIMUM.into_inner();
+        const NON_ZERO_MAXIMUM: NonZeroMessageSize = Bounded!(1024);
+        const NON_ZERO_INNER: core::num::NonZeroU32 = NON_ZERO_MAXIMUM.into_inner();
+        const ZERO: OptionalSize = Bounded!(0);
+        const MINIMUM: Participants = Bounded!(2);
 
         assert_eq!(MAXIMUM_VALUE, 1024);
-        assert_eq!(MAXIMUM_INNER, NZU32!(1024));
+        assert_eq!(MAXIMUM_INNER, 1024);
+        assert_eq!(NON_ZERO_MAXIMUM.get(), 1024);
+        assert_eq!(NON_ZERO_INNER, NZU32!(1024));
         assert_eq!(ZERO.get(), 0);
         assert_eq!(MINIMUM.get(), 2);
         assert_eq!(MINIMUM.into_inner(), 2);
-        assert_eq!(MessageSize::new(NZU32!(1)).unwrap().get(), 1);
-        assert_eq!(MessageSize::new(NZU32!(1025)), None);
+        assert_eq!(MessageSize::new(1).unwrap().get(), 1);
+        assert_eq!(MessageSize::new(1025), None);
+        assert_eq!(NonZeroMessageSize::new(NZU32!(1)).unwrap().get(), 1);
+        assert_eq!(NonZeroMessageSize::new(NZU32!(1025)), None);
 
         let wrapped = MessageSize::try_from(512).unwrap();
         assert_eq!(wrapped.get(), 512);
         let inferred: MessageSize = Bounded!(512);
         assert_eq!(inferred.get(), 512);
+        let participant_count = 4usize;
+        let explicit: Participants = Bounded!(usize, participant_count);
+        assert_eq!(explicit.get(), participant_count);
+        let explicit_nonzero: NonZeroMessageSize =
+            Bounded!(core::num::NonZeroU32, participant_count as u32);
+        assert_eq!(explicit_nonzero.get(), participant_count as u32);
         assert!(MessageSize::try_from(0).is_err());
         assert!(MessageSize::try_from(1025).is_err());
+        assert!(NonZeroMessageSize::try_from(0).is_err());
+        assert!(NonZeroMessageSize::try_from(1025).is_err());
         assert!(Participants::try_from(1).is_err());
         assert!(Participants::try_from(65).is_err());
         assert!(SignedRange::try_from(-1).is_err());
@@ -827,7 +918,7 @@ mod tests {
         );
         assert!(
             std::panic::catch_unwind(|| {
-                let _: MessageSize = Bounded!(NZU32!(too_large));
+                let _: NonZeroMessageSize = Bounded!(too_large);
             })
             .is_err()
         );

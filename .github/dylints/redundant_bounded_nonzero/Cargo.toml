@@ -1,0 +1,23 @@
+[package]
+name = "redundant_bounded_nonzero"
+version = "0.0.1"
+description = "Reject redundant NonZero inner types in positive Bounded ranges."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[[example]]
+name = "main"
+test = false
+
+[dependencies]
+dylint_linting = "=6.0.0"
+
+[dev-dependencies]
+commonware-utils = { path = "../../../utils", default-features = false }
+dylint_testing = "=6.0.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

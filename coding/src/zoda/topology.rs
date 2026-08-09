@@ -14,9 +14,9 @@ const MAX_ENCODED_ROWS: u32 = 1 << 31;
 const MAX_TOTAL_SHARDS: u32 = 65_536;
 
 /// Encoded row count supported by row shuffling.
-type EncodedRows = Bounded<NonZeroUsize, 1, MAX_ENCODED_ROWS>;
+type EncodedRows = Bounded<usize, 1, MAX_ENCODED_ROWS>;
 /// Shard count addressable by `u16` shard indices.
-type TotalShards = Bounded<NonZeroUsize, 1, MAX_TOTAL_SHARDS>;
+type TotalShards = Bounded<usize, 1, MAX_TOTAL_SHARDS>;
 
 /// Contains the sizes of various objects in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

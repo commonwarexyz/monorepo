@@ -50,6 +50,7 @@ members = [
 exclude = [
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
+    ".github/dylints/redundant_bounded_nonzero",
     ".github/dylints/span_name_style",
     ".github/dylints/tracing_int_fields",
 ]

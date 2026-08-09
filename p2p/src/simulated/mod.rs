@@ -212,7 +212,7 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-    const MAX_MESSAGE_SIZE: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(NZU32!(1024 * 1024));
+    const MAX_MESSAGE_SIZE: Bounded<u32, 1, MAX_SIZE> = Bounded!(u32, 1024 * 1024);
 
     async fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, peers: I)
     where

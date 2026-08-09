@@ -76,12 +76,11 @@ mod tests {
     use super::*;
     use crate::Configuration;
     use commonware_utils::{Bounded, Faults, N3f1};
-    use std::num::NonZeroU32;
 
     #[test]
     fn configuration_counts_enforce_construction_bounds() {
-        let minimum: Bounded<NonZeroU32, 1, 21> = Bounded!(1);
-        let maximum: Bounded<NonZeroU32, 1, 21> = Bounded!(21);
+        let minimum: Bounded<u32, 1, 21> = Bounded!(1);
+        let maximum: Bounded<u32, 1, 21> = Bounded!(21);
         let zero: Bounded<u32, 0, 21> = Bounded!(0);
         let maximum_subset: Bounded<u32, 0, 21> = Bounded!(21);
 
@@ -90,8 +89,8 @@ mod tests {
         assert_eq!(configuration.n.get(), 21);
         assert_eq!(configuration.faults.get(), 0);
         assert_eq!(configuration.correct.get(), 21);
-        assert!(Bounded::<NonZeroU32, 1, 21>::try_from(0).is_err());
-        assert!(Bounded::<NonZeroU32, 1, 21>::try_from(22).is_err());
+        assert!(Bounded::<u32, 1, 21>::try_from(0).is_err());
+        assert!(Bounded::<u32, 1, 21>::try_from(22).is_err());
         assert!(Bounded::<u32, 0, 21>::try_from(22).is_err());
     }
 

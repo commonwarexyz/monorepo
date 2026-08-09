@@ -1,0 +1,43 @@
+error: NonZero is redundant inside a Bounded range with a positive minimum
+  --> $DIR/main.rs:13:26
+   |
+LL | type Redundant = Bounded<NonZeroU32, 1, 100>;
+   |                          ^^^^^^^^^^
+   |
+   = help: use the corresponding primitive integer as the inner type
+   = note: `#[deny(redundant_bounded_nonzero)]` on by default
+
+error: NonZero is redundant inside a Bounded range with a positive minimum
+  --> $DIR/main.rs:14:44
+   |
+LL | type Qualified = commonware_utils::Bounded<core::num::NonZeroU64, 1, 100>;
+   |                                            ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the corresponding primitive integer as the inner type
+
+error: NonZero is redundant inside a Bounded range with a positive minimum
+  --> $DIR/main.rs:15:23
+   |
+LL | type Direct = Bounded<core::num::NonZero<u32>, 1, 100>;
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the corresponding primitive integer as the inner type
+
+error: NonZero is redundant inside a Bounded range with a positive minimum
+  --> $DIR/main.rs:16:22
+   |
+LL | type Renamed = Limit<NonZeroU32, POSITIVE, 100>;
+   |                      ^^^^^^^^^^
+   |
+   = help: use the corresponding primitive integer as the inner type
+
+error: NonZero is redundant inside a Bounded range with a positive minimum
+  --> $DIR/main.rs:18:24
+   |
+LL | type Aliased = Bounded<Positive, { 1 + 1 }, 100>;
+   |                        ^^^^^^^^
+   |
+   = help: use the corresponding primitive integer as the inner type
+
+error: aborting due to 5 previous errors
+

@@ -593,7 +593,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
     /// Maximum operations fetched per source request.
-    pub fetch_batch_size: Bounded<NonZeroU64, 1, { u32::MAX }>,
+    pub fetch_batch_size: Bounded<u64, 1, { u32::MAX }>,
 
     /// Number of operations applied per local apply step.
     pub apply_batch_size: NonZeroU64,
@@ -1683,7 +1683,8 @@ where
         source,
         target,
         max_outstanding_requests: sync_config.max_outstanding_requests,
-        fetch_batch_size: sync_config.fetch_batch_size.into_inner(),
+        fetch_batch_size: NonZeroU64::new(sync_config.fetch_batch_size.get())
+            .expect("bounded minimum is one"),
         apply_batch_size: sync_config.apply_batch_size,
         db_config: config,
         update_rx: Some(tip_updates),
@@ -1767,7 +1768,8 @@ where
         source,
         target: initial,
         db_config: config,
-        fetch_batch_size: sync_config.fetch_batch_size.into_inner(),
+        fetch_batch_size: NonZeroU64::new(sync_config.fetch_batch_size.get())
+            .expect("bounded minimum is one"),
         apply_batch_size: sync_config.apply_batch_size,
         max_outstanding_requests: sync_config.max_outstanding_requests,
         max_retained_roots: sync_config.max_retained_roots,

@@ -72,7 +72,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{Bounded, SystemTimeExt};
 use rand_core::CryptoRng;
-use std::{future::Future, num::NonZeroU32, ops::Range, time::Duration};
+use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
 const TAG_SIZE: u32 = {
@@ -145,7 +145,7 @@ pub struct Config<S> {
     ///
     /// Fixed-size handshake frames use their protocol-defined sizes instead of
     /// inheriting this limit.
-    pub max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+    pub max_message_size: Bounded<u32, 1, MAX_SIZE>,
 
     /// Maximum time drift allowed for future timestamps. Handles clock skew.
     pub synchrony_bound: Duration,
@@ -538,7 +538,6 @@ mod test {
     };
     use commonware_utils::{Bounded, NZU32, NZUsize, sync::Mutex};
     use std::{
-        num::NonZeroU32,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -562,7 +561,7 @@ mod test {
 
     #[test]
     fn test_max_message_size_bounds() {
-        type MessageSize = Bounded<NonZeroU32, 1, MAX_SIZE>;
+        type MessageSize = Bounded<u32, 1, MAX_SIZE>;
 
         assert_eq!(MAX_SIZE + TAG_SIZE, crate::utils::codec::MAX_SIZE);
 

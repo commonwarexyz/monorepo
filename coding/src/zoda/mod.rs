@@ -336,6 +336,10 @@ pub struct CheckedShard {
 /// Take indices up to `total`, and shuffle them.
 ///
 /// The shuffle depends, deterministically, on the transcript.
+///
+/// # Panics
+///
+/// Panics if `total` exceeds `u32::MAX`.
 fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
     let total = u32::try_from(total).expect("encoded row bound should fit u32");
     let mut out = (0..total).collect::<Vec<_>>();

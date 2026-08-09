@@ -20,7 +20,6 @@ use commonware_utils::{Bounded, NZUsize, TryCollect, channel::mpsc, ordered::Set
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
-    num::NonZeroU32,
     ops::RangeInclusive,
     sync::{
         Arc,
@@ -69,7 +68,7 @@ pub struct Plan<D: EngineDefinition> {
     pub link: Link,
 
     /// Maximum size of a p2p message (bytes).
-    pub max_message_size: Bounded<NonZeroU32, 1, { simulated::MAX_SIZE }>,
+    pub max_message_size: Bounded<u32, 1, { simulated::MAX_SIZE }>,
 
     /// Engine definition (how to wire up each validator).
     pub engine: D,
@@ -106,7 +105,7 @@ pub struct PlanBuilder<D: EngineDefinition> {
     seeds: Vec<u64>,
     participants: Vec<D::PublicKey>,
     link: Link,
-    max_message_size: Bounded<NonZeroU32, 1, { simulated::MAX_SIZE }>,
+    max_message_size: Bounded<u32, 1, { simulated::MAX_SIZE }>,
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
@@ -184,7 +183,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub const fn max_message_size(
         mut self,
-        size: Bounded<NonZeroU32, 1, { simulated::MAX_SIZE }>,
+        size: Bounded<u32, 1, { simulated::MAX_SIZE }>,
     ) -> Self {
         self.max_message_size = size;
         self
@@ -1087,11 +1086,7 @@ mod tests {
 
     #[test]
     fn max_message_size_is_validated_before_building() {
-        type MessageSize = commonware_utils::Bounded<
-            std::num::NonZeroU32,
-            1,
-            { commonware_p2p::simulated::MAX_SIZE },
-        >;
+        type MessageSize = Bounded<u32, 1, { commonware_p2p::simulated::MAX_SIZE }>;
 
         assert!(MessageSize::try_from(0).is_err());
         assert!(MessageSize::try_from(commonware_p2p::simulated::MAX_SIZE + 1).is_err());

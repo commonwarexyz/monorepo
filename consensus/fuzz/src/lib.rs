@@ -44,7 +44,7 @@ pub use simplex::{
 };
 use std::{
     collections::HashMap,
-    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,
     time::Duration,
@@ -63,7 +63,7 @@ const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
 /// Number of nodes supported by the fuzz harness.
-pub type Nodes = Bounded<NonZeroU32, 1, 21>;
+pub type Nodes = Bounded<u32, 1, 21>;
 
 /// Number of nodes in a subset of the fuzz harness.
 pub type Subset = Bounded<u32, 0, 21>;
@@ -119,11 +119,9 @@ impl Configuration {
 }
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
-pub const N4F1C3: Configuration =
-    Configuration::new(Bounded!(NZU32!(4)), Bounded!(1u32), Bounded!(3u32));
+pub const N4F1C3: Configuration = Configuration::new(Bounded!(4), Bounded!(1), Bounded!(3));
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
-pub const N4F3C1: Configuration =
-    Configuration::new(Bounded!(NZU32!(4)), Bounded!(3u32), Bounded!(1u32));
+pub const N4F3C1: Configuration = Configuration::new(Bounded!(4), Bounded!(3), Bounded!(1));
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,

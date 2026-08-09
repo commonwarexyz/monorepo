@@ -38,7 +38,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc,
@@ -124,7 +124,7 @@ struct PeerRefCounts {
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size allowed for an application payload provided to a sender.
-    pub max_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+    pub max_size: Bounded<u32, 1, MAX_SIZE>,
 
     /// Maximum number of distinct identities at one peer-set index.
     ///
@@ -1501,7 +1501,7 @@ mod tests {
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
-    const MAX_MESSAGE_SIZE: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(NZU32!(1024 * 1024));
+    const MAX_MESSAGE_SIZE: Bounded<u32, 1, MAX_SIZE> = Bounded!(u32, 1024 * 1024);
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -1580,10 +1580,10 @@ mod tests {
             MAX_SIZE + MAX_PAYLOAD_OVERHEAD,
             commonware_stream::utils::codec::MAX_SIZE
         );
-        let maximum: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(MAX_SIZE);
+        let maximum: Bounded<u32, 1, MAX_SIZE> = Bounded!(MAX_SIZE);
         assert_eq!(maximum.get(), MAX_SIZE);
-        assert!(Bounded::<NonZeroU32, 1, MAX_SIZE>::try_from(0).is_err());
-        assert!(Bounded::<NonZeroU32, 1, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
+        assert!(Bounded::<u32, 1, MAX_SIZE>::try_from(0).is_err());
+        assert!(Bounded::<u32, 1, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
     }
 
     /// [`Config::max_size`] limits the payload without counting the internal channel identifier.

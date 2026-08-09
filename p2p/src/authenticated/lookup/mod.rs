@@ -235,7 +235,6 @@ mod tests {
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        num::NonZeroU32,
         time::Duration,
     };
 
@@ -246,7 +245,7 @@ mod tests {
         One,
     }
 
-    const MAX_MESSAGE_SIZE: Bounded<NonZeroU32, 1, MAX_SIZE> = Bounded!(NZU32!(1_024 * 1_024)); // 1MB
+    const MAX_MESSAGE_SIZE: Bounded<u32, 1, MAX_SIZE> = Bounded!(u32, 1_024 * 1_024); // 1MB
 
     #[test]
     fn test_drop_before_start_closes_channels() {
@@ -305,7 +304,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: Bounded<NonZeroU32, 1, MAX_SIZE>,
+        max_message_size: Bounded<u32, 1, MAX_SIZE>,
         base_port: u16,
         n: usize,
         mode: Mode,
