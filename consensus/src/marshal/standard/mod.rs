@@ -88,10 +88,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::{
-        Manager as _, Receiver as _, Recipients, Sender as _,
-        simulated::{self, Network},
-    };
+    use commonware_p2p::{Manager as _, Receiver as _, Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -6807,17 +6804,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let me = default_leader();
-            let (network, oracle) = Network::new_with_peers(
+            let oracle = setup_network_with_participants(
                 context.child("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                vec![me.clone()],
+                NZUsize!(1),
+                [me.clone()],
             )
             .await;
-            network.start();
             let control = oracle.control(me.clone());
             let network_channel = control
                 .register(0, Quota::per_second(NonZeroU32::MAX))

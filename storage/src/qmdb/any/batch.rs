@@ -1795,9 +1795,11 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Resolved locations are not retained: a batch that writes keys it read pays an
-    /// index re-probe and journal re-read at merkleize. Use [`stage`](Self::stage) to fuse
-    /// reads into merkleize instead.
+    /// keys. Resolved locations are not retained, so writing a key read only through `get_many`
+    /// requires an index re-probe and journal re-read during merkleize. Use
+    /// [`stage`](Self::stage) for keys that may be written. When the writable subset is known and
+    /// much smaller than the full read set, call `get_many` for the read-only keys first, then
+    /// [`stage`](Self::stage) only the writable keys.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],

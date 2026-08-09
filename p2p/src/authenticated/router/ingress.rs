@@ -12,8 +12,14 @@ use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     NZUsize,
     channel::{oneshot, ring},
+    sync::Mutex,
 };
-use std::{collections::VecDeque, fmt};
+use std::{
+    collections::VecDeque,
+    fmt,
+    ops::Deref,
+    sync::{Arc, OnceLock},
+};
 
 /// Messages that can be processed by the router.
 pub enum Message<P: PublicKey> {
@@ -95,18 +101,92 @@ impl<P: PublicKey> Mailbox<P> {
     }
 }
 
+// Registered channels subscribe before the router mailbox exists. Retain those subscriptions
+// until start binds the mailbox.
+struct Shared<P: PublicKey> {
+    mailbox: OnceLock<Option<Mailbox<P>>>,
+    pending_subscriptions: Mutex<Vec<ring::Sender<Vec<P>>>>,
+}
+
+impl<P: PublicKey> Shared<P> {
+    const fn new() -> Self {
+        Self {
+            mailbox: OnceLock::new(),
+            pending_subscriptions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn bind(&self, mailbox: Mailbox<P>) {
+        // Publish the mailbox before draining pending subscriptions. Subscribers that observed it
+        // unbound recheck while holding the same lock, so they are either queued or send directly.
+        assert!(
+            self.mailbox.set(Some(mailbox)).is_ok(),
+            "router messenger already bound or closed"
+        );
+        let mut pending_subscriptions = self.pending_subscriptions.lock();
+        let mailbox = self.mailbox.get().unwrap().as_ref().unwrap();
+        for sender in pending_subscriptions.drain(..) {
+            let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+        }
+    }
+}
+
 /// Sends messages containing content to the router to send to peers.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Messenger<P: PublicKey> {
     pool: BufferPool,
-    sender: Mailbox<P>,
+    shared: Arc<Shared<P>>,
+}
+
+#[derive(Debug)]
+pub(in crate::authenticated) struct OwnedMessenger<P: PublicKey> {
+    messenger: Messenger<P>,
+}
+
+impl<P: PublicKey> Drop for OwnedMessenger<P> {
+    fn drop(&mut self) {
+        let shared = &self.messenger.shared;
+        if shared.mailbox.set(None).is_ok() {
+            shared.pending_subscriptions.lock().clear();
+        }
+    }
+}
+
+impl<P: PublicKey> OwnedMessenger<P> {
+    pub(in crate::authenticated) fn handle(&self) -> Messenger<P> {
+        self.messenger.clone()
+    }
+
+    pub(in crate::authenticated) fn bind(&self, mailbox: Mailbox<P>) {
+        self.messenger.shared.bind(mailbox);
+    }
+}
+
+impl<P: PublicKey> Deref for OwnedMessenger<P> {
+    type Target = Messenger<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.messenger
+    }
+}
+
+impl<P: PublicKey> fmt::Debug for Messenger<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mailbox = self.shared.mailbox.get();
+        f.debug_struct("Messenger")
+            .field("bound", &mailbox.is_some_and(Option::is_some))
+            .field("closed", &mailbox.is_some_and(Option::is_none))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: PublicKey> Messenger<P> {
-    /// Returns a new [Messenger] with the given sender.
-    /// (The router has the corresponding receiver.)
-    pub const fn new(pool: BufferPool, sender: Mailbox<P>) -> Self {
-        Self { pool, sender }
+    pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Arc<OwnedMessenger<P>> {
+        let messenger = Self {
+            pool,
+            shared: Arc::new(Shared::new()),
+        };
+        Arc::new(OwnedMessenger { messenger })
     }
 
     /// Sends a message to the given `recipients`.
@@ -120,10 +200,19 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Unreliable<Feedback> {
+        // Treat sends before the router is bound as sends with no connected peers. Nothing can
+        // receive the content, so accept the submission without encoding or enqueueing it.
+        let Some(mailbox) = self.shared.mailbox.get() else {
+            return Unreliable::new(Feedback::Ok);
+        };
+        let Some(mailbox) = mailbox else {
+            return Unreliable::new(Feedback::Closed);
+        };
+
         // Encode the data frame once for all recipients
         let encoded = EncodedData::new(&self.pool, channel, message);
 
-        self.sender.0.enqueue(Message::Content {
+        mailbox.0.enqueue(Message::Content {
             recipients,
             encoded,
             priority,
@@ -136,7 +225,22 @@ impl<P: PublicKey> Connected for Messenger<P> {
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
-        let _ = self.sender.0.enqueue(Message::SubscribePeers { sender });
+        if let Some(mailbox) = self.shared.mailbox.get() {
+            if let Some(mailbox) = mailbox {
+                let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+            }
+            return receiver;
+        }
+
+        let mut pending_subscriptions = self.shared.pending_subscriptions.lock();
+        match self.shared.mailbox.get() {
+            Some(Some(mailbox)) => {
+                drop(pending_subscriptions);
+                let _ = mailbox.0.enqueue(Message::SubscribePeers { sender });
+            }
+            Some(None) => {}
+            None => pending_subscriptions.push(sender),
+        }
         receiver
     }
 }
@@ -153,6 +257,45 @@ mod tests {
     };
 
     #[test]
+    fn test_unbound_messenger_accepts_and_drops_content() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            assert_eq!(
+                messenger.content(Recipients::All, 7, IoBuf::from(b"message").into(), false),
+                Unreliable::new(Feedback::Ok)
+            );
+
+            let (sender, mut receiver) = mailbox::new_unreliable::<Message<PublicKey>>(
+                context.child("router_mailbox"),
+                NZUsize!(1),
+            );
+            messenger.bind(Mailbox::new(sender));
+            assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn test_unbound_messenger_defers_subscriptions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            let _subscription = messenger.subscribe();
+            let (sender, mut receiver) = mailbox::new_unreliable::<Message<PublicKey>>(
+                context.child("router_mailbox"),
+                NZUsize!(1),
+            );
+
+            messenger.bind(Mailbox::new(sender));
+
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(Message::SubscribePeers { .. })
+            ));
+        });
+    }
+
+    #[test]
     fn test_overflow_rejects_content_but_retains_control() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -161,10 +304,8 @@ mod tests {
                 NZUsize!(1),
             );
             let mailbox = Mailbox::new(control_sender.clone());
-            let messenger = Messenger::new(
-                context.network_buffer_pool().clone(),
-                Mailbox::new(control_sender),
-            );
+            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            messenger.bind(Mailbox::new(control_sender));
             let peer = PrivateKey::from_seed(1).public_key();
 
             assert_eq!(

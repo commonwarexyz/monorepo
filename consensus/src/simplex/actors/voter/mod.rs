@@ -115,10 +115,12 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
+        let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             NConfig {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(peers.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -2630,6 +2632,7 @@ mod tests {
                 context.child("network"),
                 NConfig {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2742,6 +2745,7 @@ mod tests {
                 context.child("network"),
                 NConfig {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

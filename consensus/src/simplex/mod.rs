@@ -932,10 +932,13 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
+        let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
                 max_size: 1024 * 1024,
+                // Some tests replace the initial set with the committee plus one injector.
+                max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -956,10 +959,13 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
     {
+        let primary: Vec<_> = primary.into_iter().collect();
+        let secondary: Vec<_> = secondary.into_iter().collect();
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
