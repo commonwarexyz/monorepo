@@ -64,9 +64,8 @@ impl State {
 }
 
 pub fn bench(c: &mut Criterion) {
-    let created = THREADS * BATCH;
     let name = format!(
-        "{}/size={SIZE} capacity={CAPACITY} created={created} threads={THREADS} parallelism={PARALLELISM} batch={BATCH}",
+        "{}/size={SIZE} capacity={CAPACITY} threads={THREADS} parallelism={PARALLELISM} batch={BATCH}",
         module_path!(),
     );
 
