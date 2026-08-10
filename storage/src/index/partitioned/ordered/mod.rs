@@ -727,7 +727,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             });
         }
 
-        strategy.map_collect_vec(shard_tasks, |mut shard| {
+        // Feed the policy the per-shard diff count: the fan-out presents only
+        // shard-count items, which alone would read as trivial work and
+        // converge the adaptive policy to serial.
+        let per_shard = diffs.len() / shard_tasks.len().max(1);
+        strategy.map_collect_vec_with_multiplier(shard_tasks, per_shard, |mut shard| {
             for &(key, old, new) in shard.diffs {
                 let (i, sub) = partition_index_and_sub_key::<P>(key);
                 match (old, new) {
