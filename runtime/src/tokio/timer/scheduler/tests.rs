@@ -4,8 +4,8 @@ mod ordinary {
         Affinity, Alarm, AssignmentKind, Batch, Deadline, DriverFailure, DriverSignal,
         ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
         EXPIRY_YIELD_BUDGET, Entry, NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle, Sleep,
-        ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id, run_driver,
-        run_driver_loop,
+        ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id, register_relative,
+        run_driver, run_driver_loop,
     };
     use crate::{
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -563,6 +563,34 @@ mod ordinary {
         assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
         assert_eq!(entry.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
         assert_eq!(shard.state.lock().entries.len(), 0);
+    }
+
+    #[test]
+    fn relative_deadline_precedes_shard_selection_work() {
+        // Advance the selected shard's fake clock after construction captures
+        // the relative deadline from the scheduler's shared clock shard.
+        let (clock_shard, clock_control) = fake_shard();
+        let (selected_shard, selected_control) = fake_shard();
+        clock_control.set_now(at(100));
+        let shards = [Arc::clone(&clock_shard), Arc::clone(&selected_shard)];
+        let registered = register_relative(
+            &shards,
+            Duration::from_nanos(25),
+            || {
+                selected_control.set_now(at(1_000));
+                1
+            },
+        );
+        let entry = Arc::clone(&registered.entry);
+
+        // Selection time must not shift the captured 125 ns deadline to 1,025 ns.
+        assert_eq!(clock_shard.state.lock().entries.len(), 0);
+        assert_eq!(selected_shard.state.lock().entries.peek(), Some(at(125)));
+        let mut batch = Batch::new();
+        assert!(!driver_ok(selected_shard.take_expired(&mut batch)));
+        assert_eq!(batch.entries.len(), 1);
+        assert!(batch.complete(ENTRY_FIRED).is_none());
+        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
     }
 
     #[test]
@@ -1203,7 +1231,11 @@ mod ordinary {
 
         // Fail a producer clock read before completing the committed batch.
         control.fail_next_now();
-        let failed_registration = shard.register_after(Duration::from_nanos(1));
+        let failed_registration = register_relative(
+            std::slice::from_ref(&shard),
+            Duration::from_nanos(1),
+            || 0,
+        );
 
         // Failure covers the new entry but cannot overwrite committed expirations.
         {

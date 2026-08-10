@@ -204,8 +204,9 @@ impl Timer {
         if duration.is_zero() {
             return Sleep::Ready;
         }
-        let index = self.affinity.select();
-        Sleep::Registered(self.shards[index].register_after(duration))
+        Sleep::Registered(register_relative(&self.shards, duration, || {
+            self.affinity.select()
+        }))
     }
 
     /// Eagerly converts one wall-clock deadline and registers its sleep.
@@ -242,6 +243,23 @@ impl Timer {
     pub(crate) fn current_assignment(&self) -> Option<(usize, AssignmentKind)> {
         THREAD_ASSIGNMENTS.with(|assignments| assignments.borrow().get(self.affinity.runtime_id))
     }
+}
+
+/// Captures a relative deadline before selecting its registration shard.
+fn register_relative<A: Alarm>(
+    shards: &[Arc<Shard<A>>],
+    duration: Duration,
+    select: impl FnOnce() -> usize,
+) -> RegisteredSleep<A> {
+    // All native shards share one platform monotonic clock, so any shard can
+    // establish the deadline before affinity work consumes part of the delay.
+    let now = shards
+        .first()
+        .expect("timer scheduler must contain at least one shard")
+        .alarm
+        .now();
+    let index = select();
+    shards[index].register_after_observation(now, duration)
 }
 
 impl Drop for Timer {
@@ -402,11 +420,19 @@ impl<A: Alarm> Shard<A> {
         }
     }
 
+    #[cfg(test)]
     /// Reads monotonic time and eagerly registers a relative sleep.
     fn register_after(self: &Arc<Self>, duration: Duration) -> RegisteredSleep<A> {
-        // Establish the requested duration before allocator contention can
-        // consume part of it.
         let now = self.alarm.now();
+        self.register_after_observation(now, duration)
+    }
+
+    /// Eagerly registers a relative sleep from a captured monotonic observation.
+    fn register_after_observation(
+        self: &Arc<Self>,
+        now: io::Result<Deadline>,
+        duration: Duration,
+    ) -> RegisteredSleep<A> {
         let entry = EntryArc::new(Entry::new());
         let deadline = match now {
             Ok(now) => now.saturating_add(duration, self.max_deadline),
