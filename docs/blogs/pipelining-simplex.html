@@ -188,7 +188,7 @@ O’Grady</a></div>
             }
           </style>
         </noscript>
-        <div id="simplex-fig-leaders" class="simplex-loop" role="button" tabindex="0" aria-pressed="false" aria-label="Animated comparison of round-robin and stable leaders across six views. With round-robin rotation, responsibility moves among three leaders and every view crosses a proposer handoff. With a stable leader, one leader proposes all six views in the term, then leadership changes once at the term boundary. Activate to pause or resume the animation.">
+        <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="Animated comparison of round-robin and stable leaders across six views. With round-robin rotation, responsibility moves among three leaders and every view crosses a proposer handoff. With a stable leader, one leader proposes all six views in the term, then leadership changes once at the term boundary.">
           <noscript>In this round-robin example, responsibility moves among three leaders across six views. With a stable leader, one leader proposes all six views and leadership changes once at the term boundary.</noscript>
         </div>
         <script type="module" src="pipelining-simplex.loops.js"></script>
@@ -243,7 +243,7 @@ O’Grady</a></div>
         may notarize early, but its certification waits for its parent
         to certify. Its finalize vote follows its own certification; it
         does not wait for parent finalization.</p>
-        <div id="simplex-fig-validation" class="simplex-loop" role="button" tabindex="0" aria-pressed="false" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application certification before validators verify and notarize it. In the optimistic path, child proposals are verified and notarized while parent certification continues in a parallel lane. Finalization remains ordered behind certification. Activate to pause or resume the animation.">
+        <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application certification before validators verify and notarize it. In the optimistic path, child proposals are verified and notarized while parent certification continues in a parallel lane. Finalization remains ordered behind certification.">
           <noscript>Without optimistic validation, each child proposal waits for its parent to certify. With optimistic validation, proposal verification and notarization continue while certification runs in the background. Finalization still waits for certification.</noscript>
         </div>
         <div class="image-caption">

@@ -64,8 +64,6 @@ const addArrow = (parent, x1, y1, x2, y2, color, delay, duration = 0.1) => {
   group.appendChild(head);
   parent.appendChild(group);
   return {
-    delay,
-    duration,
     set(progress) {
       const value = Math.max(0, Math.min(1, (progress - delay) / duration));
       line.setAttribute('stroke-dashoffset', length * (1 - value));
@@ -75,8 +73,6 @@ const addArrow = (parent, x1, y1, x2, y2, color, delay, duration = 0.1) => {
 };
 
 const addReveal = (el, delay, duration = 0.06) => ({
-  delay,
-  duration,
   set(progress) {
     const value = Math.max(0, Math.min(1, (progress - delay) / duration));
     el.setAttribute('opacity', value);
@@ -226,28 +222,41 @@ function buildValidation(mount) {
 }
 
 function run(mount, builder) {
+  const description = mount.getAttribute('aria-label');
   const animated = builder(mount);
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const makeStatic = () => {
     mount.setAttribute('role', 'img');
     mount.removeAttribute('tabindex');
     mount.removeAttribute('aria-pressed');
-    mount.setAttribute(
-      'aria-label',
-      mount.getAttribute('aria-label').replace(' Activate to pause or resume the animation.', ''),
-    );
+    mount.setAttribute('aria-label', description);
   };
-  if (reducedMotion) {
-    makeStatic();
-  }
+  const makeInteractive = () => {
+    mount.setAttribute('role', 'button');
+    mount.setAttribute('tabindex', '0');
+    mount.setAttribute('aria-pressed', 'false');
+    mount.setAttribute('aria-label', `${description} Activate to pause or resume the animation.`);
+  };
+  const progressAt = elapsed =>
+    Math.max(0, Math.min(1, (elapsed - HOLD_MS) / (LOOP_MS - HOLD_MS * 2)));
+
   const frozen = new URLSearchParams(window.location.search).get('freeze');
   if (frozen !== null) {
-    const requested = Number(frozen);
-    const progress = Number.isFinite(requested) ? Math.max(0, Math.min(1, requested)) : 1;
+    const seconds = Number(frozen);
+    const elapsed = Number.isFinite(seconds)
+      ? ((seconds * 1000) % LOOP_MS + LOOP_MS) % LOOP_MS
+      : LOOP_MS - HOLD_MS;
     makeStatic();
-    animated.forEach(item => item.set(progress));
+    animated.forEach(item => item.set(progressAt(elapsed)));
     return;
   }
+  if (reducedMotion) {
+    makeStatic();
+    animated.forEach(item => item.set(1));
+    return;
+  }
+  makeInteractive();
+
   let started = performance.now();
   let pausedAt = 0;
   let userPaused = false;
@@ -255,19 +264,12 @@ function run(mount, builder) {
   let frame;
 
   const render = now => {
-    let progress;
-    if (reducedMotion) {
-      progress = 1;
-    } else {
-      const elapsed = (now - started) % LOOP_MS;
-      progress = Math.max(0, Math.min(1, (elapsed - HOLD_MS) / (LOOP_MS - HOLD_MS * 2)));
-    }
+    const progress = progressAt((now - started) % LOOP_MS);
     animated.forEach(item => item.set(progress));
-    if (!reducedMotion && !userPaused && visible) frame = requestAnimationFrame(render);
+    if (!userPaused && visible) frame = requestAnimationFrame(render);
   };
 
   const toggle = () => {
-    if (reducedMotion) return;
     if (userPaused) {
       started = performance.now() - pausedAt;
       userPaused = false;
@@ -288,9 +290,11 @@ function run(mount, builder) {
     }
   });
 
-  if (!reducedMotion && 'IntersectionObserver' in window) {
+  if ('IntersectionObserver' in window) {
     const observer = new IntersectionObserver(entries => {
-      visible = entries[0].isIntersecting;
+      const latest = entries[entries.length - 1];
+      if (!latest) return;
+      visible = latest.isIntersecting;
       cancelAnimationFrame(frame);
       if (visible && !userPaused) {
         started = performance.now();
@@ -306,10 +310,13 @@ const style = document.createElement('style');
 style.textContent = `
   .simplex-loop-svg {
     background: white;
-    cursor: pointer;
     display: block;
     height: auto;
     width: 100%;
+  }
+
+  .simplex-loop[role="button"] .simplex-loop-svg {
+    cursor: pointer;
   }
 `;
 document.head.appendChild(style);
