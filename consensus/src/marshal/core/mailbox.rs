@@ -217,8 +217,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     Finalization {
         /// The span carried with this request.
         span: Span,
-        /// The finalization.
-        finalization: Finalization<S, V::Commitment>,
+        /// Adjacent finalizations coalesced by the receiver.
+        finalizations: NonEmptyVec<Finalization<S, V::Commitment>>,
     },
 }
 
@@ -998,7 +998,7 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
             },
             Activity::Finalization(finalization) => Message::Finalization {
                 span: info_span!("marshal.mailbox.finalization", round = %finalization.round()),
-                finalization,
+                finalizations: NonEmptyVec::new(finalization),
             },
             _ => return Feedback::Ok,
         };

@@ -17,7 +17,7 @@ use commonware_storage::{
 use rand_core::Rng;
 use std::{
     cmp::max,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     num::{NonZero, NonZeroUsize},
     time::Duration,
@@ -479,30 +479,74 @@ where
         (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
-    /// Add a finalization to the prunable archive.
+    /// Add a finalization to the prunable archive and make it durable.
     ///
     /// The blocking sync is intentional. A downstream application may write to
     /// an external store once it observes a finalization's effects and then
     /// assume the certificate is still readable from marshal after a restart.
     /// Deferring this sync would silently break that recovery pattern.
     pub(crate) async fn put_finalization(
-        mut self,
+        self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
         finalization: Finalization<S, V::Commitment>,
     ) -> Self {
-        let view = round.view().get();
-        (self, _) = self
-            .with_epoch(round.epoch(), |mut cache| async move {
+        self.put_finalizations(vec![(round, digest, finalization)])
+            .await
+    }
+
+    /// Add finalizations to their epoch caches and sync each touched archive once.
+    ///
+    /// The returned manager contains only durable writes. Callers may therefore
+    /// expose the batch's finalization effects as soon as this method returns.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn put_finalizations(
+        mut self,
+        finalizations: Vec<(
+            Round,
+            <V::Block as Digestible>::Digest,
+            Finalization<S, V::Commitment>,
+        )>,
+    ) -> Self {
+        let mut touched = BTreeSet::new();
+        for (round, digest, finalization) in finalizations {
+            let epoch = round.epoch();
+            let view = round.view().get();
+            let (next, stored) = self
+                .with_epoch(epoch, |mut cache| async move {
+                    cache.finalizations = cache
+                        .finalizations
+                        .put(view, digest, finalization)
+                        .await
+                        .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
+                    (cache, ())
+                })
+                .await;
+            self = next;
+            if stored.is_some() {
+                touched.insert(epoch);
+            }
+        }
+
+        let mut syncs = Vec::with_capacity(touched.len());
+        for epoch in touched {
+            let mut cache = self
+                .caches
+                .remove(&epoch)
+                .expect("touched finalization cache missing");
+            syncs.push(async move {
                 cache.finalizations = cache
                     .finalizations
-                    .put_sync(view, digest, finalization)
+                    .sync()
                     .await
-                    .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
-                debug!(?round, "cached finalization");
-                (cache, ())
-            })
-            .await;
+                    .unwrap_or_else(|e| panic!("failed to sync finalizations: {e}"));
+                debug!(?epoch, "cached finalizations");
+                (epoch, cache)
+            });
+        }
+        for (epoch, cache) in futures::future::join_all(syncs).await {
+            self.caches.insert(epoch, cache);
+        }
         self
     }
 

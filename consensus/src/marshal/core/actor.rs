@@ -499,26 +499,47 @@ where
                 self = next;
             },
             // Handle consensus inputs before backfill or resolver traffic
-            Some(message) = self.mailbox.recv() else {
+            Some(mut message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
-                let span = info_span!(
-                    parent: message.span(),
-                    "marshal.actor.process",
-                    operation = message.name(),
-                );
-                self = self
-                    .handle_mailbox_message(
-                        message,
-                        &mut resolver,
-                        &mut waiters,
-                        &mut syncs,
-                        &mut buffer,
-                        &mut application,
-                    )
-                    .instrument(span)
-                    .await;
+                let mut following = None;
+                if let Message::Finalization { span, finalizations } = &mut message {
+                    while finalizations.len().get() < self.max_repair.get() {
+                        match self.mailbox.try_recv() {
+                            Ok(Message::Finalization {
+                                span: next_span,
+                                finalizations: next,
+                            }) => {
+                                span.follows_from(next_span.id());
+                                finalizations.extend(next);
+                            }
+                            Ok(message) => {
+                                following = Some(message);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                for message in std::iter::once(message).chain(following) {
+                    let span = info_span!(
+                        parent: message.span(),
+                        "marshal.actor.process",
+                        operation = message.name(),
+                    );
+                    self = self
+                        .handle_mailbox_message(
+                            message,
+                            &mut resolver,
+                            &mut waiters,
+                            &mut syncs,
+                            &mut buffer,
+                            &mut application,
+                        )
+                        .instrument(span)
+                        .await;
+                }
             },
             // Handle resolver messages last (batched up to max_repair, sync once)
             Some(message) = resolver_rx.recv() else {
@@ -769,19 +790,40 @@ where
                     debug!(?round, "notarized block unavailable locally");
                 }
             }
-            Message::Finalization { finalization, .. } => {
-                let round = finalization.round();
-                let commitment = finalization.proposal.payload;
-                let digest = V::commitment_to_inner(commitment);
+            Message::Finalization { finalizations, .. } => {
+                let sync_round = finalizations.last().round();
+                let cache_entries = finalizations
+                    .iter()
+                    .map(|finalization| {
+                        let round = finalization.round();
+                        let digest = V::commitment_to_inner(finalization.proposal.payload);
+                        (round, digest, finalization.clone())
+                    })
+                    .collect();
 
-                // Cache finalization by round.
-                self.cache = self
-                    .cache
-                    .put_finalization(round, digest, finalization.clone())
-                    .await;
+                // Cache certificates before exposing any tip or application effect.
+                self.cache = self.cache.put_finalizations(cache_entries).await;
 
-                // Search for the finalized block locally, otherwise fetch it remotely.
-                if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                let mut stored_any = false;
+                for finalization in finalizations {
+                    let round = finalization.round();
+                    let commitment = finalization.proposal.payload;
+                    let digest = V::commitment_to_inner(commitment);
+
+                    // Search for the finalized block locally, otherwise fetch it remotely.
+                    let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                        // The finalization carries a round and commitment, but not a
+                        // height. Keep the request round-bound until the block is decoded.
+                        debug!(?round, ?commitment, "finalized block missing");
+                        self.floor
+                            .fetch_if_permitted(
+                                resolver,
+                                Request::finalized_block_by_round(commitment, round),
+                            )
+                            .ignore();
+                        continue;
+                    };
+
                     // The anchor path stores the floor block and finalization,
                     // advances floors, prunes below them, and resumes dispatch.
                     let anchored;
@@ -789,7 +831,7 @@ where
                         .ingest(Arc::clone(&block), buffer, application, resolver)
                         .await;
                     if anchored {
-                        return self;
+                        continue;
                     }
 
                     let height = block.height();
@@ -806,22 +848,16 @@ where
                         )
                         .await;
                     if stored {
-                        // If a floor anchor is pending, repair and dispatch are
-                        // no-ops until the anchor block is stored.
-                        (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
-                        self = self.start_finalized_sync(round, syncs).await;
                         debug!(?round, %height, "finalized block stored");
+                        stored_any = true;
                     }
-                } else {
-                    // The finalization carries a round and commitment, but not a
-                    // height. Keep the request round-bound until the block is decoded.
-                    debug!(?round, ?commitment, "finalized block missing");
-                    self.floor
-                        .fetch_if_permitted(
-                            resolver,
-                            Request::finalized_block_by_round(commitment, round),
-                        )
-                        .ignore();
+                }
+
+                if stored_any {
+                    // If a floor anchor is pending, repair and dispatch are
+                    // no-ops until the anchor block is stored.
+                    (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
+                    self = self.start_finalized_sync(sync_round, syncs).await;
                 }
             }
             Message::GetBlock {

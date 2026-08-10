@@ -7048,6 +7048,7 @@ mod tests {
         inner: T,
         context: deterministic::Context,
         pace: Duration,
+        sync_starts: Arc<Mutex<usize>>,
     }
 
     impl<T: crate::marshal::store::Blocks> crate::marshal::store::Blocks for PacedStore<T> {
@@ -7068,6 +7069,7 @@ mod tests {
         async fn start_sync(
             mut self,
         ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
+            *self.sync_starts.lock() += 1;
             let handle;
             (self.inner, handle) = self.inner.start_sync().await?;
             let sleep = self.context.sleep(self.pace);
@@ -7130,6 +7132,7 @@ mod tests {
         async fn start_sync(
             mut self,
         ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
+            *self.sync_starts.lock() += 1;
             let handle;
             (self.inner, handle) = self.inner.start_sync().await?;
             let sleep = self.context.sleep(self.pace);
@@ -7176,7 +7179,9 @@ mod tests {
     ) -> (
         PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
         PacedStore<prunable::Archive<EightCap, deterministic::Context, D, B>>,
+        Arc<Mutex<usize>>,
     ) {
+        let sync_starts = Arc::new(Mutex::new(0));
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let finalizations_by_height = prunable::Archive::init(
             context.child("finalizations_by_height"),
@@ -7217,16 +7222,20 @@ mod tests {
                 inner: finalizations_by_height,
                 context: context.child("finalizations_pacer"),
                 pace,
+                sync_starts: sync_starts.clone(),
             },
             PacedStore {
                 inner: finalized_blocks,
                 context: context.child("blocks_pacer"),
                 pace,
+                sync_starts: sync_starts.clone(),
             },
+            sync_starts,
         )
     }
 
-    /// A slow finalized-archive sync must not block the marshal mailbox.
+    /// A ready finalization batch shares one slow finalized-archive sync without
+    /// blocking the marshal mailbox.
     ///
     /// Processing a finalization requires making the finalized archives
     /// durable before the block is dispatched to the application, but the
@@ -7235,10 +7244,10 @@ mod tests {
     /// flight must be answered immediately.
     ///
     /// Paces both finalized stores so sync completion takes 100ms of
-    /// deterministic time, processes a finalization, issues `get_verified` 1ms
-    /// later, and asserts that (1) the read is served while the sync is still
-    /// in flight and (2) the finalized block reaches the application only
-    /// after the paced sync completes (the durability barrier).
+    /// deterministic time, processes three queued finalizations, issues
+    /// `get_verified` 1ms later, and asserts that (1) the stores each start one
+    /// sync, (2) the read is served while that sync is still in flight, and (3)
+    /// the finalized blocks reach the application only after it completes.
     #[test_traced("WARN")]
     fn test_standard_finalization_sync_does_not_block_mailbox() {
         const PACE: Duration = Duration::from_millis(100);
@@ -7263,7 +7272,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
-            let (finalizations_by_height, finalized_blocks) =
+            let (finalizations_by_height, finalized_blocks, sync_starts) =
                 paced_finalized_stores(&context, "paced-finalized-sync", PACE).await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -7287,33 +7296,45 @@ mod tests {
             )
             .await;
 
-            // Store a verified block for round 1 in the (unpaced) prunable cache.
+            // Store three verified blocks in the unpaced prunable cache.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            assert!(mailbox.verified(round, block.clone()).await);
+            let mut parent = genesis.digest();
+            let mut blocks = Vec::new();
+            for view in 1..=3 {
+                let round = Round::new(Epoch::zero(), View::new(view));
+                let block = make_raw_block(parent, Height::new(view), view * 100);
+                assert!(mailbox.verified(round, block.clone()).await);
+                parent = block.digest();
+                blocks.push((round, block));
+            }
 
-            // Report the finalization: the actor buffers the block into the
-            // finalized archives and starts the paced 100ms sync.
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
-                &schemes,
-                QUORUM,
-            );
+            // Queue all finalizations before yielding to the actor.
             let finalized_at = context.current();
-            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            for (round, block) in &blocks {
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(
+                        *round,
+                        round.view().saturating_sub(ViewDelta::new(1)),
+                        StandardHarness::commitment(block),
+                    ),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            }
 
             // Issue a get_verified 1ms later: it must not queue behind the sync.
             context.sleep(Duration::from_millis(1)).await;
             let requested_at = context.current();
-            let verified = mailbox.get_verified(round).await;
+            let (last_round, last_block) = blocks.last().expect("blocks must not be empty");
+            let verified = mailbox.get_verified(*last_round).await;
             let elapsed = context
                 .current()
                 .duration_since(requested_at)
                 .expect("time went backwards");
             assert_eq!(
                 verified.expect("verified block missing").digest(),
-                block.digest()
+                last_block.digest()
             );
             tracing::info!(?elapsed, "get_verified answered");
             assert!(
@@ -7335,8 +7356,8 @@ mod tests {
             wait_until(
                 &context,
                 Duration::from_millis(50),
-                "finalized block dispatched",
-                || application.blocks().contains_key(&Height::new(1)),
+                "finalized blocks dispatched",
+                || application.blocks().contains_key(&Height::new(3)),
             )
             .await;
             let dispatched = context
@@ -7347,6 +7368,11 @@ mod tests {
             assert!(
                 dispatched >= PACE,
                 "block dispatched before the paced sync completed: {dispatched:?}"
+            );
+            assert_eq!(
+                *sync_starts.lock(),
+                2,
+                "each finalized store should start one sync for the batch"
             );
         });
     }
@@ -7398,7 +7424,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
-            let (finalizations_by_height, finalized_blocks) =
+            let (finalizations_by_height, finalized_blocks, _sync_starts) =
                 paced_finalized_stores(&context, "stale-floor-anchor", PACE).await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -7610,7 +7636,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
-            let (finalizations_by_height, finalized_blocks) =
+            let (finalizations_by_height, finalized_blocks, _sync_starts) =
                 paced_finalized_stores(&context, "overlapping-finalized-syncs", PACE).await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
