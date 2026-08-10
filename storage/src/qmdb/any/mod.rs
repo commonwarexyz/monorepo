@@ -81,7 +81,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{CodecShared, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -110,7 +110,7 @@ where
     F: Family,
     H: Hasher,
     U: Update,
-    Operation<F, U>: Encode,
+    Operation<F, U>: Codec,
 {
     single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
 }
@@ -157,13 +157,13 @@ pub async fn init<F, E, U, H, T, I, J, S>(
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
@@ -179,13 +179,13 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let mut log = authenticated::Journal::<F, E, J, H, S>::new(
         context.child("log"),

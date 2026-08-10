@@ -854,7 +854,7 @@ impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update + 'static,
+    U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,

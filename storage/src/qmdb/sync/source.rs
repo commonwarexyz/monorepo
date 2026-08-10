@@ -549,7 +549,7 @@ where
     E: Context,
     U: crate::qmdb::any::operation::update::Update,
     C: crate::journal::contiguous::Mutable<Item = crate::qmdb::any::operation::Operation<F, U>>,
-    I: crate::index::Unordered<Value = Location<F>> + Send + Sync,
+    I: crate::index::Unordered<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
     crate::qmdb::any::operation::Operation<F, U>: commonware_codec::Codec,
