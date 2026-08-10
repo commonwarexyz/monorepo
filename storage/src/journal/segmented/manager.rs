@@ -246,6 +246,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
     }
 
+    /// Get a mutable reference to a blob for a section, if it exists.
+    ///
+    /// Unlike [Self::get], skips the prune guard: the caller (an owned replay reader)
+    /// holds the journal, so no prune can interleave.
+    pub fn get_mut(&mut self, section: u64) -> Option<&mut F::Buffer> {
+        self.blobs.get_mut(&section)
+    }
+
     /// Get a reference to a blob for a section, if it exists.
     pub fn get(&self, section: u64) -> Result<Option<&F::Buffer>, Error> {
         self.prune_guard(section)?;
@@ -361,6 +369,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         Ok(pruned)
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    pub const fn pruned(&self, section: u64) -> bool {
+        section < self.oldest_retained_section
     }
 
     /// Returns the oldest section number, if any blobs exist.

@@ -100,7 +100,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::Recipients;
+    use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -175,7 +175,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: Commitment) {}
+        fn retire(&self, _update: core::Retirement<Commitment>) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
@@ -484,6 +484,172 @@ mod tests {
         let coded_candidate: TestCodedBlock =
             CodedBlock::new(candidate, coding_config, &Sequential);
         (candidate_ctx, coded_candidate)
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_batched_acks_retire_each_exact_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let mut setup = CodingHarness::setup_validator_with(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(2),
+                Application::manual_ack(),
+            )
+            .await;
+            assert_eq!(setup.application.acknowledged().await, Height::zero());
+
+            let mut parent = Sha256::hash(&[b""]);
+            let mut parent_commitment =
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            let mut commitments = Vec::new();
+            for height in 1..=2 {
+                let round = Round::new(Epoch::zero(), View::new(height));
+                let block = CodingHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(height),
+                    height,
+                    NUM_VALIDATORS as u16,
+                );
+                let commitment = block.commitment();
+                parent = block.digest();
+                parent_commitment = commitment;
+                commitments.push(commitment);
+
+                setup.extra.proposed(
+                    Round::new(Epoch::zero(), View::new(height + 10)),
+                    block.clone(),
+                );
+                assert!(setup.extra.get(commitment).await.is_some());
+                assert!(setup.mailbox.verified(round, block).await);
+                CodingHarness::report_finalization(
+                    &mut setup.mailbox,
+                    CodingHarness::make_finalization(
+                        Proposal {
+                            round,
+                            parent: View::new(height - 1),
+                            payload: commitment,
+                        },
+                        &schemes,
+                        QUORUM,
+                    ),
+                )
+                .await;
+            }
+
+            while setup.application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(1)));
+            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(2)));
+
+            while setup.extra.get(commitments[1]).await.is_some() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(setup.extra.get(commitments[0]).await.is_none());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_floor_retires_only_superseded_ack_commitments() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let mut setup = CodingHarness::setup_validator_with(
+                context.child("validator"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                Application::manual_ack(),
+            )
+            .await;
+            assert_eq!(setup.application.acknowledged().await, Height::zero());
+
+            let mut parent = Sha256::hash(&[b""]);
+            let mut parent_commitment =
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
+            let mut commitments = Vec::new();
+            let mut floor = None;
+            for height in 1..=3 {
+                let round = Round::new(Epoch::zero(), View::new(height));
+                let block = CodingHarness::make_test_block(
+                    parent,
+                    parent_commitment,
+                    Height::new(height),
+                    height * 100,
+                    NUM_VALIDATORS as u16,
+                );
+                let commitment = block.commitment();
+                parent = block.digest();
+                parent_commitment = commitment;
+                commitments.push(commitment);
+
+                // Every cache observation is newer than the floor, so only an exact
+                // commitment retirement can remove it.
+                setup.extra.proposed(
+                    Round::new(Epoch::zero(), View::new(height + 10)),
+                    block.clone(),
+                );
+                assert!(setup.mailbox.verified(round, block).await);
+                let finalization = CodingHarness::make_finalization(
+                    Proposal {
+                        round,
+                        parent: View::new(height - 1),
+                        payload: commitment,
+                    },
+                    &schemes,
+                    QUORUM,
+                );
+                if height == 2 {
+                    floor = Some(finalization.clone());
+                }
+                CodingHarness::report_finalization(&mut setup.mailbox, finalization).await;
+            }
+
+            while setup.application.pending_ack_heights()
+                != vec![Height::new(1), Height::new(2), Height::new(3)]
+            {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            setup
+                .mailbox
+                .set_floor(floor.expect("height 2 floor missing"));
+
+            // The height-2 floor makes height 1 durable application progress. Heights 2 and 3
+            // are re-dispatched, so their coding-buffer commitments remain live.
+            while setup.mailbox.get_processed_height().await != Some(Height::new(1)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(setup.extra.get(commitments[0]).await.is_none());
+            assert!(setup.extra.get(commitments[1]).await.is_some());
+            assert!(setup.extra.get(commitments[2]).await.is_some());
+        });
     }
 
     #[test_traced("WARN")]
@@ -1336,6 +1502,10 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            let reproposer_control = oracle.control(participants[1].clone());
+            let (mut reproposer_sender, _reproposer_receiver) =
+                reproposer_control.register(2, TEST_QUOTA).await.unwrap();
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
@@ -1357,12 +1527,19 @@ mod tests {
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
 
-            // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
-            // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
+            // Build a chain up to just below the epoch boundary (height 19 is the last
+            // block in epoch 0 with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights
+            // 0-19), so the boundary block below chains onto height 18.
             let mut parent = genesis.digest();
             let mut last_view = View::zero();
             let mut last_commitment = genesis_commitment();
-            for i in 1..BLOCKS_PER_EPOCH.get() {
+
+            // Capture a genuinely-chained non-boundary block (height 10) so Test 2
+            // can re-propose one that validates cleanly under its own embedded
+            // context. Without this, a certify rejection there could come from an
+            // ancestry error rather than the re-proposal boundary gate under test.
+            let mut non_boundary = None;
+            for i in 1..BLOCKS_PER_EPOCH.get() - 1 {
                 let round = Round::new(Epoch::new(0), View::new(i));
                 let ctx = CodingCtx {
                     round,
@@ -1372,10 +1549,15 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
                 last_commitment = coded_block.commitment();
+                if i == 10 {
+                    non_boundary = Some((View::new(i), last_commitment));
+                }
                 shards.proposed(round, coded_block);
                 parent = block.digest();
                 last_view = View::new(i);
             }
+            let (non_boundary_view, non_boundary_commitment) =
+                non_boundary.expect("chain includes a non-boundary block");
 
             // Create the epoch boundary block (height 19, last block in epoch 0)
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -1394,7 +1576,12 @@ mod tests {
             let coded_boundary =
                 CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            shards.proposed(boundary_round, coded_boundary);
+            shards.discovered(
+                boundary_commitment,
+                boundary_context.leader.clone(),
+                boundary_round,
+            );
+            shards.proposed(boundary_round, coded_boundary.clone());
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1408,7 +1595,7 @@ mod tests {
             let reproposal_round = Round::new(Epoch::new(0), View::new(20));
             let reproposal_context = CodingCtx {
                 round: reproposal_round,
-                leader: me.clone(),
+                leader: participants[1].clone(),
                 parent: (View::new(boundary_height.get()), boundary_commitment), // Parent IS the boundary block
             };
 
@@ -1424,6 +1611,19 @@ mod tests {
                 "Re-proposal verify should return true for shard validity"
             );
 
+            let assigned = shards.subscribe_assigned_shard_verified(boundary_commitment);
+            let assigned_shard = coded_boundary
+                .shard(0)
+                .expect("missing assigned shard")
+                .encode();
+            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            select! {
+                result = assigned => result.expect("assigned shard sender dropped"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("assigned shard from reproposer was not accepted");
+                },
+            }
+
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
                 .certify(reproposal_round, boundary_commitment)
@@ -1434,37 +1634,45 @@ mod tests {
                 "Valid re-proposal at epoch boundary should be accepted"
             );
 
-            // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
-            // Create a block at height 10 (not at epoch boundary)
-            let non_boundary_height = Height::new(10);
-            let non_boundary_round = Round::new(Epoch::new(0), View::new(10));
-            // For simplicity, we'll create a fresh non-boundary block and test re-proposal
-            let non_boundary_context = CodingCtx {
-                round: non_boundary_round,
+            // The same boundary commitment may be re-proposed again after the
+            // first re-proposal certifies. Its parent view advances while its
+            // parent payload remains the boundary commitment. Re-proposal
+            // validation is intrinsic to the committed block and must return
+            // the same result under both headers.
+            let repeated_reproposal_round =
+                Round::new(Epoch::new(0), View::new(boundary_height.get() + 2));
+            let repeated_reproposal_context = CodingCtx {
+                round: repeated_reproposal_round,
                 leader: me.clone(),
-                parent: (View::new(9), last_commitment), // Use a prior commitment
+                parent: (reproposal_round.view(), boundary_commitment),
             };
-            let non_boundary_block = make_coding_block(
-                non_boundary_context.clone(),
-                parent,
-                non_boundary_height,
-                1000,
+            let repeated_verify = marshaled
+                .verify(repeated_reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                repeated_verify.unwrap(),
+                "Repeated re-proposal should remain valid as the parent view advances"
             );
-            let coded_non_boundary =
-                CodedBlock::new(non_boundary_block.clone(), coding_config, &Sequential);
-            let non_boundary_commitment = coded_non_boundary.commitment();
+            let repeated_certify = marshaled
+                .certify(repeated_reproposal_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                repeated_certify.unwrap(),
+                "Repeated re-proposal certification should remain valid"
+            );
 
-            // Make the non-boundary block available
-            shards.proposed(non_boundary_round, coded_non_boundary);
-
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Attempt to re-propose the non-boundary block
+            // Test 2: Invalid re-proposal (not at epoch boundary) should be
+            // rejected. Re-propose the genuinely-chained height-10 block at view
+            // 15. Because that block validates cleanly under its embedded context,
+            // a certify rejection can only come from the re-proposal boundary gate,
+            // not from an ancestry error.
             let invalid_reproposal_round = Round::new(Epoch::new(0), View::new(15));
             let invalid_reproposal_context = CodingCtx {
                 round: invalid_reproposal_round,
                 leader: me.clone(),
-                parent: (View::new(10), non_boundary_commitment),
+                parent: (non_boundary_view, non_boundary_commitment),
             };
 
             // Call verify to kick off deferred verification.
@@ -1524,6 +1732,353 @@ mod tests {
             // because they require multiple validators to reconstruct blocks from shards. In a
             // single-validator test setup, block reconstruction fails due to insufficient shards.
             // These paths are tested in integration tests with multiple validators.
+        })
+    }
+
+    /// An invalid re-proposal must not open shard reconstruction for its payload.
+    ///
+    /// A re-proposal's consensus round is not bound to its payload because the context
+    /// digest check is skipped: the block carries the context of its original proposal.
+    /// The shard engine resolves the participant set from the announced round's epoch, so
+    /// announcing before the boundary check lets a leader bind a commitment to a round it
+    /// was never proposed in and misclassify shards from honest peers.
+    #[test_traced("INFO")]
+    fn test_invalid_reproposal_does_not_open_reconstruction() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            let reproposer_control = oracle.control(participants[1].clone());
+            let (mut reproposer_sender, _reproposer_receiver) =
+                reproposer_control.register(2, TEST_QUOTA).await.unwrap();
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // Store a mid-epoch block in core marshal without opening shard reconstruction.
+            let original_round = Round::new(Epoch::new(0), View::new(5));
+            let original_context = CodingCtx {
+                round: original_round,
+                leader: participants[1].clone(),
+                parent: (View::new(4), genesis_commitment()),
+            };
+            let block = make_coding_block(
+                original_context,
+                Sha256::hash(&[b"parent"]),
+                Height::new(5),
+                500,
+            );
+            let coded_block: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            assert!(marshal.verified(original_round, coded_block.clone()).await);
+            assert!(shards.get(commitment).await.is_none());
+
+            // Re-proposing the old block as epoch 1's genesis parent is invalid.
+            // The payload is the parent, so `verify` takes the re-proposal path.
+            let reproposal_round = Round::new(Epoch::new(1), View::new(1));
+            let reproposal_context = CodingCtx {
+                round: reproposal_round,
+                leader: participants[1].clone(),
+                parent: (View::zero(), commitment),
+            };
+            let assigned = shards.subscribe_assigned_shard_verified(commitment);
+            let verdict = marshaled.verify(reproposal_context, commitment).await.await;
+            assert!(!verdict.expect("re-proposal verdict missing"));
+
+            // The re-proposer delivers this node's assigned shard. Without reconstruction
+            // state it stays buffered, so assigned shard verification cannot complete.
+            let assigned_shard = coded_block
+                .shard(0)
+                .expect("missing assigned shard")
+                .encode();
+            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+
+            select! {
+                _ = assigned => {
+                    panic!("invalid re-proposal opened reconstruction for its payload");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
+        })
+    }
+
+    /// Exact commitment retirement (durable application progress) can occur on
+    /// either side of re-proposal verification. The re-proposal must remain live
+    /// through core marshal's verified cache, while a post-retirement `discovered`
+    /// announcement must recreate shard state needed before notarization.
+    #[test_traced("WARN")]
+    fn test_coding_reproposal_recreates_shard_state_after_retirement() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            let reproposer_control = oracle.control(participants[1].clone());
+            let (mut reproposer_sender, _reproposer_receiver) =
+                reproposer_control.register(2, TEST_QUOTA).await.unwrap();
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // Build the epoch boundary block, store it in core marshal (the durable
+            // backstop), and cache it in the shard engine.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::new(0), View::new(boundary_height.get()));
+            let boundary_context = CodingCtx {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get() - 1), genesis_commitment()),
+            };
+            let boundary_block = make_coding_block(
+                boundary_context.clone(),
+                Sha256::hash(&[b"parent"]),
+                boundary_height,
+                1900,
+            );
+            let coded_boundary: TestCodedBlock =
+                CodedBlock::new(boundary_block, coding_config, &Sequential);
+            let boundary_commitment = coded_boundary.commitment();
+            assert!(
+                marshal
+                    .verified(boundary_round, coded_boundary.clone())
+                    .await
+            );
+            shards.discovered(boundary_commitment, me.clone(), boundary_round);
+            shards.proposed(boundary_round, coded_boundary.clone());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(shards.get(boundary_commitment).await.is_some());
+
+            // Exact retirement with a round floor below the commitment's observed
+            // round: only the exact commitment list can retire it.
+            shards.retire(core::Retirement {
+                round_floor: Round::new(Epoch::zero(), View::new(1)),
+                exact_retirements: vec![boundary_commitment],
+            });
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(shards.get(boundary_commitment).await.is_none());
+
+            // Re-propose the boundary block in the same epoch. Verification must
+            // fetch the block from the core backstop and re-announce discovery.
+            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
+            let reproposal_context = CodingCtx {
+                round: reproposal_round,
+                leader: participants[1].clone(),
+                parent: (View::new(boundary_height.get()), boundary_commitment),
+            };
+            let verdict = marshaled
+                .verify(reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                verdict.expect("re-proposal verdict missing"),
+                "re-proposal should verify from the core backstop after exact retirement"
+            );
+
+            // The recreated reconstruction state must accept this node's assigned
+            // shard from the re-proposer (not the original leader).
+            let assigned = shards.subscribe_assigned_shard_verified(boundary_commitment);
+            let assigned_shard = coded_boundary
+                .shard(0)
+                .expect("missing assigned shard")
+                .encode();
+            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            select! {
+                result = assigned => result.expect("assigned shard sender dropped"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("assigned shard was not accepted after state recreation");
+                },
+            }
+
+            // Retiring again after verification removes the newly recreated shard
+            // state, but not the block persisted in core marshal. Certification and
+            // caller-owned core subscriptions must remain live through that cache.
+            shards.retire(core::Retirement {
+                round_floor: Round::new(Epoch::zero(), View::new(1)),
+                exact_retirements: vec![boundary_commitment],
+            });
+            while shards.get(boundary_commitment).await.is_some() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let block = marshal
+                .subscribe_by_commitment(boundary_commitment, core::CommitmentFallback::Wait)
+                .await
+                .expect("core block subscription closed after shard retirement");
+            assert_eq!(block.commitment(), boundary_commitment);
+
+            let certify = marshaled
+                .certify(reproposal_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                certify.expect("certify result missing"),
+                "re-proposal should certify after exact retirement"
+            );
+        })
+    }
+
+    /// A participant that never held the payload cannot wait for shards it
+    /// cannot yet classify. Re-proposal verification must acquire the block by
+    /// fetching at the parent's certified round and return the boundary verdict.
+    #[test_traced("WARN")]
+    fn test_coding_reproposal_verify_fetches_block_by_parent_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants[..2].iter().cloned(),
+            )
+            .await;
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let v0_setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let v1_setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 1),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+            let mut v0_mailbox = v0_setup.mailbox;
+            let v1_marshal = v1_setup.mailbox;
+            let v1_shards = v1_setup.extra;
+
+            // The boundary block of epoch 0, originally proposed at view 5.
+            let original_round = Round::new(Epoch::new(0), View::new(5));
+            let original_context = CodingCtx {
+                round: original_round,
+                leader: participants[0].clone(),
+                parent: (View::new(4), genesis_commitment()),
+            };
+            let block = make_coding_block(
+                original_context,
+                Sha256::hash(&[b"parent"]),
+                Height::new(BLOCKS_PER_EPOCH.get() - 1),
+                1900,
+            );
+            let coded_block: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+
+            // Serving a fetch by round requires the block and the round's
+            // notarization certificate.
+            assert!(
+                v0_mailbox
+                    .verified(original_round, coded_block.clone())
+                    .await
+            );
+            CodingHarness::report_notarization(
+                &mut v0_mailbox,
+                CodingHarness::make_notarization(
+                    Proposal {
+                        round: original_round,
+                        parent: View::new(4),
+                        payload: commitment,
+                    },
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+
+            // The re-proposal names its own parent, so verification targets the
+            // parent round. Validator 1 never held the payload.
+            assert!(v1_shards.get(commitment).await.is_none());
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: v1_marshal.clone(),
+                shards: v1_shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[1].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let reproposal_context = CodingCtx {
+                round: Round::new(Epoch::new(0), View::new(7)),
+                leader: participants[1].clone(),
+                parent: (View::new(5), commitment),
+            };
+            let verdict = marshaled.verify(reproposal_context, commitment).await.await;
+            assert!(
+                verdict.expect("re-proposal verdict missing"),
+                "re-proposal should verify after fetching the block by parent round"
+            );
         })
     }
 
@@ -1780,7 +2335,10 @@ mod tests {
             // Ensure the certification gate task has registered its subscription, then
             // force cancellation by pruning the missing commitment.
             context.sleep(Duration::from_millis(100)).await;
-            shards.prune(missing_payload);
+            shards.retire(core::Retirement {
+                round_floor: round,
+                exact_retirements: vec![missing_payload],
+            });
 
             select! {
                 result = verify_rx => {
@@ -1857,7 +2415,10 @@ mod tests {
 
             // Prune the missing commitment in the shard engine, which should cancel
             // the underlying buffer subscription.
-            shards.prune(missing_commitment);
+            shards.retire(core::Retirement {
+                round_floor: round,
+                exact_retirements: vec![missing_commitment],
+            });
 
             // The core actor must surface cancellation by closing the subscription,
             // not by panicking or leaving the waiter parked indefinitely.
@@ -1870,6 +2431,85 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("core subscription should resolve promptly after coding prune");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_floor_preserves_registered_commitment_subscription() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let missing_round = Round::new(Epoch::zero(), View::new(1));
+            let missing = CodingHarness::make_test_block(
+                Sha256::hash(&[b""]),
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(1),
+                100,
+                NUM_VALIDATORS as u16,
+            );
+            let missing_commitment = missing.commitment();
+            shards.discovered(missing_commitment, participants[1].clone(), missing_round);
+
+            let subscription =
+                marshal.subscribe_by_commitment(missing_commitment, core::CommitmentFallback::Wait);
+            context.sleep(Duration::from_millis(100)).await;
+
+            let floor_round = Round::new(Epoch::zero(), View::new(2));
+            let floor = CodingHarness::make_test_block(
+                missing.digest(),
+                missing_commitment,
+                Height::new(2),
+                200,
+                NUM_VALIDATORS as u16,
+            );
+            let floor_commitment = floor.commitment();
+            shards.proposed(floor_round, floor);
+            assert!(shards.get(floor_commitment).await.is_some());
+            marshal.set_floor(CodingHarness::make_finalization(
+                Proposal {
+                    round: floor_round,
+                    parent: View::new(1),
+                    payload: floor_commitment,
+                },
+                &schemes,
+                QUORUM,
+            ));
+
+            while marshal.get_processed_height().await != Some(Height::new(2)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            shards.proposed(Round::new(Epoch::zero(), View::new(3)), missing);
+            select! {
+                result = subscription => {
+                    let block = result.expect("floor update closed commitment subscription");
+                    assert_eq!(block.commitment(), missing_commitment);
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("commitment subscription did not resolve after local ingress");
                 },
             }
         })
@@ -2269,6 +2909,124 @@ mod tests {
         })
     }
 
+    /// A Byzantine leader can deliver assigned shards to only f+1 honest
+    /// validators and form a notarization with its own vote, leaving no peer
+    /// able to serve a full-block fetch. A validator that never saw the
+    /// proposal then holds only buffered sender-indexed gossip shards, and
+    /// draining them requires the reconstruction interest that `certify`
+    /// registers with the shard engine (`shards.notarized`).
+    #[test_traced("WARN")]
+    fn test_certify_reconstructs_from_buffered_gossip_shards() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            // Register the peers' shard-channel senders and link the network.
+            // No peer runs a marshal actor, so round-bound block fetches go
+            // unanswered.
+            let mut peer_senders = Vec::new();
+            for peer in participants.iter().skip(1) {
+                let (sender, _receiver) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                peer_senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The parent is available locally. The notarized candidate is not:
+            // this validator never saw its proposal.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.proposed(parent_round, coded_parent);
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = CodingCtx {
+                round: child_round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let coded_child: TestCodedBlock = CodedBlock::new(child, coding_config, &Sequential);
+            let child_commitment = coded_child.commitment();
+
+            // Deliver each peer's sender-indexed gossip shard. Without leader
+            // discovery or reconstruction interest, the shard engine only
+            // buffers them.
+            for (i, sender) in peer_senders.iter_mut().enumerate() {
+                let index = u16::try_from(i + 1).expect("peer index fits in u16");
+                let shard = coded_child.shard(index).expect("missing shard").encode();
+                sender.send(Recipients::One(me.clone()), shard, true);
+            }
+            context.sleep(Duration::from_millis(250)).await;
+
+            // Certify must register reconstruction interest with the shard
+            // engine, drain the buffered shards, and verify the reconstructed
+            // block through its embedded context.
+            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify must reconstruct the candidate from buffered gossip shards"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify did not reconstruct from buffered gossip shards");
+                },
+            }
+        })
+    }
+
     /// Regression test: a Byzantine leader must not be able to crash honest nodes
     /// by proposing a `Commitment` with invalid `CodingConfig` bytes (e.g.
     /// zero-valued `NonZeroU16` fields). The fix validates the embedded config
@@ -2390,6 +3148,139 @@ mod tests {
                 !certify.await.expect("certify result missing"),
                 "certify should propagate deferred application verify failure"
             );
+        })
+    }
+
+    /// Coding analog of the standard equivocation tests. The commitment binds
+    /// the proposal context, so a proposal that names a different parent for
+    /// the same commitment fails `validate_proposal` before any certification
+    /// gate is registered. Certification of the notarized commitment then
+    /// recovers through the block's embedded context.
+    #[test_traced("WARN")]
+    fn test_certify_not_poisoned_by_equivocating_parent_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The view-1 block: the parent this validator last certified.
+            let certified_round = Round::new(Epoch::zero(), View::new(1));
+            let certified_ctx = CodingCtx {
+                round: certified_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let certified = make_coding_block(certified_ctx, genesis.digest(), Height::new(1), 100);
+            let certified_digest = certified.digest();
+            let coded_certified = CodedBlock::new(certified, coding_config, &Sequential);
+            let certified_commitment = coded_certified.commitment();
+            shards.proposed(certified_round, coded_certified);
+
+            // The view-2 block: notarized by the network but only nullified
+            // here, so this validator never certified it.
+            let notarized_round = Round::new(Epoch::zero(), View::new(2));
+            let notarized_ctx = CodingCtx {
+                round: notarized_round,
+                leader: me.clone(),
+                parent: (View::new(1), certified_commitment),
+            };
+            let notarized = make_coding_block(notarized_ctx, certified_digest, Height::new(2), 200);
+            let notarized_digest = notarized.digest();
+            let coded_notarized = CodedBlock::new(notarized, coding_config, &Sequential);
+            let notarized_commitment = coded_notarized.commitment();
+            shards.proposed(notarized_round, coded_notarized);
+
+            // The view-3 block builds on the view-2 block.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let block_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(2), notarized_commitment),
+            };
+            let block = make_coding_block(block_ctx, notarized_digest, Height::new(3), 300);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.proposed(round, coded_block);
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The equivocating proposal names the certified view-1 block as
+            // parent, which this validator's parent selection accepts
+            // (view 1 certified, view 2 nullified). The commitment's context
+            // digest exposes the mismatch, so verify rejects it without
+            // registering a certification gate.
+            let equivocating_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(1), certified_commitment),
+            };
+            let verify_rx = marshaled.verify(equivocating_ctx, commitment).await;
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        !result.expect("verify result missing"),
+                        "the equivocating proposal must not be notarized"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should reject the equivocating proposal promptly");
+                },
+            }
+
+            // The honest notarization for the same `(round, commitment)`
+            // arrives. Certification recovers through the embedded context.
+            let certify_rx = marshaled.certify(round, commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify of the notarized commitment must succeed via the embedded context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
         })
     }
 

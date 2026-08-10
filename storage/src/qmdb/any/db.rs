@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Operation as OperationTrait, update_known_loc,
+        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        operation::Floored as _, update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -181,13 +181,18 @@ where
         self.root
     }
 
+    /// The [`Commitment`] for the database's current state.
+    pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
+        Commitment::new(self.last_commit_loc + 1, self.root)
+    }
+
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
     pub(crate) fn inactive_peaks(
         &self,
         leaves: Location<F>,
         inactivity_floor: Location<F>,
     ) -> usize {
-        F::inactive_peaks(F::location_to_position(leaves), inactivity_floor)
+        F::inactive_peaks(leaves, inactivity_floor)
     }
 
     /// Return a reference to the merkleization strategy.
@@ -506,10 +511,7 @@ where
         }
 
         let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size, |op| {
-                op.has_floor()
-            })
-            .await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -543,7 +545,8 @@ where
     /// from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
+    /// completes.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -751,12 +754,9 @@ where
                     .checked_sub(1)
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
-            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &*log,
-                Location::new(bounds.end),
-                |op| op.has_floor(),
-            )
-            .await?;
+            let inactivity_floor_loc =
+                crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
+                    .await?;
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index
@@ -811,10 +811,7 @@ where
             ));
         }
 
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(log.merkle.leaves()),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks = F::inactive_peaks(log.merkle.leaves(), inactivity_floor_loc);
         let root = log.root(inactive_peaks)?;
 
         let db = Self {
@@ -851,15 +848,17 @@ where
         Ok(self)
     }
 
-    /// Begin durably committing the journal state published by prior [`Db::apply_batch`] calls.
+    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]:
-    /// the Merkle state is not durably persisted, so recovery may be required on startup in the
-    /// event of a crash (use [Self::sync] for the stronger guarantee). A new commit waits for
-    /// the prior commit's sync before starting. Failures of the deferred durability work
-    /// surface on the returned handle and again on the next durability operation.
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// Also makes a best-effort attempt to bound the recovery needed on startup. Use
+    /// [Self::sync] to guarantee none is needed. A new sync waits for the prior sync before
+    /// starting. Failures of the deferred durability work surface on the returned handle. A
+    /// failed data sync also fails the next durability operation. A failed recovery-watermark
+    /// sync is not observed by [Self::commit], and a failed merkle-node sync may not be. Both
+    /// resurface on the next [Self::sync].
     #[tracing::instrument(
-        name = "qmdb.any.db.start_commit",
+        name = "qmdb.any.db.start_sync",
         level = "info",
         skip_all,
         fields(
@@ -869,9 +868,9 @@ where
         ),
     )]
     #[boxed]
-    pub async fn start_commit(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
-        self.metrics.start_commit_calls.inc();
-        let (log, handle) = self.log.start_commit().await?;
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
+        self.metrics.start_sync_calls.inc();
+        let (log, handle) = self.log.start_sync().await?;
         self.log = log;
         Ok((self, handle))
     }

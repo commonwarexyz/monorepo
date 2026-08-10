@@ -49,9 +49,8 @@ fn bench_get(c: &mut Criterion) {
     // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let bits = builder.start(|ctx| async move {
-        let mut store = init(ctx, None).await;
-        let indices = append_random(&mut store, ITEMS).await;
-        store.sync().await.unwrap();
+        let store = init(ctx, None).await;
+        let (_, indices) = append_random(store, ITEMS).await;
         bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
     });
 

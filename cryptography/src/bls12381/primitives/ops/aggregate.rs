@@ -7,6 +7,8 @@
 //!
 //! Aggregate operations ensure the aggregate is valid, but not that the individual elements are valid.
 //! Use [`batch`](super::batch) when you need to ensure each individual signature is valid.
+//! Aggregating signatures from multiple public keys over the same message additionally requires a
+//! verified proof of possession (PoP) for every public key.
 
 use super::{
     super::{Error, variant::Variant},
@@ -21,6 +23,12 @@ use commonware_parallel::Strategy;
 ///
 /// This type is returned by [`combine_public_keys`] and ensures that
 /// aggregated public keys are not confused with individual public keys.
+///
+/// # Security
+///
+/// Before using this key with [`verify_same_message`], callers must group-check every public key
+/// included in it, verify each key's PoP, and ensure the keys are unique. Decoding an aggregate
+/// public key does not perform these checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey<V: Variant>(V::Public);
 
@@ -182,10 +190,10 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on all `public_keys`,
-/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
-/// for each `public_key`. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// Every `public_key` must be group-checked and unique, and its proof of possession (PoP) must be
+/// verified with [`verify_proof_of_possession`](super::verify_proof_of_possession). Skipping these
+/// checks can let an attacker make an invalid aggregate signature verify, including through a
+/// rogue-key attack.
 pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
 where
     V: Variant,
@@ -255,9 +263,10 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes the caller has performed a group check and collected a proof-of-possession
-/// for all provided `public`. This function assumes a group check was already performed on the
-/// `signature`. It is not safe to provide duplicate public keys.
+/// Every public key included in `public` must be unique and group-checked, and its PoP must be
+/// verified with [`verify_proof_of_possession`](super::verify_proof_of_possession). This also
+/// applies when `public` is decoded or precomputed. The `signature` must be group-checked as well.
+/// Accepting a public key without a verified PoP enables rogue-key attacks.
 pub fn verify_same_message<V: Variant>(
     public: &PublicKey<V>,
     namespace: &[u8],

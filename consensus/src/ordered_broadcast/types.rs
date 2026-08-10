@@ -12,7 +12,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Namespace, Provider, Scheme, Subject, Verifier},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{N3f1, channel::oneshot, ordered::Set, union};
+use commonware_utils::{channel::oneshot, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::{
     hash::{Hash, Hasher},
@@ -48,15 +48,6 @@ pub enum Error {
     /// The verification was canceled by the application
     #[error("Application verify error: {0}")]
     AppVerifyCanceled(oneshot::error::RecvError),
-    /// The application tried to verify a chunk but no tip was found
-    #[error("Application verified no tip")]
-    AppVerifiedNoTip,
-    /// The application verified a chunk but the height doesn't match the tip
-    #[error("Application verified height mismatch")]
-    AppVerifiedHeightMismatch,
-    /// The application verified a chunk but the payload doesn't match the tip
-    #[error("Application verified payload mismatch")]
-    AppVerifiedPayloadMismatch,
 
     // Broadcast errors
     /// The chunk already has a certificate
@@ -68,15 +59,6 @@ pub enum Error {
     /// Nothing to rebroadcast
     #[error("Nothing to rebroadcast")]
     NothingToRebroadcast,
-    /// A certificate is missing
-    #[error("Missing certificate")]
-    MissingCertificate,
-    /// The sequencer in the context doesn't match the expected sequencer
-    #[error("Invalid context sequencer")]
-    ContextSequencer,
-    /// The height in the context is invalid
-    #[error("Invalid context height")]
-    ContextHeight,
 
     // Epoch Errors
     /// No signing scheme is known for the specified epoch
@@ -88,9 +70,6 @@ pub enum Error {
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(Epoch, String),
-    /// The local validator is not a signer in the scheme for the specified epoch.
-    #[error("Not a signer at epoch {0}")]
-    NotSigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -548,10 +527,9 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         let chunk = Chunk::read(reader)?;
         let signature = P::Signature::read(reader)?;
 
-        // Decode `Option<()>` to check if parent exists
-        // This consumes the bool prefix and positions us correctly
-        let parent = if Option::<()>::read(reader)?.is_some() {
-            // The bool prefix has been consumed, now read parent fields
+        // A parent is encoded as an `Option`, whose boolean prefix must be read before
+        // its epoch can select the certificate decoding configuration.
+        let parent = if bool::read(reader)? {
             let digest = D::read(reader)?;
             let epoch = Epoch::read(reader)?;
 
@@ -657,7 +635,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        if !scoped.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy) {
+        if !scoped.verify_certificate::<R, D>(rng, ctx, &parent.certificate, strategy) {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
@@ -1068,7 +1046,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &self.certificate, strategy)
+        scheme.verify_certificate::<R, D>(rng, ctx, &self.certificate, strategy)
     }
 }
 
@@ -1204,7 +1182,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1265,7 +1243,7 @@ mod tests {
             .collect();
 
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(parent_attestations, &Sequential)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid certificate
@@ -1347,7 +1325,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(parent_attestations, &Sequential)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1489,7 +1467,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1571,7 +1549,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1633,7 +1611,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(parent_attestations, &Sequential)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S, Sha256Digest>::new(
@@ -1708,7 +1686,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
@@ -1750,7 +1728,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1866,7 +1844,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(parent_attestations, &Sequential)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create parent with valid certificate
@@ -1901,7 +1879,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(wrong_ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(wrong_attestations, &Sequential)
+            .assemble(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create parent with certificate signed for wrong context (wrong epoch)
@@ -2036,7 +2014,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -2051,7 +2029,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble::<_, N3f1>(wrong_attestations, &Sequential)
+            .assemble(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
@@ -2140,7 +2118,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(attestations, &Sequential)
+            .assemble(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent = Parent::<S, Sha256Digest>::new(sample_digest(0), Epoch::new(5), certificate);
@@ -2225,7 +2203,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, N3f1>(parent_attestations, &Sequential)
+            .assemble(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent =

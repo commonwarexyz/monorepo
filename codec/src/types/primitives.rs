@@ -251,24 +251,6 @@ impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
     const SIZE: usize = T::SIZE * N;
 }
 
-impl Write for () {
-    #[inline]
-    fn write(&self, _buf: &mut impl BufMut) {}
-}
-
-impl Read for () {
-    type Cfg = ();
-
-    #[inline]
-    fn read_cfg(_buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        Ok(())
-    }
-}
-
-impl FixedSize for () {
-    const SIZE: usize = 0;
-}
-
 // Option implementation
 impl<T: Write> Write for Option<T> {
     #[inline]
@@ -628,13 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn test_unit() {
-        let x = ();
-        // Not using an equality check, since that will always pass.
-        assert!(<()>::decode(x.encode()).is_ok());
-    }
-
-    #[test]
     fn test_nonzero_u16() {
         let values = [
             NonZeroU16::new(1).unwrap(),
@@ -819,7 +794,6 @@ mod tests {
             CodecConformance<bool>,
             CodecConformance<[u8; 32]>,
             CodecConformance<Option<u64>>,
-            CodecConformance<()>,
             CodecConformance<NonZeroU16>,
             CodecConformance<NonZeroU32>,
             CodecConformance<NonZeroU64>,

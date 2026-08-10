@@ -38,18 +38,6 @@ hash = "89d51bef0703a3cc6ac96ae71daa453113fd55e70febcd765d0791cc7d8c612c"
 n_cases = 65536
 hash = "334bc977cfa11a849de1b135da67dd6b2103608838a8a5fa2093b401ea161a78"
 
-["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family,sha256::Digest>>"]
-n_cases = 65536
-hash = "290187801284530d0d7e82c33bb6ce975a5f4daa4b104230291cea9cffcd7686"
-
-["commonware_glue::stateful::db::p2p::standard::handler::tests::conformance::CodecConformance<Request<mmr::Family>>"]
-n_cases = 65536
-hash = "44c363dc52376203a66269a71e13f7271c1a9beb1f8ee9dd9864a3ce7ae2c281"
-
-["commonware_glue::stateful::db::p2p::standard::handler::tests::conformance::CodecConformance<Response<mmr::Family,u64,sha256::Digest>>"]
-n_cases = 65536
-hash = "7ca1ff124e5835f5be5d9b915233b9df088db121a0f5c3baa54b9ab8daf8bd78"
-
 ["commonware_glue::stateful::probe::test::conformance::CodecConformance<wire::Message<Scheme,Variant>>"]
 n_cases = 65536
 hash = "a1531497bb18034b930404ea638b7f2ac922c41d36f5995c6a3ff8c3f99c18a1"

@@ -171,10 +171,11 @@ impl StorageWorkload for SegmentedFixedWorkload {
 
         for (i, item) in data_to_write.iter().enumerate() {
             let section = (i % 3) as u64;
-            journal.append(section, item).await?;
+            (journal, _) = journal.append(section, item).await?;
         }
 
-        journal.sync([0, 1, 2]).await
+        journal.sync([0, 1, 2]).await?;
+        Ok(())
     }
 }
 
@@ -205,10 +206,11 @@ impl StorageWorkload for SegmentedGlobWorkload {
 
         for (i, item) in data_to_write.iter().enumerate() {
             let section = (i % 3) as u64;
-            journal.append(section, item).await?;
+            (journal, _, _) = journal.append(section, item).await?;
         }
 
-        journal.sync([0, 1, 2]).await
+        journal.sync([0, 1, 2]).await?;
+        Ok(())
     }
 }
 
@@ -242,10 +244,11 @@ impl StorageWorkload for SegmentedVariableWorkload {
 
         for (i, item) in data_to_write.iter().enumerate() {
             let section = (i % 3) as u64;
-            journal.append(section, item).await?;
+            (journal, _, _) = journal.append(section, item).await?;
         }
 
-        journal.sync([0, 1, 2]).await
+        journal.sync([0, 1, 2]).await?;
+        Ok(())
     }
 }
 
@@ -336,10 +339,11 @@ impl StorageWorkload for SegmentedOversizedWorkload {
                 value_offset: 0,
                 value_size: 0,
             };
-            journal.append(section, entry, item).await?;
+            (journal, _, _, _) = journal.append(section, entry, item).await?;
         }
 
-        journal.sync([0, 1, 2]).await
+        journal.sync([0, 1, 2]).await?;
+        Ok(())
     }
 }
 

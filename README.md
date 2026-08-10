@@ -42,7 +42,6 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
-* [sync](./examples/sync/README.md): Synchronize state between a server and client.
 
 ## Miscellaneous
 
@@ -80,6 +79,12 @@ RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stabi
 # Check if your application only uses commonware APIs with stability >= BETA
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
+
+## Platform Compatibility
+
+The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
+
+_Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 
 ## Licensing
 

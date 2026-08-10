@@ -175,11 +175,6 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish sync
-      run: cargo publish --manifest-path examples/sync/Cargo.toml
-      continue-on-error: true
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish estimator
       run: cargo publish --manifest-path examples/estimator/Cargo.toml
       continue-on-error: true

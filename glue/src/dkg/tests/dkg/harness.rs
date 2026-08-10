@@ -347,21 +347,21 @@ pub(super) fn good_link() -> Link {
 pub(super) fn run_closed_network_receiver() {
     let runner = deterministic::Runner::timed(Duration::from_secs(5));
     runner.start(|context| async move {
+        let engine = DkgEngine::new(1);
+        let participants = engine.participants_set();
         let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
             context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();
 
-        let engine = DkgEngine::new(1);
         let public_key = engine.participant(0);
-        oracle
-            .manager()
-            .track(0, Set::from_iter_dedup(engine.participants()));
+        oracle.manager().track(0, participants.clone());
 
         let control = oracle.control(public_key.clone());
         let mut channels = Vec::new();
@@ -392,7 +392,7 @@ pub(super) fn run_closed_network_receiver() {
                 sharing_mode: Mode::NonZeroCounter,
                 max_supported_mode: max_supported_mode(),
                 partition_prefix: "dkg-closed-receiver".into(),
-                participants: engine.participants_set(),
+                participants,
                 blocks_per_epoch: EPOCH_LENGTH,
             },
         );

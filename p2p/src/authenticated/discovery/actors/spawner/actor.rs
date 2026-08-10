@@ -3,12 +3,13 @@ use crate::authenticated::{
     Mailbox,
     discovery::{
         actors::{
-            peer, router,
+            peer,
             tracker::{self, Metadata},
         },
         metrics,
         types::InfoVerifier,
     },
+    router,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;

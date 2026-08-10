@@ -26,9 +26,11 @@
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
-//! Persistence and cleanup are managed directly on the database: `commit()` and `start_commit()`
-//! make applied state durable, `sync()` additionally eliminates recovery on startup, and
-//! `prune()`/`destroy()` reclaim storage.
+//! # Durability
+//!
+//! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
+//! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
+//! durable and guarantees no recovery is needed on startup after a crash.
 //!
 //! # Ownership
 //!
@@ -63,7 +65,7 @@ use crate::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::Operation,
+    qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
 use commonware_codec::Encode;
@@ -137,11 +139,10 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,
     op_count: Location<F>,
-    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
 ) -> Result<Location<F>, Error<F>>
 where
     F: Family,
-    R: Contiguous,
+    R: Contiguous<Item: Floored<F>>,
 {
     let Some(last_op) = op_count.checked_sub(1) else {
         return Err(Error::HistoricalFloorPruned(op_count));
@@ -153,7 +154,9 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = floor_of(&op).ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let floor = op
+        .has_floor()
+        .ok_or(Error::HistoricalFloorPruned(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
@@ -166,18 +169,17 @@ where
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,
-    floor_of: impl Fn(&R::Item) -> Option<Location<F>>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous,
+    R: Contiguous<Item: Floored<F>>,
 {
     if op_count == Location::new(0) {
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count, floor_of).await?;
-    Ok(F::inactive_peaks(F::location_to_position(op_count), floor))
+    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
+    Ok(F::inactive_peaks(op_count, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -221,14 +223,8 @@ pub enum Error<F: Family> {
     /// The batch was created from a different database state than the current one.
     ///
     /// See [`batch_chain`] for more details on staleness detection.
-    #[error(
-        "stale batch: db has {db_size} ops, batch requires {batch_db_size}, {batch_base_size}, or an ancestor boundary"
-    )]
-    StaleBatch {
-        db_size: u64,
-        batch_db_size: u64,
-        batch_base_size: u64,
-    },
+    #[error("stale batch: current database state does not match the batch")]
+    StaleBatch,
 
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]

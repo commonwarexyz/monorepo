@@ -18,7 +18,7 @@ pub enum Message<S: Scheme, D: Digest> {
         finalized: View,
         certified_proposal: Option<Proposal<D>>,
     },
-    /// A constructed vote (needed for quorum).
+    /// A durable locally constructed vote for certificate assembly.
     Constructed(Vote<S, D>),
 }
 
@@ -188,7 +188,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Send a constructed vote.
+    /// Sends a locally constructed vote after its journal entry is durable.
     pub fn constructed(&mut self, message: Vote<S, D>) {
         let _ = self.sender.enqueue(Message::Constructed(message));
     }
