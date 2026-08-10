@@ -102,11 +102,12 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use commonware_codec::FixedSize as _;
 use commonware_utils::Bounded;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::num::{NonZeroU32, NonZeroUsize};
 
-const MIN_MESSAGE_SIZE: u32 = size_of::<u64>() as _;
+const MIN_MESSAGE_SIZE: u32 = u64::SIZE as u32;
 
 fn deserialize_message_size<'de, D>(
     deserializer: D,

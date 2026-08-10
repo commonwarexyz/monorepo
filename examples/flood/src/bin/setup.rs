@@ -1,5 +1,5 @@
-use clap::{Arg, Command, value_parser};
-use commonware_codec::Encode;
+use clap::{Arg, Command, builder::TypedValueParser as _, value_parser};
+use commonware_codec::{Encode, FixedSize as _};
 use commonware_cryptography::{Signer as _, ed25519};
 use commonware_deployer::aws;
 use commonware_flood::Config;
@@ -13,6 +13,20 @@ use uuid::Uuid;
 
 const BINARY_NAME: &str = "flood";
 const PORT: u16 = 4545;
+const MIN_MESSAGE_SIZE: u32 = u64::SIZE as u32;
+const MAX_MESSAGE_SIZE: u32 = commonware_p2p::authenticated::MAX_SIZE;
+type MessageSize = Bounded<u32, MIN_MESSAGE_SIZE, MAX_MESSAGE_SIZE>;
+
+fn message_size_arg() -> Arg {
+    Arg::new("message-size")
+        .long("message-size")
+        .required(true)
+        .value_parser(value_parser!(u32).try_map(|value| {
+            MessageSize::try_from(value).map_err(|value| {
+                format!("{value} is not in {MIN_MESSAGE_SIZE}..={MAX_MESSAGE_SIZE}")
+            })
+        }))
+}
 
 fn main() {
     // Parse arguments
@@ -71,12 +85,7 @@ fn main() {
                 .required(true)
                 .value_parser(value_parser!(usize)),
         )
-        .arg(
-            Arg::new("message-size")
-                .long("message-size")
-                .required(true)
-                .value_parser(value_parser!(u32)),
-        )
+        .arg(message_size_arg())
         .arg(
             Arg::new("message-rate")
                 .long("message-rate")
@@ -155,12 +164,7 @@ fn main() {
     let storage_iops = matches.get_one::<i32>("storage_iops").copied();
     let storage_throughput = matches.get_one::<i32>("storage_throughput").copied();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
-    let message_size = *matches.get_one::<u32>("message-size").unwrap();
-    let message_size: Bounded<
-        u32,
-        { size_of::<u64>() as u32 },
-        { commonware_p2p::authenticated::MAX_SIZE },
-    > = Bounded!(message_size);
+    let message_size = *matches.get_one::<MessageSize>("message-size").unwrap();
     let message_rate = *matches.get_one::<NonZeroU32>("message-rate").unwrap();
     let mailbox_size = *matches.get_one::<NonZeroUsize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();
@@ -246,4 +250,20 @@ fn main() {
     let file = std::fs::File::create(path.clone()).unwrap();
     serde_yaml::to_writer(file, &config).unwrap();
     info!(path, "wrote configuration files");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_message_size_during_parsing() {
+        let message_size = (MIN_MESSAGE_SIZE - 1).to_string();
+        let error = Command::new("setup")
+            .arg(message_size_arg())
+            .try_get_matches_from(["setup", "--message-size", &message_size])
+            .expect_err("out-of-range message size should be rejected");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }
