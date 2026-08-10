@@ -863,7 +863,7 @@ impl IoBufMut {
     ///
     /// # Panics
     ///
-    /// Panics if `alignment` is not a power of two.
+    /// Panics if `capacity` is nonzero and `alignment` is not a power of two.
     #[inline]
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
         if capacity == 0 {
@@ -888,7 +888,7 @@ impl IoBufMut {
     ///
     /// # Panics
     ///
-    /// Panics if `alignment` is not a power of two.
+    /// Panics if `len` is nonzero and `alignment` is not a power of two.
     #[inline]
     pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
         if len == 0 {
@@ -5116,6 +5116,14 @@ mod tests {
         assert!(zeroed.is_empty());
         assert_eq!(zeroed.len(), 0);
         assert_eq!(zeroed.capacity(), 0);
+
+        // Zero-sized buffers do not allocate, so alignment is not validated.
+        let invalid_alignment = NonZeroUsize::new(3).expect("non-zero alignment");
+        assert_eq!(IoBufMut::with_alignment(0, invalid_alignment).capacity(), 0);
+        assert_eq!(
+            IoBufMut::zeroed_with_alignment(0, invalid_alignment).capacity(),
+            0
+        );
     }
 
     #[test]

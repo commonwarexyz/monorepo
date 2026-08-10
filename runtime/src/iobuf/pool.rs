@@ -1791,11 +1791,7 @@ impl std::fmt::Debug for BufferPool {
 ///
 /// Relaxed ordering is sufficient: the atomic operation is only used to assign
 /// unique ids, not to publish any associated size-class state.
-///
-/// Id 0 is reserved so zero remains an invalid class route. Real ids start at
-/// 1 and are copied into live slot leases while buffers are outside the global
-/// freelist.
-static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(1);
+static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl BufferPool {
     /// Creates a new buffer pool with the given configuration.
