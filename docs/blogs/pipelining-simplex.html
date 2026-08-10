@@ -270,6 +270,11 @@ O’Grady</a></div>
         <td style="text-align: right;"><code>c7gd.4xlarge</code></td>
         </tr>
         <tr>
+        <td>Build</td>
+        <td style="text-align: right;">Optimized aarch64 release with
+        debug information</td>
+        </tr>
+        <tr>
         <td>Worker / signature threads</td>
         <td style="text-align: right;">8 / 16</td>
         </tr>
@@ -281,6 +286,11 @@ O’Grady</a></div>
         <tr>
         <td>Block target</td>
         <td style="text-align: right;">5ms</td>
+        </tr>
+        <tr>
+        <td>Leader early wake</td>
+        <td style="text-align: right;">1ms before the pacing
+        deadline</td>
         </tr>
         <tr>
         <td>Term length</td>
@@ -305,7 +315,8 @@ O’Grady</a></div>
         </tr>
         <tr>
         <td>Median block spacing</td>
-        <td style="text-align: right;">5ms</td>
+        <td style="text-align: right;">5ms in all 189 reporting
+        windows</td>
         </tr>
         <tr>
         <td>External-observer finality</td>
@@ -323,6 +334,10 @@ O’Grady</a></div>
         change by 188 nominal one-second timer intervals, giving 198.13
         successful views and blocks per nominal second. The raw tick
         timestamps were not preserved.</p>
+        <p>For block spacing, the analyzer divided the change in block
+        timestamps by the change in finalized height. A delivery gap
+        could make one observation average across several heights. The
+        missing raw stream prevents us from ruling out such gaps.</p>
         <p>A separate finality capture measured from the leader-stamped
         block timestamp until an external client received the
         finalization certificate. It included indexer and WebSocket
@@ -350,12 +365,12 @@ O’Grady</a></div>
         storage, networking, or verification runs slower than proposal
         production, the lookahead fills and that slower stage limits the
         view rate.</p>
-        <p>The <a href="/benchmarks/alto-50v-198bps">archival run
-        report</a> contains the surviving analyzer output, metric
-        definitions, configuration, revisions, and limitations. The raw
-        captures and exact deployed Alto worktree were not preserved, so
-        the report is historical evidence rather than a reproducible
-        benchmark package.</p>
+        <p>The deployed Alto worktree included uncommitted changes, and
+        its exact patch was not preserved. The raw captures, dashboards,
+        and deployment assets were also lost. These gaps prevent exact
+        reproduction. The 1ms early wake also meant that a
+        leader-stamped timestamp could lead the leader’s wall clock by
+        up to 1ms.</p>
         <h2 id="how-optimism-stays-safe">How Optimism Stays Safe</h2>
         <p><code>Optimistic</code> describes when a validator starts
         work. It does not relax the evidence required for

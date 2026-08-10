@@ -121,19 +121,23 @@ Here is the configuration for the 50-validator Alto run:
 |---|---:|
 | Deployment | 50 validators, 5 in each of 10 AWS regions |
 | Instance | `c7gd.4xlarge` |
+| Build | Optimized aarch64 release with debug information |
 | Worker / signature threads | 8 / 16 |
 | Workload | Header-only blocks, no transactions or execution |
 | Block target | 5ms |
+| Leader early wake | 1ms before the pacing deadline |
 | Term length | 10,000 views |
 | Stall timeout | 12 seconds |
 | `optimistic_views` (local policy) | 100 |
 | Throughput capture | 189 samples spanning 188 nominal one-second intervals |
 | Analyzer-reported successful views / blocks | 198.1 per nominal second |
-| Median block spacing | 5ms |
+| Median block spacing | 5ms in all 189 reporting windows |
 | External-observer finality | p50 300ms / p99 376ms (`n=3,736`) |
 | View intervals per observer-latency window | roughly 60 |
 
 The analyzer observed 37,249 finalized height and view increments between its first and last samples. It divided this change by 188 nominal one-second timer intervals, giving 198.13 successful views and blocks per nominal second. The raw tick timestamps were not preserved.
+
+For block spacing, the analyzer divided the change in block timestamps by the change in finalized height. A delivery gap could make one observation average across several heights. The missing raw stream prevents us from ruling out such gaps.
 
 A separate finality capture measured from the leader-stamped block timestamp until an external client received the finalization certificate. It included indexer and WebSocket delivery. The observer's clock was checked, but the leaders' clock offsets were not preserved, so this is end-to-end observer latency rather than a strict bound on consensus-network finality.
 
@@ -147,7 +151,7 @@ Stable Leader and Optimistic Validation allow views to overlap. In this run, the
 
 The analyzer flagged four samples near expected term boundaries. Those samples contained 155 to 163 blocks, and the following sample contained 189 to 200. The deleted raw data prevents exact attribution to the transition. If certification, storage, networking, or verification runs slower than proposal production, the lookahead fills and that slower stage limits the view rate.
 
-The [archival run report](/benchmarks/alto-50v-198bps) contains the surviving analyzer output, metric definitions, configuration, revisions, and limitations. The raw captures and exact deployed Alto worktree were not preserved, so the report is historical evidence rather than a reproducible benchmark package.
+The deployed Alto worktree included uncommitted changes, and its exact patch was not preserved. The raw captures, dashboards, and deployment assets were also lost. These gaps prevent exact reproduction. The 1ms early wake also meant that a leader-stamped timestamp could lead the leader's wall clock by up to 1ms.
 
 ## How Optimism Stays Safe
 
