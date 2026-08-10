@@ -157,6 +157,12 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     /// without scanning all tracked rounds.
     nullification_views: BTreeSet<View>,
 
+    /// Views with a local certification rejection not covered by finalization.
+    /// A rejected view cannot support same-term descendant ancestry.
+    /// Every entry remains above the retention floor, so [`Self::prune`] skips
+    /// this set.
+    failed_certifications: BTreeSet<View>,
+
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -221,6 +227,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             stall_anchor: GENESIS_VIEW,
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
+            failed_certifications: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -607,6 +614,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if view > self.last_finalized {
             self.last_finalized = view;
 
+            // Finalization overrides local certification rejections at or
+            // below its view.
+            self.failed_certifications = self.failed_certifications.split_off(&view.next());
+
             // Prune certification candidates at or below finalized view.
             // Finalization is definitive, so these certifications are no longer relevant.
             self.certification_candidates.retain(|v| *v > view);
@@ -624,6 +635,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.set_leader(view.next(), Some(&finalization.certificate));
         let result = self.create_round(view).add_finalization(finalization);
         if result.0 {
+            self.wake_certification_child(view);
             self.slide_optimistic_frontier(view);
         }
         result
@@ -773,10 +785,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Replays a journaled artifact into the appropriate round during recovery.
     ///
     /// Restores round-level broadcast flags (via [`Round::replay`]) and
-    /// tracking sets (`nullify_views`, `nullification_views`) so that
-    /// term-safety checks work correctly after a restart. Replaying a local
-    /// notarize vote also restores the optimistic successor prepared by live
-    /// vote construction. Unlike
+    /// tracking sets (`nullify_views`, `nullification_views`, and
+    /// `failed_certifications`) so that term-safety and ancestry checks work
+    /// correctly after a restart. Replaying a local notarize vote also restores
+    /// the optimistic successor prepared by live vote construction. Unlike
     /// [`Self::add_nullification`] (which the actor's replay loop also calls,
     /// making the `nullification_views` insert idempotent on that path), this
     /// never advances the view.
@@ -786,6 +798,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
         if let Artifact::Nullification(n) = artifact {
             self.nullification_views.insert(n.view());
+        }
+        if matches!(artifact, Artifact::Certification(_, false))
+            && artifact.view() > self.last_finalized
+        {
+            self.failed_certifications.insert(artifact.view());
         }
         self.create_round(artifact.view()).replay(artifact);
         if matches!(artifact, Artifact::Notarize(_)) {
@@ -1070,9 +1087,25 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.insert(view);
     }
 
-    /// Takes all certification candidates and returns proposals ready for
-    /// certification, plus fetches for candidates blocked on a certificate we
-    /// do not hold (see [`Self::certification_fetch`]).
+    /// Queues a blocked immediate same-term child when `parent` certifies or
+    /// finalizes.
+    fn wake_certification_child(&mut self, parent: View) {
+        let child = parent.next();
+        if self.previous_in_term(child) != Some(parent)
+            || child <= self.last_finalized
+            || !self
+                .views
+                .get(&child)
+                .is_some_and(|round| round.notarization().is_some())
+        {
+            return;
+        }
+        self.certification_candidates.insert(child);
+    }
+
+    /// Takes newly notarized or unblocked certification candidates and returns
+    /// proposals ready for certification, plus fetches for missing parent
+    /// certificates (see [`Self::certification_fetch`]).
     pub fn certify_candidates(
         &mut self,
     ) -> (Vec<Proposal<D>>, Vec<CertificateFetch<S::PublicKey>>) {
@@ -1096,8 +1129,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 if err.invalid_proposal() {
                     warn!(round = ?proposal.round, ?err, "proposal failed certification precheck");
                 } else {
+                    // Dormant candidates wake only through
+                    // [`Self::wake_certification_child`]. Therefore,
+                    // [`Self::certification_parent_ready`] may block only on an
+                    // uncertified parent.
+                    assert!(
+                        matches!(err, ParentPayloadError::ParentNotCertified { .. }),
+                        "blocked candidate has no wake: {err:?}"
+                    );
                     fetches.extend(self.certification_fetch(&err));
-                    self.certification_candidates.insert(view);
                 }
                 continue;
             }
@@ -1171,12 +1211,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Remove from outstanding since certification is complete
         self.outstanding_certifications.remove(&view);
+        if !is_success && view > self.last_finalized {
+            self.failed_certifications.insert(view);
+        }
 
         if is_success {
             // Keep the stall deadline armed after certification so the
             // term-level timeout can still abandon a term that certifies but
             // never finalizes.
             self.enter_view(view.next());
+            self.wake_certification_child(view);
         } else {
             self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
@@ -1256,6 +1300,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.explicit_ancestry_payload(parent)
     }
 
+    /// Returns true when `view` or a same-term predecessor has an unresolved
+    /// local certification rejection. Intra-term proposals link every
+    /// intermediate view; term starts instead require explicit ancestry.
+    fn has_failed_optimistic_ancestry(&self, view: View) -> bool {
+        self.failed_certifications
+            .range(view.term_start(self.term_length())..=view)
+            .next()
+            .is_some()
+    }
+
     /// Returns the payload of a parent usable as *optimistic* ancestry: a
     /// certificate-backed payload when one exists, otherwise our own verified,
     /// unequivocated, notarize-broadcast proposal; recursively, so the whole
@@ -1271,6 +1325,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // is always payload the certificate actually supports, independent of
         // the slot's proposal bookkeeping.
         if round.is_directly_notarized() {
+            if self.has_failed_optimistic_ancestry(view) {
+                return None;
+            }
             return round.certificate_ancestry_payload();
         }
 
@@ -3344,7 +3401,7 @@ mod tests {
             assert!(state.is_me(leader.idx));
             assert!(fetches[0].target.is_none());
 
-            // The round deduplicates the fetch while it is outstanding.
+            // The blocked candidate is dormant, so another pass emits nothing.
             let (ready, fetches) = state.certify_candidates();
             assert!(ready.is_empty());
             assert!(fetches.is_empty());
@@ -4053,6 +4110,55 @@ mod tests {
     }
 
     #[test]
+    fn replayed_failed_ancestor_blocks_direct_descendant_until_finalization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+            );
+
+            // Directly notarize two consecutive views in the same term.
+            let ancestor = fetch_proposal(1, 0, 116);
+            let descendant = fetch_proposal(2, 1, 117);
+            for proposal in [&ancestor, &descendant] {
+                let notarization = build_notarization(&verifier, &schemes, proposal);
+                assert!(state.add_notarization(notarization).0);
+            }
+
+            // Restore a rejected certification for the ancestor. It must veto
+            // the descendant's otherwise certificate-backed ancestry.
+            state.replay(&Artifact::Certification(ancestor.round, false));
+            assert!(
+                state
+                    .optimistic_ancestry_payload(descendant.view())
+                    .is_none()
+            );
+
+            // A descendant finalization covers the rejection and makes that
+            // certificate usable again.
+            let finalization = build_finalization(&verifier, &schemes, &descendant);
+            assert!(state.add_finalization(finalization).0);
+            assert_eq!(
+                state
+                    .optimistic_ancestry_payload(descendant.view())
+                    .copied(),
+                Some(descendant.payload)
+            );
+        });
+    }
+
+    #[test]
     fn failed_certification_blocks_locally_proposed_optimistic_child_notarize() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -4186,6 +4292,97 @@ mod tests {
             let candidates = state.certify_candidates().0;
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].round.view(), View::new(2));
+        });
+    }
+
+    #[test]
+    fn blocked_certification_candidates_wake_parent_first() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(10)),
+                ViewDelta::new(3),
+            );
+
+            // Certify view 1 so only view 2 is initially ready.
+            certify_first_view(&mut state, &verifier, &schemes);
+
+            // Deliver the remaining chain in reverse, leaving each descendant
+            // blocked on its immediate parent.
+            let proposals = [
+                fetch_proposal(2, 1, 102),
+                fetch_proposal(3, 2, 103),
+                fetch_proposal(4, 3, 104),
+            ];
+            for proposal in proposals.iter().rev() {
+                let notarization = build_notarization(&verifier, &schemes, proposal);
+                assert!(state.add_notarization(notarization).0);
+            }
+
+            // Each successful certification wakes only its immediate child.
+            // More distant descendants remain dormant.
+            for proposal in proposals {
+                let (ready, fetches) = state.certify_candidates();
+                assert_eq!(ready, vec![proposal.clone()]);
+                assert!(fetches.is_empty());
+                assert!(
+                    state.certification_candidates.is_empty(),
+                    "parent-blocked descendants must remain dormant"
+                );
+                assert!(state.certified(proposal.view(), true).is_some());
+            }
+        });
+    }
+
+    #[test]
+    fn finalization_wakes_child_after_failed_parent_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+            );
+
+            certify_first_view(&mut state, &verifier, &schemes);
+
+            let parent = fetch_proposal(2, 1, 102);
+            let child = fetch_proposal(3, 2, 103);
+            for proposal in [&parent, &child] {
+                let notarization = build_notarization(&verifier, &schemes, proposal);
+                assert!(state.add_notarization(notarization).0);
+            }
+
+            let (ready, fetches) = state.certify_candidates();
+            assert_eq!(ready, vec![parent.clone()]);
+            assert!(fetches.is_empty());
+            assert!(state.certification_candidates.is_empty());
+
+            assert!(state.certified(parent.view(), false).is_some());
+            assert!(state.certify_candidates().0.is_empty());
+
+            let finalization = build_finalization(&verifier, &schemes, &parent);
+            assert!(state.add_finalization(finalization).0);
+            assert_eq!(state.certify_candidates().0, vec![child]);
         });
     }
 

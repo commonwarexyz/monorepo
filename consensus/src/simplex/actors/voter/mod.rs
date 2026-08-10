@@ -3083,6 +3083,193 @@ mod tests {
         });
     }
 
+    /// A directly notarized descendant must not hide a local certification
+    /// failure in its same-term ancestry.
+    #[test_traced]
+    fn test_failed_certification_blocks_direct_descendant_verify() {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"failed_certification_blocks_direct_descendant_verify".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(5));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            // Build a stable-leader network with a follower whose application
+            // rejects certification for view 1.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let local_index = (usize::from(leader_idx) + 1) % participants.len();
+            let leader = participants[usize::from(leader_idx)].clone();
+            let verify_requests = Arc::new(Mutex::new(Vec::new()));
+
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    verify_requests: Some(verify_requests.clone()),
+                    certifier: mocks::application::Certifier::Custom(Box::new(|round, _| {
+                        round.view() != View::new(1)
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            assert!(matches!(
+                batcher_receiver.recv().await.unwrap(),
+                batcher::Message::Update { .. }
+            ));
+
+            // Locally notarize view 1 so its child enters the optimistic
+            // issuance window.
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"failed_ancestor_view_1"]),
+            );
+            let contents_1 = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents_1));
+            mailbox.proposal(proposal_1.clone());
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
+                            && notarize.view() == View::new(1)
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected notarize for view 1");
+                    }
+                }
+            }
+
+            // Extend the chain optimistically before view 1's certificate
+            // arrives.
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(&[b"failed_ancestor_view_2"]),
+            );
+            let contents_2 = (proposal_2.round, proposal_1.payload, 1u64).encode();
+            relay.broadcast(&leader, Recipients::All, (proposal_2.payload, contents_2));
+            mailbox.proposal(proposal_2.clone());
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
+                            && notarize.view() == View::new(2)
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected optimistic notarize for view 2");
+                    }
+                }
+            }
+
+            // Prepare both certificates, but deliver only view 1. Its
+            // certification rejection must emit a nullify before view 2
+            // becomes directly notarized.
+            let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
+            let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_1));
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
+                            && nullify.view() == View::new(1)
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected failed certification to nullify view 1");
+                    }
+                }
+            }
+
+            // Deliver view 2's certificate and extend the direct chain. The
+            // unresolved view-1 rejection must block view 3 before application
+            // verification.
+            mailbox.resolved(Certificate::Notarization(notarization_2));
+            let proposal_3 = Proposal::new(
+                Round::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256::hash(&[b"failed_ancestor_view_3"]),
+            );
+            let contents_3 = (proposal_3.round, proposal_2.payload, 2u64).encode();
+            relay.broadcast(&leader, Recipients::All, (proposal_3.payload, contents_3));
+            mailbox.proposal(proposal_3);
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
+                            && notarize.view() == View::new(3)
+                        {
+                            panic!("rejected ancestry must not produce a view 3 notarize");
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => break,
+                }
+            }
+            assert!(
+                !verify_requests.lock().contains(&View::new(3)),
+                "rejected ancestry must not reach application verification"
+            );
+
+            // Nullify the failed ancestor to abandon the term and confirm the
+            // voter can advance.
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(epoch, View::new(1)), quorum);
+            mailbox.resolved(Certificate::Nullification(nullification));
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { current, .. } = msg.unwrap()
+                            && current == View::new(6)
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected nullification to advance to the next term");
+                    }
+                }
+            }
+        });
+    }
+
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
