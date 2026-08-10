@@ -72,8 +72,8 @@ impl<V> Certification<V> {
     }
 
     /// Buffers a vote for verification (or, if already verified, for
-    /// certificate recovery). The caller owns signer uniqueness. Dropped once
-    /// complete.
+    /// certificate recovery). The caller owns signer uniqueness. Votes that
+    /// arrive after completion are dropped.
     fn add(&mut self, vote: V, is_verified: bool) {
         // Completed certifications drop subsequent votes without allocating.
         let State::Incomplete { pending, verified } = &mut self.state else {

@@ -179,7 +179,7 @@ impl<
             }
         };
 
-        // Retained votes are signer-unique and still contribute to certificate
+        // Retained votes are signer-unique and contribute to certificate
         // assembly. Compacted phases preserve only signer facts, so new activity
         // is reported without forwarding the full vote to the verifier.
         let verifier_message = retained.then(|| message.clone());
