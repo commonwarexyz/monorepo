@@ -344,7 +344,7 @@ impl Freelist {
             for scanned in 0..self.reserved.len() {
                 let word_index = probe.word_index(scanned);
                 let word_ref = &self.reserved[word_index];
-                // Creation searches for zero bits, so invalid high bits would
+                // Creation searches for zero bits, so unused high bits would
                 // look available without this mask.
                 let valid = Self::valid_bits(capacity, self.word_shift, word_index);
                 // The relaxed load only chooses candidates. The following RMW
@@ -405,7 +405,7 @@ impl Freelist {
 
     /// Returns the mask of valid slot bits for a bitmap word.
     ///
-    /// Some words have invalid high bits when capacity does not fill a complete
+    /// Some words have unused high bits when capacity does not fill a complete
     /// final logical row. For example, with capacity 10 and 4 words, words 0
     /// and 1 have three valid bits (slots 0/4/8 and 1/5/9), while words 2 and 3
     /// have only two.
@@ -963,7 +963,7 @@ pub(super) mod tests {
         assert!(set.try_create(false).is_none());
 
         // Prefill reserves and publishes every slot during construction. Use a
-        // partial final logical row so invalid high bits would show up as extra
+        // partial final logical row so unused high bits would show up as extra
         // free slots if the initialization mask were wrong.
         let prefilled = Freelist::new(NZU32!(10), NZUsize!(4), TEST_LAYOUT, true);
         assert_eq!(created(&prefilled), 10);
@@ -1129,8 +1129,8 @@ pub(super) mod tests {
         // every slot at most once and stop exactly at capacity.
         const CAPACITY: usize = 128;
 
-        // Use more creator threads than bitmap words so some threads collide
-        // on home words and exercise the losing-candidate retry path.
+        // Cover capacity-wide creation with real threads. The Loom sibling
+        // exhaustively covers same-candidate reservation races.
         let set = Arc::new(Freelist::new(NZU32!(128), NZUsize!(16), TEST_LAYOUT, false));
         let barrier = Arc::new(Barrier::new(16));
         let (tx, rx) = std::sync::mpsc::channel();
