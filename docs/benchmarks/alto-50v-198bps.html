@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Alto 50-Validator Benchmark: 198.1 Blocks Per
+Second</title>
+    <meta name="description" content="An archival record of the Alto
+analyzer reporting 198.1 finalized blocks per nominal second across 50
+validators in 10 AWS regions.">
+    <meta name="author" content="Commonware">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/benchmarks/alto-50v-198bps" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/pipelining-simplex.png" />
+    <meta property="og:title" content="Alto 50-Validator Benchmark:
+198.1 Blocks Per Second" />
+    <meta property="og:description" content="An archival record of the
+Alto analyzer reporting 198.1 finalized blocks per nominal second across
+50 validators in 10 AWS regions." />
+    <meta property="article:author" content="Commonware" />
+    <meta property="article:published_time" content="2026-08-10T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-08-10T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/benchmarks/alto-50v-198bps" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/benchmarks/alto-50v-198bps" />
+    <meta property="twitter:title" content="Alto 50-Validator Benchmark:
+198.1 Blocks Per Second" />
+    <meta property="twitter:description" content="An archival record of
+the Alto analyzer reporting 198.1 finalized blocks per nominal second
+across 50 validators in 10 AWS regions." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/pipelining-simplex.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Alto 50-Validator Benchmark: 198.1 Blocks Per Second</h1>
+        <div class="meta">
+
+                        <div class="author">By Commonware</div>
+                        <div class="date">August 10th, 2026</div>
+        </div>
+        <p>This page reconstructs an Alto benchmark run from the
+        evidence that survived after the cluster was destroyed. It is an
+        archival record, not a reproducible benchmark package. The raw
+        captures, dashboards, deployment assets, and exact deployed Alto
+        source tree were not preserved.</p>
+        <p>The surviving analyzer output supports the reported rate and
+        latency distributions. It does not support a comparison against
+        another protocol configuration.</p>
+        <h2 id="result">Result</h2>
+        <p>On August 5th, 2026, 50 Alto validators ran across 10 AWS
+        regions with a 5ms block target. The workload used header-only
+        blocks with no transactions or execution.</p>
+        <p>The throughput capture contained 189 samples from a nominal
+        one-second Tokio timer. These samples define 188 timer intervals
+        between the first and last observation. The raw tick timestamps
+        were not preserved. The finalized height increased from 196,305
+        to 233,554:</p>
+        <pre class="text"><code>(233,554 - 196,305) / (189 - 1) = 198.13 finalized blocks per nominal second</code></pre>
+        <p>The analyzer rounded this result to 198.1 blocks per nominal
+        second. The view increased by the same amount, so the capture
+        observed one successful view per finalized block.</p>
+        <table>
+        <thead>
+        <tr>
+        <th>Metric</th>
+        <th style="text-align: right;">Result</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td>Once-per-second samples</td>
+        <td style="text-align: right;">189</td>
+        </tr>
+        <tr>
+        <td>Measured intervals</td>
+        <td style="text-align: right;">188 nominal one-second timer
+        intervals</td>
+        </tr>
+        <tr>
+        <td>Finalized height increase</td>
+        <td style="text-align: right;">37,249 blocks</td>
+        </tr>
+        <tr>
+        <td>View increase</td>
+        <td style="text-align: right;">37,249 views</td>
+        </tr>
+        <tr>
+        <td>Analyzer-reported finalized block rate</td>
+        <td style="text-align: right;">198.1 per nominal second</td>
+        </tr>
+        <tr>
+        <td>Successful views per block</td>
+        <td style="text-align: right;">1.00</td>
+        </tr>
+        <tr>
+        <td>Per-second median block spacing</td>
+        <td style="text-align: right;">5ms in 189 of 189 samples</td>
+        </tr>
+        <tr>
+        <td>Zero-block samples</td>
+        <td style="text-align: right;">0 of 189</td>
+        </tr>
+        <tr>
+        <td>Rounded worst per-second average spacing</td>
+        <td style="text-align: right;">7ms</td>
+        </tr>
+        </tbody>
+        </table>
+        <p>The analyzer flagged four samples near expected 10,000-view
+        term boundaries. Its detector used zero-based integer division
+        while protocol terms are one-indexed. The selected samples
+        probably contain the transitions, but the deleted raw data
+        prevents exact attribution. They contained 155 to 163 blocks,
+        compared with the 200-block target. The following samples
+        contained 189 to 200 blocks. No sample contained zero
+        blocks.</p>
+        <p>The inspector derived each block-spacing observation by
+        dividing the timestamp change by the corresponding height
+        change. This averages across multiple heights when delivery
+        skips directly to a later height. The raw stream is unavailable,
+        so this record cannot rule out such gaps. The surviving output
+        directly establishes that all 189 reporting-window medians were
+        5ms.</p>
+        <h2 id="finality">Finality</h2>
+        <p>A separate capture on the same cluster measured 3,736
+        finalizations about one hour later. The measurement began at the
+        leader-stamped block timestamp and ended when an external client
+        received the finalization certificate.</p>
+        <p>The path included delivery from a validator to the indexer,
+        through a WebSocket, and then to the external client. The
+        observer’s clock was checked, but the validator clock offsets
+        were not preserved. The values measure external-observer
+        end-to-end latency with unknown cross-clock error. They are not
+        a strict upper bound on consensus-network finality.</p>
+        <table>
+        <thead>
+        <tr>
+        <th>Percentile</th>
+        <th style="text-align: right;">Finality</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td>Minimum</td>
+        <td style="text-align: right;">276ms</td>
+        </tr>
+        <tr>
+        <td>p1</td>
+        <td style="text-align: right;">282ms</td>
+        </tr>
+        <tr>
+        <td>p10</td>
+        <td style="text-align: right;">292ms</td>
+        </tr>
+        <tr>
+        <td>p25</td>
+        <td style="text-align: right;">296ms</td>
+        </tr>
+        <tr>
+        <td>p50</td>
+        <td style="text-align: right;">300ms</td>
+        </tr>
+        <tr>
+        <td>p75</td>
+        <td style="text-align: right;">305ms</td>
+        </tr>
+        <tr>
+        <td>p90</td>
+        <td style="text-align: right;">310ms</td>
+        </tr>
+        <tr>
+        <td>p99</td>
+        <td style="text-align: right;">376ms</td>
+        </tr>
+        <tr>
+        <td>Maximum</td>
+        <td style="text-align: right;">416ms</td>
+        </tr>
+        </tbody>
+        </table>
+        <p>The external client’s clock was checked against
+        <code>time.apple.com</code> immediately before the capture. The
+        observed offset was +3.6ms with a reported uncertainty of
+        +/-4.8ms.</p>
+        <p>The cluster’s own <code>finalization_latency</code> metric
+        reported roughly 90ms, but that metric started at view entry
+        rather than proposal. This record excludes it.</p>
+        <h2 id="deployment">Deployment</h2>
+        <p>The cluster tag was
+        <code>92e68f61-9093-43d0-81fe-56dbae2b024b</code>. The cluster
+        contained 50 validators and one monitoring host.</p>
+        <p>Each of the following AWS regions hosted five validators:</p>
+        <ul>
+        <li><code>us-west-1</code></li>
+        <li><code>us-east-1</code></li>
+        <li><code>eu-west-1</code></li>
+        <li><code>eu-north-1</code></li>
+        <li><code>eu-central-1</code></li>
+        <li><code>ap-northeast-1</code></li>
+        <li><code>ap-northeast-2</code></li>
+        <li><code>ap-south-1</code></li>
+        <li><code>ap-southeast-2</code></li>
+        <li><code>sa-east-1</code></li>
+        </ul>
+        <p>Validators used <code>c7gd.4xlarge</code> instances with 8
+        worker threads and 16 signature-verification threads. The
+        monitoring host used a <code>c8g.4xlarge</code> instance. The
+        validator binary was an optimized aarch64 release build with
+        debug information.</p>
+        <p>The deployment used the following additional limits:</p>
+        <table>
+        <thead>
+        <tr>
+        <th>Setting</th>
+        <th style="text-align: right;">Value</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td>Message backlog</td>
+        <td style="text-align: right;">16,384</td>
+        </tr>
+        <tr>
+        <td>Mailbox size</td>
+        <td style="text-align: right;">16,384</td>
+        </tr>
+        <tr>
+        <td>Deque size</td>
+        <td style="text-align: right;">1,000</td>
+        </tr>
+        <tr>
+        <td>Validator storage</td>
+        <td style="text-align: right;">25GB</td>
+        </tr>
+        </tbody>
+        </table>
+        <p>Validator-to-validator network routing was not preserved.
+        Three <code>us-east-1</code> validators uploaded data to the
+        indexer over private addresses. The throughput and finality
+        measurements came from one external client subscribed to that
+        indexer.</p>
+        <h2 id="consensus-configuration">Consensus Configuration</h2>
+        <table>
+        <thead>
+        <tr>
+        <th>Setting</th>
+        <th style="text-align: right;">Value</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td>Block target</td>
+        <td style="text-align: right;">5ms</td>
+        </tr>
+        <tr>
+        <td>Leader early wake</td>
+        <td style="text-align: right;">1ms before the pacing
+        deadline</td>
+        </tr>
+        <tr>
+        <td>Stable-leader term length</td>
+        <td style="text-align: right;">10,000 views</td>
+        </tr>
+        <tr>
+        <td>Stall timeout</td>
+        <td style="text-align: right;">12s</td>
+        </tr>
+        <tr>
+        <td>Optimistic views</td>
+        <td style="text-align: right;">100</td>
+        </tr>
+        <tr>
+        <td>Leader timeout</td>
+        <td style="text-align: right;">1s</td>
+        </tr>
+        <tr>
+        <td>Certification timeout</td>
+        <td style="text-align: right;">2s</td>
+        </tr>
+        <tr>
+        <td>Nullify retry</td>
+        <td style="text-align: right;">10s</td>
+        </tr>
+        <tr>
+        <td>Activity window</td>
+        <td style="text-align: right;">256 views</td>
+        </tr>
+        <tr>
+        <td>Skip timeout</td>
+        <td style="text-align: right;">11s</td>
+        </tr>
+        <tr>
+        <td>Fetch timeout</td>
+        <td style="text-align: right;">2s</td>
+        </tr>
+        <tr>
+        <td>Marshal resolver timeout</td>
+        <td style="text-align: right;">10s</td>
+        </tr>
+        </tbody>
+        </table>
+        <p>The forwarding policy was not preserved.</p>
+        <h2 id="workload">Workload</h2>
+        <p>Blocks contained only a context, parent digest, height,
+        timestamp, and block digest. The run offered no transactions and
+        performed no transaction execution. Application verification
+        checked timestamp monotonicity and skew. Marshal checked the
+        height and parent digest. Consensus artifacts were journaled to
+        disk, and blocks were disseminated over the P2P network.</p>
+        <p>This workload measures consensus cadence. It does not measure
+        transaction throughput.</p>
+        <h2 id="source-revisions">Source Revisions</h2>
+        <p>The Alto binary was based on commit
+        <code>b0b477871a3ead89882af1208806ef73c2ee3e8f</code> on branch
+        <code>bc/optimistic</code>, plus uncommitted changes. A later
+        worktree status showed 14 modified files, but it is not an exact
+        snapshot of the deployed source. The known run-defining edits
+        set the block target to 5ms, woke the leader 1ms before its
+        pacing deadline, set the term length to 10,000 views, and set
+        the tracing sample rate to 0.1. A leader timestamp could
+        therefore lead its wall clock by as much as 1ms. No snapshot of
+        the complete deployed Alto tree survives.</p>
+        <p>The Commonware dependency used revision
+        <code>19af3c69d87c79a043cf6a8b3b4ebb640be3caf2</code>. This was
+        a local-only committed revision retained under the local tag
+        <code>keep-alto-pin</code> at the time this record was
+        assembled.</p>
+        <p>The exact Rust flags and feature selection were not
+        preserved.</p>
+        <h2 id="surviving-analyzer-output">Surviving Analyzer
+        Output</h2>
+        <p>The following output was copied verbatim from the surviving
+        session transcript:</p>
+        <pre class="text"><code>189s captured, heights 196305..233554, views 329781..367030
+blocks/s: 198.1   views/s: 198.1   views/block: 1.00
+zero-block seconds: 0/189   p50=5ms: 189/189
+worst avg-second: 7ms   seconds avg&gt;20ms: 0
+term boundaries crossed at seconds: [1, 51, 101, 152]
+  boundary ~s1: blocks around: [199, 200, 163, 200], avgs: [5.1, 5.1, 6.2, 5.1]
+  boundary ~s51: blocks around: [202, 200, 163, 198], avgs: [5.0, 5.0, 6.3, 5.0]
+  boundary ~s101: blocks around: [205, 200, 159, 189], avgs: [5.0, 5.0, 5.0, 6.2]
+  boundary ~s152: blocks around: [195, 202, 155, 198], avgs: [5.0, 5.0, 6.7, 5.0]</code></pre>
+        <p>The finality summary also survives:</p>
+        <pre class="text"><code>n=3736  min=276  p1=282  p10=292  p25=296  p50=300  p75=305  p90=310  p99=376  max=416 (ms)
+histogram: 250-299ms: 1694 | 300-349ms: 1974 | 350-399ms: 45 | 400-449ms: 23</code></pre>
+        <h2 id="limitations">Limitations</h2>
+        <ul>
+        <li>The raw per-second throughput and finality captures were
+        deleted.</li>
+        <li>The Grafana and Prometheus data were destroyed with the
+        cluster.</li>
+        <li>The deployment assets and per-validator configuration files
+        were deleted.</li>
+        <li>The Alto worktree was dirty, and its exact patch was not
+        preserved.</li>
+        <li>The Commonware revision was local-only.</li>
+        <li>Throughput and finality came from one external observer
+        through an indexer.</li>
+        <li>CPU, memory, and network utilization were not
+        preserved.</li>
+        <li>The run used no transaction workload.</li>
+        <li>No rotating-leader, stable-only, or other ablation ran under
+        the same deployment.</li>
+        </ul>
+        <p>This evidence supports one claim: the archived analyzer
+        reported 198.1 finalized blocks per nominal second with 5ms
+        reporting-window median block spacing. It does not establish
+        transaction throughput or how much any individual optimization
+        improved the baseline.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
