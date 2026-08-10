@@ -179,7 +179,9 @@ function buildValidation(mount) {
   const svg = makeSvg(mount, 430);
   const animated = [];
   const x0 = 190;
-  const gap = 138;
+  const sequentialGap = 186;
+  const optimisticGap = 92;
+  const certificationSpan = sequentialGap;
 
   addText(svg, 20, 35, 'Certification on the view path', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 20, 246, 'Optimistic validation', { 'font-size': 18, 'font-weight': 700 });
@@ -190,30 +192,31 @@ function buildValidation(mount) {
   [92, 151, 303, 362].forEach(y => addLine(svg, 130, y, 976, y, { stroke: LIGHT }));
 
   for (let index = 0; index < 5; index++) {
-    const x = x0 + index * gap * 1.35;
+    const x = x0 + index * sequentialGap;
     const block = svgEl('rect', { x: x - 14, y: 78, width: 28, height: 28, rx: 3, fill: RED, opacity: 0 });
     svg.appendChild(block);
     animated.push(addReveal(block, 0.06 + index * 0.17));
     addText(svg, x, 70, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
     if (index < 4) {
-      animated.push(addArrow(svg, x + 16, 92, x + gap * 1.35 - 16, 92, RED, 0.1 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, x, 108, x + gap * 0.68, 151, BLUE, 0.12 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, x + gap * 0.68, 151, x + gap * 1.35 - 16, 92, BLUE, 0.18 + index * 0.17, 0.08));
+      const certificationMidpoint = x + certificationSpan / 2;
+      animated.push(addArrow(svg, x + 16, 92, x + sequentialGap - 16, 92, RED, 0.1 + index * 0.17, 0.08));
+      animated.push(addArrow(svg, x, 108, certificationMidpoint, 151, BLUE, 0.12 + index * 0.17, 0.08));
+      animated.push(addArrow(svg, certificationMidpoint, 151, x + sequentialGap - 16, 92, BLUE, 0.18 + index * 0.17, 0.08));
     }
   }
 
-  for (let index = 0; index < 6; index++) {
-    const x = x0 + index * gap;
+  for (let index = 0; index < 9; index++) {
+    const x = x0 + index * optimisticGap;
     const block = svgEl('rect', { x: x - 14, y: 289, width: 28, height: 28, rx: 3, fill: RED, opacity: 0 });
     svg.appendChild(block);
-    animated.push(addReveal(block, 0.06 + index * 0.105));
+    animated.push(addReveal(block, 0.06 + index * 0.075));
     addText(svg, x, 281, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
-    if (index < 5) animated.push(addArrow(svg, x + 16, 303, x + gap - 16, 303, RED, 0.09 + index * 0.105, 0.07));
-    if (index < 4) {
-      const cert = svgEl('circle', { cx: x + gap * 1.3, cy: 362, r: 8, fill: BLUE, opacity: 0 });
+    if (index < 8) animated.push(addArrow(svg, x + 16, 303, x + optimisticGap - 16, 303, RED, 0.09 + index * 0.075, 0.05));
+    if (index < 7) {
+      const cert = svgEl('circle', { cx: x + certificationSpan, cy: 362, r: 8, fill: BLUE, opacity: 0 });
       svg.appendChild(cert);
-      animated.push(addReveal(cert, 0.22 + index * 0.105));
-      animated.push(addArrow(svg, x, 319, x + gap * 1.3 - 9, 362, BLUE, 0.1 + index * 0.105, 0.11));
+      animated.push(addReveal(cert, 0.22 + index * 0.075));
+      animated.push(addArrow(svg, x, 319, x + certificationSpan - 9, 362, BLUE, 0.1 + index * 0.075, 0.11));
     }
   }
   const note = addText(svg, 968, 397, 'certification follows in order', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });

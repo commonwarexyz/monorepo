@@ -1,6 +1,6 @@
 ---
-title: "200 Views Per Second: Pipelining Simplex"
-description: "At 5ms median block spacing, Alto sustained about 200 successful views per nominal second across 50 validators. Median external-observer finalization latency was 300ms."
+title: "A Finer Ordering Clock"
+description: "In a 50-validator Alto deployment, Stable Leader and Optimistic Validation sustained about 200 successful views per second at 5ms median block spacing."
 date: "August 10th, 2026"
 published-time: "2026-08-10T00:00:00Z"
 modified-time: "2026-08-10T00:00:00Z"
@@ -10,40 +10,35 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-For applications sequencing already-disseminated data, block spacing sets how often fresh data gets another ordering opportunity.
+For applications sequencing already-disseminated data, the wait for the next block can matter as much as the wait for finality.
 
-In one global deployment with 50 validators, [Alto](https://alto.commonware.xyz) sustained about 200 successful views per nominal second. Every successful view finalized one block, and the per-window median block spacing was 5ms.
+Today, we're introducing Stable Leader and Optimistic Validation, two options that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader removes the handoff between consecutive proposers. Optimistic Validation lets validators begin checking the next proposal while the application finishes checking its parent.
 
-A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. Those numbers may look inconsistent at first, but they describe two different clocks.
+In a global [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 successful views per second. Every successful view finalized one block, and the median block spacing was 5ms.
 
-At 5ms per block, one 300ms observer-latency window spans about 60 block intervals. This ratio estimates the pipeline depth. It does not directly measure concurrent views.
+The blocks were header-only, with no transactions or execution. This result measures consensus cadence, not transaction throughput.
 
-Once data reaches the leader, it has another ordering opportunity after one block interval while earlier blocks continue toward finality.
+A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. The two measurements describe different clocks. At 5ms per view, one 300ms observer-latency window spans about 60 view intervals.
 
-This is 5ms median block spacing, not 5ms finality or transaction throughput.
+The pipeline keeps new views moving while earlier blocks finish. Once data reaches the leader, it gets another ordering opportunity after one block interval.
 
 ```{=html}
 <img src="/imgs/pipelining-simplex.png" alt="About sixty view intervals fit inside a 300ms median external-observer finalization-latency window at 5ms median block spacing.">
 ```
 
 ::: {.image-caption}
-Figure 1: Alto's per-window median block spacing was 5ms. Median external-observer finalization latency was 300ms. Their ratio gives about 60 view intervals per observer-latency window.
+Figure 1: Alto's median block spacing was 5ms. Median external-observer finalization latency was 300ms. Their ratio gives about 60 view intervals per observer-latency window.
 :::
 
-A *view* is one opportunity for a leader to propose a block and for validators to vote. [Simplex](https://eprint.iacr.org/2023/463) moves a block through four steps:
+A *view* is one opportunity for a leader to propose a block and for validators to vote. Three steps matter here:
 
 1. The leader proposes a block.
-2. Validators verify the block and broadcast `notarize` votes.
-3. After a quorum notarizes the block, the [application certifies](https://docs.rs/commonware-consensus/latest/commonware_consensus/trait.CertifiableAutomaton.html) that the verified payload is safe to commit.
-4. Validators broadcast `finalize` votes, and a quorum forms the finalization.
+2. Validators verify and notarize the proposal.
+3. The application runs its full deterministic safety check before validators finalize the block. Commonware calls this check *certification*.
 
-That order matters within each block. It does not require the network to finish one block before starting the next. Validators can work on several views at different stages.
+These steps remain ordered for each block, but different blocks can be at different steps. Two waits otherwise limit how quickly new views begin: a proposer handoff and application certification.
 
-Honest applications must make the same deterministic certification decision. Temporary uncertainty should keep certification pending. Rejection means the payload can never certify.
-
-Two waits otherwise couple view cadence to finality latency. [Stable Leader](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term) removes proposer handoffs inside a term. [Optimistic Validation](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html#optimistic-validation) lets validators verify and notarize the next proposal while its parent is still being certified.
-
-Stable leadership is useful on its own. If certification is still the limiting stage, Optimistic Validation builds on the stable term. Together, they remove both waits from the path between proposals.
+[Stable Leader](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term) removes the first wait. [Optimistic Validation](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html#optimistic-validation) moves the second wait out of the path between proposals.
 
 ## Wait One: The Proposer Handoff
 
@@ -79,101 +74,76 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 Figure 2: Round-robin rotation changes the proposer every view. A stable leader extends its own chain and pays the handoff cost once per term.
 :::
 
-A stable leader is not free. A faulty leader can delay the network for more than one view. A censoring leader also controls more consecutive proposals.
+A stable leader is not free. One leader controls more consecutive proposals.
 
-Simplex bounds stalls in two ways. First, a *nullification* is quorum proof that validators abandoned a view. A local timeout makes one validator broadcast `nullify`. A quorum certificate covers the rest of the term and advances the network to a new leader. Second, a stall timeout detects a leader that keeps per-view timers satisfied but prevents finality.
+If a leader stops making progress, validators vote to abandon the current view. Once a quorum agrees, the network skips the rest of the term and moves to a new leader.
+
+A subtler faulty leader can keep views moving while preventing finality. A term-wide stall timeout bounds that case.
 
 These controls do not evict a leader that keeps finalizing blocks while selectively censoring transactions. That leader can retain proposal authority for the full term. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence.
 
 Term length therefore makes a direct tradeoff. Longer terms amortize more handoffs, but give one leader more consecutive proposals. Networks that rely on proposer rotation for censorship resistance should use shorter terms.
 
-Stable terms also add one safety rule. After a validator broadcasts `nullify` for a view, it withholds finalize votes for later views in that term. It resumes after observing a same-term finalization at or above its highest nullify vote.
-
-Every validator must use the same term length. The current implementation supports stable terms with round-robin election. The threshold-VRF elector remains rotating because validators may enter a view with different certificates.
+Every validator must use the same term length. Stable terms currently work with round-robin leader election.
 
 Stable leadership removes the proposer handoff. One wait remains: application certification.
 
 ## Wait Two: Certification on the View Path
 
-Certification can take time for good reasons. An erasure-coded application may wait until it has enough shards to reconstruct a block. Optimistic Validation does not weaken this check. It changes when the next work begins.
+Application certification can take time for good reasons. An erasure-coded application may wait until it has enough shards to reconstruct a block. Optimistic Validation changes when the next work begins.
 
 A stable leader can propose view `v+1` as soon as view `v` is notarized. Without Optimistic Validation, followers wait for the application to certify `v` before they verify and notarize `v+1`. Certification remains on the critical path of every view.
 
-Optimistic Validation removes that dependency from the view path. Within a stable term, a validator may verify and notarize the child while the application certifies its parent. The child may notarize early, but its certification waits for its parent to certify. Its finalize vote follows its own certification; it does not wait for parent finalization.
+With Optimistic Validation, a validator may verify and notarize the child while the application certifies its parent. The application still certifies blocks in order. Validators finalize each block only after its own certification.
 
 ```{=html}
-<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application certification before validators verify and notarize it. In the optimistic path, child proposals are verified and notarized while parent certification continues in a parallel lane. Finalization remains ordered behind certification.">
-  <noscript>Without optimistic validation, each child proposal waits for its parent to certify. With optimistic validation, proposal verification and notarization continue while certification runs in the background. Finalization still waits for certification.</noscript>
+<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application certification before validators verify and notarize it. In the optimistic path, child proposals are closer together because validators verify and notarize them while application certification continues in order on a parallel lane.">
+  <noscript>Without Optimistic Validation, each child proposal waits for its parent to certify. With Optimistic Validation, proposal verification and notarization continue while certification runs in order on a parallel lane.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 3: Optimistic Validation pipelines proposal verification and notarization (red) over application certification (blue). Certification and finalization remain ordered.
+Figure 3: Optimistic Validation pipelines proposal verification and notarization (red) over application certification (blue). Both panels use the same horizontal time scale.
 :::
+
+## How Optimism Stays Safe
+
+`Optimistic` describes when a validator starts work. It does not weaken the evidence required for finalization.
+
+A validator works ahead only if it has verified and voted for the parent, or holds usable quorum proof for it. The same rule applies to every optimistic ancestor. Application certification still proceeds parent by parent. If the application rejects an ancestor, no descendant can certify or finalize through it. Validators then abandon that part of the term through the normal timeout path.
+
+The lookahead stops at the term boundary. The first view of a new term must start from certified ancestry.
+
+The lookahead is local policy. A value of zero disables Optimistic Validation. Validators can choose different values without affecting safety. A larger value uses more CPU and memory on work that may later be discarded. A smaller value can limit the pipeline when application certification falls behind.
 
 ## What We Measured
 
-Here is the configuration for the 50-validator Alto run:
+Here are the relevant configuration and results for the 50-validator Alto run:
 
 | | |
 |---|---:|
 | Deployment | 50 validators, 5 in each of 10 AWS regions |
 | Instance | `c7gd.4xlarge` |
-| Build | Optimized aarch64 release with debug information |
-| Worker / signature threads | 8 / 16 |
 | Workload | Header-only blocks, no transactions or execution |
 | Block target | 5ms |
-| Leader early wake | 1ms before the pacing deadline |
-| Term length | 10,000 views |
-| Stall timeout | 12 seconds |
-| `optimistic_views` (local policy) | 100 |
+| Stable term | 10,000 views |
+| Optimistic lookahead | 100 views |
 | Throughput capture | 189 samples spanning 188 nominal one-second intervals |
-| Analyzer-reported successful views / blocks | 198.1 per nominal second |
+| Successful views / finalized blocks | 198.1 per nominal second |
 | Median block spacing | 5ms in all 189 reporting windows |
 | External-observer finality | p50 300ms / p99 376ms (`n=3,736`) |
-| View intervals per observer-latency window | roughly 60 |
 
-The analyzer observed 37,249 finalized height and view increments between its first and last samples. It divided this change by 188 nominal one-second timer intervals, giving 198.13 successful views and blocks per nominal second. The raw tick timestamps were not preserved.
+The analyzer observed 37,249 finalized height and view increments between its first and last samples. Across 188 nominal one-second intervals, that is 198.13 successful views and blocks per second. We round this result to about 200.
 
-For block spacing, the analyzer divided the change in block timestamps by the change in finalized height. A delivery gap could make one observation average across several heights. The missing raw stream prevents us from ruling out such gaps.
+### How to Read This Result
 
-A separate finality capture measured from the leader-stamped block timestamp until an external client received the finalization certificate. It included indexer and WebSocket delivery. The observer's clock was checked, but the leaders' clock offsets were not preserved, so this is end-to-end observer latency rather than a strict bound on consensus-network finality.
+This was a capability run of the combined configuration. We did not compare it with a baseline. The result shows that one global deployment sustained the 5ms target, but it does not isolate the contribution of either feature.
 
-A filled pipeline can emit blocks at 5ms median spacing while median external-observer finalization latency remains 300ms.
+The run used header-only blocks. Transaction throughput also depends on dissemination, execution, storage, and the application workload.
 
-This is a capability result, not an ablation. It shows that one global deployment sustained the combined configuration near its 5ms target. It does not isolate how much either feature improved the baseline.
+The finality capture measured from the leader-stamped block timestamp until an external client received the finalization certificate. It includes indexer and WebSocket delivery. Leader clock offsets were not preserved, and a timestamp could lead its leader's wall clock by up to 1ms.
 
-The run measured consensus cadence, not transaction throughput. The number of transactions a chain can process still depends on block dissemination, execution, storage, and the application workload.
-
-Stable Leader and Optimistic Validation allow views to overlap. In this run, the overall deployment sustained the 5ms target.
-
-The analyzer flagged four samples near expected term boundaries. Those samples contained 155 to 163 blocks, and the following sample contained 189 to 200. The deleted raw data prevents exact attribution to the transition. If certification, storage, networking, or verification runs slower than proposal production, the lookahead fills and that slower stage limits the view rate.
-
-The deployed Alto worktree included uncommitted changes, and its exact patch was not preserved. The raw captures, dashboards, and deployment assets were also lost. These gaps prevent exact reproduction. The 1ms early wake also meant that a leader-stamped timestamp could lead the leader's wall clock by up to 1ms.
-
-## How Optimism Stays Safe
-
-`Optimistic` describes when a validator starts work. It does not relax the evidence required for finalization.
-
-A validator can vote optimistically when it has one of two forms of evidence for the parent:
-
-1. The validator holds a usable notarization or finalization certificate for the parent.
-2. The validator verified the parent's proposal, saw no conflicting proposal from the leader, and already broadcast its own notarize vote.
-
-A notarization becomes unusable if the application rejects its payload. An observed finalization overrides that validator's local rejection.
-
-The rule recurses through every optimistic ancestor until it reaches certificate-backed ancestry. If an ancestor fails application certification, no descendant can certify or finalize through it. The normal nullification path then abandons the failed part of the term.
-
-One `optimistic_views` setting bounds two local windows:
-
-- The *issuance window* limits local notarize votes to `optimistic_views` beyond the child of the last directly observed notarization. A certificate inferred from a descendant does not move this anchor.
-- The *admission window* retains peer votes up to `optimistic_views` beyond the validator's current view.
-
-Both windows stop at the term boundary. The first view of a new term must start from explicitly certified ancestry.
-
-Mid-term certification also proceeds parent by parent. If a validator sees a child certificate but missed the exact parent notarization, it fetches the parent from the stable leader or another peer. The child certificate cannot replace it.
-
-The lookahead is local policy, and zero disables Optimistic Validation. Validators can use different values without affecting safety. A smaller value can reduce throughput if too many future votes are dropped. A larger value keeps more rounds in memory and may perform work above an ancestor that later fails.
+The exact deployed Alto patch, raw captures, dashboards, and deployment assets were not preserved. The result cannot be reproduced exactly from the surviving records. The missing raw stream also prevents deeper analysis of individual samples.
 
 ## Choose the Pipeline
 
@@ -181,40 +151,28 @@ Start with the stage that limits your view rate. Alto's settings are an example,
 
 | Limiting stage | Configuration | Main cost |
 |---|---|---|
-| Proposer handoff | Stable Leader with zero optimistic views | Longer proposer authority |
+| Proposer handoff | Stable Leader without Optimistic Validation | Longer proposer authority |
 | Certification latency, with enough certification capacity | Add Optimistic Validation | More speculative CPU and memory |
 | Certification, execution, storage, verification, or dissemination capacity | Improve that stage first | A deeper window will fill |
 
 Stable Leader reduces handoff latency. Optimistic Validation hides certification latency when certification can still keep up. Neither feature makes a slower stage process more work per second.
 
-The combined configuration fits networks with reliable connectivity and enough CPU and memory for many active views. Application certification must run concurrently, and transactions or block references still need a reliable path to the current leader.
+The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Application certification must run concurrently, and transactions or block references still need a reliable path to the current leader.
 
 A rotating leader or smaller lookahead may fit better when validators are heterogeneous, leaders frequently fail, or proposer rotation is an important censorship defense.
 
 Stable leadership keeps the leader on the transaction data path for the whole term. Networks that need concurrent dissemination from many producers can combine this pipeline with another design. [Multimmit](/blogs/multimmit) describes one such approach.
 
-Configure both features on the round-robin elector:
-
-```rust
-let elector = RoundRobin::default().with_term(
-    term_length,       // Consensus-critical: identical at every validator.
-    stall_timeout,     // Local policy: evict a leader that prevents finality.
-    optimistic_views,  // Local policy: zero disables Optimistic Validation.
-);
-```
-
-Stable terms require a term length greater than one and a nonzero stall timeout. Use `RoundRobin::default()` to rotate every view. Use `with_term(..., ViewDelta::zero())` to enable Stable Leader without Optimistic Validation.
-
 Choose enough lookahead to cover measured certification lag at your target view rate. A larger window helps only when certification catches up before the window fills. It also costs CPU and memory. Choose the term length based on how long one leader should retain proposal authority.
 
-See [`RoundRobin::with_term`](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term) for the configuration API. [Alto](https://github.com/commonwarexyz/alto) provides a complete blockchain integration.
+Stable terms currently use the round-robin elector. Every validator must use the same term length, while each validator can choose its own optimistic lookahead. See [`RoundRobin::with_term`](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term) for the configuration API. [Alto](https://github.com/commonwarexyz/alto) provides a complete blockchain integration.
 
-## A Finer Ordering Clock
+## The Next Ordering Opportunity
 
 A shorter block interval reduces the wait for the next ordering opportunity after data reaches the proposer. An order-book update, batch reference, or game action that misses one proposal gets another opportunity after one block interval.
 
-At Alto's measured cadence, that interval was 5ms at the median. Median external-observer finalization latency was 300ms. Stable Leader and Optimistic Validation changed how much consensus work could overlap without changing the fault threshold or finalization rule.
+At Alto's measured cadence, that interval was 5ms at the median. Stable Leader and Optimistic Validation let Simplex overlap more work without changing its fault threshold or finalization rule.
 
-For builders who have already made dissemination and execution fast, the ordering clock can become the next visible limit. These options let each network tune that clock around its own latency, capacity, and proposer-rotation requirements.
+For builders who have already made dissemination and execution fast, the ordering clock can become the next visible limit. Each network can tune that clock around its own latency, capacity, and proposer-rotation requirements.
 
 If that is your bottleneck, explore the [Simplex documentation](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html), study the complete [Alto integration](https://github.com/commonwarexyz/alto), or ask an integration question in [Commonware Q&A](https://github.com/commonwarexyz/monorepo/discussions/categories/q-a).
