@@ -1226,6 +1226,14 @@ impl<
                 resolved = processed_resolved;
             },
             on_end => {
+                // This iteration may make the next proposal eligible. Dispatch it
+                // before signing and journal sync so application pacing overlaps
+                // with that work. Its result is not consumed until the next
+                // iteration.
+                if pending_propose.is_none() {
+                    pending_propose = self.try_propose().await;
+                }
+
                 // Attempt to send any new view messages
                 //
                 // The batcher may drop votes we construct here if it has not yet been updated to the
