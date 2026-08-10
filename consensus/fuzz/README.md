@@ -105,21 +105,22 @@ cargo fuzz run simplex_ed25519 fuzz/artifacts/simplex_ed25519/<crash_file>
 
 ## Marshal Fuzzing
 
-The standard-wrapper targets exercise proposal, verification, certification,
-broadcast, and application-result transitions using structured libFuzzer input:
+The marshal end-to-end targets exercise proposal, verification, certification,
+broadcast, and application-result transitions through real Simplex stacks:
 
 ```bash
-cargo fuzz run marshal_actor_standard_inline_cert_mock
-cargo fuzz run marshal_actor_standard_deferred_cert_mock
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_disrupter
+cargo fuzz run marshal_e2e_coding_cert_mock_disrupter
 cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
 cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
 cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
 ```
 
-The inline and deferred targets include split-header equivocation in their
-action space. The multi-node targets are Byzantine Twins mutators over the
-end-to-end standard stack. The general Twins target shares one corpus across
-the Basic and Faulty applications with both Inline and Deferred wrappers.
+The disrupter targets check post-prefix liveness over the standard deferred and
+coding marshal stacks. The Twins targets are Byzantine mutators over the
+end-to-end standard stack, and the split-header variants include proposal-header
+equivocation in their action space. The general Twins target shares one corpus
+across the Basic and Faulty applications with both Inline and Deferred wrappers.
 Three honest validators each run
 `Simplex -> Inline|Deferred -> Marshal -> Application`; the compromised
 identity runs one full Simplex engine over the same real marshal/application
