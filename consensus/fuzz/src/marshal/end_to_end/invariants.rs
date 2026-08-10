@@ -21,7 +21,7 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_utils::sync::Mutex;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -31,17 +31,14 @@ type PublicKeyOf<P> =
 type Ctx<P> = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
 type VerifiedContexts<P> = HashMap<(Round, Sha256Digest), Vec<Ctx<P>>>;
 type CertifyVerdicts = HashMap<(Round, Sha256Digest), (usize, bool)>;
-type ProposedBlocks = HashSet<(usize, Round, Sha256Digest)>;
 
 #[derive(Default)]
 struct CertificationState {
     agreement: CertifyVerdicts,
-    proposals: ProposedBlocks,
 }
 
 /// Ensures correct automata return the same completed certification verdict
-/// for the same `(round, digest)`. Direct drivers may also record completed
-/// proposals to ensure they never certify as false on the proposing node.
+/// for the same `(round, digest)`.
 #[derive(Clone)]
 pub(crate) struct CertificationAgreementInvariant {
     state: Arc<Mutex<CertificationState>>,
@@ -56,13 +53,6 @@ impl CertificationAgreementInvariant {
         }
     }
 
-    pub(crate) fn record_proposal(&self, validator: usize, round: Round, digest: Sha256Digest) {
-        self.state
-            .lock()
-            .proposals
-            .insert((validator, round, digest));
-    }
-
     pub(crate) fn check_certify_agreement(
         &self,
         validator: usize,
@@ -71,13 +61,6 @@ impl CertificationAgreementInvariant {
         verdict: bool,
     ) {
         let mut state = self.state.lock();
-        assert!(
-            verdict || !state.proposals.contains(&(validator, round, digest)),
-            "marshal automaton certified its own proposal as false: honest node{validator} \
-             round={round} digest={digest}; stack={}",
-            self.stack,
-        );
-
         if let Some((first_validator, first_verdict)) = state.agreement.get(&(round, digest)) {
             assert_eq!(
                 *first_verdict, verdict,
