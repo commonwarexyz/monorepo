@@ -264,8 +264,18 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+
+        // Constructor-exclusive prefill can reserve every valid slot without
+        // running the concurrent affinity probe.
         let reserved = (0..word_count)
-            .map(|_| CachePadded::new(AtomicU64::new(0)))
+            .map(|word_index| {
+                let bits = if prefill {
+                    Self::valid_bits(capacity, word_shift, word_index)
+                } else {
+                    0
+                };
+                CachePadded::new(AtomicU64::new(bits))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let slots = (0..slot_count)
@@ -275,7 +285,7 @@ impl Freelist {
 
         let freelist = Self {
             layout,
-            created: AtomicUsize::new(0),
+            created: AtomicUsize::new(if prefill { capacity } else { 0 }),
             reserved,
             words,
             slots,
@@ -284,10 +294,10 @@ impl Freelist {
         };
 
         if prefill {
-            freelist.put_batch((0..capacity).map(|_| {
-                freelist
-                    .try_create(false)
-                    .expect("prefill creates exactly capacity buffers")
+            freelist.put_batch((0..slot_count).map(|slot| {
+                // SAFETY: construction exclusively owns this reserved
+                // side-table entry. `put_batch` publishes it after initialization.
+                unsafe { PooledBuffer::new(freelist.slot_ptr(slot), layout, false) }
             }));
         }
 
@@ -356,7 +366,7 @@ impl Freelist {
                     // Another creator reserved that candidate first. Continue
                     // from the word state returned by the RMW instead of
                     // restarting the whole scan.
-                    available = !(observed | mask) & valid;
+                    available = !observed & valid;
                 }
             }
 
@@ -903,14 +913,6 @@ pub(super) mod tests {
         freelist.words.len()
     }
 
-    fn reserve_all(freelist: &Freelist) -> Vec<PooledBuffer> {
-        let mut entries = Vec::new();
-        while let Some(buffer) = freelist.try_create(false) {
-            entries.push(buffer);
-        }
-        entries
-    }
-
     fn reserve_by_slot(freelist: &Freelist, capacity: usize) -> Vec<Option<PooledBuffer>> {
         let mut entries = (0..capacity).map(|_| None).collect::<Vec<_>>();
         for _ in 0..capacity {
@@ -1006,14 +1008,16 @@ pub(super) mod tests {
         // Two entries force the multi-entry `put_entries` path, whose per-word
         // assert is separate from the single-buffer `put` assert.
         let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
-        let buffer0 = set.try_create(false).expect("first slot");
-        let buffer1 = set.try_create(false).expect("second slot");
+        let returned = set.try_create(false).expect("returned slot");
+        let returned_slot = returned.slot();
+        let other = set.try_create(false).expect("other slot");
+
         // SAFETY: the duplicate handle exists only to drive the batch
         // double-return assert. put_batch panics before it is used further,
         // and drain deallocates each slot exactly once afterwards.
-        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
-        set.put(buffer0);
-        set.put_batch([buffer1, duplicate]);
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(returned_slot)) };
+        set.put(returned);
+        set.put_batch([other, duplicate]);
     }
 
     #[test]
@@ -1025,9 +1029,11 @@ pub(super) mod tests {
         // miri's leak check.
         let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
         let buffer = set.try_create(false).expect("slot available");
+        let slot = buffer.slot();
+
         // SAFETY: the duplicate handle exists only to drive the staging
         // assert. put_batch panics before publishing either handle.
-        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(slot)) };
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             set.put_batch([buffer, duplicate]);
         }))
@@ -1043,9 +1049,9 @@ pub(super) mod tests {
         );
 
         // Republish the slot so teardown reclaims its allocation.
-        // SAFETY: slot 0 was created by this freelist and is not available
+        // SAFETY: `slot` was created by this freelist and is not available
         // (the staging panic happened before its bit was inserted).
-        set.put(unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) });
+        set.put(unsafe { PooledBuffer::from_owner(set.slot_ptr(slot)) });
     }
 
     #[test]
@@ -1095,8 +1101,8 @@ pub(super) mod tests {
         // falling through to another stripe because of mask limits.
         let set = Freelist::new(NZU32!(512), NZUsize!(8), TEST_LAYOUT, false);
         let probe = SlotBitmapProbe::new(set.word_mask, set.word_shift);
-        // Mirror the creation probe calculation explicitly so this test checks
-        // the public effect of `try_create`, not the helper implementation.
+
+        // Derive the expected slot ids from this thread's stable probe state.
         let expected0 = set.slot_index(probe.word_index(0), probe.bit_offset as usize);
         let expected1 = set.slot_index(
             probe.word_index(0),
@@ -1122,6 +1128,7 @@ pub(super) mod tests {
         // Multiple creators racing to grow the same size class must reserve
         // every slot at most once and stop exactly at capacity.
         const CAPACITY: usize = 128;
+
         // Use more creator threads than bitmap words so some threads collide
         // on home words and exercise the losing-candidate retry path.
         let set = Arc::new(Freelist::new(NZU32!(128), NZUsize!(16), TEST_LAYOUT, false));
@@ -1300,7 +1307,9 @@ pub(super) mod tests {
         // Drain should drop every globally available buffer while leaving
         // outstanding created buffers owned by the caller.
         let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
-        let mut entries = reserve_all(&set);
+        let mut entries = (0..4)
+            .map(|_| set.try_create(false).expect("slot"))
+            .collect::<Vec<_>>();
         assert_eq!(entries.len(), 4);
         let held = entries.pop().expect("held entry");
         for buffer in entries {
@@ -1357,8 +1366,6 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_take_batch_breaks_after_filling_target_in_home_word() {
-        // A batch take that fills its target from the home word should not scan
-        // later stripes.
         let set = Freelist::new(NZU32!(16), NZUsize!(8), TEST_LAYOUT, true);
         let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
         let slot0 = set.slot_index(start_word, 0);
@@ -1382,8 +1389,6 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_take_batch_stops_mid_word_when_limit_is_reached() {
-        // When the home word contains more free bits than requested, only the
-        // selected prefix should be claimed and the rest should remain free.
         let set = Freelist::new(NZU32!(24), NZUsize!(8), TEST_LAYOUT, true);
         let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
         // This thread's first probed word contains three slots, so the batch
@@ -1493,6 +1498,7 @@ pub(super) mod tests {
         for _ in 0..32 {
             let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
             let buffer = set.try_create(false).unwrap();
+            assert_eq!(buffer.slot(), 0);
             set.put(buffer);
 
             // Align the contenders so several can race on the same observed
