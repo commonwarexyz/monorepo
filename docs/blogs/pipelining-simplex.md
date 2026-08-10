@@ -1,20 +1,18 @@
 ---
-title: "198.1 Blocks Per Second: Pipelining Simplex"
-description: "At 5ms median block spacing, Alto's analyzer reported 198.1 finalized blocks per nominal second across 50 validators. Median external-observer finalization latency was 300ms."
+title: "200 Views Per Second: Pipelining Simplex"
+description: "At 5ms median block spacing, Alto sustained about 200 successful views per nominal second across 50 validators. Median external-observer finalization latency was 300ms."
 date: "August 10th, 2026"
 published-time: "2026-08-10T00:00:00Z"
 modified-time: "2026-08-10T00:00:00Z"
 author: "Brendan Chou"
 author_twitter: "https://x.com/B_Chou"
-author2: "Patrick O'Grady"
-author2_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
 For applications sequencing already-disseminated data, block spacing sets how often fresh data gets another ordering opportunity.
 
-In one global deployment with 50 validators, [Alto's](https://alto.commonware.xyz) analyzer reported 198.1 finalized blocks per nominal second. The per-window median block spacing was 5ms.
+In one global deployment with 50 validators, [Alto](https://alto.commonware.xyz) sustained about 200 successful views per nominal second. Every successful view finalized one block, and the per-window median block spacing was 5ms.
 
 A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. Those numbers may look inconsistent at first, but they describe two different clocks.
 
