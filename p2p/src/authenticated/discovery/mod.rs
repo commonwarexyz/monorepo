@@ -246,7 +246,10 @@ mod metrics;
 mod network;
 mod types;
 
-pub use crate::authenticated::channels::{Error, Receiver, Sender};
+pub use crate::authenticated::{
+    MAX_SIZE,
+    channels::{Error, Receiver, Sender},
+};
 pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
 pub use network::Network;

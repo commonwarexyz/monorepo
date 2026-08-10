@@ -80,6 +80,9 @@ const TAG_SIZE: u32 = {
     handshake::TAG_SIZE as u32
 };
 
+/// Maximum supported plaintext message size.
+pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
+
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -137,6 +140,8 @@ pub struct Config<S> {
     pub namespace: Vec<u8>,
 
     /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
+    ///
+    /// The largest supported value is [`MAX_SIZE`].
     ///
     /// Fixed-size handshake frames use their protocol-defined sizes instead of
     /// inheriting this limit.
@@ -544,6 +549,11 @@ mod test {
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+
+    #[test]
+    fn test_max_message_size_bounds() {
+        assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
+    }
 
     fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {
         Config {
