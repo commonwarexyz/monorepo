@@ -38,7 +38,7 @@ In a global [Alto](https://alto.commonware.xyz) deployment with 50 validators, t
     }
   </style>
 </noscript>
-<div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="Animated 20 by 10 grid showing 200 view intervals in one second. The grid fills at a rate of one red square per 5ms interval until all 200 squares are visible.">
+<div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="Animated 20 by 10 grid showing 200 view intervals in one second. The grid fills at a rate of one red square per 5ms interval. After a pause, the squares return to gray from left to right and the cycle repeats.">
   <noscript>At a 5ms target, 200 view intervals fit into one second. This figure shows them as a 20 by 10 grid of red squares.</noscript>
 </div>
 <script type="module" src="pipelining-simplex.loops.js"></script>

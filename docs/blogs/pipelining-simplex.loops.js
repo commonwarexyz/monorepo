@@ -126,9 +126,24 @@ function buildCadence(mount) {
 
   return [{
     set(progress) {
-      const count = Math.min(200, Math.floor(progress * 200));
-      squares.forEach((square, index) => square.setAttribute('opacity', index < count ? 1 : 0));
-      counter.textContent = `${String(count).padStart(3, '0')} / 200`;
+      const fillEnd = 0.25;
+      const holdEnd = 0.625;
+      const clearEnd = 0.875;
+      if (progress < fillEnd) {
+        const count = Math.floor((progress / fillEnd) * 200);
+        squares.forEach((square, index) => square.setAttribute('opacity', index < count ? 1 : 0));
+        counter.textContent = `${String(count).padStart(3, '0')} / 200`;
+      } else if (progress < holdEnd) {
+        squares.forEach(square => square.setAttribute('opacity', 1));
+        counter.textContent = '200 / 200';
+      } else if (progress < clearEnd) {
+        const cleared = Math.floor(((progress - holdEnd) / (clearEnd - holdEnd)) * 200);
+        squares.forEach((square, index) => square.setAttribute('opacity', index < cleared ? 0 : 1));
+        counter.textContent = '200 / 200';
+      } else {
+        squares.forEach(square => square.setAttribute('opacity', 0));
+        counter.textContent = '000 / 200';
+      }
     },
   }];
 }
@@ -266,7 +281,7 @@ function buildValidation(mount) {
   return animated;
 }
 
-function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS) {
+function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS, staticProgress = 1) {
   const description = mount.getAttribute('aria-label');
   const animated = builder(mount);
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -288,16 +303,16 @@ function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS) {
   const frozen = new URLSearchParams(window.location.search).get('freeze');
   if (frozen !== null) {
     const seconds = Number(frozen);
-    const elapsed = Number.isFinite(seconds)
-      ? ((seconds * 1000) % loopMs + loopMs) % loopMs
-      : loopMs - holdMs;
+    const progress = Number.isFinite(seconds)
+      ? progressAt(((seconds * 1000) % loopMs + loopMs) % loopMs)
+      : staticProgress;
     makeStatic();
-    animated.forEach(item => item.set(progressAt(elapsed)));
+    animated.forEach(item => item.set(progress));
     return;
   }
   if (reducedMotion) {
     makeStatic();
-    animated.forEach(item => item.set(1));
+    animated.forEach(item => item.set(staticProgress));
     return;
   }
   makeInteractive();
@@ -367,11 +382,11 @@ style.textContent = `
 document.head.appendChild(style);
 
 const figures = [
-  ['simplex-fig-cadence', buildCadence, 2800, 900],
-  ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS],
-  ['simplex-fig-validation', buildValidation, LOOP_MS, HOLD_MS],
+  ['simplex-fig-cadence', buildCadence, 4600, 300, 0.4],
+  ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS, 1],
+  ['simplex-fig-validation', buildValidation, LOOP_MS, HOLD_MS, 1],
 ];
-for (const [id, builder, loopMs, holdMs] of figures) {
+for (const [id, builder, loopMs, holdMs, staticProgress] of figures) {
   const mount = document.getElementById(id);
-  if (mount) run(mount, builder, loopMs, holdMs);
+  if (mount) run(mount, builder, loopMs, holdMs, staticProgress);
 }
