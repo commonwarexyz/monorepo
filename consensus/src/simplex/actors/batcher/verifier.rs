@@ -58,45 +58,6 @@ enum State<V> {
     Complete,
 }
 
-impl<V: Attributable> Certification<V> {
-    /// Buffers a vote for verification (or, if already verified, for
-    /// certificate recovery), unless its signer is already counted: a
-    /// verified vote displaces the signer's pending duplicate, while a
-    /// pending vote is dropped if the signer is already buffered. This keeps
-    /// each signer's vote counted at most once toward the quorum. Votes that
-    /// arrive after the certificate is complete are dropped.
-    fn add(&mut self, vote: V, is_verified: bool) {
-        // Completed certifications drop subsequent votes without allocating.
-        let State::Incomplete { pending, verified } = &mut self.state else {
-            return;
-        };
-        let signer = vote.signer();
-        if verified.iter().any(|v| v.signer() == signer) {
-            return;
-        }
-        // Verified votes may accumulate to quorum. A batchable pending buffer
-        // only needs the remaining unverified slots, while a non-batchable
-        // pending buffer is consumed after each vote.
-        let initial_capacity = if is_verified || self.batchable {
-            self.quorum.saturating_sub(verified.len()).max(1)
-        } else {
-            1
-        };
-        if is_verified {
-            pending.retain(|v| v.signer() != signer);
-            if verified.capacity() == 0 {
-                verified.reserve_exact(initial_capacity);
-            }
-            verified.push(vote);
-        } else if !pending.iter().any(|v| v.signer() == signer) {
-            if pending.capacity() == 0 {
-                pending.reserve_exact(initial_capacity);
-            }
-            pending.push(vote);
-        }
-    }
-}
-
 impl<V> Certification<V> {
     /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
     const fn new(quorum: usize, batchable: bool) -> Self {
@@ -108,6 +69,30 @@ impl<V> Certification<V> {
                 verified: Vec::new(),
             },
         }
+    }
+
+    /// Buffers a vote for verification (or, if already verified, for
+    /// certificate recovery). The caller owns signer uniqueness. Votes that
+    /// arrive after completion are dropped.
+    fn add(&mut self, vote: V, is_verified: bool) {
+        // Completed certifications drop subsequent votes without allocating.
+        let State::Incomplete { pending, verified } = &mut self.state else {
+            return;
+        };
+
+        // Verified votes may accumulate to quorum. A batchable pending buffer
+        // only needs the remaining unverified slots, while a non-batchable
+        // pending buffer is consumed after each vote.
+        let initial_capacity = if is_verified || self.batchable {
+            self.quorum.saturating_sub(verified.len()).max(1)
+        } else {
+            1
+        };
+        let votes = if is_verified { verified } else { pending };
+        if votes.capacity() == 0 {
+            votes.reserve_exact(initial_capacity);
+        }
+        votes.push(vote);
     }
 
     /// Returns true if a batch verification should run: pending votes exist,
@@ -439,6 +424,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// If a leader is known and the message is a [Vote::Notarize] from that leader,
     /// this method may reveal the leader proposal.
     ///
+    /// Callers must add at most one vote of each kind per signer. The batcher's
+    /// [`Round`](super::Round) enforces this while recording votes.
+    ///
     /// # Arguments
     ///
     /// * `msg` - The [Vote] message to add.
@@ -725,25 +713,37 @@ mod tests {
         }
     }
 
+    /// A round reserves vote storage only for phases that receive votes.
     #[test]
-    fn test_certification_allocates_vote_buffers_lazily() {
-        let mut certification = Certification::new(4, true);
-        assert_eq!(certification.capacities(), (0, 0));
+    fn test_verifier_allocates_vote_buffers_lazily() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier =
+            Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone(), quorum);
 
-        certification.add(TestVote(1), false);
-        let (pending, verified) = certification.capacities();
-        assert!(pending >= 4);
+        assert_eq!(verifier.notarize.capacities(), (0, 0));
+        assert_eq!(verifier.nullify.capacities(), (0, 0));
+        assert_eq!(verifier.finalize.capacities(), (0, 0));
+
+        let notarize = create_notarize(&schemes[0], round, View::zero(), 1);
+        verifier.add(Vote::Notarize(notarize), false);
+        let (pending, verified) = verifier.notarize.capacities();
+        assert!(pending >= quorum as usize);
         assert_eq!(verified, 0);
+        assert_eq!(verifier.nullify.capacities(), (0, 0));
+        assert_eq!(verifier.finalize.capacities(), (0, 0));
 
-        certification.complete();
-        assert_eq!(certification.capacities(), (0, 0));
+        verifier.record_certificate(Kind::Notarization);
+        assert_eq!(verifier.notarize.capacities(), (0, 0));
     }
 
     #[test_async]
     async fn test_non_batchable_certification_avoids_repeated_quorum_reservations() {
         let quorum = 64;
         let mut certification = Certification::new(quorum, false);
-        certification.add(TestVote(1), false);
+        certification.add(1u8, false);
         certification
             .try_verify(|pending, mut verified| async move {
                 verified.extend(pending);
@@ -752,7 +752,7 @@ mod tests {
             .await
             .expect("non-batchable pending votes must verify eagerly");
 
-        certification.add(TestVote(2), false);
+        certification.add(2u8, false);
         let (pending, _) = certification.capacities();
         assert!(
             pending < quorum,
@@ -765,7 +765,7 @@ mod tests {
         let quorum = 64;
         let mut certification = Certification::new(quorum, true);
         for vote in 0..quorum {
-            certification.add(TestVote(vote as u32), false);
+            certification.add(vote, false);
         }
         certification
             .try_verify(|mut pending, _| async move {
@@ -775,7 +775,7 @@ mod tests {
             .await
             .expect("a quorum of pending votes must trigger batch verification");
 
-        certification.add(TestVote(quorum as u32), false);
+        certification.add(quorum, false);
         let (pending, _) = certification.capacities();
         assert!(
             pending < quorum,
@@ -830,30 +830,29 @@ mod tests {
         );
 
         let round = Round::new(Epoch::new(0), View::new(1));
-        let notarize1 = create_notarize(&schemes[0], round, View::new(0), 1);
-        let notarize2 = create_notarize(&schemes[1], round, View::new(0), 1);
-        let notarize_diff = create_notarize(&schemes[2], round, View::new(0), 2);
+        let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
+        let verified_notarize = create_notarize(&schemes[1], round, View::new(0), 1);
+        let pending_notarize = create_notarize(&schemes[2], round, View::new(0), 1);
+        let notarize_diff = create_notarize(&schemes[3], round, View::new(0), 2);
 
-        verifier.add(Vote::Notarize(notarize1.clone()), false);
+        verifier.add(Vote::Notarize(leader_notarize.clone()), false);
         assert_eq!(verifier.notarize.pending().len(), 1);
         assert_eq!(verifier.notarize.verified().len(), 0);
 
-        // The verified copy displaces the pending duplicate from the same signer.
-        verifier.add(Vote::Notarize(notarize1.clone()), true);
-        assert!(verifier.notarize.pending().is_empty());
+        verifier.add(Vote::Notarize(verified_notarize), true);
+        assert_eq!(verifier.notarize.pending().len(), 1);
         assert_eq!(verifier.notarize.verified().len(), 1);
 
-        verifier.set_leader(notarize1.signer(), Some(&notarize1));
-        assert_eq!(verifier.leader(), Some(notarize1.signer()));
-        assert_eq!(verifier.proposal(), Some(&notarize1.proposal));
-        assert!(verifier.notarize.pending().is_empty());
-
-        verifier.add(Vote::Notarize(notarize2), false);
+        verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
+        assert_eq!(verifier.leader(), Some(leader_notarize.signer()));
+        assert_eq!(verifier.proposal(), Some(&leader_notarize.proposal));
         assert_eq!(verifier.notarize.pending().len(), 1);
 
-        // A notarize for a different proposal is rejected.
+        verifier.add(Vote::Notarize(pending_notarize), false);
+        assert_eq!(verifier.notarize.pending().len(), 2);
+
         verifier.add(Vote::Notarize(notarize_diff), false);
-        assert_eq!(verifier.notarize.pending().len(), 1);
+        assert_eq!(verifier.notarize.pending().len(), 2);
 
         let mut verifier2 = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
@@ -1093,15 +1092,15 @@ mod tests {
             quorum,
         );
         let round = Round::new(Epoch::new(0), View::new(1));
-        let nullify = create_nullify(&schemes[0], round);
+        let pending_nullify = create_nullify(&schemes[0], round);
+        let verified_nullify = create_nullify(&schemes[1], round);
 
-        verifier.add(Vote::Nullify(nullify.clone()), false);
+        verifier.add(Vote::Nullify(pending_nullify), false);
         assert_eq!(verifier.nullify.pending().len(), 1);
         assert_eq!(verifier.nullify.verified().len(), 0);
 
-        // The verified copy displaces the pending duplicate from the same signer.
-        verifier.add(Vote::Nullify(nullify), true);
-        assert!(verifier.nullify.pending().is_empty());
+        verifier.add(Vote::Nullify(verified_nullify), true);
+        assert_eq!(verifier.nullify.pending().len(), 1);
         assert_eq!(verifier.nullify.verified().len(), 1);
     }
 
@@ -1187,8 +1186,10 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
         let finalize_b = create_finalize(&schemes[1], round, View::new(0), 2);
+        let verified_a = create_finalize(&schemes[2], round, View::new(0), 1);
+        let rejected_b = create_finalize(&schemes[3], round, View::new(0), 2);
 
-        verifier.add(Vote::Finalize(finalize_b.clone()), false);
+        verifier.add(Vote::Finalize(finalize_b), false);
         assert_eq!(verifier.finalize.pending().len(), 1);
         assert_eq!(verifier.finalize.verified().len(), 0);
 
@@ -1203,13 +1204,12 @@ mod tests {
         assert_eq!(verifier.finalize.pending()[0], finalize_a);
         assert_eq!(verifier.finalize.verified().len(), 0);
 
-        // The verified copy displaces the pending duplicate from the same signer.
-        verifier.add(Vote::Finalize(finalize_a), true);
-        assert!(verifier.finalize.pending().is_empty());
+        verifier.add(Vote::Finalize(verified_a), true);
+        assert_eq!(verifier.finalize.pending().len(), 1);
         assert_eq!(verifier.finalize.verified().len(), 1);
 
-        verifier.add(Vote::Finalize(finalize_b), false);
-        assert!(verifier.finalize.pending().is_empty());
+        verifier.add(Vote::Finalize(rejected_b), false);
+        assert_eq!(verifier.finalize.pending().len(), 1);
         assert_eq!(verifier.finalize.verified().len(), 1);
     }
 
@@ -1290,7 +1290,7 @@ mod tests {
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
     {
         let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = N3f1::quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
@@ -1301,32 +1301,37 @@ mod tests {
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
         let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
 
-        let notarize_a = Notarize::sign(&schemes[0], proposal_a.clone()).unwrap();
-        let notarize_b = Notarize::sign(&schemes[1], proposal_b.clone()).unwrap();
-        let finalize_a = Finalize::sign(&schemes[0], proposal_a.clone()).unwrap();
-        let finalize_b = Finalize::sign(&schemes[1], proposal_b).unwrap();
+        let leader_notarize = Notarize::sign(&schemes[0], proposal_a.clone()).unwrap();
+        let pending_notarize_b = Notarize::sign(&schemes[1], proposal_b.clone()).unwrap();
+        let verified_notarize_a = Notarize::sign(&schemes[2], proposal_a.clone()).unwrap();
+        let verified_notarize_b = Notarize::sign(&schemes[3], proposal_b.clone()).unwrap();
+        let pending_finalize_a = Finalize::sign(&schemes[0], proposal_a.clone()).unwrap();
+        let pending_finalize_b = Finalize::sign(&schemes[1], proposal_b.clone()).unwrap();
+        let verified_finalize_a = Finalize::sign(&schemes[2], proposal_a.clone()).unwrap();
+        let verified_finalize_b = Finalize::sign(&schemes[3], proposal_b).unwrap();
 
-        verifier.add(Vote::Notarize(notarize_a.clone()), false);
-        verifier.add(Vote::Notarize(notarize_b.clone()), false);
-        verifier.add(Vote::Notarize(notarize_a.clone()), true);
-        verifier.add(Vote::Notarize(notarize_b), true);
-        verifier.add(Vote::Finalize(finalize_a.clone()), false);
-        verifier.add(Vote::Finalize(finalize_b.clone()), false);
-        verifier.add(Vote::Finalize(finalize_a), true);
-        verifier.add(Vote::Finalize(finalize_b), true);
+        verifier.add(Vote::Notarize(leader_notarize.clone()), false);
+        verifier.add(Vote::Notarize(pending_notarize_b), false);
+        verifier.add(Vote::Notarize(verified_notarize_a), true);
+        verifier.add(Vote::Notarize(verified_notarize_b), true);
+        verifier.add(Vote::Finalize(pending_finalize_a), false);
+        verifier.add(Vote::Finalize(pending_finalize_b), false);
+        verifier.add(Vote::Finalize(verified_finalize_a), true);
+        verifier.add(Vote::Finalize(verified_finalize_b), true);
 
-        // The verified copies displace the pending duplicates from the same signers.
-        assert!(verifier.notarize.pending().is_empty());
+        assert_eq!(verifier.notarize.pending().len(), 2);
         assert_eq!(verifier.notarize.verified().len(), 2);
-        assert!(verifier.finalize.pending().is_empty());
+        assert_eq!(verifier.finalize.pending().len(), 2);
         assert_eq!(verifier.finalize.verified().len(), 2);
 
-        verifier.set_leader(notarize_a.signer(), Some(&notarize_a));
+        verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
 
-        assert!(verifier.notarize.pending().is_empty());
+        assert_eq!(verifier.notarize.pending().len(), 1);
+        assert_eq!(verifier.notarize.pending()[0].proposal, proposal_a);
         assert_eq!(verifier.notarize.verified().len(), 1);
         assert_eq!(verifier.notarize.verified()[0].proposal, proposal_a);
-        assert!(verifier.finalize.pending().is_empty());
+        assert_eq!(verifier.finalize.pending().len(), 1);
+        assert_eq!(verifier.finalize.pending()[0].proposal, proposal_a);
         assert_eq!(verifier.finalize.verified().len(), 1);
         assert_eq!(verifier.finalize.verified()[0].proposal, proposal_a);
     }
@@ -1581,75 +1586,6 @@ mod tests {
         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinPk, _>).await;
         ready_finalizes_without_leader(ed25519::fixture).await;
         ready_finalizes_without_leader(secp256r1::fixture).await;
-    }
-
-    async fn verified_leader_notarize_is_not_reverified<S, F>(mut fixture: F)
-    where
-        S: Scheme<Sha256, PublicKey = PublicKey>,
-        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
-    {
-        if !S::is_batchable() {
-            return;
-        }
-
-        let mut rng = test_rng();
-        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(2)),
-            schemes[0].clone(),
-            quorum,
-        );
-        let round = Round::new(Epoch::new(0), View::new(2));
-        let leader_vote = create_notarize(&schemes[0], round, View::new(1), 10);
-
-        verifier.add(Vote::Notarize(leader_vote.clone()), true);
-        assert!(verifier.notarize.pending().is_empty());
-        assert_eq!(verifier.notarize.verified().len(), 1);
-
-        verifier.set_leader(leader_vote.signer(), Some(&leader_vote));
-
-        // A network duplicate of the already-verified leader vote is dropped.
-        verifier.add(Vote::Notarize(leader_vote.clone()), false);
-        assert!(verifier.notarize.pending().is_empty());
-
-        for scheme in schemes.iter().skip(1).take(quorum as usize - 2) {
-            verifier.add(
-                Vote::Notarize(create_notarize(scheme, round, View::new(1), 10)),
-                false,
-            );
-        }
-        assert!(
-            verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
-                .await
-                .is_none(),
-            "verified leader vote must not also count as pending"
-        );
-
-        verifier.add(
-            Vote::Notarize(create_notarize(
-                &schemes[quorum as usize - 1],
-                round,
-                View::new(1),
-                10,
-            )),
-            false,
-        );
-        let (batch, failed) = verifier
-            .try_verify_notarizes(&mut rng, &Sequential)
-            .await
-            .expect("batch should be worthwhile at quorum");
-        assert_eq!(batch, quorum as usize - 1);
-        assert!(failed.is_empty());
-        assert_eq!(verifier.notarize.verified().len(), quorum as usize);
-    }
-
-    #[test_async]
-    async fn test_verified_leader_notarize_is_not_reverified() {
-        // The skip-reverification bookkeeping is scheme-independent; one
-        // batchable scheme exercises it (the helper is a no-op otherwise).
-        verified_leader_notarize_is_not_reverified(ed25519::fixture).await;
     }
 
     async fn certificate_proposal_allows_finalize_verification<S, F>(mut fixture: F)
@@ -2224,68 +2160,48 @@ mod tests {
         ready_finalizes_quorum_already_met_by_verified(secp256r1::fixture);
     }
 
-    /// A minimal vote for exercising [Certification] mechanics.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct TestVote(u32);
-
-    impl Attributable for TestVote {
-        fn signer(&self) -> Participant {
-            Participant::new(self.0)
-        }
-    }
-
     #[test_async]
     async fn test_certification_lifecycle() {
-        // Non-batchable schemes verify eagerly whenever votes are pending
-        let mut eager = Certification::<TestVote>::new(3, false);
-        eager.add(TestVote(1), false);
+        // Non-batchable schemes verify eagerly whenever votes are pending.
+        let mut eager = Certification::<u64>::new(3, false);
+        eager.add(1, false);
         assert!(eager.should_verify());
 
-        let mut votes = Certification::<TestVote>::new(3, true);
-        votes.add(TestVote(1), false);
-        votes.add(TestVote(2), true);
-        assert_eq!(votes.pending(), &[TestVote(1)]);
-        assert_eq!(votes.verified(), &[TestVote(2)]);
+        // Certification owns the pending and verified buffer lifecycle; its
+        // caller owns signer uniqueness. Opaque values keep this test focused
+        // on that boundary.
+        let mut votes = Certification::<u64>::new(3, true);
+        votes.add(1, false);
+        votes.add(2, true);
+        assert_eq!(votes.pending(), &[1]);
+        assert_eq!(votes.verified(), &[2]);
 
-        // Duplicate signers never double-count. A pending duplicate is
-        // dropped and a verified copy displaces the pending original.
-        votes.add(TestVote(1), false);
-        assert_eq!(votes.pending(), &[TestVote(1)]);
-        votes.add(TestVote(1), true);
-        assert!(votes.pending().is_empty());
-        assert_eq!(votes.verified(), &[TestVote(2), TestVote(1)]);
-        votes.add(TestVote(1), false);
-        assert!(votes.pending().is_empty());
-
-        // Batchable schemes wait until the buffers could reach quorum
+        // Batchable schemes wait until the buffers could reach quorum.
         assert!(!votes.should_verify());
-        votes.add(TestVote(3), false);
+        votes.add(3, false);
         assert!(votes.should_verify());
 
         // Verification consumes both buffers and stores the new verified set.
         // Below quorum, recovery is refused.
         let (batch, invalid) = votes
             .try_verify(|pending, verified| async move {
-                assert_eq!(pending, vec![TestVote(3)]);
-                assert_eq!(verified, vec![TestVote(2), TestVote(1)]);
-                (vec![TestVote(1), TestVote(2)], vec![])
+                assert_eq!(pending, vec![1, 3]);
+                assert_eq!(verified, vec![2]);
+                (vec![1, 2], vec![])
             })
             .await
             .unwrap();
-        assert_eq!(batch, 1);
+        assert_eq!(batch, 2);
         assert!(invalid.is_empty());
         assert!(votes.pending().is_empty());
         assert!(votes.try_complete().is_none());
 
         // At quorum, recovery surrenders the votes and completes. All later
         // votes are dropped.
-        votes.add(TestVote(3), true);
-        assert_eq!(
-            votes.try_complete(),
-            Some(vec![TestVote(1), TestVote(2), TestVote(3)])
-        );
+        votes.add(3, true);
+        assert_eq!(votes.try_complete(), Some(vec![1, 2, 3]));
         assert!(votes.is_complete());
-        votes.add(TestVote(5), false);
+        votes.add(5, false);
         assert!(votes.pending().is_empty());
         assert!(votes.verified().is_empty());
         assert!(
@@ -2296,9 +2212,9 @@ mod tests {
         );
         assert!(votes.try_complete().is_none());
 
-        // Network certificates complete without any votes
-        let mut votes = Certification::<TestVote>::new(3, true);
-        votes.add(TestVote(1), false);
+        // Network certificates complete without any votes.
+        let mut votes = Certification::<u64>::new(3, true);
+        votes.add(1, false);
         votes.complete();
         assert!(votes.is_complete());
         assert!(votes.pending().is_empty());

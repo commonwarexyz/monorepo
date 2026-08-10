@@ -378,7 +378,7 @@ impl<
         });
     }
 
-    /// Fetches ancestry from the leader whose proposal requires it.
+    /// Fetches missing proposal ancestry, preferring `target` when provided.
     fn resolve<R>(
         &self,
         resolver: &mut R,

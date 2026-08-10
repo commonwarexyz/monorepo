@@ -39,22 +39,15 @@ pub(crate) enum Effect {
     RetainAbove(View),
 }
 
-/// Tracks the construction floor, retained finalization, and certificates
-/// needed to repair views through the current view.
-///
-/// The construction floor and retained finalization have different lifetimes.
-/// A higher certified notarization advances the floor, but it does not replace
-/// the finalization as a settling response for requests at or below the
-/// finalized view. The full finalization certificate is therefore retained
-/// independently so it remains servable after the floor advances. Only the
-/// highest finalization is needed because it settles every request that a
-/// lower finalization would settle.
+/// Tracks certificates used to construct and repair ancestry through the
+/// current view.
 pub struct State<S: Scheme, D: Digest> {
     /// Highest seen view.
     current_view: View,
     /// Highest certificate used as the construction floor.
     floor: Option<Certificate<S, D>>,
-    /// Full highest finalization, retained independently of the movable floor.
+    /// Highest finalization, retained across floor advances because it settles
+    /// every request at or below its view.
     finalization: Option<Certificate<S, D>>,
     /// Notarizations pending certification (possible floors).
     notarizations: BTreeMap<View, Notarization<S, D>>,

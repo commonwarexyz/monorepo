@@ -468,12 +468,12 @@ pub mod types;
 
 use crate::types::{TermLength, View, ViewDelta};
 
-/// The view geometry of a term: its length and `optimistic_views`, the
-/// depth of the two optimistic windows. The *admission* window is
-/// anchored at the current view ([`Self::in_admission_window`]); the
-/// *issuance* window at the last directly-notarized view
-/// ([`Self::issuance_floor`]). See the [module docs] for what each
-/// governs.
+/// Defines term boundaries and optimistic lookahead.
+///
+/// The admission window limits future votes relative to the current view
+/// ([`Self::in_admission_window`]). The issuance window limits how far a
+/// directly notarized anchor can authorize uncertified descendants
+/// ([`Self::issuance_floor`]). See the [module docs] for the full rules.
 ///
 /// `current` arguments must be locally derived views (they feed
 /// panicking arithmetic in [`View::term_end`]); candidate arguments
