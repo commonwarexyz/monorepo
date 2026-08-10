@@ -456,6 +456,14 @@ fn unknown_peer(participants: &[PublicKey]) -> PublicKey {
     panic!("unable to derive non-participant peer");
 }
 
+fn max_peers_per_set(participants: &[PublicKey], inject_bad_ack: bool) -> NonZeroUsize {
+    let peer_count = participants
+        .len()
+        .checked_add(usize::from(inject_bad_ack))
+        .expect("peer set size overflow");
+    NZUsize!(peer_count)
+}
+
 fn spawn_target_watchers<S>(
     context: deterministic::Context,
     reporters: &BTreeMap<PublicKey, ReporterMailbox<S, Sha256Digest>>,
@@ -505,7 +513,7 @@ pub fn fuzz(input: FuzzInput) {
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: MAX_NETWORK_SIZE,
-                max_peers_per_set: NZUsize!(fixture.participants.len()),
+                max_peers_per_set: max_peers_per_set(&fixture.participants, input.inject_bad_ack),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
             },
