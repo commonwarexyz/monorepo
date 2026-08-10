@@ -225,7 +225,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
-                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let expected_end = merkleized.bounds().tip.size;
                     let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
@@ -281,7 +281,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let expected_end = merkleized.bounds().tip.size;
                     let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
@@ -325,7 +325,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let expected_end = merkleized.bounds().tip.size;
                     let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
@@ -373,7 +373,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let expected_end = merkleized.bounds().tip.size;
                     let (db, applied) = db
                         .apply_batch(merkleized)
                         .await
@@ -449,7 +449,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None).await.unwrap();
-                    let expected_end = Location::new(merkleized.bounds().total_size);
+                    let expected_end = merkleized.bounds().tip.size;
                     let expected_root = merkleized.root();
                     let (db, applied) = db
                         .apply_batch(merkleized)
@@ -527,7 +527,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
-        let expected_end = Location::new(merkleized.bounds().total_size);
+        let expected_end = merkleized.bounds().tip.size;
         let (db, applied) = db
             .apply_batch(merkleized)
             .await

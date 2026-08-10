@@ -121,7 +121,6 @@ impl<
                 strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
                 term_length,
             },
@@ -178,7 +177,7 @@ impl<
     /// Used for request-response certificate fetching. When a node needs to
     /// catch up on a view it missed (e.g., to verify a proposal's parent), it
     /// uses this channel to request certificates from peers. The resolver handles
-    /// rate limiting, retries, and peer selection for these requests.
+    /// retries and peer selection for these requests.
     pub fn start(
         mut self,
         vote_network: (

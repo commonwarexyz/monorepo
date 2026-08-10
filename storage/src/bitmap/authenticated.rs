@@ -172,13 +172,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
     /// The returned index is absolute and includes pruned chunks.
     #[inline]
     fn complete_chunks(&self) -> usize {
-        let chunks_len = self.bitmap.chunks_len();
-        if self.bitmap.is_chunk_aligned() {
-            chunks_len
-        } else {
-            // Last chunk is partial
-            chunks_len.checked_sub(1).unwrap()
-        }
+        self.bitmap.complete_chunks()
     }
 
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the

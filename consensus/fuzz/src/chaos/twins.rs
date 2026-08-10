@@ -347,7 +347,6 @@ where
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
             skip_timeout: Duration::from_secs(11),
-            fetch_concurrent: input.fetch_concurrent,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(
@@ -406,7 +405,6 @@ where
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
             skip_timeout: Duration::from_secs(11),
-            fetch_concurrent: input.fetch_concurrent,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(
@@ -462,7 +460,6 @@ where
         Duration::from_secs(1),
         Duration::from_millis(1_500),
         input.mailbox_size,
-        input.fetch_concurrent,
         input.forwarding,
         partition,
         pending,

@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_cryptography::transcript::{Summary, Transcript};
+use commonware_cryptography::transcript::{Summary, Transcript, Version};
 use libfuzzer_sys::fuzz_target;
 
 const MIN_DATA_SIZE: usize = 32;
@@ -210,7 +210,9 @@ impl<'a> Arbitrary<'a> for TranscriptSequence {
 impl ExecutionContext {
     fn new(namespace: &[u8]) -> Self {
         Self {
-            transcript: Transcript::new(namespace),
+            // V1's injective framing is required for the equivalence oracle:
+            // V0 summaries can collide for non-equivalent arbitrary histories.
+            transcript: Transcript::new(namespace, Version::V1),
         }
     }
 
@@ -224,7 +226,7 @@ impl ExecutionContext {
             }
             FuzzedOperation::SummarizeAndResume(_) => {
                 let summary = self.transcript.summarize();
-                self.transcript = Transcript::resume(summary);
+                self.transcript = Transcript::resume(summary, Version::V1);
             }
         }
     }

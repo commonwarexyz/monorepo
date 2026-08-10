@@ -4,15 +4,16 @@
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key.
 //! The wrapper types here capture a [`Shared`] database handle so the batch API
-//! can read through to committed state.
+//! can read through to applied state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
     journal::contiguous::{
@@ -93,13 +94,13 @@ where
         self
     }
 
-    /// Read a value by location, falling back to committed state.
+    /// Read a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to committed state.
+    /// Read multiple values by location, falling back to applied state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
@@ -134,6 +135,24 @@ where
     db: Shared<Keyless<F, E, V, C, H, S>>,
 }
 
+impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
+}
+
 impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -161,13 +180,13 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to committed state.
+    /// Read a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to committed state.
+    /// Read multiple values by location, falling back to applied state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
@@ -264,11 +283,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         KeylessUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
@@ -277,12 +296,12 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -349,11 +368,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         KeylessUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
@@ -362,12 +381,12 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -530,7 +549,8 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = db
+                .new_batch_for_test::<_>()
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -541,11 +561,11 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                slot.put(
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap(),
-                );
+                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
+                slot.put(database);
+                sync.await.expect("finalize flush failed");
             }
 
             let guard = db.read().await;
@@ -569,7 +589,8 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = db
+                .new_batch_for_test::<_>()
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -582,7 +603,7 @@ mod tests {
                 merkleized.root(),
                 non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    mmr::Location::new(merkleized.bounds().total_size)
+                    merkleized.bounds().tip.size
                 ),
             );
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
@@ -592,10 +613,7 @@ mod tests {
 
             let wrong_start = AnySyncTarget::new(
                 merkleized.root(),
-                non_empty_range!(
-                    mmr::Location::new(0),
-                    mmr::Location::new(merkleized.bounds().total_size)
-                ),
+                non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip.size),
             );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -606,7 +624,7 @@ mod tests {
                 merkleized.root(),
                 non_empty_range!(
                     merkleized.bounds().inactivity_floor,
-                    mmr::Location::new(merkleized.bounds().total_size - 1)
+                    merkleized.bounds().tip.size - 1
                 ),
             );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(

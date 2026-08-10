@@ -5,13 +5,13 @@
 //! adapters expose append and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     merkle::{Family, Location},
@@ -108,6 +108,25 @@ where
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, V, S>>,
     db: Shared<CompactDb<F, E, V, H, C, S>>,
+}
+
+impl<F, E, V, H, S, C> Clone for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, V>: EncodeShared,
+    Operation<F, V>: CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<F, E, V, H, S, C> Deref for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
@@ -213,23 +232,23 @@ where
         }
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         KeylessUnjournaledUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -279,23 +298,23 @@ where
         }
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         KeylessUnjournaledUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == Location::new(batch.bounds().total_size)
+        batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -538,7 +557,8 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = db
+                .new_batch_for_test::<_>()
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -550,11 +570,11 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                slot.put(
-                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap(),
-                );
+                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
+                slot.put(database);
+                sync.await.expect("finalize flush failed");
             }
 
             let guard = db.read().await;
@@ -574,7 +594,8 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = db
+                .new_batch_for_test::<_>()
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -585,7 +606,7 @@ mod tests {
 
             let valid_target = sync::CompactTarget {
                 root: merkleized.root(),
-                size: mmr::Location::new(merkleized.bounds().total_size),
+                size: merkleized.bounds().tip.size,
             };
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -594,7 +615,7 @@ mod tests {
 
             let wrong_size = sync::CompactTarget {
                 root: merkleized.root(),
-                size: mmr::Location::new(merkleized.bounds().total_size - 1),
+                size: merkleized.bounds().tip.size - 1,
             };
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
@@ -735,7 +756,7 @@ mod tests {
             // hangs so the test can observe the gauges while they diverge.
             let unservable_target = sync::CompactTarget {
                 root: Sha256::hash(&[&[0xFF]]),
-                size: Location::new(*target.size + 1),
+                size: target.size + 1,
             };
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
             let superseding_source = SupersedingCompactSource {

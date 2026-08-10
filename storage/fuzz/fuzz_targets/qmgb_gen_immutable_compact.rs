@@ -215,7 +215,7 @@ fn fuzz_fixed<F: Family>(input: &FuzzInput, name: &str) {
                 Operation::ToBatch => {
                     let snapshot = db.to_batch();
                     assert_eq!(snapshot.root(), db.root());
-                    assert_eq!(snapshot.bounds().total_size, db.size().as_u64());
+                    assert_eq!(snapshot.bounds().tip.size, db.size());
                 }
                 Operation::Target => {
                     let target = db.target();
@@ -375,7 +375,7 @@ fn fuzz_variable<F: Family>(input: &FuzzInput, name: &str) {
                 Operation::ToBatch => {
                     let snapshot = db.to_batch();
                     assert_eq!(snapshot.root(), db.root());
-                    assert_eq!(snapshot.bounds().total_size, db.size().as_u64());
+                    assert_eq!(snapshot.bounds().tip.size, db.size());
                 }
                 Operation::Target => {
                     let target = db.target();

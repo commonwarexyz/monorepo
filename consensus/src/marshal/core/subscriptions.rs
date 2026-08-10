@@ -127,7 +127,7 @@ impl<V: Variant> Subscriptions<V> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{core::variant::NoBuffer, mocks::block::Block, standard::Standard},
+        marshal::{core::variant::NoBuffer, mocks::block::EmptyBlock, standard::Standard},
         types::{Height, Round},
     };
     use commonware_cryptography::{
@@ -142,7 +142,7 @@ mod tests {
     use futures::FutureExt;
     use std::sync::Arc;
 
-    type TestBlock = Block<Digest, ()>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
     type TestWaiters = AbortablePool<Result<Arc<TestBlock>, KeyFor<TestVariant>>>;
     type Subscriber = oneshot::Sender<Arc<TestBlock>>;
@@ -193,13 +193,13 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: Digest) {}
+        fn retire(&self, _update: crate::marshal::core::Retirement<Digest>) {}
 
         fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
     }
 
     fn block(height: u64, timestamp: u64) -> TestBlock {
-        Block::new::<Sha256>((), Sha256::fill(0), Height::new(height), timestamp)
+        TestBlock::new(Sha256::fill(0), Height::new(height), timestamp)
     }
 
     fn assert_receives(receiver: oneshot::Receiver<Arc<TestBlock>>, expected: &TestBlock) {

@@ -344,7 +344,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_eq!(range.start, start);
                     assert_eq!(range.end, db.size());
                     assert!(
-                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch { .. })),
+                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch)),
                         "second batch from the same state must be stale"
                     );
                     expected_metadata = None;

@@ -275,9 +275,9 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                     match expect_err {
                         None => {
-                            assert_eq!(merkleized.bounds().base_size, db.size().as_u64());
+                            assert_eq!(merkleized.bounds().base.size, db.size());
                             assert_eq!(
-                                merkleized.bounds().total_size,
+                                merkleized.bounds().tip.size.as_u64(),
                                 db.size().as_u64() + pending_count + 1
                             );
                             assert_eq!(merkleized.bounds().inactivity_floor, floor);
@@ -341,7 +341,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     (db, _) = db.apply_batch(batch_a).expect("Commit should not fail");
                     expected_metadata = None;
                     assert!(
-                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch { .. })),
+                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch)),
                         "second batch from the same state must be stale"
                     );
                 }
@@ -490,8 +490,8 @@ fn fuzz_family<F: Family, S: Strategy>(
                 Operation::ToBatch => {
                     let batch = db.to_batch();
                     assert_eq!(batch.root(), db.root());
-                    assert_eq!(batch.bounds().base_size, db.size().as_u64());
-                    assert_eq!(batch.bounds().total_size, db.size().as_u64());
+                    assert_eq!(batch.bounds().base.size, db.size());
+                    assert_eq!(batch.bounds().tip.size, db.size());
                     assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
                 }
 

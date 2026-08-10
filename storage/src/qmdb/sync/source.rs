@@ -61,9 +61,7 @@ impl<F: Family> Request<F> {
             Self::Boundary { .. } => NonZeroU64::MIN,
         }
     }
-}
 
-impl<F: Family> Request<F> {
     /// Total-order key for map lookups. The final component separates the variants.
     fn order_key(&self) -> (u64, u64, u64, bool) {
         (
@@ -652,7 +650,7 @@ pub(crate) mod tests {
         source
             .serve(Request::Boundary {
                 size: target.size,
-                start: Location::new(*target.size - 1),
+                start: target.size - 1,
             })
             .await
     }

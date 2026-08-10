@@ -1219,7 +1219,7 @@ where
         fetch_batch_size: NZU64!(1),
         target: sync::Target {
             root: target.root,
-            range: non_empty_range!(Location::new(*target.size - 1), target.size),
+            range: non_empty_range!(target.size - 1, target.size),
         },
         source,
         apply_batch_size: NZU64!(1024),
@@ -1575,7 +1575,7 @@ mod compact_variable_mmr {
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            proof.leaves = Location::new(*proof.leaves - 1);
+            proof.leaves -= 1;
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
@@ -1919,7 +1919,7 @@ mod compact_variable_mmr {
                 client_cfg.strategy.clone(),
                 journal,
                 client_cfg.commit_codec_config,
-                Location::new(*target_b.size - 1),
+                target_b.size - 1,
                 pinned_nodes,
                 op,
             )
@@ -1950,7 +1950,7 @@ mod compact_variable_mmr {
                 client_cfg.strategy.clone(),
                 journal,
                 client_cfg.commit_codec_config,
-                Location::new(*target_b.size - 1),
+                target_b.size - 1,
                 pinned_nodes,
                 op,
             )
@@ -2317,7 +2317,7 @@ mod compact_variable_mmb {
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            proof.leaves = Location::new(*proof.leaves - 1);
+            proof.leaves -= 1;
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),

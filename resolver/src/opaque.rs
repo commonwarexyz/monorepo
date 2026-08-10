@@ -4,7 +4,8 @@
 //! requires asking an application-provided source for raw bytes or objects.
 //! Implementations provide [`Fetcher::fetch`]; this module handles request
 //! coalescing, retain pruning, retry scheduling, consumer delivery, and
-//! accepted-response redelivery.
+//! accepted-response redelivery. An ignored consumer outcome retires the key
+//! without accepting the value or retrying the source.
 //!
 //! Target hints supplied through [`crate::TargetedResolver::fetch_targeted`] and
 //! [`crate::TargetedResolver::fetch_all_targeted`] are ignored because opaque
@@ -551,6 +552,14 @@ where
                 self.deliveries.discard_response(&key);
                 self.schedule_retry(key);
             }
+            Outcome::Ignored => {
+                // The consumer no longer needs this key. Retire it without accepting the
+                // response or scheduling another source fetch.
+                self.fetch.inc(Status::Dropped);
+                self.requests.remove(&key);
+                self.subscribers.remove(&key);
+                self.deliveries.remove(&key);
+            }
         }
     }
 
@@ -917,6 +926,63 @@ mod tests {
                     .encode()
                     .contains("resolver_actor_fetch_total{status=\"Ambiguous\"} 1")
             );
+        });
+    }
+
+    #[test]
+    fn ignored_delivery_retires_without_retry() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"obsolete")));
+            fetcher.push(1, Some(Bytes::from_static(b"fresh")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(delivery.value, Bytes::from_static(b"obsolete"));
+            delivery
+                .response
+                .send(Outcome::Ignored)
+                .expect("response dropped");
+
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
+            assert!(
+                context
+                    .encode()
+                    .contains("resolver_actor_fetch_total{status=\"Dropped\"} 1")
+            );
+
+            // Ignoring retires the old fetch rather than leaving a tombstone.
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
+            delivery
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+            assert_eq!(fetcher.calls(), 2);
         });
     }
 

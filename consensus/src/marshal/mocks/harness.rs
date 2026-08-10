@@ -139,10 +139,12 @@ pub async fn setup_network_with_participants<I>(
 where
     I: IntoIterator<Item = K>,
 {
+    let participants: Vec<_> = participants.into_iter().collect();
     let (network, oracle) = Network::new_with_peers(
         context.child("network"),
         simulated::Config {
             max_size: 1024 * 1024,
+            max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: true,
             tracked_peer_sets,
         },
@@ -1933,7 +1935,7 @@ impl TestHarness for StandardHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -1946,7 +1948,7 @@ impl TestHarness for StandardHarness {
             application,
             mailbox,
             extra: buffer,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }
@@ -2728,7 +2730,7 @@ impl TestHarness for CodingHarness {
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
-        let (actor, mailbox, height) = Actor::init(
+        let (actor, mailbox, floor) = Actor::init(
             context.child("actor"),
             finalizations_by_height,
             finalized_blocks,
@@ -2741,7 +2743,7 @@ impl TestHarness for CodingHarness {
             application,
             mailbox,
             extra: shard_mailbox,
-            height,
+            height: floor.height(),
             actor_handle,
         }
     }

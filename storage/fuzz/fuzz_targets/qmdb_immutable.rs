@@ -161,7 +161,7 @@ fn assign_pending_locations<F: MerkleFamily>(
     let mut sorted_keys: Vec<Digest> = pending.iter().map(|(k, _)| *k).collect();
     sorted_keys.sort();
     for (i, key) in sorted_keys.iter().enumerate() {
-        let loc = Location::new(base.as_u64() + i as u64);
+        let loc = base + i as u64;
         keys_set.push((*key, loc));
         set_locations.push((*key, loc));
     }
@@ -268,7 +268,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             ]
                         );
                         assert_eq!(
-                            merkleized.bounds().total_size,
+                            merkleized.bounds().tip.size.as_u64(),
                             db.size().as_u64() + pending_sets.len() as u64 + 1
                         );
                         db
@@ -301,14 +301,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             // Advance floor to the commit location (end of this batch).
                             // total_size = end + pending_count + 1 (commit op).
                             // Floor at the commit op is the maximum valid value.
-                            Location::new(*end + pending_count)
+                            end + pending_count
                         } else {
                             db.inactivity_floor_loc()
                         };
                         let expected_metadata_after = metadata.clone();
                         let merkleized = batch.merkleize(&db, metadata, floor).await;
                         let expected_root = merkleized.root();
-                        let expected_size = Location::new(merkleized.bounds().total_size);
+                        let expected_size = merkleized.bounds().tip.size;
                         let (db, _) = db.apply_batch(merkleized).await.unwrap();
                         let db = db.commit().await.unwrap();
                         assert_eq!(db.size(), expected_size);
@@ -548,8 +548,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     ImmutableOperation::ToBatch => {
                         let batch = db.to_batch();
                         assert_eq!(batch.root(), db.root());
-                        assert_eq!(batch.bounds().base_size, db.size().as_u64());
-                        assert_eq!(batch.bounds().total_size, db.size().as_u64());
+                        assert_eq!(batch.bounds().base.size, db.size());
+                        assert_eq!(batch.bounds().tip.size, db.size());
                         assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
                         db
                     }

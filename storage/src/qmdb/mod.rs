@@ -179,7 +179,7 @@ where
     }
 
     let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
-    Ok(F::inactive_peaks(F::location_to_position(op_count), floor))
+    Ok(F::inactive_peaks(op_count, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -223,14 +223,8 @@ pub enum Error<F: Family> {
     /// The batch was created from a different database state than the current one.
     ///
     /// See [`batch_chain`] for more details on staleness detection.
-    #[error(
-        "stale batch: db has {db_size} ops, batch requires {batch_db_size}, {batch_base_size}, or an ancestor boundary"
-    )]
-    StaleBatch {
-        db_size: u64,
-        batch_db_size: u64,
-        batch_base_size: u64,
-    },
+    #[error("stale batch: current database state does not match the batch")]
+    StaleBatch,
 
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]

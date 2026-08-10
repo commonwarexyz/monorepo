@@ -37,7 +37,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 
 /// [Acknowledgement] that returns after all instances are acknowledged.
 ///
-/// If any acknowledgement is not handled, the acknowledgement will be cancelled.
+/// Dropping an acknowledgement cancels the waiter.
 pub struct Exact {
     state: Arc<ExactState>,
     acknowledged: bool,

@@ -267,7 +267,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
         Some(Proposed { block, merkleized })
@@ -299,7 +299,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        _databases: &Self::Databases,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
             .lock()
@@ -450,41 +450,7 @@ pub(super) struct ReshareEngine {
 
 pub(super) struct ValidatorEngine {
     context: DeterministicContext,
-    handles: ValidatorHandles,
-}
-
-struct ValidatorHandles {
-    probe: Handle<()>,
-    qmdb: Handle<()>,
-    reshare: Handle<()>,
-    orchestrator: Handle<()>,
-    marshal: Handle<()>,
-    stateful: Handle<()>,
-}
-
-impl ValidatorHandles {
-    async fn join(mut self) {
-        futures::try_join!(
-            &mut self.probe,
-            &mut self.qmdb,
-            &mut self.reshare,
-            &mut self.orchestrator,
-            &mut self.marshal,
-            &mut self.stateful,
-        )
-        .expect("validator actor failed");
-    }
-}
-
-impl Drop for ValidatorHandles {
-    fn drop(&mut self) {
-        self.probe.abort();
-        self.qmdb.abort();
-        self.reshare.abort();
-        self.orchestrator.abort();
-        self.marshal.abort();
-        self.stateful.abort();
-    }
+    handles: [Handle<()>; 6],
 }
 
 #[derive(Clone)]
@@ -834,7 +800,7 @@ impl EngineDefinition for ReshareEngine {
             };
             plan = plan.with_floor(finalization);
         }
-        let (marshal_actor, marshal, _) = MarshalActor::init(
+        let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -976,7 +942,7 @@ impl EngineDefinition for ReshareEngine {
                 },
                 db_config,
                 provider: (),
-                marshal: marshal.clone(),
+                marshal: (marshal.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
@@ -1023,7 +989,6 @@ impl EngineDefinition for ReshareEngine {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_secs(2),
-                    fetch_concurrent: NZUsize!(3),
                     view_retention: ViewDelta::new(10),
                     skip_timeout: Duration::from_secs(5),
                     forwarding: ForwardingPolicy::Disabled,
@@ -1077,14 +1042,14 @@ impl EngineDefinition for ReshareEngine {
         (
             ValidatorEngine {
                 context,
-                handles: ValidatorHandles {
-                    probe: probe_handle,
-                    qmdb: qmdb_handle,
-                    reshare: reshare_handle,
-                    orchestrator: orchestrator_handle,
-                    marshal: marshal_handle,
-                    stateful: stateful_handle,
-                },
+                handles: [
+                    probe_handle,
+                    qmdb_handle,
+                    reshare_handle,
+                    orchestrator_handle,
+                    marshal_handle,
+                    stateful_handle,
+                ],
             },
             ValidatorState {
                 marshal,
@@ -1098,7 +1063,11 @@ impl EngineDefinition for ReshareEngine {
 
     fn start(engine: Self::Engine) -> Handle<()> {
         let ValidatorEngine { context, handles } = engine;
-        context.spawn(move |_| handles.join())
+        context.spawn(move |_| async move {
+            Handle::select(handles)
+                .await
+                .expect("validator actor failed");
+        })
     }
 }
 

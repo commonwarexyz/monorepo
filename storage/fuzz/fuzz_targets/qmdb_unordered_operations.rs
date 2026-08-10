@@ -93,7 +93,7 @@ async fn commit_pending<F: MerkleFamily>(
         batch = batch.write(k, v);
     }
     let merkleized = batch.merkleize(&db, None).await.unwrap();
-    let expected_end = Location::new(merkleized.bounds().total_size);
+    let expected_end = merkleized.bounds().tip.size;
     let (db, applied) = db
         .apply_batch(merkleized)
         .await

@@ -96,6 +96,7 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
+    let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -174,6 +175,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_peers_per_set,
         1024 * 1024, // 1MB
     );
 
@@ -192,13 +194,6 @@ fn main() {
         let (mut network, mut oracle) =
             authenticated::discovery::Network::new(context.child("network"), p2p_cfg);
 
-        // Configure channel capacity
-        //
-        // The rate is enforced independently for each peer. All peers share each channel's inbound
-        // mailbox, so size its backlog for one full burst from every peer.
-        let message_rate = Quota::per_second(NZU32!(10));
-        let message_backlog = authenticated::backlog(validators.len(), message_rate);
-
         // Provide authorized peers
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
@@ -207,13 +202,11 @@ fn main() {
 
         // Register consensus channels
         //
-        // To support more views per second, increase the rate and retain enough backlog for every
-        // participant's full burst.
-        let (vote_sender, vote_receiver) = network.register(0, message_rate, message_backlog);
-        let (certificate_sender, certificate_receiver) =
-            network.register(1, message_rate, message_backlog);
-        let (resolver_sender, resolver_receiver) =
-            network.register(2, message_rate, message_backlog);
+        // To support more views per second, increase the rate.
+        let message_rate = Quota::per_second(NZU32!(10));
+        let (vote_sender, vote_receiver) = network.register(0, message_rate);
+        let (certificate_sender, certificate_receiver) = network.register(1, message_rate);
+        let (resolver_sender, resolver_receiver) = network.register(2, message_rate);
 
         // Initialize application
         let strategy = context.strategy(NZUsize!(2));
@@ -254,7 +247,6 @@ fn main() {
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
-                fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,

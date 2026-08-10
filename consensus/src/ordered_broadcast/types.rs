@@ -527,10 +527,9 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         let chunk = Chunk::read(reader)?;
         let signature = P::Signature::read(reader)?;
 
-        // Decode `Option<()>` to check if parent exists
-        // This consumes the bool prefix and positions us correctly
-        let parent = if Option::<()>::read(reader)?.is_some() {
-            // The bool prefix has been consumed, now read parent fields
+        // A parent is encoded as an `Option`, whose boolean prefix must be read before
+        // its epoch can select the certificate decoding configuration.
+        let parent = if bool::read(reader)? {
             let digest = D::read(reader)?;
             let epoch = Epoch::read(reader)?;
 

@@ -1414,62 +1414,83 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        // Create and populate a simple target database
-        let mut target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(10);
-        target_db = H::apply_ops(target_db, target_ops).await;
-        // commit already done in apply_ops
+        let base_ops = H::create_ops(10);
+        let older_source_config = H::config(&context.next_u64().to_string(), &context);
+        let mut older_source =
+            H::init_db_with_config(context.child("older_source"), older_source_config).await;
+        older_source = H::apply_ops(older_source, base_ops.clone()).await;
+        let older_target = Target {
+            root: H::sync_target_root(&older_source),
+            range: non_empty_range!(older_source.sync_boundary(), older_source.bounds().end),
+        };
+        let older_root = older_source.root();
 
-        // Capture target state
-        let sync_root = H::sync_target_root(&target_db);
-        let verification_root = target_db.root();
-        let lower_bound = target_db.sync_boundary();
-        let upper_bound = target_db.bounds().end;
+        let newer_source_config = H::config(&context.next_u64().to_string(), &context);
+        let mut newer_source =
+            H::init_db_with_config(context.child("newer_source"), newer_source_config).await;
+        newer_source = H::apply_ops(newer_source, base_ops).await;
+        newer_source = H::apply_ops(newer_source, H::create_ops_seeded(5, 1)).await;
+        let newer_target = Target {
+            root: H::sync_target_root(&newer_source),
+            range: non_empty_range!(newer_source.sync_boundary(), newer_source.bounds().end),
+        };
+        let newer_root = newer_source.root();
+        assert!(newer_target.range.end() > older_target.range.end());
 
-        // Perform sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let target_db = Arc::new(target_db);
-        let config = Config {
+        let older_source = Arc::new(older_source);
+        let newer_source = Arc::new(newer_source);
+        let synced_db: H::Db = sync::sync(Config {
             db_config: db_config.clone(),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: sync_root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
-            context: client_context.child("client"),
-            source: target_db.clone(),
+            target: newer_target,
+            context: client_context.child("newer"),
+            source: newer_source.clone(),
             apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 1,
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
-        };
-        let synced_db: H::Db = sync::sync(config).await.unwrap();
-
-        // Verify initial sync worked
-        assert_eq!(synced_db.root(), verification_root);
-
-        // Save state before dropping
-        let expected_root = synced_db.root();
-        let expected_op_count = synced_db.bounds().end;
-        let expected_inactivity_floor_loc = synced_db.inactivity_floor_loc();
-
-        // Re-open the database
+        })
+        .await
+        .unwrap();
+        assert_eq!(synced_db.root(), newer_root);
         drop(synced_db);
+
+        let recovered_db: H::Db = sync::sync(Config {
+            db_config: db_config.clone(),
+            fetch_batch_size: NZU64!(5),
+            target: older_target.clone(),
+            context: client_context.child("older"),
+            source: older_source.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(recovered_db.root(), older_root);
+        assert_eq!(recovered_db.bounds().end, *older_target.range.end());
+        assert_eq!(recovered_db.sync_boundary(), *older_target.range.start());
+        drop(recovered_db);
+
         let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
+        assert_eq!(reopened_db.root(), older_root);
+        assert_eq!(reopened_db.bounds().end, *older_target.range.end());
+        assert_eq!(reopened_db.sync_boundary(), *older_target.range.start());
 
-        // Verify the state is unchanged
-        assert_eq!(reopened_db.root(), expected_root);
-        assert_eq!(reopened_db.bounds().end, expected_op_count);
-        assert_eq!(
-            reopened_db.inactivity_floor_loc(),
-            expected_inactivity_floor_loc
-        );
-
-        // Cleanup
-        Arc::try_unwrap(target_db)
+        Arc::try_unwrap(older_source)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+        Arc::try_unwrap(newer_source)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
             .destroy()
             .await
