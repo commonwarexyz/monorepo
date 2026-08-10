@@ -295,15 +295,21 @@ impl FreelistImplementation for Freelist {
     #[inline]
     fn take_batch(&self, out: &mut Vec<PooledBuffer>, max: usize) {
         if max == 1 {
-            if let Some(buffer) = self.take() {
+            // SAFETY: WorkerState retains the shared freelist until every held
+            // buffer is returned by its Drop implementation.
+            if let Some(buffer) = unsafe { self.take() } {
                 out.push(buffer);
             }
             return;
         }
 
-        self.take_batch(max, |buffer| {
-            out.push(buffer);
-        });
+        // SAFETY: WorkerState retains the shared freelist until every held
+        // buffer is returned by its Drop implementation.
+        unsafe {
+            self.take_batch(max, |buffer| {
+                out.push(buffer);
+            });
+        }
     }
 
     #[inline]

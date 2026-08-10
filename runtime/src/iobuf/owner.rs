@@ -1091,6 +1091,8 @@ impl PooledOwner {
 ///
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.
+/// The originating side-table entry must remain alive until then because all
+/// buffer metadata is read through `owner`.
 pub struct PooledBuffer {
     owner: NonNull<PooledOwner>,
 }
@@ -1127,7 +1129,8 @@ impl PooledBuffer {
     ///
     /// The caller must own `owner` initialization for this size class. No other
     /// thread may read it until the returned buffer is published through the
-    /// freelist bitmap or handed to a checked-out owner.
+    /// freelist bitmap or handed to a checked-out owner. The side-table entry
+    /// must outlive the returned buffer and every operation on it.
     #[inline]
     pub unsafe fn new(owner: NonNull<PooledOwner>, layout: Layout, zeroed: bool) -> Self {
         assert!(layout.size() > 0, "pooled data layout must be non-zero");
@@ -1247,7 +1250,8 @@ impl PooledBuffer {
     ///
     /// # Safety
     ///
-    /// `layout` must exactly match the layout used to allocate this buffer.
+    /// `layout` must exactly match the layout used to allocate this buffer,
+    /// and the owner side-table entry must remain live for this call.
     #[inline(always)]
     pub unsafe fn deallocate(self, layout: Layout) {
         // SAFETY: guaranteed by the caller.

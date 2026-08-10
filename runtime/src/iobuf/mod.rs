@@ -119,8 +119,9 @@ pub const fn cache_line_size() -> usize {
 
 /// Benchmark-only access to internal pool machinery.
 ///
-/// Returning a raw pooled buffer requires the caller to prove that the buffer
-/// came from the target freelist:
+/// Raw pooled buffers reference owner metadata stored by their freelist.
+/// Taking one requires the caller to keep that freelist alive, and returning
+/// one requires proof that it came from the target freelist:
 ///
 /// ```compile_fail,E0133
 /// use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
@@ -161,14 +162,45 @@ pub mod bench {
         }
 
         /// Returns one available pooled buffer.
+        ///
+        /// ```compile_fail,E0133
+        /// use commonware_runtime::iobuf::bench::Freelist;
+        ///
+        /// fn take(freelist: &Freelist) {
+        ///     let _buffer = freelist.take();
+        /// }
+        /// ```
+        ///
+        /// # Safety
+        ///
+        /// The returned buffer references owner metadata stored by this
+        /// freelist. This freelist must remain alive until the buffer is
+        /// returned here or deallocated.
         #[inline]
-        pub fn take(&self) -> Option<PooledBuffer> {
+        pub unsafe fn take(&self) -> Option<PooledBuffer> {
             self.0.take()
         }
 
         /// Returns up to `max` available pooled buffers to `on_entry`.
+        ///
+        /// `on_entry` must not panic. A panic can strand claimed buffers
+        /// outside the freelist and leak their allocations.
+        ///
+        /// ```compile_fail,E0133
+        /// use commonware_runtime::iobuf::bench::Freelist;
+        ///
+        /// fn take_batch(freelist: &Freelist) {
+        ///     freelist.take_batch(1, |_| {});
+        /// }
+        /// ```
+        ///
+        /// # Safety
+        ///
+        /// Every buffer passed to `on_entry` references owner metadata stored
+        /// by this freelist. This freelist must remain alive until all such
+        /// buffers are returned here or deallocated.
         #[inline]
-        pub fn take_batch(&self, max: usize, on_entry: impl FnMut(PooledBuffer)) -> usize {
+        pub unsafe fn take_batch(&self, max: usize, on_entry: impl FnMut(PooledBuffer)) -> usize {
             self.0.take_batch(max, on_entry)
         }
 

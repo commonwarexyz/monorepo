@@ -275,7 +275,7 @@ impl Freelist {
     ///
     /// The returned buffer does not deallocate itself. It must be returned to
     /// this same freelist before the freelist is finally dropped, otherwise
-    /// the buffer leaks.
+    /// its allocation leaks and its owner pointer dangles.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
         // Loom's atomic implementation does not provide `try_update`.
