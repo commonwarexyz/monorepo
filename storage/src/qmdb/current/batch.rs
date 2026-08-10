@@ -584,15 +584,15 @@ where
             bitmap_parent,
         } = self;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
-        let inner = inner
-            .merkleize_with_floor_scan(
+        let pending = inner
+            .merkleize_with_floor_scan_pending(
                 &db.any,
                 metadata,
                 staged_updates,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer_pipelined(pending, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -673,15 +673,15 @@ where
             bitmap_parent,
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let inner = inner
-            .merkleize_with_floor_scan(
+        let pending = inner
+            .merkleize_with_floor_scan_pending(
                 &db.any,
                 metadata,
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer_pipelined(pending, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -787,6 +787,136 @@ where
             merkleized
         })
         .await
+}
+
+/// [`compute_current_layer`] over a [`any::batch::PendingMerkleize`]: the frozen-chunk
+/// graft work (chunks below the pre-batch grafting boundary, whose covering ops-tree
+/// nodes this batch cannot change) runs on the calling task while the journal merkleize
+/// job hashes on the strategy; only the tip chunks wait for the sealed batch.
+async fn compute_current_layer_pipelined<F, E, U, C, I, H, const N: usize, S>(
+    pending: any::batch::PendingMerkleize<F, H, U, S>,
+    current_db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
+    bitmap_parent: &BitmapBatch<N>,
+) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
+where
+    F: Graftable,
+    E: Context,
+    U: update::Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    // Phase A: everything here depends only on the diff and pre-batch state.
+    let batch_len = pending.batch_len;
+    let batch_base = *pending.commit_loc + 1 - batch_len as u64;
+    let overlay = build_chunk_overlay::<F, U, _, N>(
+        bitmap_parent,
+        batch_len,
+        batch_base,
+        &pending.diff,
+        &pending.ancestor_diffs,
+    );
+
+    let grafting_height = grafting::height::<N>();
+    let overlay_ops_leaves = pending.commit_loc + 1;
+    let new_complete_chunks = overlay.complete_chunks();
+    let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
+        .min(new_complete_chunks as u64) as usize;
+    let graftable_parent = *grafted_parent.leaves() as usize;
+    let pruned_chunks = bitmap_parent.pruned_chunks();
+    assert!(
+        pruned_chunks <= graftable_parent
+            && graftable_parent <= graftable_overlay
+            && graftable_overlay <= new_complete_chunks,
+        "invariant violated: pruned={pruned_chunks} graftable_parent={graftable_parent} graftable_overlay={graftable_overlay} new_complete={new_complete_chunks}"
+    );
+
+    // Frozen chunks: dirty below the pre-batch grafting boundary. Their covering ops-tree
+    // nodes predate this batch, so they resolve through the journal batch's parent (or the
+    // committed tree) while the job runs. Tip chunks ([graftable_parent, graftable_overlay))
+    // cover both dirty-at-tip and pending-to-graftable transitions, exactly the remainder
+    // of the set `compute_current_layer` builds.
+    let mut frozen: Vec<usize> = overlay
+        .chunks
+        .iter()
+        .filter(|&(&idx, _)| idx < graftable_parent && idx >= pruned_chunks)
+        .map(|(&idx, _)| idx)
+        .collect();
+    frozen.sort_unstable();
+    frozen.dedup();
+    let chunk_of = |idx: usize| {
+        overlay
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| bitmap_parent.get_chunk(idx))
+    };
+    let frozen_chunks = frozen.iter().map(|&idx| (idx, chunk_of(idx)));
+    let frozen_inputs = match &pending.journal_parent {
+        Some(parent) => {
+            let adapter = BatchStorageAdapter::new(parent, &current_db.any.log.merkle);
+            read_graft_inputs::<F, _, N>(&adapter, frozen_chunks).await?
+        }
+        None => read_graft_inputs::<F, _, N>(&current_db.any.log.merkle, frozen_chunks).await?,
+    };
+    let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
+    let mut grafted_batch = grafted_parent.new_batch();
+    if !frozen_inputs.is_empty() {
+        let frozen_leaves =
+            grafting::graft_chunk_digests::<H, _, N>(&current_db.strategy, frozen_inputs);
+        for (chunk_idx, digest) in frozen_leaves {
+            grafted_batch = grafted_batch
+                .update_leaf_digest(Location::<F>::new(chunk_idx as u64), digest)
+                .expect("update_leaf_digest failed");
+        }
+    }
+
+    // Phase B: seal (awaiting the job), then the tip chunks that need the fresh tree.
+    let inner = pending.seal().await?;
+    let ops_tree_adapter =
+        BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
+    let tip_chunks = (graftable_parent..graftable_overlay).map(|idx| (idx, chunk_of(idx)));
+    let tip_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, tip_chunks).await?;
+    if !tip_inputs.is_empty() {
+        let tip_leaves = grafting::graft_chunk_digests::<H, _, N>(&current_db.strategy, tip_inputs);
+        for (_, digest) in tip_leaves {
+            grafted_batch = grafted_batch.add_leaf_digest(digest);
+        }
+    }
+    let grafted_batch = grafted_batch.merkleize(&current_db.grafted_tree, &grafted_hasher);
+
+    // Remainder identical to `compute_current_layer`.
+    let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+        parent: bitmap_parent.clone(),
+        overlay: Arc::new(overlay),
+        shared: Arc::clone(bitmap_parent.shared()),
+    }));
+    let ops_root = inner.root();
+    let layered = BatchOverMem {
+        batch: &grafted_batch,
+        mem: &current_db.grafted_tree,
+    };
+    let grafted_storage =
+        grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
+    let partial = partial_chunk::<_, N>(&bitmap_batch);
+    let canonical_root = compute_db_root::<F, H, _, _, N>(
+        &bitmap_batch,
+        &grafted_storage,
+        overlay_ops_leaves,
+        partial,
+        inner.bounds.inactivity_floor,
+        &ops_root,
+    )
+    .await?;
+
+    Ok(Arc::new(MerkleizedBatch {
+        inner,
+        grafted: grafted_batch,
+        bitmap: bitmap_batch,
+        canonical_root,
+    }))
 }
 
 /// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized any
