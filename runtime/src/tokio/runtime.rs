@@ -320,10 +320,14 @@ impl Config {
     }
 
     /// Returns the storage buffer pool config, deriving pool parallelism from
-    /// `worker_threads` if not explicitly configured.
+    /// the total thread count if not explicitly configured.
     fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
         self.storage_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_storage().with_parallelism(NZUsize!(self.worker_threads))
+            // Storage I/O runs on the blocking pool in addition to the worker
+            // threads, so freelist striping and derived thread caches must be
+            // sized for the combined thread count.
+            BufferPoolConfig::for_storage()
+                .with_parallelism(NZUsize!(self.worker_threads + self.max_blocking_threads))
         })
     }
 }
@@ -873,8 +877,13 @@ mod tests {
             BufferPoolConfig::for_network().thread_cache_config
         );
 
+        // Storage parallelism also counts the blocking pool, which serves
+        // storage I/O.
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism(), NZUsize!(8));
+        assert_eq!(
+            storage.parallelism(),
+            NZUsize!(8 + cfg.max_blocking_threads)
+        );
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage().thread_cache_config
