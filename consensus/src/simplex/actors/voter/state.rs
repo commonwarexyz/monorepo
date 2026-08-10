@@ -19,7 +19,7 @@ use crate::{
 use commonware_cryptography::{Digest, certificate};
 use commonware_runtime::{
     Clock, Metrics,
-    telemetry::metrics::{CounterFamily, Gauge, GaugeExt, MetricsExt as _},
+    telemetry::metrics::{Counter, CounterFamily, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::futures::Aborter;
 use rand_core::CryptoRng;
@@ -168,6 +168,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
 
     current_view: Gauge,
     tracked_views: Gauge,
+    issuance_window_probes: Counter,
     timeouts: CounterFamily<Timeout>,
     nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
@@ -186,11 +187,27 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return false;
         };
         // Genesis anchors the window until the first notarization lands.
-        floor == GENESIS_VIEW
-            || self
-                .views
-                .range(floor..view)
-                .any(|(_, round)| round.is_directly_notarized())
+        if floor == GENESIS_VIEW {
+            return true;
+        }
+
+        let mut probes = 0;
+        let in_window = self.views.range(floor..view).any(|(_, round)| {
+            probes += 1;
+            round.is_directly_notarized()
+        });
+        self.issuance_window_probes.inc_by(probes);
+        in_window
+    }
+
+    /// Returns true when `pending` is inside the optimistic issuance window
+    /// opened by directly-notarized `anchor`.
+    fn in_issuance_window_from(&self, anchor: View, pending: View) -> bool {
+        anchor < pending
+            && self
+                .lookahead
+                .issuance_floor(pending)
+                .is_some_and(|floor| floor <= anchor)
     }
 
     /// Returns the lowest tracked view at or above `from`.
@@ -205,6 +222,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = context.gauge("current_view", "current view");
         let tracked_views = context.gauge("tracked_views", "tracked views");
+        let issuance_window_probes = context.counter(
+            "issuance_window_probes",
+            "rounds inspected for optimistic issuance anchors",
+        );
         let timeouts = context.family("timeouts", "timed out views");
         let nullifications = context.family("nullifications", "nullifications");
 
@@ -232,6 +253,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
+            issuance_window_probes,
             timeouts,
             nullifications,
         }
@@ -1370,12 +1392,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Re-extends the optimistic frontier (the highest same-term view stamped
     /// with the term's stable leader, and so able to accept a proposal before
     /// its ancestry certifies) through the issuance window that `view`'s
-    /// notarization just opened. The window predicate bounds the walk.
+    /// notarization just opened. Every direct anchor slides its own window when
+    /// first inserted, so this walk is bounded by the triggering anchor alone.
     fn slide_optimistic_frontier(&mut self, view: View) {
         let mut frontier = view;
-        while self.in_issuance_window(frontier.next()) {
-            self.inherit_leader(frontier, frontier.next());
-            frontier = frontier.next();
+        let mut next = frontier.next();
+        while self.in_issuance_window_from(view, next) {
+            self.inherit_leader(frontier, next);
+            frontier = next;
+            next = frontier.next();
         }
     }
 
@@ -4432,6 +4457,68 @@ mod tests {
         });
     }
 
+    #[test]
+    fn optimistic_frontier_walk_does_not_scan_rounds() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                10,
+                10,
+                TermLength::new(NZU32!(131)),
+                ViewDelta::new(64),
+            );
+
+            // Build the densest proposal prefix admitted from view 1. A
+            // follower can receive these leader proposals while a quorum
+            // withholds the corresponding certificates from it.
+            for view in 1..=65 {
+                let view = View::new(view);
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(10), view),
+                    view.previous().unwrap_or(GENESIS_VIEW),
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                assert!(state.set_proposal(view, proposal));
+            }
+
+            // Deliver only the certificate at the end of the prefix. This
+            // single direct anchor opens the remainder of the stable-leader
+            // term, so extending it must not rediscover that same anchor for
+            // each successor.
+            let proposal = state
+                .views
+                .get(&View::new(65))
+                .and_then(|round| round.proposal())
+                .cloned()
+                .expect("proposal must be tracked");
+            let notarization = build_notarization(&verifier, &schemes, &proposal);
+            let probes = state.issuance_window_probes.get();
+            assert!(state.add_notarization(notarization).0);
+
+            // The anchor reaches every remaining in-term view and stops at the
+            // next term start.
+            for view in 66..=130 {
+                assert!(
+                    state.leader_index(View::new(view)).is_some(),
+                    "view {view} must inherit the stable leader"
+                );
+            }
+            assert!(state.leader_index(View::new(131)).is_none());
+
+            // Frontier extension already knows the triggering direct anchor;
+            // round scans would repeat work for every reached view.
+            assert_eq!(state.issuance_window_probes.get(), probes);
+        });
+    }
+
     /// Regression: the frontier walk must start adjacent to the notarized
     /// view. Otherwise a far-future same-term round (created by an
     /// unbounded-future certificate) keeps the window the notarization just
@@ -4767,7 +4854,7 @@ mod tests {
         });
     }
 
-    /// Pruned rounds must not leave anchors behind. A stale entry below the
+    /// Pruned rounds must not remain issuance anchors. A stale round below the
     /// activity floor would widen the issuance window past its bound.
     #[test]
     fn prune_drops_stale_optimistic_anchors() {

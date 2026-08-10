@@ -63,7 +63,7 @@ mod tests {
             },
             types::{
                 Activity, Certificate, Finalization, Finalize, Kind, Notarization, Notarize,
-                Nullification, Nullify, Proposal, Vote,
+                Nullification, Nullify, Outcome, Proposal, Vote,
             },
         },
         types::{Epoch, Participant, Round, TermLength, View},
@@ -457,6 +457,56 @@ mod tests {
 
         // Construction is one-shot per round.
         assert!(round.try_construct_certificate(&strategy).await.is_none());
+    }
+
+    /// A locally constructed vote and its network duplicate must count once
+    /// toward the verifier quorum.
+    #[test_async]
+    async fn test_constructed_leader_notarize_is_not_reverified() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_test", 5);
+        let quorum = quorum(5) as usize;
+        let round_id = Round::new(Epoch::new(0), View::new(1));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+            false,
+        );
+        round.set_leader(Participant::from_usize(0));
+
+        let proposal = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"payload"]));
+        let leader_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+        assert!(matches!(
+            round.accept_vote(Vote::Notarize(leader_vote.clone()), true),
+            Outcome::Added { retained: true }
+        ));
+
+        // VoteTracker rejects the network copy before it reaches the verifier.
+        assert!(!round.add_network(participants[0].clone(), Vote::Notarize(leader_vote)));
+        for i in 1..quorum - 1 {
+            let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
+            assert!(round.add_network(participants[i].clone(), Vote::Notarize(vote)));
+        }
+        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
+
+        let vote = Notarize::sign(&schemes[quorum - 1], proposal).unwrap();
+        assert!(round.add_network(participants[quorum - 1].clone(), Vote::Notarize(vote)));
+        let (batch, invalid) = round
+            .try_verify(&mut rng, &Sequential)
+            .await
+            .expect("unique signer quorum must be ready");
+        assert_eq!(batch, quorum - 1);
+        assert!(invalid.is_empty());
+        assert!(matches!(
+            round.try_construct_certificate(&Sequential).await,
+            Some(Certificate::Notarization(_))
+        ));
     }
 
     /// Deterministic-runtime tests drive `Strategy::spawn` inline: the deterministic runtime's
