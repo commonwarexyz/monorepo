@@ -374,7 +374,6 @@ enum FuzzInput<'a> {
 
     // Primitive inputs!
     Bool(bool),
-    Unit,
     Usize(usize),
     U8(u8),
     U16(u16),
@@ -433,7 +432,6 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::SVarInt128(v) => roundtrip_primitive(SInt(v)),
         // Fixed-width primitives
         FuzzInput::Bool(v) => roundtrip_primitive(v),
-        FuzzInput::Unit => roundtrip_primitive(()),
         FuzzInput::Usize(v) => {
             // Limit to u32::MAX for testing (since usize encodes as u32)
             let v = v.min(u32::MAX as usize);

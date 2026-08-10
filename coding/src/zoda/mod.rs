@@ -119,7 +119,7 @@ use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
-    transcript::{Summary, Transcript},
+    transcript::{Summary, Transcript, Version},
 };
 use commonware_math::{
     fields::goldilocks::F,
@@ -391,7 +391,7 @@ impl<D: Digest> CheckingData<D> {
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
-        let mut transcript = Transcript::new(NAMESPACE);
+        let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
@@ -399,7 +399,7 @@ impl<D: Digest> CheckingData<D> {
         if *commitment != expected_commitment {
             return Err(Error::InvalidShard);
         }
-        let mut transcript = Transcript::resume(expected_commitment);
+        let mut transcript = Transcript::resume(expected_commitment, Version::V1);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
             return Err(Error::InvalidShard);
@@ -558,14 +558,14 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let root = bmt.root();
 
         // Step 4: Commit to the root, and the size of the data.
-        let mut transcript = Transcript::new(NAMESPACE);
+        let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let commitment = transcript.summarize();
 
         // Step 5: Generate a checking matrix and checksum with the commitment.
-        let mut transcript = Transcript::resume(commitment);
+        let mut transcript = Transcript::resume(commitment, Version::V1);
         let checking_matrix = checking_matrix(&transcript, &topology);
         let checksum = Arc::new(data.mul(&checking_matrix));
         // Bind index sampling to this checksum to prevent follower-specific malleability.

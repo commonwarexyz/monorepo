@@ -7,7 +7,7 @@ use crate::{
     Block,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+        core::{Buffer, CommitmentFallback, Mailbox, Retirement, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
@@ -110,9 +110,7 @@ where
         self.subscribe_by_digest(commitment)
     }
 
-    fn finalized(&self, _commitment: B::Digest) {
-        // No cleanup needed in standard mode - the buffer handles its own pruning
-    }
+    fn retire(&self, _update: Retirement<B::Digest>) {}
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);

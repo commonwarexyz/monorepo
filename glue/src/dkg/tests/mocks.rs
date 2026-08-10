@@ -497,10 +497,10 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
         fetch_timeout: Duration::from_millis(100),
-        fetch_concurrent: NZUsize!(2),
         view_retention: ViewDelta::new(8),
         skip_timeout: Duration::from_secs(1),
         forwarding: simplex::ForwardingPolicy::Disabled,
+        track_historical_votes: false,
     }
 }
 

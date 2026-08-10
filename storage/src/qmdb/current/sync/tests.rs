@@ -24,7 +24,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Runner as _, Supervisor as _, deterministic, deterministic::Context,
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{NZU64, non_empty_range};
 use rand::Rng as _;
 
 // ===== Harness Implementations =====
@@ -534,8 +534,8 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
                 root: sync_root,
                 range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
             },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
             max_outstanding_requests: 4,
             update_rx: None,
             finish_rx: None,
@@ -570,7 +570,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 }
 
 #[test_traced]
-fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
+fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     type Db = crate::qmdb::current::unordered::variable::Db<
         crate::merkle::mmr::Family,
         Context,
@@ -615,7 +615,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_boundary_nodes(
+            <Db as SyncDatabase>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -631,7 +631,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_boundary_nodes(
+            <Db as SyncDatabase>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
@@ -658,8 +658,8 @@ macro_rules! current_sync_tests_for_harness {
             use std::num::NonZeroU64;
 
             #[test_traced]
-            fn test_sync_resolver_fails() {
-                crate::qmdb::any::sync::tests::test_sync_resolver_fails::<$harness>();
+            fn test_sync_source_fails() {
+                crate::qmdb::any::sync::tests::test_sync_source_fails::<$harness>();
             }
 
             #[rstest]

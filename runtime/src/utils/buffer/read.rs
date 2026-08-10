@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 ///
 /// # Allocation Semantics
 ///
-/// - The internal read buffer is allocated eagerly in [Self::new].
+/// - The internal read buffer is allocated lazily on the first refill.
 /// - Refills try to reclaim mutable ownership of that same backing allocation.
 /// - If backing is still shared (for example, previously returned slices are alive), a pooled
 ///   replacement is allocated and existing backing is left alive until all aliases drop.
@@ -17,7 +17,9 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic, BufferPooler};
+/// use commonware_runtime::{
+///     Blob, BufferPooler, Error, Runner, Storage, WriteOptions, buffer::Read, deterministic,
+/// };
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -25,7 +27,7 @@ use std::num::NonZeroUsize;
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
-///     blob.write_at(0, data).await.expect("unable to write data");
+///     blob.write_at(0, data, WriteOptions::default()).await.expect("unable to write data");
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
@@ -63,7 +65,8 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: pool.alloc(buffer_size.get()).freeze(),
+            // The first refill allocates the backing buffer.
+            buffer: IoBuf::default(),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -129,7 +132,13 @@ impl<B: Blob> Read<B> {
                 reusable.clear();
                 reusable
             }
-            Ok(_) | Err(_) => self.pool.alloc(bytes_to_read),
+            Ok(too_small) => {
+                // Release the undersized buffer before allocating so a tight
+                // pool can reuse its slot for the replacement.
+                drop(too_small);
+                self.pool.alloc(bytes_to_read)
+            }
+            Err(_) => self.pool.alloc(bytes_to_read),
         };
         let read_result = self
             .blob

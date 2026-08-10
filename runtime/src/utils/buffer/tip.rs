@@ -48,7 +48,7 @@ impl Buffer {
     }
 
     /// Creates a new buffer seeded with existing logical bytes.
-    pub(super) fn from(offset: u64, data: IoBuf, capacity: usize, pool: BufferPool) -> Self {
+    pub(super) const fn from(offset: u64, data: IoBuf, capacity: usize, pool: BufferPool) -> Self {
         let len = data.len();
         Self {
             data,

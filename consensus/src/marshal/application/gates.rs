@@ -185,6 +185,25 @@ pub(crate) const fn resolve(verdict: Option<bool>, durable: bool) -> Option<bool
     }
 }
 
+/// Forwards `input` while `output` still has a receiver.
+///
+/// If the output receiver closes first, the input operation is canceled.
+pub(crate) async fn forward<T, U>(
+    mut output: oneshot::Sender<T>,
+    input: oneshot::Receiver<U>,
+    map: impl FnOnce(U) -> Option<T>,
+) {
+    let result = select! {
+        _ = output.closed() => return,
+        result = input => result,
+    };
+    if let Ok(value) = result
+        && let Some(value) = map(value)
+    {
+        output.send_lossy(value);
+    }
+}
+
 /// Drives a certification gate `task` to a certify verdict, recovering through `fallback` when the
 /// gate cannot speak for the notarized proposal.
 ///
@@ -245,7 +264,7 @@ mod tests {
     use super::*;
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
-    use commonware_runtime::{Runner, Spawner, deterministic};
+    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use std::future::ready;
 
     type D = Sha256Digest;
@@ -368,6 +387,40 @@ mod tests {
         // A true verdict publishes only once the store is durable.
         assert_eq!(resolve(Some(true), true), Some(true));
         assert_eq!(resolve(Some(true), false), None);
+    }
+
+    #[test]
+    fn test_forward_cancels_input_when_output_closes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (input_tx, input_rx) = oneshot::channel::<bool>();
+            let (output_tx, output_rx) = oneshot::channel::<bool>();
+            drop(output_rx);
+
+            forward(output_tx, input_rx, Some).await;
+
+            assert!(input_tx.is_closed());
+        });
+    }
+
+    #[test]
+    fn test_forward_cancels_in_flight_input_when_output_closes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (input_tx, input_rx) = oneshot::channel::<bool>();
+            let (output_tx, output_rx) = oneshot::channel::<bool>();
+            let (started_tx, started_rx) = oneshot::channel();
+            let forwarder = context.child("forwarder").spawn(|_| async move {
+                started_tx.send_lossy(());
+                forward(output_tx, input_rx, Some).await;
+            });
+
+            started_rx.await.expect("forwarder should start");
+            assert!(!input_tx.is_closed());
+            drop(output_rx);
+            forwarder.await.expect("forwarder should stop");
+            assert!(input_tx.is_closed());
+        });
     }
 
     #[test]

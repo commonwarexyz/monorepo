@@ -4,7 +4,7 @@ use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, Error as RError,
+    Blob, Buf, BufMut, BufferPooler, Error as RError, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -189,8 +189,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 let mut modified = false;
                 for bit_index in 0..(*size / record_size) {
                     if bit_index >= bits.len() || !bits.get(bit_index) {
-                        blob.write_at(bit_index * record_size, empty.clone())
-                            .await?;
+                        blob.write_at(
+                            bit_index * record_size,
+                            empty.clone(),
+                            WriteOptions::default(),
+                        )
+                        .await?;
                         modified = true;
                     }
                 }

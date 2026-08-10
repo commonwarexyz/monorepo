@@ -22,10 +22,10 @@
 //! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
 //! relayed to all other participants to aid in block reconstruction.
 //!
-//! A participant may still reconstruct the full block from gossiped shards before its designated
-//! leader-delivered shard arrives. That is sufficient for later certification and repair flows, but it
-//! is not treated as notarization readiness: a participant only helps form a notarization once it has
-//! validated the shard it is supposed to echo.
+//! A participant may still reconstruct the full block from gossiped shards before its assigned shard
+//! arrives. That is sufficient for later certification and repair flows, but it is not treated as
+//! notarization readiness: a participant only helps form a notarization once it has validated the
+//! shard it is supposed to echo.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
 //! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and
@@ -59,8 +59,9 @@
 //!
 //! In rare crash cases, it is possible for a notarization certificate to exist without a block being
 //! available to the honest parties (e.g., if the whole network crashed before receiving `f+1` shards
-//! and the proposer went permanently offline). In this case, `certify` will be unable to fetch the
-//! block before timeout and result in a nullification.
+//! and the proposer went permanently offline). In this case, `certify` may remain pending while it
+//! waits for the unavailable block. Simplex may time out and nullify the view, but that timeout does
+//! not resolve the certification request.
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
 //! to the lack of an available block. However, if even one honest and online party has the block,
@@ -75,7 +76,7 @@
 //! │          B1         │◀──│          B2         │◀──│          B3         │XXX│          B4         │
 //! └─────────────────────┘   └─────────────────────┘   └──────────┬──────────┘   └─────────────────────┘
 //!                                                                │
-//!                                                          Failed Certify
+//!                                                         Pending Certify
 //! ```
 
 use crate::{
@@ -585,9 +586,11 @@ where
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, payload, Some(block), Stage::Certified)
                     .await;
-                if let Ok(GateOutcome::Ready(result)) = verify_rx.await {
-                    tx.send_lossy(result);
-                }
+                gates::forward(tx, verify_rx, |result| match result {
+                    GateOutcome::Ready(result) => Some(result),
+                    GateOutcome::Recover => None,
+                })
+                .await;
             }
             .instrument(info_span!(
                 "marshal.coding.certify.embedded",
@@ -948,14 +951,23 @@ where
         // 2. The parent-child height check would fail (parent IS the block)
         // 3. Waiting for shards could stall if the leader doesn't rebroadcast
         if is_reproposal {
-            // Fetch the block to verify it's at the epoch boundary.
-            // This should be fast since the parent block is typically already cached.
-            let block_rx = self
-                .marshal
-                .subscribe_by_commitment(payload, core::CommitmentFallback::Wait);
+            // Fetch the block to verify it's at the epoch boundary. This should be fast
+            // since the parent block is typically already cached. A re-proposal names its
+            // own parent, so the parent round is a certified round for this commitment and
+            // lets a participant that never received the original proposal acquire it
+            // instead of waiting for shards it cannot yet classify.
+            let (parent_view, _) = consensus_context.parent;
+            let block_rx = self.marshal.subscribe_by_commitment(
+                payload,
+                core::CommitmentFallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
+            );
             let marshal = self.marshal.clone();
+            let shards = self.shards.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
+            let leader = consensus_context.leader;
             let gates = self.gates.clone();
 
             // Register a certification gate task synchronously before spawning work so
@@ -1011,6 +1023,13 @@ where
                         return;
                     }
 
+                    // Announce the re-proposal only after the boundary check. A
+                    // re-proposal's consensus round is not bound to the commitment, and
+                    // the shard engine reads the participant set from the round's epoch,
+                    // so announcing an unvalidated round would classify this block's
+                    // shards against the wrong epoch.
+                    shards.discovered(payload, leader, round);
+
                     // Valid re-proposal: notify the marshal and complete the
                     // certification gate task for `certify`.
                     let durable = marshal.verified(round, block).await;
@@ -1029,7 +1048,8 @@ where
             return rx;
         }
 
-        // Inform the shard engine of an externally proposed commitment.
+        // Inform the shard engine of an externally proposed commitment. The context
+        // digest validated above binds this round and leader to the commitment.
         self.shards.discovered(
             payload,
             consensus_context.leader.clone(),
@@ -1052,10 +1072,9 @@ where
         match scheme.me() {
             Some(_) => {
                 // Subscribe to assigned shard verification. For participants, this
-                // only completes once the leader-delivered shard for our
-                // assigned index has been verified. Reconstructing the block
-                // from peer gossip is useful for certification later, but is
-                // not enough to emit a notarize vote.
+                // only completes once the shard for our assigned index has been
+                // verified. Reconstructing the block from peer gossip is useful for
+                // certification later, but is not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
@@ -1066,9 +1085,7 @@ where
                     .with_attribute("round", round);
                 context.spawn(move |_| {
                     async move {
-                        if validity_rx.await.is_ok() {
-                            tx.send_lossy(true);
-                        }
+                        gates::forward(tx, validity_rx, |()| Some(true)).await;
                     }
                     .instrument(info_span!(
                         "marshal.coding.verify.shard_validity",
