@@ -213,7 +213,8 @@ impl Freelist {
         prefill: bool,
     ) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
-        let capacity = capacity.get() as usize;
+        let slot_count = capacity.get();
+        let capacity = slot_count as usize;
 
         // Keep the caller-facing knob as expected parallelism, then derive an
         // implementation-friendly stripe count here. Capping at capacity avoids
@@ -243,7 +244,7 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let slots = (0..capacity as u32)
+        let slots = (0..slot_count)
             .map(|slot| CachePadded::new(UnsafeCell::new(PooledOwner::new(slot, layout.size()))))
             .collect::<Vec<_>>()
             .into_boxed_slice();

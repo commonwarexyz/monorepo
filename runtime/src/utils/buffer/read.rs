@@ -65,8 +65,7 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            // Freezing an unwritten buffer would detach and release it
-            // immediately, so the first refill allocates instead.
+            // The first refill allocates the backing buffer.
             buffer: IoBuf::default(),
             blob_position: 0,
             blob_size,
