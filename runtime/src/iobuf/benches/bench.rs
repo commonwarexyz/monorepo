@@ -1,13 +1,14 @@
 //! Benchmarks for `runtime::iobuf`.
 //!
-//! This entry point registers three suites:
+//! This entry point registers four suites:
 //!
 //! - [`iobuf`]: fixed-size decode benchmarks comparing `Bytes` with `IoBuf`
 //!   backed by external `Bytes` or native heap storage. `Vec<u8>` modes
 //!   provide the deep-clone baseline.
-//! - [`pool`]: end-to-end steady-state `BufferPool` allocation and reuse,
-//!   compared against direct aligned allocation. This primarily exercises the
-//!   thread-local cache path.
+//! - [`allocation`]: end-to-end steady-state `BufferPool` allocation and
+//!   reuse, compared against direct aligned allocation.
+//! - [`reuse`]: global reuse after partial lazy growth with thread-local
+//!   caching disabled.
 //! - [`freelist`]: microbenchmarks of the global freelist that stores free
 //!   pooled buffers shared across threads, compared against `Mutex<Vec<_>>` and
 //!   `ArrayQueue`.
@@ -18,11 +19,18 @@
 
 use criterion::{criterion_group, criterion_main};
 
+mod allocation;
 mod freelist;
 mod iobuf;
-mod pool;
+mod reuse;
 mod utils;
 
-criterion_group!(benches, iobuf::bench, pool::bench, freelist::bench);
+criterion_group!(
+    benches,
+    iobuf::bench,
+    allocation::bench,
+    reuse::bench,
+    freelist::bench
+);
 
 criterion_main!(benches);
