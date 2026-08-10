@@ -1442,6 +1442,43 @@ pub(crate) mod tests {
     }
 
     #[boxed]
+    pub(crate) async fn test_keyless_delayed_merkleize_after_ancestor_apply<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let floor = db.inactivity_floor_loc();
+        let a = db
+            .new_batch()
+            .append(V::Value::make(10))
+            .merkleize(&db, None, floor)
+            .await;
+        let b = a
+            .new_batch::<H>()
+            .append(V::Value::make(20))
+            .merkleize(&db, None, floor)
+            .await;
+        let c = b.new_batch::<H>().append(V::Value::make(30));
+
+        let (db, _) = db.apply_batch(a).await.unwrap();
+        let c = c.merkleize(&db, None, floor).await;
+        let expected_root = c.root();
+        let (db, _) = db.apply_batch(c).await.unwrap();
+
+        assert_eq!(db.root(), expected_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
     pub(crate) async fn test_keyless_to_batch<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where

@@ -26,13 +26,17 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, acknowledgement::Acknowledgement as _, vec::NonEmptyVec,
+    NZU16, NZU64, NZUsize,
+    acknowledgement::{Acknowledgement as _, Exact},
+    sync::Mutex,
+    vec::NonEmptyVec,
 };
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FixtureReporter {
     acknowledge: bool,
+    pending: Arc<Mutex<Vec<Exact>>>,
 }
 
 impl Reporter for FixtureReporter {
@@ -43,7 +47,7 @@ impl Reporter for FixtureReporter {
             if self.acknowledge {
                 ack.acknowledge();
             } else {
-                ack.abandon();
+                self.pending.lock().push(ack);
             }
         }
         Feedback::Ok
@@ -54,7 +58,7 @@ impl Reporter for FixtureReporter {
 enum Dispatch {
     Stopped,
     Acknowledge,
-    Freeze,
+    Hold,
 }
 
 struct Options<'a> {
@@ -275,7 +279,7 @@ pub(crate) async fn marshal_fixture_with_floor(
             block: Some(block),
             floor: Some(finalization),
             max_pending_acks,
-            dispatch: Dispatch::Freeze,
+            dispatch: Dispatch::Hold,
         },
     )
     .await
@@ -283,7 +287,7 @@ pub(crate) async fn marshal_fixture_with_floor(
 
 /// Initializes a started marshal actor over prunable finalized archives.
 ///
-/// When provided, `block` is pre-seeded. Dispatched blocks are abandoned unless
+/// When provided, `block` is pre-seeded. Dispatched blocks are held open unless
 /// `acknowledge` is set.
 pub(crate) async fn prunable_marshal_fixture(
     context: deterministic::Context,
@@ -302,7 +306,7 @@ pub(crate) async fn prunable_marshal_fixture(
         dispatch: if acknowledge {
             Dispatch::Acknowledge
         } else {
-            Dispatch::Freeze
+            Dispatch::Hold
         },
     };
     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
@@ -446,6 +450,7 @@ where
         handler::init(context.child("resolver_handler"), NZUsize!(8));
     let reporter = FixtureReporter {
         acknowledge: matches!(options.dispatch, Dispatch::Acknowledge),
+        pending: Arc::new(Mutex::new(Vec::new())),
     };
     let handle = actor.start_unbuffered(reporter, (resolver_receiver, IgnoreResolver));
     MarshalFixture {

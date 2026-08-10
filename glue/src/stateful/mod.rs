@@ -142,6 +142,13 @@ pub struct Input<Upstream, Provider> {
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
 /// finalization.
+///
+/// [`Stateful`] may freely clone the application and invoke its methods
+/// concurrently. Implementors should treat `Application` as a stateless,
+/// deterministic state machine: given the same method inputs and database
+/// state, every clone must produce the same state-transition result. Mutable
+/// state that affects those results must live in the database batches provided
+/// to proposal, verification, and replay methods.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -155,7 +162,7 @@ where
     /// epoch. Must be [`Epochable`] and [`Viewable`] so the wrapper can
     /// construct a [`Round`](commonware_consensus::types::Round) for
     /// pending-state pruning.
-    type Context: Epochable + Viewable + Send;
+    type Context: Clone + Epochable + Viewable + Send;
 
     /// The block type produced by the application.
     ///
@@ -232,6 +239,9 @@ where
     /// still change as additional information becomes available, continue
     /// waiting instead of returning [`None`].
     ///
+    /// Validity is relative to those inputs: finalizing a competing branch
+    /// later does not retroactively change a completed verdict.
+    ///
     /// In other words, to abstain from voting, do not resolve this future yet.
     /// Keep it pending until the implementation can either prove the block
     /// valid, prove it invalid, or the consensus engine cancels the request.
@@ -249,9 +259,18 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// This future may be cancelled by consensus if the caller drops its
-    /// response receiver. Implementations should be cancellation-safe: dropping
-    /// and retrying must not violate invariants or lose durable progress.
+    /// This future is scoped to its caller. Stateful may also cancel and retry
+    /// it before finalization or pruning. Cancellation and retry must not
+    /// violate invariants or lose durable progress.
+    ///
+    /// Verification may overlap finalization while its batches remain valid.
+    /// Stateful retries or rejects requests that cannot safely overlap it.
+    /// Read through the provided batches without holding the database set's
+    /// locks. Batches may be branch-scoped views rather than historical
+    /// snapshots: retained ancestor overlays preserve same-branch state, while
+    /// unresolved reads may fall through to the live applied database. Such
+    /// batches remain valid only while applied state advances along their branch
+    /// (see [`db::Shared::read`] for guard discipline).
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -271,9 +290,9 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled if the originating propose/verify request
-    /// is dropped. Implementations should be cancellation-safe: dropping and
-    /// retrying must not violate invariants or lose durable progress.
+    /// This future may be cancelled if its originating request is dropped, or
+    /// cancelled and retried before finalization or pruning. Cancellation and
+    /// retry must not violate invariants or lose durable progress.
     ///
     /// # Panics
     ///
@@ -301,18 +320,23 @@ where
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
     ///
+    /// This hook receives read-only database handles and may overlap verification
+    /// of blocks built on the newly finalized block or one of its retained
+    /// descendants. Result-affecting mutations must be made through normal block
+    /// execution, not from this observer.
+    ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
     /// marshal's reporter stream: a crash after this hook runs but before the block's flush and
     /// the marshal acknowledgement are durable may cause the same block to be reported again.
     ///
     /// # Panics
     ///
-    /// Implementations should panic if post-finalization maintenance fails.
+    /// Implementations should panic if observing finalized state fails.
     fn finalized(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _databases: &Self::Databases,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send {
         async {}
     }

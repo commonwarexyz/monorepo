@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -51,12 +51,39 @@ impl Merkleized for TestMerkleized {
 /// Completes one parked flush when released by the test.
 pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
 
+/// Signals that pruning has started, then blocks it until the test releases it.
+struct PruneGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
 /// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
 /// prune targets.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    prune_gate: Arc<Mutex<Option<PruneGate>>>,
+}
+
+impl FlushControl {
+    /// Gates the next prune. The receiver reports entry, and sending on the
+    /// returned sender lets pruning continue. Only one gate may be active.
+    pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        assert!(
+            self.prune_gate
+                .lock()
+                .replace(PruneGate {
+                    started,
+                    release: release_rx,
+                })
+                .is_none(),
+            "prune gate already installed",
+        );
+        (started_rx, release)
+    }
 }
 
 #[derive(Default)]
@@ -73,8 +100,7 @@ impl TestDb {
         }
     }
 
-    /// A database whose every finalize flush parks until the test releases it and whose
-    /// prune records its target immediately, isolating the caller's own scheduling.
+    /// A database with test-controlled finalize flushes and pruning.
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
             finalize: Mutex::new(None),
@@ -98,7 +124,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
+    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -122,6 +148,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
         if let Some(control) = &self.control {
+            let gate = control.prune_gate.lock().take();
+            if let Some(mut gate) = gate {
+                gate.started.send(()).expect("test must await prune");
+                let _ = (&mut gate.release).await;
+            }
             control.pruned.lock().push(*target);
         }
         Ok(self)
@@ -152,6 +183,22 @@ impl TestBlock {
                 parent: (View::zero(), Sha256Digest::EMPTY),
             },
             height: Height::new(height),
+            digest: Sha256Digest::from([digest_byte; 32]),
+        }
+    }
+
+    pub(crate) fn child(parent: &Self, digest_byte: u8) -> Self {
+        let height = parent.height.next();
+        Self {
+            context: SimplexContext {
+                round: commonware_consensus::types::Round::new(
+                    Epoch::zero(),
+                    View::new(height.get()),
+                ),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (parent.context.round.view(), parent.digest),
+            },
+            height,
             digest: Sha256Digest::from([digest_byte; 32]),
         }
     }
@@ -203,7 +250,7 @@ impl Heightable for TestBlock {
 
 impl ConsensusBlock for TestBlock {
     fn parent(&self) -> Self::Digest {
-        Sha256Digest::EMPTY
+        self.context.parent.1
     }
 }
 

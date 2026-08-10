@@ -38,6 +38,7 @@ use commonware_runtime::{
 use commonware_utils::{NZU32, NZUsize};
 use criterion::Criterion;
 use std::{hint::black_box, num::NonZeroUsize};
+
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
 
 #[derive(Clone, Copy)]

@@ -2,7 +2,8 @@
 //! make progress. The voter is voting in a view and has a "floor" view which is the latest
 //! certified (or finalized) view that it knows about. Thus, it either requires covering
 //! nullification evidence for intermediate views, or a higher floor. It will request the required
-//! nullifications from the resolver. Other nodes will either serve such nullifications, or higher floors.
+//! nullifications from the resolver, and proposal verification can also request the exact parent
+//! notarization a proposal names. Other nodes serve matching certificates, or higher floors.
 //!
 //! # Fetch Strategy
 //!
@@ -23,6 +24,25 @@
 //! Requests stay pending in the resolver until answered or retained out, so the cursor never
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
+//!
+//! # Proposal Ancestry
+//!
+//! Background repair cannot detect a split where one participant certifies a notarization while
+//! another holds a covering nullification. Proposal verification exposes the missing ancestry and
+//! targets the first gap at the proposal's leader. Matching evidence, finalization, or a failed
+//! certification verdict retires that request, whereas a certified-floor raise retires only
+//! background work.
+//!
+//! The wire key names only the view. An active finalization floor settles every ask at or below it.
+//! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
+//! proposal construction. If neither is retained, the responder serves its current floor. Floors
+//! advance by view, so a higher certified notarization supersedes an older finalization, while a
+//! finalization upgrades a certified notarization at the same view. The requester treats a valid
+//! response that does not settle its ask as ambiguous and retries without faulting the peer.
+//!
+//! A notarization is served only after local certification succeeds. Possession still settles the
+//! holder's own ask, because certification judges evidence already in hand. A failed verdict also
+//! settles it, since no copy of that notarization can certify anywhere.
 //!
 //! # Mid-Term Floor Raises
 //!

@@ -73,17 +73,17 @@ mod tests {
         types::{Participant, Round, TermLength, View},
     };
     use commonware_actor::mailbox;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         Hasher as _, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::mocks::Fixture,
+        certificate::{Verifier as _, mocks::Fixture},
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::{
-        Recipients,
+        Receiver as _, Recipients,
         simulated::{Config as NConfig, Link, Network, Oracle},
     };
     use commonware_parallel::Sequential;
@@ -115,10 +115,12 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
+        let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             NConfig {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(peers.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -2465,6 +2467,132 @@ mod tests {
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
     }
 
+    #[test_traced]
+    fn test_nullification_notification_omits_floor_but_retry_broadcasts_entry() {
+        let n = 5;
+        let quorum = quorum(n);
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"nullification_floor_broadcast", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let me = participants[0].clone();
+            let observer = participants[1].clone();
+            let (_, mut certificates) = oracle
+                .control(observer.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me,
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let (mut mailbox, mut batcher, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    timeout_retry: Duration::from_millis(100),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(matches!(
+                batcher.recv().await.unwrap(),
+                batcher::Message::Update { current, .. } if current == View::new(1)
+            ));
+
+            advance_to_view(&mut mailbox, &mut batcher, &schemes, quorum, View::new(2)).await;
+            loop {
+                match batcher.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize))
+                        if notarize.view() == View::new(2) =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let (_, encoded) = certificates.recv().await.unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
+                &mut encoded.as_ref(),
+                &schemes[0].certificate_codec_config(),
+            )
+            .unwrap();
+            assert!(matches!(
+                certificate,
+                Certificate::Finalization(finalization) if finalization.view() == View::new(1)
+            ));
+
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
+            mailbox.resolved(Certificate::Nullification(nullification.clone()));
+            let (_, encoded) = certificates.recv().await.unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
+                &mut encoded.as_ref(),
+                &schemes[0].certificate_codec_config(),
+            )
+            .unwrap();
+            assert!(matches!(
+                certificate,
+                Certificate::Nullification(received) if received == nullification
+            ));
+            select! {
+                message = certificates.recv() => {
+                    panic!("unexpected certificate after nullification: {message:?}");
+                },
+                _ = context.sleep(Duration::from_millis(10)) => {},
+            }
+
+            loop {
+                match batcher.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current == View::new(3) => break,
+                    _ => {}
+                }
+            }
+            mailbox.timeout(Round::new(epoch, View::new(3)), TimeoutReason::Inactivity);
+            loop {
+                match batcher.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify))
+                        if nullify.view() == View::new(3) =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            let (_, encoded) = certificates.recv().await.unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
+                &mut encoded.as_ref(),
+                &schemes[0].certificate_codec_config(),
+            )
+            .unwrap();
+            assert!(matches!(
+                certificate,
+                Certificate::Nullification(received) if received == nullification
+            ));
+        });
+    }
+
     fn stall_timeout_nullifies_current_view<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -2479,6 +2607,7 @@ mod tests {
                 context.child("network"),
                 NConfig {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2588,6 +2717,7 @@ mod tests {
                 context.child("network"),
                 NConfig {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -6118,6 +6248,7 @@ mod tests {
                         break;
                     }
                     MailboxMessage::Certificate { .. } => continue,
+                    MailboxMessage::Resolve { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
                     }
@@ -6282,12 +6413,14 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == view5 =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == view5 =>
                         {
                             break Some(success);
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
+                        MailboxMessage::Certified { .. }
+                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -6395,12 +6528,14 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             break Some(success);
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
+                        MailboxMessage::Certified { .. }
+                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -7333,11 +7468,13 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
+                        MailboxMessage::Certified { .. }
+                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
@@ -8668,8 +8805,8 @@ mod tests {
 
             let mut certified_before_sync = false;
             while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
-                if let MailboxMessage::Certified { round, success, .. } = msg
-                    && round.view() == target_view {
+                if let MailboxMessage::Certified { view, success, .. } = msg
+                    && view == target_view {
                         assert!(success, "expected successful certification");
                         certified_before_sync = true;
                     }
@@ -8746,8 +8883,8 @@ mod tests {
             while !certified {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             assert!(success, "expected successful certification");
                             certified = true;
@@ -8860,7 +8997,7 @@ mod tests {
             while !(replayed_certified && advanced) {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
                             assert!(success, "replayed certification should be successful");
                             replayed_certified = true;
                         }
@@ -9034,8 +9171,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             assert!(!success, "expected failed certification");
                             break;
@@ -9120,8 +9257,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. }
-                            if round.view() == target_view =>
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
                         {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;

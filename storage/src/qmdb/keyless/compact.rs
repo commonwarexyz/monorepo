@@ -210,8 +210,13 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        // Capture the DB boundary before `self` is consumed below.
-        let boundary = self.db();
+        let live_ancestors: Vec<_> =
+            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+                .collect();
+        let boundary = batch_chain::effective_boundary(
+            self.db(),
+            live_ancestors.last().map(|oldest| oldest.bounds.base),
+        );
 
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -230,10 +235,8 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors());
         let ancestors = batch_chain::collect_ancestor_bounds(
-            ancestors,
+            live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
@@ -1414,6 +1417,33 @@ mod tests {
             let (db, _) = db.apply_batch(batch_a).unwrap();
             assert_eq!(db.root(), expected_root);
             assert!(matches!(db.apply_batch(batch_b), Err(Error::StaleBatch)));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_delayed_merkleize_after_ancestor_apply() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-delayed-child").await;
+            let floor = db.inactivity_floor_loc();
+
+            let a = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, None, floor)
+                .await;
+            let b = a
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, None, floor)
+                .await;
+            let c = b.new_batch::<Sha256>().append(U64::new(3));
+
+            let (db, _) = db.apply_batch(a).unwrap();
+            let c = c.merkleize(&db, None, floor).await;
+            let expected_root = c.root();
+            let (db, _) = db.apply_batch(c).unwrap();
+
+            assert_eq!(db.root(), expected_root);
         });
     }
 

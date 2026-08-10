@@ -221,8 +221,13 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        // Capture the DB boundary before `self` is consumed below.
-        let boundary = self.db();
+        let live_ancestors: Vec<_> =
+            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+                .collect();
+        let boundary = batch_chain::effective_boundary(
+            self.db(),
+            live_ancestors.last().map(|oldest| oldest.bounds.base),
+        );
 
         let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         for (key, value) in self.mutations {
@@ -241,10 +246,8 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors());
         let ancestors = batch_chain::collect_ancestor_bounds(
-            ancestors,
+            live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
@@ -861,6 +864,38 @@ mod tests {
             let (db, _) = db.apply_batch(batch_a).unwrap();
             assert_eq!(db.root(), expected_root);
             assert!(matches!(db.apply_batch(batch_b), Err(Error::StaleBatch)));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_delayed_merkleize_after_ancestor_apply() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-delayed-child").await;
+            let key1 = Sha256::hash(&[&[1]]);
+            let key2 = Sha256::hash(&[&[2]]);
+            let key3 = Sha256::hash(&[&[3]]);
+            let value1 = Sha256::fill(10u8);
+            let value2 = Sha256::fill(20u8);
+            let value3 = Sha256::fill(30u8);
+
+            let a = db
+                .new_batch()
+                .set(key1, value1)
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let b = a
+                .new_batch::<Sha256>()
+                .set(key2, value2)
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            let c = b.new_batch::<Sha256>().set(key3, value3);
+
+            let (db, _) = db.apply_batch(a).unwrap();
+            let c = c.merkleize(&db, None, Location::new(0)).await;
+            let expected_root = c.root();
+            let (db, _) = db.apply_batch(c).unwrap();
+
+            assert_eq!(db.root(), expected_root);
         });
     }
 

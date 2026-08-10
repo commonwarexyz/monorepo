@@ -534,6 +534,14 @@ mod test {
     }
 
     #[test_traced]
+    fn test_delayed_merkleize_after_ancestor_apply() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
+            tests::test_keyless_delayed_merkleize_after_ancestor_apply(db).await;
+        });
+    }
+
+    #[test_traced]
     fn test_keyless_to_batch() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;

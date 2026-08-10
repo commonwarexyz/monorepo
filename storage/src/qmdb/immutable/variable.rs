@@ -553,6 +553,15 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_delayed_merkleize_after_ancestor_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_delayed_merkleize_after_ancestor_apply(ctx, open::<mmr::Family>)
+                .await;
+        });
+    }
+
+    #[test_traced]
     fn test_variable_child_root_matches_pending_and_committed() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
