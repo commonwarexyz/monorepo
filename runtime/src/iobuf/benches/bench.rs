@@ -3,8 +3,8 @@
 //! This entry point registers three suites:
 //!
 //! - [`iobuf`]: fixed-size decode benchmarks comparing `Bytes` with `IoBuf`
-//!   backed by `Bytes` or aligned storage. `Vec<u8>` modes provide the
-//!   deep-clone baseline.
+//!   backed by external `Bytes` or native heap storage. `Vec<u8>` modes
+//!   provide the deep-clone baseline.
 //! - [`pool`]: end-to-end steady-state `BufferPool` allocation and reuse,
 //!   compared against direct aligned allocation. This primarily exercises the
 //!   thread-local cache path.

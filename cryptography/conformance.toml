@@ -50,6 +50,10 @@ hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 n_cases = 65536
 hash = "fca94fb3b0df54a6a34edfbb8aeef28490262daf97870e12f869aee6cf7f7e67"
 
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::FeldmanTranscript"]
+n_cases = 16
+hash = "8777f5418d51ecdf8367797b7925433e51bb0a174cc920ae224c2d9605e487a6"
+
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<G1>"]
 n_cases = 65536
 hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
@@ -186,9 +190,13 @@ hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
-["commonware_cryptography::transcript::test::conformance::TranscriptOps"]
+["commonware_cryptography::transcript::test::conformance::TranscriptV0Ops"]
 n_cases = 4096
 hash = "9115bb89c941947d7bfabb3c67b7812c842c3ab8be196a61e3378a873e2e5837"
+
+["commonware_cryptography::transcript::test::conformance::TranscriptV1Ops"]
+n_cases = 4096
+hash = "8b67a5feb9019c290bb51a632a042cf302a66eb16f69a91c45f599602ce27fcf"
 
 ["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Claim<TestF,TestG>>"]
 n_cases = 65536

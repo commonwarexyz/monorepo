@@ -34,31 +34,6 @@ runs:
         sudo rm -rf ~/Library/Android/sdk || true
         sudo rm -rf ~/Library/Caches || true
 
-    # Windows Cleanup
-    - name: Cleanup (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        if (Get-Command docker -ErrorAction SilentlyContinue) {
-          Write-Host "docker available; running docker cleanup."
-          docker system prune -af
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "docker system prune failed with exit code $LASTEXITCODE; continuing."
-            $global:LASTEXITCODE = 0
-          } else {
-            Write-Host "docker cleanup completed successfully."
-          }
-        } else {
-          Write-Host "docker not available; skipping docker cleanup."
-        }
-        Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Android" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:ProgramFiles\dotnet" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:USERPROFILE\.ghcup" -ErrorAction SilentlyContinue
-        echo "TEMP=D:\Temp" >> $env:GITHUB_ENV
-        echo "TMP=D:\Temp" >> $env:GITHUB_ENV
-        New-Item -ItemType Directory -Path "D:\Temp" -Force | Out-Null
-
     - name: Configure swap (Linux)
       shell: bash
       if: runner.os == 'Linux'
@@ -81,16 +56,6 @@ runs:
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
         fi
         sysctl vm.swapusage || true
-
-    # Windows manages the pagefile dynamically by default, and changing its size requires a
-    # reboot to take effect (not practical within a single job). Log the current state only.
-    - name: Log pagefile (Windows)
-      shell: pwsh
-      if: runner.os == 'Windows'
-      run: |
-        $ErrorActionPreference = 'Continue'
-        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List Name, AllocatedBaseSize, CurrentUsage, PeakUsage
-        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
 
     - name: Show disk free (after)
       shell: bash

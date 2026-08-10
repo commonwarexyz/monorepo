@@ -448,42 +448,23 @@ where
     let (metadata, pruned_chunks, pinned_nodes) =
         db::init_metadata(context.child("metadata"), &metadata_partition).await?;
 
-    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted
-    // metadata, then hand it to `any` which becomes the sole owner. `any::init_with_bitmap`
-    // populates it during snapshot rebuild.
+    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
+    // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
+    // populates it during snapshot rebuild.
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
-    // Build the grafted tree from the bitmap and ops tree.
-    let ops_size = any.log.merkle.size();
-    let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
-    let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
+    // Rebuild the grafted tree and canonical root from the initialized `any` state.
+    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
-        ops_leaves,
-        &strategy,
-    )
-    .await?;
-
-    // Compute and cache the root.
-    let storage = grafting::Storage::<F, H, _, _>::new(
-        &grafted_tree,
-        grafting::height::<N>(),
-        &any.log.merkle,
-    );
-    let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
-    let ops_root = any.root();
-    let root = db::compute_db_root::<F, H, _, _, N>(
-        any.bitmap.as_ref(),
-        &storage,
-        ops_leaves,
-        partial_chunk,
         any.inactivity_floor_loc,
-        &ops_root,
+        any.root(),
+        &strategy,
     )
     .await?;
 
@@ -520,9 +501,11 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
-    use super::{FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig, ordered, unordered};
+    use super::{
+        FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig, grafting, ordered, unordered,
+    };
     use crate::{
-        merkle::{self, mmb, mmr},
+        merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
                 test::colliding_digest,
@@ -1386,7 +1369,7 @@ pub mod tests {
             panic!("expected StaleBatch error");
         };
         assert!(
-            matches!(err, Error::StaleBatch { .. }),
+            matches!(err, Error::StaleBatch),
             "expected StaleBatch error, got {err:?}"
         );
 
@@ -1618,6 +1601,96 @@ pub mod tests {
         32,
         Sequential,
     >;
+
+    #[test_traced]
+    fn test_reconstruction_views_expose_all_chunk_states() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = UnorderedFixedMmbDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>("reconstruction-views", &context),
+            )
+            .await
+            .unwrap();
+
+            // At this size, MMB has a grafted chunk, a complete pending chunk, and a trailing
+            // partial chunk.
+            let mut batch = db.new_batch();
+            for i in 0u64..512 {
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash(&[&(i + 1_000).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+
+            // The exposed bitmap must describe the same operation boundary as the DB and surface
+            // both reconstruction chunks that remain outside the grafted tree.
+            let end = db.bounds().end;
+            let bitmap = db.bitmap();
+            assert_eq!(bitmap.len(), *end);
+            assert_eq!(bitmap.pruned_chunks(), 0);
+
+            let first = bitmap.get_chunk(0);
+            let chunk_bits = first.len() as u64 * 8;
+            let grafting_height = chunk_bits.trailing_zeros();
+            let complete = bitmap.complete_chunks() as u64;
+            let graftable =
+                grafting::graftable_chunks::<mmb::Family>(*end, grafting_height).min(complete);
+            assert_eq!(complete - graftable, 1, "expected one pending chunk");
+            assert!(first.iter().any(|byte| *byte != 0));
+            let pending = bitmap.get_chunk(graftable as usize);
+            assert!(pending.iter().any(|byte| *byte != 0));
+
+            let (partial, partial_bits) = bitmap.last_chunk();
+            assert!(partial_bits > 0 && partial_bits < chunk_bits);
+            assert!(partial.iter().any(|byte| *byte != 0));
+
+            // Tie the extracted bytes to the digests authenticated by the existing root witness.
+            let witness = db.ops_root_witness().await.unwrap();
+            assert_eq!(
+                witness.pending_chunk_digest,
+                Some(Sha256::hash(&[pending.as_slice()]))
+            );
+            assert_eq!(
+                witness.partial_chunk,
+                Some((partial_bits, Sha256::hash(&[partial.as_slice()])))
+            );
+
+            // The virtual storage remains in ops-tree coordinates even where it substitutes
+            // bitmap-authenticated grafted nodes.
+            let storage = db.grafted_storage();
+            assert_eq!(
+                storage.size(),
+                <mmb::Family as merkle::Family>::location_to_position(end)
+            );
+
+            let ops_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+                Location::new(0),
+                grafting_height,
+            );
+            assert!(storage.get_node(ops_pos).await.unwrap().is_some());
+
+            // Reconstruction frontiers use the raw ops-tree pin ordering. The virtual digest at
+            // the grafting boundary must differ because the corresponding bitmap chunk is nonzero.
+            let pinned_positions =
+                <mmb::Family as merkle::Family>::nodes_to_pin(end).collect::<Vec<_>>();
+            let raw_pinned = db.pinned_nodes_at(end).await.unwrap();
+            assert_eq!(pinned_positions.len(), raw_pinned.len());
+            let mut checked_grafted_node = false;
+            for (pos, raw_digest) in pinned_positions.into_iter().zip(raw_pinned) {
+                let digest = storage.get_node(pos).await.unwrap().unwrap();
+                if pos == ops_pos {
+                    assert_ne!(digest, raw_digest);
+                    checked_grafted_node = true;
+                }
+            }
+            assert!(checked_grafted_node);
+
+            drop(storage);
+            db.destroy().await.unwrap();
+        });
+    }
 
     // Regression test for a forged exclusion proof against the ordered partitioned index with
     // variable-length keys shorter than the partition prefix. The buggy router zero-padded a short
@@ -2782,7 +2855,7 @@ pub mod tests {
             let expected_value = db.get(&key0).await.unwrap();
 
             // 32 * 8 = 256 bits per chunk for N=32.
-            let invalid_prune_loc = Location::new(*expected_boundary + 256);
+            let invalid_prune_loc = expected_boundary + 256;
             let Err(err) = db.prune(invalid_prune_loc).await else {
                 panic!("expected prune rejection above sync boundary");
             };

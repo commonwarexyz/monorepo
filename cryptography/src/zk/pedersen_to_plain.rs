@@ -36,7 +36,7 @@
 //! ```rust
 //! # use commonware_cryptography::{
 //! #     bls12381::primitives::group::{G1, Scalar},
-//! #     transcript::Transcript,
+//! #     transcript::{Transcript, Version},
 //! #     zk::pedersen_to_plain::{prove, verify, Setup, Witness},
 //! # };
 //! # use commonware_math::{
@@ -62,7 +62,8 @@
 //! let claim = witness.claim(&setup);
 //!
 //! let mut prover_rng = test_rng();
-//! let mut prover_transcript = Transcript::new(b"pedersen-to-plain-example");
+//! let mut prover_transcript =
+//!     Transcript::new(b"pedersen-to-plain-example", Version::V1);
 //! prover_transcript.commit(b"context".as_slice());
 //! let proof = prove(
 //!     &mut prover_rng,
@@ -73,7 +74,8 @@
 //! );
 //!
 //! let mut verifier_rng = test_rng();
-//! let mut verifier_transcript = Transcript::new(b"pedersen-to-plain-example");
+//! let mut verifier_transcript =
+//!     Transcript::new(b"pedersen-to-plain-example", Version::V1);
 //! verifier_transcript.commit(b"context".as_slice());
 //! let [g, h] = Synthetic::<F, G>::generators_array();
 //! let synthetic_setup = Setup {
@@ -393,7 +395,10 @@ mod conformance {
 #[cfg(all(feature = "bls12381", any(test, feature = "fuzz")))]
 pub mod fuzz {
     use super::*;
-    use crate::bls12381::primitives::group::{G1 as G, Scalar as F};
+    use crate::{
+        bls12381::primitives::group::{G1 as G, Scalar as F},
+        transcript::Version,
+    };
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup};
     use commonware_parallel::Sequential;
@@ -425,7 +430,7 @@ pub mod fuzz {
             let claim = witness.claim(setup);
             let proof = prove(
                 &mut test_rng(),
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 setup,
                 &claim,
                 &witness,
@@ -500,7 +505,7 @@ pub mod fuzz {
             let [g, h] = Synthetic::generators_array();
             verify(
                 rng,
-                &mut Transcript::new(ns),
+                &mut Transcript::new(ns, Version::V1),
                 &Setup {
                     value_generator: g,
                     blinding_generator: h,

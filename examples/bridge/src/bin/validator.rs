@@ -96,6 +96,7 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
+    let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -174,6 +175,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_peers_per_set,
         1024 * 1024, // 1MB
     );
 
@@ -200,23 +202,11 @@ fn main() {
 
         // Register consensus channels
         //
-        // If you want to maximize the number of views per second, increase the rate limit
-        // for this channel.
-        let (vote_sender, vote_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (certificate_sender, certificate_receiver) = network.register(
-            1,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (resolver_sender, resolver_receiver) = network.register(
-            2,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
+        // To support more views per second, increase the rate.
+        let message_rate = Quota::per_second(NZU32!(10));
+        let (vote_sender, vote_receiver) = network.register(0, message_rate);
+        let (certificate_sender, certificate_receiver) = network.register(1, message_rate);
+        let (resolver_sender, resolver_receiver) = network.register(2, message_rate);
 
         // Initialize application
         let strategy = context.strategy(NZUsize!(2));
@@ -257,10 +247,10 @@ fn main() {
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
-                fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             },
         );
 

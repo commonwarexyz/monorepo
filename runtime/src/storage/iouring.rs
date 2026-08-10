@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, WriteOptions,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -34,7 +34,7 @@ use std::{
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 /// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
@@ -266,6 +266,9 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted write.
+    dont_cache_supported: Arc<AtomicBool>,
 }
 
 impl Clone for Blob {
@@ -277,6 +280,7 @@ impl Clone for Blob {
             io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
             data_offset: self.data_offset,
+            dont_cache_supported: self.dont_cache_supported.clone(),
         }
     }
 }
@@ -298,6 +302,7 @@ impl Blob {
             io_handle,
             pool,
             data_offset,
+            dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -351,25 +356,11 @@ impl crate::Blob for Blob {
         }
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.io_handle
-            .write_at(self.file.clone(), offset, bufs)
-            .await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let offset = offset
@@ -380,8 +371,13 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
+        let cache = if options.contains(WriteOptions::DONT_CACHE) {
+            iouring::Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            iouring::Cache::Enabled
+        };
         self.io_handle
-            .write_at_sync(self.file.clone(), offset, bufs)
+            .write_at(self.file.clone(), offset, bufs, options, cache)
             .await
     }
 
@@ -568,7 +564,9 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data.to_vec()).await.unwrap();
+        blob.write_at(0, data.to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -611,7 +609,9 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(0, b"test data".to_vec()).await.unwrap();
+        blob.write_at(0, b"test data".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
@@ -721,7 +721,9 @@ mod tests {
         let mut bufs = crate::IoBufs::default();
         bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
         bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
-        blob.write_at(0, bufs).await.unwrap();
+        blob.write_at(0, bufs, WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Read back and verify.
@@ -741,7 +743,9 @@ mod tests {
         // Persist fewer bytes than the upcoming read requests so the wrapper
         // encounters EOF after the header-adjusted offset has already started reading.
         let (blob, _) = storage.open("partition", b"short").await.unwrap();
-        blob.write_at(0, b"abc".to_vec()).await.unwrap();
+        blob.write_at(0, b"abc".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // The wrapper should surface this as an insufficient-length error instead
@@ -759,7 +763,9 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
 
         let (blob, _) = storage.open("partition", b"multichunk").await.unwrap();
-        blob.write_at(0, b"hello world".to_vec()).await.unwrap();
+        blob.write_at(0, b"hello world".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Use a two-chunk destination so the read path must rebuild the original
@@ -783,9 +789,15 @@ mod tests {
         assert_eq!(size, 0);
 
         // Zero-length operations should succeed immediately and preserve the empty blob.
-        blob.write_at(0, IoBufs::default()).await.unwrap();
-        blob.write_at(0, IoBuf::default()).await.unwrap();
-        blob.write_at(0, Vec::<u8>::new()).await.unwrap();
+        blob.write_at(0, IoBufs::default(), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(0, IoBuf::default(), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
+            .await
+            .unwrap();
         let empty = blob.read_at(0, 0).await.unwrap();
         assert!(empty.is_empty());
         let _ = blob
@@ -981,7 +993,7 @@ mod tests {
             "offset overflow"
         );
         assert_eq!(
-            blob.write_at(u64::MAX, b"x".to_vec())
+            blob.write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -1030,7 +1042,7 @@ mod tests {
             "read failed"
         );
         assert_eq!(
-            blob.write_at(0, b"x".to_vec())
+            blob.write_at(0, b"x".to_vec(), WriteOptions::default())
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -1308,7 +1320,9 @@ mod tests {
             blob.read_at(0, payload.len()).await.unwrap().coalesce(),
             payload
         );
-        blob.write_at(size, b"!".to_vec()).await.unwrap();
+        blob.write_at(size, b"!".to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 

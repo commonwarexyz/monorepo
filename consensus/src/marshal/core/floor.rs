@@ -7,50 +7,40 @@ use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::vec::NonEmptyVec;
 
-/// Durable processed floor used to admit or reject resolver fetches.
-#[derive(Clone, Copy)]
-struct ProcessedFloor {
+/// Durable height and round bounds restored when marshal initializes.
+///
+/// The components are independent retention bounds and need not identify the
+/// same finalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Floor {
     height: Option<Height>,
     round: Round,
 }
 
-impl ProcessedFloor {
-    /// Returns true when the resolver request is above all processed floors.
-    fn permits<C: Digest>(&self, fetch: &Request<C>) -> bool {
-        if let Some(height) = self.height
-            && !fetch.above_height_floor(height)
-        {
-            return false;
-        }
+impl Floor {
+    /// Returns the latest durably processed height, if any.
+    pub const fn height(&self) -> Option<Height> {
+        self.height
+    }
 
-        fetch.above_round_floor(self.round)
+    /// Returns the latest durable finalization round floor.
+    pub const fn round(&self) -> Round {
+        self.round
     }
 }
 
-#[must_use = "fetch admission must be handled explicitly"]
-pub(super) enum FetchAdmission {
-    Issued,
-    Denied,
-}
-
-impl FetchAdmission {
-    pub(super) const fn denied(self) -> bool {
-        matches!(self, Self::Denied)
-    }
-
-    pub(super) const fn ignore(self) {}
-}
-
-/// The processed floor plus any pending floor update awaiting its anchor block.
-pub(super) struct Floor<S: Scheme, C: Digest> {
-    processed: ProcessedFloor,
+/// Durable floor state plus any update awaiting its anchor block.
+pub(super) struct State<S: Scheme, C: Digest> {
+    height: Option<Height>,
+    round: Round,
     pending: Option<Finalization<S, C>>,
 }
 
-impl<S: Scheme, C: Digest> Floor<S, C> {
+impl<S: Scheme, C: Digest> State<S, C> {
     pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
         Self {
-            processed: ProcessedFloor { height, round },
+            height,
+            round,
             pending: None,
         }
     }
@@ -61,28 +51,36 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
         finalization: Finalization<S, C>,
     ) -> Self {
         Self {
-            processed: ProcessedFloor { height, round },
+            height,
+            round,
             pending: Some(finalization),
         }
     }
 
+    pub(super) const fn snapshot(&self) -> Floor {
+        Floor {
+            height: self.height,
+            round: self.round,
+        }
+    }
+
     pub(super) const fn processed_height(&self) -> Height {
-        match self.processed.height {
+        match self.height {
             Some(height) => height,
             None => Height::zero(),
         }
     }
 
-    pub(super) const fn processed_round(&self) -> Round {
-        self.processed.round
+    pub(super) const fn round(&self) -> Round {
+        self.round
     }
 
     pub(super) const fn set_processed_height(&mut self, height: Height) {
-        self.processed.height = Some(height);
+        self.height = Some(height);
     }
 
     pub(super) const fn set_processed_round(&mut self, round: Round) {
-        self.processed.round = round;
+        self.round = round;
     }
 
     /// Returns true while repair and application dispatch must wait for the floor anchor.
@@ -111,6 +109,17 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
         self.pending.take()
     }
 
+    /// Returns true when the resolver request is above all processed floors.
+    fn permits(&self, fetch: &Request<C>) -> bool {
+        if let Some(height) = self.height
+            && !fetch.above_height_floor(height)
+        {
+            return false;
+        }
+
+        fetch.above_round_floor(self.round)
+    }
+
     pub(super) fn fetch_if_permitted<R>(
         &self,
         resolver: &mut R,
@@ -119,7 +128,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
     where
         R: Resolver<Key = Key<C>, Subscriber = Annotation>,
     {
-        if !self.processed.permits(&fetch) {
+        if !self.permits(&fetch) {
             return FetchAdmission::Denied;
         }
         resolver.fetch(fetch);
@@ -135,7 +144,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
     where
         R: TargetedResolver<Key = Key<C>, Subscriber = Annotation>,
     {
-        if !self.processed.permits(&fetch) {
+        if !self.permits(&fetch) {
             return FetchAdmission::Denied;
         }
         resolver.fetch_targeted(fetch, targets);
@@ -152,7 +161,7 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
     {
         let fetches = fetches
             .into_iter()
-            .filter(|fetch| self.processed.permits(fetch))
+            .filter(|fetch| self.permits(fetch))
             .collect::<Vec<_>>();
         if fetches.is_empty() {
             return FetchAdmission::Denied;
@@ -160,6 +169,17 @@ impl<S: Scheme, C: Digest> Floor<S, C> {
         resolver.fetch_all(fetches);
         FetchAdmission::Issued
     }
+}
+
+/// Whether floor admission issued at least one resolver fetch.
+#[must_use = "fetch admission must be handled explicitly"]
+pub(super) enum FetchAdmission {
+    Issued,
+    Denied,
+}
+
+impl FetchAdmission {
+    pub(super) const fn ignore(self) {}
 }
 
 #[cfg(test)]
@@ -263,8 +283,8 @@ mod tests {
         Sha256::fill(byte)
     }
 
-    fn floor() -> Floor<TestScheme, TestDigest> {
-        Floor::resolved(Some(Height::new(5)), round(5))
+    fn floor() -> State<TestScheme, TestDigest> {
+        State::resolved(Some(Height::new(5)), round(5))
     }
 
     #[test]
@@ -272,36 +292,31 @@ mod tests {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
-        assert!(
-            floor
-                .fetch_if_permitted(&mut resolver, Request::finalized(Height::new(5)))
-                .denied()
-        );
-        assert!(
-            floor
-                .fetch_if_permitted(
-                    &mut resolver,
-                    Request::finalized_block_by_height(digest(1), Height::new(4)),
-                )
-                .denied()
-        );
-        assert!(
-            floor
-                .fetch_if_permitted(&mut resolver, Request::notarized(round(5)))
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(5))),
+            FetchAdmission::Denied
+        ));
+        assert!(matches!(
+            floor.fetch_if_permitted(
+                &mut resolver,
+                Request::finalized_block_by_height(digest(1), Height::new(4)),
+            ),
+            FetchAdmission::Denied
+        ));
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(5))),
+            FetchAdmission::Denied
+        ));
         assert!(resolver.fetches().is_empty());
 
-        assert!(
-            !floor
-                .fetch_if_permitted(&mut resolver, Request::finalized(Height::new(6)))
-                .denied()
-        );
-        assert!(
-            !floor
-                .fetch_if_permitted(&mut resolver, Request::notarized(round(6)))
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(6))),
+            FetchAdmission::Issued
+        ));
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(6))),
+            FetchAdmission::Issued
+        ));
 
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 2);
@@ -338,26 +353,24 @@ mod tests {
         let mut rng = commonware_utils::test_rng();
         let target = crypto_ed25519::PrivateKey::random(&mut rng).public_key();
 
-        assert!(
-            floor
-                .fetch_targeted_if_permitted(
-                    &mut resolver,
-                    Request::finalized(Height::new(5)),
-                    NonEmptyVec::new(target.clone()),
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_targeted_if_permitted(
+                &mut resolver,
+                Request::finalized(Height::new(5)),
+                NonEmptyVec::new(target.clone()),
+            ),
+            FetchAdmission::Denied
+        ));
         assert!(resolver.targeted().is_empty());
 
-        assert!(
-            !floor
-                .fetch_targeted_if_permitted(
-                    &mut resolver,
-                    Request::finalized(Height::new(6)),
-                    NonEmptyVec::new(target),
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_targeted_if_permitted(
+                &mut resolver,
+                Request::finalized(Height::new(6)),
+                NonEmptyVec::new(target),
+            ),
+            FetchAdmission::Issued
+        ));
         assert_eq!(
             resolver.targeted(),
             vec![Key::Finalized {
@@ -371,19 +384,18 @@ mod tests {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
-        assert!(
-            !floor
-                .fetch_all_if_permitted(
-                    &mut resolver,
-                    vec![
-                        Request::finalized(Height::new(5)),
-                        Request::finalized(Height::new(6)),
-                        Request::notarized(round(5)),
-                        Request::notarized(round(6)),
-                    ],
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_all_if_permitted(
+                &mut resolver,
+                vec![
+                    Request::finalized(Height::new(5)),
+                    Request::finalized(Height::new(6)),
+                    Request::notarized(round(5)),
+                    Request::notarized(round(6)),
+                ],
+            ),
+            FetchAdmission::Issued
+        ));
 
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 2);
@@ -393,30 +405,28 @@ mod tests {
         );
 
         let mut resolver = TestResolver::default();
-        assert!(
-            floor
-                .fetch_all_if_permitted(
-                    &mut resolver,
-                    vec![
-                        Request::finalized(Height::new(5)),
-                        Request::notarized(round(5)),
-                    ],
-                )
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_all_if_permitted(
+                &mut resolver,
+                vec![
+                    Request::finalized(Height::new(5)),
+                    Request::notarized(round(5)),
+                ],
+            ),
+            FetchAdmission::Denied
+        ));
         assert!(resolver.fetches().is_empty());
     }
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = Floor::<TestScheme, TestDigest>::resolved(None, round(5));
+        let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
         let mut resolver = TestResolver::default();
 
-        assert!(
-            !floor
-                .fetch_if_permitted(&mut resolver, Request::finalized(Height::zero()))
-                .denied()
-        );
+        assert!(matches!(
+            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::zero())),
+            FetchAdmission::Issued
+        ));
 
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 1);

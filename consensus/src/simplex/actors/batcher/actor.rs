@@ -59,6 +59,7 @@ where
 
     blocker: B,
     reporter: Re,
+    track_historical_votes: bool,
     relay: Rl,
     strategy: T,
 
@@ -144,6 +145,7 @@ where
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
+                track_historical_votes: cfg.track_historical_votes,
                 relay: cfg.relay,
                 strategy: cfg.strategy,
 
@@ -174,6 +176,7 @@ where
             Arc::clone(&self.scheme),
             self.blocker.clone(),
             self.reporter.clone(),
+            self.track_historical_votes,
         )
     }
 
@@ -425,7 +428,7 @@ where
                         let round = work.entry(view).or_insert_with(|| self.new_round(view));
                         let process = process_span(round.span());
                         let _guard = process.entered();
-                        round.add_constructed(message);
+                        round.accept_vote(message, true);
                         self.added.inc();
                         updated_view = view;
                     }
@@ -483,62 +486,44 @@ where
                 );
                 let _guard = span.entered();
 
-                match message {
-                    Certificate::Notarization(notarization) => {
-                        // Verify the certificate
-                        if !notarization.verify(
-                            self.context.as_mut(),
-                            self.scheme.as_ref(),
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .record_certificate(kind);
-                        voter.recovered(Certificate::Notarization(notarization));
-                    }
-                    Certificate::Nullification(nullification) => {
-                        // Verify the certificate
-                        if !nullification.verify::<_, D>(
-                            self.context.as_mut(),
-                            self.scheme.as_ref(),
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid nullification");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .record_certificate(kind);
-                        voter.recovered(Certificate::Nullification(nullification));
-                    }
-                    Certificate::Finalization(finalization) => {
-                        // Verify the certificate
-                        if !finalization.verify(
-                            self.context.as_mut(),
-                            self.scheme.as_ref(),
-                            &self.strategy,
-                        ) {
-                            commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
-                            continue;
-                        }
-
-                        // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
-                            .record_certificate(kind);
-                        voter.recovered(Certificate::Finalization(finalization));
-                    }
+                // Verify the certificate
+                let valid = match &message {
+                    Certificate::Notarization(notarization) => notarization.verify(
+                        self.context.as_mut(),
+                        self.scheme.as_ref(),
+                        &self.strategy,
+                    ),
+                    Certificate::Nullification(nullification) => nullification.verify::<_, D>(
+                        self.context.as_mut(),
+                        self.scheme.as_ref(),
+                        &self.strategy,
+                    ),
+                    Certificate::Finalization(finalization) => finalization.verify(
+                        self.context.as_mut(),
+                        self.scheme.as_ref(),
+                        &self.strategy,
+                    ),
+                };
+                if !valid {
+                    commonware_p2p::block!(self.blocker, sender, %view, %kind, "invalid certificate");
+                    continue;
                 }
 
-                // Certificates are already forwarded to voter, no need for construction
-                continue;
+                // Store and forward to voter
+                let reprocess_votes = work
+                    .entry(view)
+                    .or_insert_with(|| self.new_round(view))
+                    .record_certificate(&message);
+                voter.recovered(message);
+
+                // A notarization may make buffered finalize votes newly eligible,
+                // requiring another verification and construction pass.
+                if !reprocess_votes {
+                    // Otherwise, certificates are already forwarded to voter,
+                    // no need for construction.
+                    continue;
+                }
+                updated_view = view;
             },
             // Handle votes from the network
             Ok((sender, message)) = vote_receiver.recv() else break => {
@@ -608,7 +593,8 @@ where
                     "updated view must be greater than zero"
                 );
 
-                // Forward leader's proposal to voter (if we're not the leader and haven't already)
+                // Forward the selected proposal to voter if we are not the
+                // leader and have not already forwarded it.
                 if let Some(round) = work.get_mut(&current.view)
                     && let Some(me) = self.scheme.me()
                     && let Some(proposal) = round.try_forward_proposal(me)
@@ -632,13 +618,19 @@ where
                 };
                 let span = round.span();
                 async {
-                    // Batch verify votes if ready
-                    let timer = self.verify_latency.timer(self.context.as_ref());
-                    if let Some((batch, failed)) = round
-                        .try_verify(self.context.as_mut(), &self.strategy)
-                        .await
-                    {
+                    // Batch verify every ready kind. Multiple vote kinds may
+                    // be ready at the same time.
+                    let mut verified_any = false;
+                    loop {
+                        let timer = self.verify_latency.timer(self.context.as_ref());
+                        let Some((batch, failed)) = round
+                            .try_verify(self.context.as_mut(), &self.strategy)
+                            .await
+                        else {
+                            break;
+                        };
                         timer.observe(self.context.as_ref());
+                        verified_any = true;
 
                         // Process verified votes.
                         trace!(%updated_view, batch, "batch verified votes");
@@ -655,7 +647,8 @@ where
                                 );
                             }
                         }
-                    } else {
+                    }
+                    if !verified_any {
                         trace!(
                             current = %current.view,
                             %finalized,

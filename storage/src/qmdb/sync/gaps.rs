@@ -1,33 +1,30 @@
 //! Gap detection algorithm for sync operations.
 
 use crate::merkle::{Family, Location};
-use core::{num::NonZeroU64, ops::Range};
+use core::ops::Range;
 use std::collections::BTreeMap;
 
 /// Find the next gap in operations that needs to be fetched.
 /// Returns a Range of operations to fetch, or None if no gaps.
 ///
-/// We assume that all outstanding requests will return `fetch_batch_size` operations,
-/// but the resolver may return fewer. In that case, we'll fetch the remaining operations
-/// in a subsequent request.
+/// Outstanding request ranges describe their maximum responses, but the source may return fewer
+/// operations. In that case, we'll fetch the remaining operations in a subsequent request.
 ///
 /// # Arguments
 ///
 /// * `range` - The sync range
 /// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
-/// * `outstanding_requests` - Start locations of outstanding requests, in ascending order
-/// * `fetch_batch_size` - Expected size of each fetch batch
+/// * `outstanding_ranges` - Maximum ranges of outstanding requests, in ascending order
 ///
 /// # Invariants
 ///
 /// - All start locations in `fetched_operations` are in `range`
-/// - All start locations in `outstanding_requests` are in `range`
+/// - All outstanding request starts are in `range`
 /// - All operation counts in `fetched_operations` are > 0
-pub fn find_next<'a, F: Family>(
+pub fn find_next<F: Family>(
     range: Range<Location<F>>,
     fetched_operations: &BTreeMap<Location<F>, u64>, // start_loc -> operation_count
-    outstanding_requests: impl IntoIterator<Item = &'a Location<F>>,
-    fetch_batch_size: NonZeroU64,
+    outstanding_ranges: impl IntoIterator<Item = Range<Location<F>>>,
 ) -> Option<Range<Location<F>>> {
     if range.is_empty() {
         return None;
@@ -45,26 +42,20 @@ pub fn find_next<'a, F: Family>(
         })
         .peekable();
 
-    let mut outstanding_reqs_iter = outstanding_requests
-        .into_iter()
-        .map(|&start_loc| {
-            let end_loc = start_loc.checked_add(fetch_batch_size.get()).unwrap();
-            start_loc..end_loc
-        })
-        .peekable();
+    let mut outstanding_ranges_iter = outstanding_ranges.into_iter().peekable();
 
     // Merge process both iterators in sorted order
     loop {
-        let covered_range = match (fetched_ops_iter.peek(), outstanding_reqs_iter.peek()) {
+        let covered_range = match (fetched_ops_iter.peek(), outstanding_ranges_iter.peek()) {
             (Some(f_range), Some(o_range)) => {
                 if f_range.start <= o_range.start {
                     fetched_ops_iter.next().unwrap()
                 } else {
-                    outstanding_reqs_iter.next().unwrap()
+                    outstanding_ranges_iter.next().unwrap()
                 }
             }
             (Some(_), None) => fetched_ops_iter.next().unwrap(),
-            (None, Some(_)) => outstanding_reqs_iter.next().unwrap(),
+            (None, Some(_)) => outstanding_ranges_iter.next().unwrap(),
             (None, None) => break,
         };
 
@@ -260,16 +251,16 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (Location::new(k), v))
             .collect();
-        let outstanding_requests: Vec<Location<MmrFamily>> = test_case
+        let request_size = test_case.fetch_batch_size;
+        let outstanding_ranges: Vec<Range<Location<MmrFamily>>> = test_case
             .requested_ops
             .into_iter()
-            .map(Location::new)
+            .map(|start| Location::new(start)..Location::new(start + request_size))
             .collect();
         let result = find_next(
             Location::new(test_case.lower_bound)..Location::new(test_case.upper_bound),
             &fetched_ops,
-            &outstanding_requests,
-            NonZeroU64::new(test_case.fetch_batch_size).unwrap(),
+            outstanding_ranges,
         );
         assert_eq!(
             result,

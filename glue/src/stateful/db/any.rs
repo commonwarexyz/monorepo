@@ -1,19 +1,19 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to committed state. This module provides wrapper types
+//! read-through to applied state. This module provides wrapper types
 //! that capture a [`Shared`] database handle alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait,
+    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     index::{
@@ -35,7 +35,7 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         operation::Key,
-        sync::{self, Target as AnySyncTarget, resolver::Resolver},
+        sync::{self, Target as AnySyncTarget},
     },
     translator::Translator,
 };
@@ -107,13 +107,13 @@ where
         self
     }
 
-    /// Read a value by key, falling back to committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
@@ -169,6 +169,25 @@ where
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
     db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
+}
+
+impl<F, E, C, I, H, U, S> Clone for AnyMerkleized<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Context,
+    U: Update,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
@@ -357,13 +376,13 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to committed state.
+    /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to committed state.
+    /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
@@ -459,10 +478,10 @@ where
 ///
 /// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
-/// committed state.
+/// applied state.
 ///
-/// `finalize` applies the merkleized batch's changeset and durably
-/// commits it to disk.
+/// `finalize` applies the merkleized batch's changeset and starts
+/// persisting it, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -516,11 +535,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         AnyUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
         }
     }
@@ -528,12 +547,12 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -620,11 +639,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         AnyUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
         }
     }
@@ -632,12 +651,12 @@ where
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
             && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+            && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.sync().await
+        db.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -684,37 +703,30 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    R: Resolver<
-            Family = F,
-            Op = Operation<F, unordered::Update<K, FixedEncoding<V>>>,
-            Digest = H::Digest,
-        >,
+    R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        sync_standard_db(
             context,
-            resolver,
+            config,
+            source,
             target,
-            max_outstanding_requests: sync_config.max_outstanding_requests,
-            fetch_batch_size: sync_config.fetch_batch_size,
-            apply_batch_size: sync_config.apply_batch_size,
-            db_config: config,
-            update_rx: Some(tip_updates),
-            finish_rx: finish,
-            reached_target_tx: reached_target,
-            max_retained_roots: sync_config.max_retained_roots,
-        })
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
         .await
     }
 }
@@ -739,37 +751,30 @@ where
     T: Translator,
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
-    R: Resolver<
-            Family = F,
-            Op = Operation<F, unordered::Update<K, VariableEncoding<V>>>,
-            Digest = H::Digest,
-        >,
+    R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
 
     async fn sync_db(
         context: E,
         config: Self::Config,
-        resolver: R,
+        source: R,
         target: Self::SyncTarget,
         tip_updates: mpsc::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        sync_standard_db(
             context,
-            resolver,
+            config,
+            source,
             target,
-            max_outstanding_requests: sync_config.max_outstanding_requests,
-            fetch_batch_size: sync_config.fetch_batch_size,
-            apply_batch_size: sync_config.apply_batch_size,
-            db_config: config,
-            update_rx: Some(tip_updates),
-            finish_rx: finish,
-            reached_target_tx: reached_target,
-            max_retained_roots: sync_config.max_retained_roots,
-        })
+            tip_updates,
+            finish,
+            reached_target,
+            sync_config,
+        )
         .await
     }
 }
@@ -780,7 +785,10 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -821,6 +829,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unmerkleized_batch_falls_through_to_applied_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("unordered-fixed-live-fallback", &context);
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"winner"]);
+            let pre_finalization = db.new_batch_for_test::<_>().await;
+            let winner = db.new_batch_for_test::<_>().await.write(key, Some(value));
+            let winner = crate::stateful::db::Unmerkleized::merkleize(winner)
+                .await
+                .unwrap();
+
+            let (slot, database) = db.write().await;
+            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database, winner)
+                .await
+                .unwrap();
+            slot.put(database);
+            sync.await.expect("finalize flush failed");
+
+            // The batch commitment does not provide a historical database view.
+            assert_eq!(pre_finalization.get(&key).await.unwrap(), Some(value));
+        });
+    }
+
     /// The glue staged wrapper (`AnyUnmerkleized::stage` -> `AnyStaged::expand` ->
     /// `AnyStaged::merkleize`) must return the same values and root as an explicit `get_many` +
     /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
@@ -840,7 +877,7 @@ mod tests {
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
-            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let mut seed = db.new_batch_for_test::<_>().await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
@@ -849,11 +886,12 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                slot.put(
+                let (database, sync) =
                     <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
                         .await
-                        .unwrap(),
-                );
+                        .unwrap();
+                slot.put(database);
+                sync.await.expect("finalize flush failed");
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
@@ -863,7 +901,7 @@ mod tests {
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let mut explicit = db.new_batch_for_test::<_>().await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (slot, value) in &indexed_updates {
                 explicit = explicit.write(read_keys[*slot], *value);
@@ -878,7 +916,7 @@ mod tests {
                     .root();
 
             // Staged path, with metadata set on the staged handle.
-            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).await;
+            let staged_batch = db.new_batch_for_test::<_>().await;
             let split = 2;
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
@@ -895,9 +933,7 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db)
-                .await
-                .with_metadata(metadata);
+            let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
             let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
             let carried_root = staged
                 .merkleize(indexed_updates.clone(), upserts.clone())
@@ -906,6 +942,66 @@ mod tests {
                 .root();
             assert_eq!(explicit_values, carried_values);
             assert_eq!(explicit_root, carried_root);
+        });
+    }
+
+    type DelayedFixedDb = fixed::Db<
+        mmr::Family,
+        DelayedSyncContext<deterministic::Context>,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+
+    /// `finalize` must return, with the batch readable through the shared
+    /// handle, while its flush is still parked at the storage layer.
+    /// Durability is reported only on the returned handle.
+    #[test]
+    fn finalize_defers_flush_to_returned_handle() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let config = fixed_config("unordered-fixed-deferred", &delayed);
+            let db = drive_pending_syncs(
+                &pending,
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+            )
+            .await
+            .unwrap();
+            let db = Shared::new("test", db);
+
+            let key = Sha256::hash(&[b"key"]);
+            let value = Sha256::hash(&[b"value"]);
+            let batch = db.new_batch_for_test::<_>().await.write(key, Some(value));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+
+            let (slot, database) = db.write().await;
+            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                .await
+                .unwrap();
+            slot.put(database);
+
+            // The flush is parked, yet the batch is already readable.
+            assert!(
+                pending.starts() > pending.completions(),
+                "finalize must leave its flush parked",
+            );
+            {
+                let guard = db.read().await;
+                assert_eq!(guard.get(&key).await.unwrap(), Some(value));
+            }
+
+            release_pending_syncs(&pending);
+            drive_pending_syncs(&pending, sync)
+                .await
+                .expect("flush must succeed once released");
         });
     }
 }

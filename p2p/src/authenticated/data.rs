@@ -47,7 +47,10 @@ pub(crate) const DATA_PREFIX: u8 = 0;
 /// - 1: Frame discriminant
 /// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub(crate) const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
+pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
+
+/// Maximum supported application payload size.
+pub const MAX_SIZE: u32 = commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD;
 
 /// Pre-encoded data ready for transmission.
 ///
@@ -111,6 +114,14 @@ mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
+
+    #[test]
+    fn test_max_size_bounds() {
+        assert_eq!(
+            MAX_SIZE + MAX_PAYLOAD_OVERHEAD,
+            commonware_stream::encrypted::MAX_SIZE
+        );
+    }
 
     #[test]
     fn test_data_codec() {

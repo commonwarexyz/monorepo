@@ -43,10 +43,11 @@ use std::{marker::PhantomData, time::Duration};
 ///
 /// # Determinism Requirement
 ///
-/// Implementations **must** be deterministic: given the same construction parameters
-/// and the same inputs to [`Elector::elect`], the method must always return
-/// the same leader index. This is critical for consensus correctness - all honest
-/// participants must agree on the leader for each round.
+/// Implementations **must** be deterministic. Honest participants with the same
+/// configuration and participant set must select the same leader for each round.
+/// This is stronger than returning the same output for identical inputs because
+/// honest participants may call [`Elector::elect`] with different certificates for
+/// the same round. See [`Elector`] for the certificate handling requirements.
 pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
@@ -156,17 +157,26 @@ impl Default for Terms {
 /// view 1 (the first view after genesis). For all subsequent views, the caller
 /// provides the certificate that unlocked the target view. With stable leaders,
 /// a nullification certificate can skip to the next term start, so this is not
-/// necessarily a certificate from the immediately previous view. Implementations
-/// can use the certificate to derive randomness (like [`RandomElector`]) or
-/// ignore it entirely (like [`RoundRobinElector`]).
+/// necessarily a certificate from the immediately previous view.
 ///
-/// Honest participants may enter the same round holding different certificates
-/// (for example, one via a notarization of the previous view and another via a
-/// nullification), and with `term_length > 1` those certificates may even be
-/// from different views. Implementations that derive the leader from the
-/// certificate must return the same leader for every certificate that can
-/// unlock the round; this is why [`Random`] does not support `term_length > 1`,
-/// where certificates from different views carry different randomness.
+/// Whether certificate data is safe to use for leader selection depends on the
+/// certificate scheme. Certificates are not necessarily canonical: schemes that
+/// retain signer contributions can produce different valid certificates for the
+/// same subject from different quorum subsets. Message reordering or a Byzantine
+/// participant can therefore cause honest participants to call `elect` for the
+/// same round with different certificate values. Implementations must not derive
+/// the leader from a certificate's raw encoding or signer set unless the scheme
+/// guarantees that the result is invariant across every valid representation.
+///
+/// Honest participants may also enter the same round with certificates for
+/// different subjects (for example, one via a notarization of the previous view
+/// and another via a nullification). With `term_length > 1`, those certificates
+/// may even be from different views. Implementations must return the same leader
+/// for every certificate that can unlock the round. [`RoundRobinElector`] meets
+/// this requirement by ignoring the certificate. [`RandomElector`] uses the
+/// recovered threshold seed signature, which is independent of vote type and
+/// quorum subset for a given round. [`Random`] does not support `term_length > 1`
+/// because certificates from different views carry different seed signatures.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Returns the leadership term structure this elector was built with.
     ///
@@ -670,9 +680,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0]
-            .assemble::<_, N3f1>(attestations1, &Sequential)
-            .unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -684,9 +692,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0]
-            .assemble::<_, N3f1>(attestations2, &Sequential)
-            .unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -793,9 +799,7 @@ mod tests {
                     .take(quorum)
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
-                let cert = schemes[0]
-                    .assemble::<_, N3f1>(attestations, &Sequential)
-                    .unwrap();
+                let cert = schemes[0].assemble(attestations, &Sequential).unwrap();
 
                 // Elect leader using the certificate
                 let leader = elector.elect(round, Some(&cert));
