@@ -1607,7 +1607,6 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
- "futures",
  "rand 0.10.2",
  "serde",
  "serde_yaml",

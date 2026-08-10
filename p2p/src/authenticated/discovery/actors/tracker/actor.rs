@@ -36,9 +36,6 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// For signing and verifying messages.
     crypto: C,
 
-    /// The maximum number of peers in a set.
-    max_peer_set_size: u64,
-
     /// The maximum number of [types::Info] allowable in a single message.
     peer_gossip_max_count: usize,
 
@@ -90,7 +87,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the mailboxes
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let oracle = Oracle::new(sender.clone());
+        let oracle = Oracle::new(
+            sender.clone(),
+            cfg.crypto.public_key(),
+            cfg.max_peers_per_set,
+        );
         let releaser = Releaser::new(sender.clone());
 
         // Create the directory
@@ -110,21 +111,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             ip_namespace,
         );
 
-        (
-            Self {
-                context: ContextCell::new(context),
-                crypto: cfg.crypto,
-                max_peer_set_size: cfg.max_peer_set_size,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
-                receiver,
-                directory,
-                mailboxes: hash_map::new(),
-                subscribers: Vec::new(),
-            },
-            Mailbox::new(sender),
-            oracle,
-            info_verifier,
-        )
+        let actor = Self {
+            context: ContextCell::new(context),
+            crypto: cfg.crypto,
+            peer_gossip_max_count: cfg.peer_gossip_max_count,
+            receiver,
+            directory,
+            mailboxes: hash_map::new(),
+            subscribers: Vec::new(),
+        };
+
+        (actor, Mailbox::new(sender), oracle, info_verifier)
     }
 
     /// Start the actor and run it in the background.
@@ -154,18 +151,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Ensure that the primary peer set is not too large.
-                // Panic since there is no way to recover from this.
-                //
-                // Secondary peers are not checked here because max_peer_set_size
-                // exists to cap the bitvec size, which only covers primary peers.
-                let max = self.max_peer_set_size;
-                assert!(
-                    peers.primary.len() as u64 <= max,
-                    "primary peer set too large: {} > {max}",
-                    peers.primary.len()
-                );
-
                 // Attempt to update peer set membership.
                 let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
@@ -326,7 +311,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
     };
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, TryCollect, bitmap::BitMap, ordered::Set};
+    use commonware_utils::{NZUsize, bitmap::BitMap, ordered::Set};
     use futures::{FutureExt, future::Either};
     use std::{
         collections::HashSet,
@@ -349,10 +334,10 @@ mod tests {
             allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
             mailbox_size: NZUsize!(1024),
+            max_peers_per_set: 1024,
             tracked_peer_sets: NZUsize!(2),
             peer_connection_cooldown: Duration::from_millis(200),
             peer_gossip_max_count: 5,
-            max_peer_set_size: 128,
             dial_fail_limit: 1,
             block_duration: Duration::from_secs(100),
         }
@@ -455,53 +440,6 @@ mod tests {
             tracker_pk,
             cfg: stored_cfg,
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "primary peer set too large")]
-    fn test_register_primary_peer_set_too_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut oracle,
-                cfg,
-                mailbox,
-                ..
-            } = setup_actor(context.child("actor"), cfg_initial);
-            let too_many_peers: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
-                .map(|i| new_signer_and_pk(i).1)
-                .try_collect()
-                .unwrap();
-            oracle.track(0, too_many_peers);
-            // Ensure the message is processed causing the panic
-            let _ = mailbox.dialable().await;
-        });
-    }
-
-    #[test]
-    fn test_register_large_secondary_peer_set_accepted() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
-            let TestHarness {
-                mut oracle,
-                cfg,
-                mailbox,
-                ..
-            } = setup_actor(context.child("actor"), cfg_initial);
-
-            // Create a secondary set larger than max_peer_set_size.
-            // This should not panic because the limit only applies to
-            // primary peers (bitvec size).
-            let large_secondary: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
-                .map(|i| new_signer_and_pk(i).1)
-                .try_collect()
-                .unwrap();
-            let primary: Set<PublicKey> = Set::default();
-            oracle.track(0, TrackedPeers::new(primary, large_secondary));
-            let _ = mailbox.dialable().await;
-        });
     }
 
     #[test]
@@ -671,6 +609,7 @@ mod tests {
         executor.start(|context| async move {
             let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
             cfg.tracked_peer_sets = NZUsize!(1);
+            cfg.max_peers_per_set = 2;
             let TestHarness {
                 mailbox,
                 mut oracle,

@@ -1,12 +1,15 @@
 use crate::{
-    merkle::{Family, Location},
-    qmdb::any::{
-        FixedValue,
-        operation::{
-            COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
-            update,
+    merkle::Family,
+    qmdb::{
+        any::{
+            FixedValue,
+            operation::{
+                COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+                update,
+            },
+            value::FixedEncoding,
         },
-        value::FixedEncoding,
+        operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
     },
 };
 use commonware_codec::{
@@ -25,10 +28,6 @@ const fn update_op_size<S: FixedSize>() -> usize {
     1 + S::SIZE
 }
 
-const fn commit_op_size<V: FixedSize>() -> usize {
-    1 + 1 + V::SIZE + u64::SIZE
-}
-
 const fn delete_op_size<K: Array>() -> usize {
     1 + K::SIZE
 }
@@ -36,7 +35,7 @@ const fn delete_op_size<K: Array>() -> usize {
 const fn total_op_size<K: Array, V: FixedSize, S: FixedSize>() -> usize {
     const_max(
         update_op_size::<S>(),
-        const_max(commit_op_size::<V>(), delete_op_size::<K>()),
+        const_max(commit_fixed_operation_size::<V>(), delete_op_size::<K>()),
     )
 }
 
@@ -64,14 +63,8 @@ where
             }
             Operation::CommitFloor(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
-                if let Some(metadata) = metadata {
-                    true.write(buf);
-                    metadata.write(buf);
-                } else {
-                    buf.put_bytes(0, V::SIZE + 1);
-                }
-                buf.put_slice(&floor_loc.to_be_bytes());
-                buf.put_bytes(0, total - commit_op_size::<V>());
+                write_commit_fixed(metadata, *floor_loc, buf);
+                buf.put_bytes(0, total - commit_fixed_operation_size::<V>());
             }
         }
     }
@@ -95,21 +88,8 @@ where
                 Ok(Operation::Update(payload))
             }
             COMMIT_CONTEXT => {
-                let is_some = bool::read(buf)?;
-                let metadata = if is_some {
-                    Some(V::read_cfg(buf, cfg)?)
-                } else {
-                    ensure_zeros(buf, V::SIZE)?;
-                    None
-                };
-                let floor_loc = Location::new(u64::read(buf)?);
-                if !floor_loc.is_valid() {
-                    return Err(CodecError::Invalid(
-                        "storage::qmdb::any::operation::fixed::Operation",
-                        "commit floor location overflow",
-                    ));
-                }
-                ensure_zeros(buf, total - commit_op_size::<V>())?;
+                let (metadata, floor_loc) = read_commit_fixed(buf)?;
+                ensure_zeros(buf, total - commit_fixed_operation_size::<V>())?;
                 Ok(Operation::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),

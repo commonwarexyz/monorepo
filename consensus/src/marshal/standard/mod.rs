@@ -88,10 +88,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::{
-        Manager as _, Receiver as _, Recipients, Sender as _,
-        simulated::{self, Network},
-    };
+    use commonware_p2p::{Manager as _, Receiver as _, Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -106,7 +103,7 @@ mod tests {
     use commonware_utils::{
         Acknowledgement as _, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
-        channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
+        channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         ordered::{Quorum as _, Set},
         sequence::U64,
         sync::Mutex,
@@ -3817,7 +3814,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: D) {}
+        fn retire(&self, _update: crate::marshal::core::Retirement<D>) {}
 
         fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
@@ -4101,6 +4098,23 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ApplicationReporter {
+        updates: mpsc::UnboundedSender<Update<B>>,
+    }
+
+    impl Reporter for ApplicationReporter {
+        type Activity = Update<B>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            if self.updates.send(activity).is_ok() {
+                Feedback::Ok
+            } else {
+                Feedback::Closed
+            }
+        }
+    }
+
     async fn start_standard_actor<R, Buf, P>(
         context: deterministic::Context,
         partition_prefix: &str,
@@ -4208,6 +4222,116 @@ mod tests {
             actor.start_unbuffered(application, (resolver_rx, resolver.clone()))
         };
         (mailbox, buffer, resolver, actor_handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_application_shutdown_redelivers_pending_ack_after_restart() {
+        const PARTITION_PREFIX: &str = "application-shutdown-with-pending-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let first_run = |mut context: deterministic::Context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+
+            // Model an application that handles genesis normally, then owns the first
+            // non-genesis acknowledgement while its work remains in flight.
+            let (updates, mut application_mailbox) = mpsc::unbounded_channel::<Update<B>>();
+            let (delivered, delivery) = oneshot::channel();
+            let application_handle = context.child("application").spawn(move |_| async move {
+                let mut delivered = Some(delivered);
+                while let Some(update) = application_mailbox.recv().await {
+                    let Update::Block(block, acknowledgement) = update else {
+                        continue;
+                    };
+                    if block.height() == Height::zero() {
+                        acknowledgement.acknowledge();
+                        continue;
+                    }
+
+                    delivered
+                        .take()
+                        .expect("normal block should only be delivered once")
+                        .send_lossy(block.height());
+
+                    // Keep the acknowledgement in the suspended future so aborting this task
+                    // exercises application-owned cancellation during shutdown.
+                    std::future::pending::<()>().await;
+                    acknowledgement.acknowledge();
+                }
+            });
+
+            // Retain marshal's mailbox, buffer, and resolver until the exit assertion so no other
+            // input closing can account for the actor's exit.
+            let (mut mailbox, _buffer, _resolver, marshal_handle) = start_standard_actor(
+                context.child("validator"),
+                PARTITION_PREFIX,
+                provider.clone(),
+                ApplicationReporter { updates },
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // Deliver a normal finalized block and wait until the application owns its
+            // acknowledgement before beginning shutdown.
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_digest = block.digest();
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(round, block).await);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            assert_eq!(
+                delivery.await.expect("normal block should be delivered"),
+                Height::new(1)
+            );
+
+            // Drop the application first; the pending acknowledgement must stop marshal cleanly.
+            application_handle.abort();
+            let _ = application_handle.await;
+            marshal_handle
+                .await
+                .expect("application shutdown should stop marshal cleanly");
+
+            (provider, genesis, block_digest)
+        };
+
+        // Shut down with a pending acknowledgement, then recover the runtime.
+        let ((provider, genesis, block_digest), checkpoint) = runner.start_and_recover(first_run);
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            // The canceled acknowledgement must leave the processed floor behind the block so the
+            // recovered application receives the same finalized block again.
+            let restart_application = Application::<B>::manual_ack();
+            let (_mailbox, _buffer, _resolver, _marshal_handle) = start_standard_actor(
+                context.child("validator").with_attribute("restart", 0),
+                PARTITION_PREFIX,
+                provider,
+                restart_application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis),
+            )
+            .await;
+            select! {
+                height = restart_application.acknowledged() => {
+                    assert_eq!(height, Height::new(1));
+                    assert_eq!(
+                        restart_application
+                            .blocks()
+                            .get(&height)
+                            .expect("redelivered block must be recorded")
+                            .digest(),
+                        block_digest,
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("unacknowledged block was not redelivered after restart");
+                },
+            }
+        });
     }
 
     #[test_traced("WARN")]
@@ -6680,17 +6804,12 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let me = default_leader();
-            let (network, oracle) = Network::new_with_peers(
+            let oracle = setup_network_with_participants(
                 context.child("network"),
-                simulated::Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                vec![me.clone()],
+                NZUsize!(1),
+                [me.clone()],
             )
             .await;
-            network.start();
             let control = oracle.control(me.clone());
             let network_channel = control
                 .register(0, Quota::per_second(NonZeroU32::MAX))

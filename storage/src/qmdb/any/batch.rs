@@ -29,7 +29,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::{cmp::Ordering, ops::Range};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, hash_map},
     iter, mem,
     sync::{Arc, Weak},
 };
@@ -306,68 +306,8 @@ where
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
-    keys: StagedKeys<U::Key>,
+    keys: Vec<U::Key>,
     resolutions: Vec<StagedResolution<F, U>>,
-}
-
-/// The staged read slots: each staged key paired with its distinct-key id, assigned by
-/// first occurrence across [`stage`](UnmerkleizedBatch::stage) and
-/// [`expand`](Staged::expand). Ids are assigned while staging so
-/// [`resolve_updates`](Staged::resolve_updates) deduplicates updates by direct indexing
-/// instead of hashing every key on the merkleize path.
-struct StagedKeys<K> {
-    /// Staged keys, one per slot.
-    keys: Vec<K>,
-    /// Slot -> distinct-key id (1:1 with `keys`).
-    slots: Vec<usize>,
-    /// Key -> distinct-key id backing `slots`, retained so a later
-    /// [`expand`](Staged::expand) chunk assigns consistent ids to keys staged again. Only
-    /// probed, never iterated.
-    ids: AHashMap<K, usize>,
-}
-
-impl<K: Clone + Eq + core::hash::Hash> StagedKeys<K> {
-    /// Wrap the initial staged chunk, assigning each key its distinct-key id.
-    fn new(keys: Vec<K>) -> Self {
-        let mut staged = Self {
-            keys: Vec::new(),
-            slots: Vec::new(),
-            ids: AHashMap::with_capacity(keys.len()),
-        };
-        staged.append(keys);
-        staged
-    }
-
-    /// Append a staged chunk, assigning each key its distinct-key id (by first occurrence).
-    fn append(&mut self, mut keys: Vec<K>) {
-        self.slots.reserve(keys.len());
-        for key in &keys {
-            let next = self.ids.len();
-            let id = *self.ids.entry(key.clone()).or_insert(next);
-            self.slots.push(id);
-        }
-        self.keys.append(&mut keys);
-    }
-
-    /// Number of staged slots.
-    const fn len(&self) -> usize {
-        self.keys.len()
-    }
-
-    /// The key staged at `slot`.
-    fn key(&self, slot: usize) -> &K {
-        &self.keys[slot]
-    }
-
-    /// The distinct-key id assigned to `slot`.
-    fn id(&self, slot: usize) -> usize {
-        self.slots[slot]
-    }
-
-    /// Number of distinct staged keys, bounding the id space.
-    fn distinct(&self) -> usize {
-        self.ids.len()
-    }
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1391,19 +1331,10 @@ where
             v.extend(parent.ancestors());
             v
         });
-        // The DB boundary is inherited unless older ancestors were applied and freed, truncating
-        // the weak parent chain. The oldest live ancestor's base then names the boundary directly.
-        // For A -> B -> C with A applied and dropped, `ancestors()` yields [B]. B's items start at
-        // A's size, so B's `base` is the boundary.
-        let inherited = self.base.db();
-        let db_state = ancestors.last().map_or(inherited, |oldest| {
-            let oldest_base = oldest.bounds.base;
-            if oldest_base.size > inherited.size {
-                oldest_base
-            } else {
-                inherited
-            }
-        });
+        let db_state = batch_chain::effective_boundary(
+            self.base.db(),
+            ancestors.last().map(|oldest| oldest.bounds.base),
+        );
         let m = Merkleizer {
             journal_batch: self.journal_batch,
             ancestors,
@@ -1458,7 +1389,7 @@ where
             .checked_add(keys.len())
             .expect("staged read index overflow");
         let (values, keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
-        self.keys.append(keys);
+        self.keys.extend(keys);
         self.resolutions.append(&mut resolutions);
         Ok((start..end, values, self))
     }
@@ -1511,48 +1442,55 @@ where
             return (Self::apply_upserts(batch, upserts), staged_updates);
         }
 
-        // Resolve last-write-wins per distinct key without hashing on the merkleize path:
-        // each staged slot carries its distinct-key id, so a forward walk leaves each id's
-        // final write (the same winner as a newest-first scan). Overlapping updates for upsert
-        // keys are dropped (upserts are applied last and win). Detecting the overlap is the
-        // one remaining hash probe, skipped entirely for the common upsert-free call.
-        // `touched` records each id on first write so the walks below stay proportional to
-        // the updates actually submitted, not the full staged read set.
-        let upsert_keys: AHashSet<&U::Key> = upserts.iter().map(|(key, _)| key).collect();
-        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = vec![None; keys.distinct()];
-        let mut touched: Vec<usize> = Vec::with_capacity(updates.len());
+        // Resolve last-write-wins per distinct key: a forward walk keyed on the staged key leaves
+        // each key's final write, the same winner as a newest-first scan. Later writes overwrite
+        // their key's entry in place, so `winners` holds one entry per distinct key written. A
+        // distinct key needs a staged slot, so the staged read set caps the reservation that a
+        // duplicate-heavy update list would otherwise inflate.
+        let capacity = updates.len().min(keys.len());
+        let mut winner_of: AHashMap<&U::Key, usize> = AHashMap::with_capacity(capacity);
+        let mut winners: Vec<Option<(usize, Option<U::Value>)>> = Vec::with_capacity(capacity);
         for (slot, value) in updates {
             assert!(slot < keys.len(), "update index out of staged read range");
-            if !upsert_keys.is_empty() && upsert_keys.contains(keys.key(slot)) {
-                continue;
+            match winner_of.entry(&keys[slot]) {
+                hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(winners.len());
+                    winners.push(Some((slot, value)));
+                }
+                hash_map::Entry::Occupied(occupied) => {
+                    winners[*occupied.get()] = Some((slot, value))
+                }
             }
-            let id = keys.id(slot);
-            if winners[id].is_none() {
-                touched.push(id);
-            }
-            winners[id] = Some((slot, value));
         }
+
+        // Upserts are applied last and win over overlapping staged updates. Only updated keys can
+        // overlap, so this probes the winner index rather than the whole staged read set.
+        for (key, _) in &upserts {
+            if let Some(&entry) = winner_of.get(key) {
+                winners[entry] = None;
+            }
+        }
+        drop(winner_of);
 
         // Split the winners: updates whose slot resolved to a location become staged
         // updates, the rest fall back to batch mutations. A surviving staged write must not
         // also emit an older batch mutation for the same key, so it is removed here. The
         // probe is skipped when the batch had no mutations before this call: each distinct
-        // key is visited at most once (winners are per key id), so a staged winner can never
+        // key is visited at most once (winners are per key), so a staged winner can never
         // chase a fallback inserted by this same loop.
         let had_mutations = !batch.mutations.is_empty();
-        let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(touched.len());
-        for &id in &touched {
-            let winner = &mut winners[id];
+        let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(winners.len());
+        for (entry, winner) in winners.iter_mut().enumerate() {
             let Some((slot, value)) = winner else {
-                unreachable!("touched ids hold a winner");
+                continue;
             };
-            let key = keys.key(*slot);
+            let key = &keys[*slot];
             match &resolutions[*slot] {
                 Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
                     if had_mutations {
                         batch.mutations.remove(key);
                     }
-                    order.push((sloc.loc(), *slot));
+                    order.push((sloc.loc(), entry));
                 }
                 _ => {
                     let (_, value) = winner.take().expect("winner checked above");
@@ -1563,18 +1501,18 @@ where
 
         // Locations are unique after last-write-wins dedup (each key resolves to exactly one
         // location, committed or ancestor), so the parallel sort is deterministic. Sorting
-        // compact `(location, slot)` pairs instead of the staged tuples keeps its memory
+        // compact `(location, winner)` pairs instead of the staged tuples keeps its memory
         // traffic low. The tuples are then drained in sorted order, moving each winner's
         // payload and value instead of cloning them.
         strategy.sort_by(&mut order, |a, b| a.0.cmp(&b.0));
         staged_updates = order
             .iter()
-            .map(|&(_, slot)| {
-                let (_, value) = winners[keys.id(slot)]
+            .map(|&(_, entry)| {
+                let (slot, value) = winners[entry]
                     .take()
                     .expect("winner recorded for staged slot");
                 let (sloc, payload) = resolutions[slot].take().expect("resolution checked above");
-                (keys.key(slot).clone(), sloc, payload, value)
+                (keys[slot].clone(), sloc, payload, value)
             })
             .collect();
         (Self::apply_upserts(batch, upserts), staged_updates)
@@ -1684,7 +1622,7 @@ where
             .iter()
             .filter(|(slot, _)| self.resolutions.get(*slot).is_some_and(Option::is_some))
             .count()
-            .min(self.keys.distinct());
+            .min(self.keys.len());
         let existing_writes = upserts
             .iter()
             .map(|(key, _)| key)
@@ -1857,9 +1795,11 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Resolved locations are not retained: a batch that writes keys it read pays an
-    /// index re-probe and journal re-read at merkleize. Use [`stage`](Self::stage) to fuse
-    /// reads into merkleize instead.
+    /// keys. Resolved locations are not retained, so writing a key read only through `get_many`
+    /// requires an index re-probe and journal re-read during merkleize. Use
+    /// [`stage`](Self::stage) for keys that may be written. When the writable subset is known and
+    /// much smaller than the full read set, call `get_many` for the read-only keys first, then
+    /// [`stage`](Self::stage) only the writable keys.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -1920,7 +1860,7 @@ where
             results,
             Staged {
                 batch: self,
-                keys: StagedKeys::new(keys),
+                keys,
                 resolutions,
             },
         ))
@@ -3935,7 +3875,7 @@ mod tests {
         2
     );
 
-    /// Build a [`Staged`] handle with the slot key-id map `stage`/`expand` would have built.
+    /// Build a [`Staged`] handle with the keys and resolutions `stage`/`expand` would produce.
     fn staged_with<F: Family, H: Hasher, U: update::Update + Send + Sync, S: Strategy>(
         batch: UnmerkleizedBatch<F, H, U, S>,
         keys: Vec<U::Key>,
@@ -3946,7 +3886,7 @@ mod tests {
     {
         Staged {
             batch,
-            keys: StagedKeys::new(keys),
+            keys,
             resolutions,
         }
     }

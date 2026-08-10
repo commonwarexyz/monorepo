@@ -9,6 +9,7 @@ use super::{
 use crate::{
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
+    sizing::peer_set_size,
     utils::{
         PeerSetsAtIndex as PeerSetsAtIndexBase,
         limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
@@ -56,7 +57,10 @@ type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 type Task<P> = (Channel, P, Recipients<P>, IoBuf);
 
 /// Overhead from prepending a channel identifier to an application payload.
-pub const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
+const MAX_PAYLOAD_OVERHEAD: u32 = Channel::SIZE as u32;
+
+/// Maximum supported application payload size.
+pub const MAX_SIZE: u32 = u32::MAX - MAX_PAYLOAD_OVERHEAD;
 
 struct RegistrationGuard {
     active: Arc<AtomicBool>,
@@ -123,8 +127,16 @@ struct PeerRefCounts {
 pub struct Config {
     /// Maximum size allowed for an application payload provided to a sender.
     ///
+    /// The largest supported value is [`MAX_SIZE`].
+    ///
     /// Providing a larger payload panics. Exchanged messages are larger due to framing overhead.
     pub max_size: u32,
+
+    /// Maximum number of distinct identities at one peer-set index.
+    ///
+    /// This applies to the deduplicated union of a peer set's primary and secondary identities.
+    /// The simulator panics when it processes an oversized registration.
+    pub max_peers_per_set: NonZeroUsize,
 
     /// True if peers should disconnect upon being blocked. While production networking would
     /// typically disconnect, for testing purposes it may be useful to keep peers connected,
@@ -147,6 +159,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Maximum size of an internal message containing a channel identifier and payload.
     max_frame_size: u32,
+
+    // Maximum number of distinct identities in one peer set.
+    max_peers_per_set: usize,
 
     // True if peers should disconnect upon being blocked.
     // While production networking would typically disconnect, for testing purposes it may be useful
@@ -203,7 +218,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::max_size`] plus [`MAX_PAYLOAD_OVERHEAD`] exceeds `u32::MAX`.
+    /// Panics if [`Config::max_size`] exceeds [`MAX_SIZE`].
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
@@ -212,7 +227,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .max_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
-
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
 
@@ -221,6 +235,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 context: ContextCell::new(context),
                 max_size: cfg.max_size,
                 max_frame_size,
+                max_peers_per_set: cfg.max_peers_per_set.get(),
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
@@ -281,10 +296,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Apply a tracked peer set to network state.
     async fn register_tracked_peer_set(&mut self, id: u64, peers: TrackedPeers<P>) -> bool {
-        let primary = peers.primary;
-        let secondary = peers.secondary;
-        let tracked_peer_sets = self.tracked_peer_sets;
-
         // Check if peer set already exists
         if self.peer_sets.contains_key(&id) {
             warn!(id, "peer set already exists");
@@ -303,7 +314,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             return false;
         }
 
-        // Create and store new primary peer set.
+        // Validate and unpack the peer set.
+        self.assert_peer_set_size(&peers);
+        let primary = peers.primary;
+        let secondary = peers.secondary;
+        let tracked_peer_sets = self.tracked_peer_sets;
+
+        // Track primary peers.
         for public_key in primary.iter() {
             self.ensure_peer_exists(public_key).await;
             self.peer_ref_counts
@@ -312,7 +329,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .primary += 1;
         }
 
-        // Secondary peers: Peers in both roles count only as primary.
+        // Track secondary peers, treating overlaps as primary.
         let secondary_filtered = Set::from_iter_dedup(
             secondary
                 .iter()
@@ -375,8 +392,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
         }
-
         true
+    }
+
+    /// Enforces the configured maximum over one peer set.
+    fn assert_peer_set_size(&self, peers: &TrackedPeers<P>) {
+        let peer_count = peer_set_size(peers.primary.iter(), peers.secondary.iter(), None);
+        assert!(
+            peer_count <= self.max_peers_per_set,
+            "peer set too large: {peer_count} > {}",
+            self.max_peers_per_set
+        );
     }
 
     /// Returns (and increments) the next available socket address.
@@ -1518,6 +1544,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -1567,6 +1594,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: u32::MAX,
+                max_peers_per_set: NZUsize!(1),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             };
@@ -1586,6 +1614,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_SIZE as u32,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             };
@@ -1658,6 +1687,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -1697,6 +1727,126 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_max_peers_per_set_allows_larger_union_across_sets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(2),
+            };
+            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
+            let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
+            let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
+
+            // Each set contains two identities. Their combined union may be larger than either
+            // individual set.
+            assert!(
+                network
+                    .register_tracked_peer_set(
+                        0,
+                        TrackedPeers::new(
+                            Set::try_from([peer_1]).unwrap(),
+                            Set::try_from([peer_2.clone()]).unwrap(),
+                        ),
+                    )
+                    .await
+            );
+            assert!(
+                network
+                    .register_tracked_peer_set(
+                        1,
+                        TrackedPeers::new(
+                            Set::try_from([peer_2]).unwrap(),
+                            Set::try_from([peer_3]).unwrap(),
+                        ),
+                    )
+                    .await
+            );
+            assert_eq!(network.peer_ref_counts.len(), 3);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "peer set too large: 3 > 2")]
+    fn test_max_peers_per_set_rejects_primary_secondary_union() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
+            let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
+            let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
+
+            network
+                .register_tracked_peer_set(
+                    0,
+                    TrackedPeers::new(
+                        Set::try_from([peer_1, peer_2.clone()]).unwrap(),
+                        Set::try_from([peer_2, peer_3]).unwrap(),
+                    ),
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    fn test_peer_set_size_deduplicates_roles_and_sets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(2),
+            };
+            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
+            let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Within a set, a primary identity is not also counted as secondary. Across retained
+            // sets, each identity may still hold one reference in each role.
+            assert!(
+                network
+                    .register_tracked_peer_set(
+                        0,
+                        TrackedPeers::new(
+                            Set::try_from([peer_1.clone()]).unwrap(),
+                            Set::try_from([peer_1.clone(), peer_2.clone()]).unwrap(),
+                        ),
+                    )
+                    .await
+            );
+            assert!(
+                network
+                    .register_tracked_peer_set(
+                        1,
+                        TrackedPeers::new(
+                            Set::try_from([peer_2.clone()]).unwrap(),
+                            Set::try_from([peer_1.clone()]).unwrap(),
+                        ),
+                    )
+                    .await
+            );
+
+            assert_eq!(network.peer_ref_counts.len(), 2);
+            let peer_1_counts = network.peer_ref_counts.get(&peer_1).unwrap();
+            assert_eq!(peer_1_counts.primary, 1);
+            assert_eq!(peer_1_counts.secondary, 1);
+            let peer_2_counts = network.peer_ref_counts.get(&peer_2).unwrap();
+            assert_eq!(peer_2_counts.primary, 1);
+            assert_eq!(peer_2_counts.secondary, 1);
+        });
+    }
+
     /// Split sender/receiver routes each half to a different neighbor: primary out goes only to `peer_a`,
     /// secondary out only to `peer_b`, and inbound mail is demuxed by sender id.
     #[test]
@@ -1705,6 +1855,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(3),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -1819,6 +1970,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -1888,6 +2040,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -1964,6 +2117,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -2011,6 +2165,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(3),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -2071,6 +2226,7 @@ mod tests {
     fn test_get_next_socket() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
+            max_peers_per_set: NZUsize!(1),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),
         };
@@ -2107,6 +2263,7 @@ mod tests {
     fn test_fifo_burst_same_recipient() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
+            max_peers_per_set: NZUsize!(2),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(3),
         };
@@ -2185,6 +2342,7 @@ mod tests {
     fn test_broadcast_respects_transmit_latency() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
+            max_peers_per_set: NZUsize!(3),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(3),
         };
@@ -2285,6 +2443,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(3),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -2376,6 +2535,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };
@@ -2441,6 +2601,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(2),
             };

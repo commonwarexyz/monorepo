@@ -5,7 +5,7 @@ use crate::{
         metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
-    types::{Participant, Round as Rnd},
+    types::{Participant, Round as Rnd, View},
 };
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -69,6 +69,7 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalize: bool,
     broadcast_finalization: bool,
     certify: CertifyState,
+    last_ancestry_request: Option<View>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -95,6 +96,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_finalize: false,
             broadcast_finalization: false,
             certify: CertifyState::Ready,
+            last_ancestry_request: None,
         }
     }
 
@@ -142,6 +144,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return false;
         }
         self.proposal.request_verify()
+    }
+
+    /// Records an ancestry view requested from the leader.
+    pub fn request(&mut self, view: View) -> bool {
+        if self.last_ancestry_request == Some(view) {
+            return false;
+        }
+        self.last_ancestry_request = Some(view);
+        true
     }
 
     /// Attempt to certify this round's proposal.
@@ -686,6 +697,21 @@ mod tests {
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_utils::{futures::AbortablePool, test_rng};
+
+    #[test]
+    fn ancestry_request_deduplicates_view() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(10));
+        let mut round =
+            Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        let requested = View::new(3);
+
+        assert!(round.request(requested));
+        assert!(!round.request(requested));
+        assert!(round.request(requested.next()));
+        assert!(!round.request(requested.next()));
+    }
 
     #[test]
     fn equivocation_detected_on_proposal_notarization_conflict() {

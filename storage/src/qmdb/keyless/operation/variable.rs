@@ -1,8 +1,9 @@
 use crate::{
-    merkle::{Family, Location},
+    merkle::Family,
     qmdb::{
         any::{VariableValue, value::VariableEncoding},
         keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
+        operation::{commit_variable_payload_size, read_commit_variable, write_commit_variable},
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -19,8 +20,7 @@ impl<V: VariableValue> Codec for VariableEncoding<V> {
             }
             Operation::Commit(metadata, floor) => {
                 COMMIT_CONTEXT.write(buf);
-                metadata.write(buf);
-                floor.write(buf);
+                write_commit_variable(metadata, *floor, buf);
             }
         }
     }
@@ -32,8 +32,7 @@ impl<V: VariableValue> Codec for VariableEncoding<V> {
         match u8::read(buf)? {
             APPEND_CONTEXT => Ok(Operation::Append(V::read_cfg(buf, cfg)?)),
             COMMIT_CONTEXT => {
-                let metadata = Option::<V>::read_cfg(buf, cfg)?;
-                let floor = Location::<F>::read(buf)?;
+                let (metadata, floor) = read_commit_variable(buf, cfg)?;
                 Ok(Operation::Commit(metadata, floor))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -45,7 +44,7 @@ impl<F: Family, V: VariableValue> EncodeSize for Operation<F, VariableEncoding<V
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Append(v) => v.encode_size(),
-            Self::Commit(v, floor) => v.encode_size() + floor.encode_size(),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }
@@ -53,7 +52,7 @@ impl<F: Family, V: VariableValue> EncodeSize for Operation<F, VariableEncoding<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr;
+    use crate::merkle::{Location, mmr};
     use commonware_codec::{DecodeExt, Encode, EncodeSize};
     use commonware_utils::sequence::U64;
 

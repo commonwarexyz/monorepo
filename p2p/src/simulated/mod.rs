@@ -76,6 +76,7 @@
 //! // Configure network
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
+//!     max_peers_per_set: NZUsize!(4),
 //!     disconnect_on_block: true,
 //!     tracked_peer_sets: NZUsize!(3),
 //! };
@@ -175,7 +176,7 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    Config, ConnectedPeerProvider, MAX_PAYLOAD_OVERHEAD, Network, Receiver, Sender, SplitForwarder,
+    Config, ConnectedPeerProvider, MAX_SIZE, Network, Receiver, Sender, SplitForwarder,
     SplitOrigin, SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
 };
 
@@ -244,6 +245,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(size),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -359,6 +361,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -399,6 +402,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -442,6 +446,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -544,6 +549,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -597,6 +603,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -649,6 +656,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -735,6 +743,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -795,6 +804,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -869,6 +879,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1055,6 +1066,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1154,6 +1166,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(101),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1304,6 +1317,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1369,6 +1383,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1473,6 +1488,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1564,6 +1580,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1657,6 +1674,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1755,6 +1773,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1900,6 +1919,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2005,6 +2025,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2107,6 +2128,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2197,6 +2219,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2275,6 +2298,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2353,6 +2377,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2381,6 +2406,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2440,6 +2466,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2478,6 +2505,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2524,6 +2552,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2563,6 +2592,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2600,6 +2630,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -2651,6 +2682,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2), // Only track 2 peer sets
                 },
@@ -2759,6 +2791,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -2801,6 +2834,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -2912,6 +2946,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3009,6 +3044,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -3060,6 +3096,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
                 },
@@ -3153,6 +3190,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -3222,6 +3260,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -3286,6 +3325,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
             };
@@ -3365,6 +3405,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },
@@ -3407,6 +3448,7 @@ mod tests {
                 context.child("network"),
                 Config {
                     max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
                 },

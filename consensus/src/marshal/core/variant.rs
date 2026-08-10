@@ -19,6 +19,18 @@ use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
+/// An atomic retirement from a buffer's retained state.
+///
+/// The round floor and exact retirements are independent eligibility signals
+/// carried together so implementations apply one coherent update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Retirement<C> {
+    /// The inclusive floor for entries owned by their last observation round.
+    pub round_floor: Round,
+    /// Commitments to retire regardless of their last observation round.
+    pub exact_retirements: Vec<C>,
+}
+
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
@@ -168,10 +180,13 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<Arc<V::Block>>>;
 
-    /// Notify the buffer that a block has been finalized.
+    /// Retire entries made eligible by durable application progress.
     ///
-    /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, commitment: V::Commitment);
+    /// [`Retirement::round_floor`] is increasing and inclusive.
+    /// [`Retirement::exact_retirements`] may be empty, sparse, or batched.
+    /// Implementations must apply both fields as one update and must not infer
+    /// that they describe the same finalization.
+    fn retire(&self, update: Retirement<V::Commitment>);
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: Arc<V::Block>, recipients: Recipients<Self::PublicKey>);
@@ -227,7 +242,7 @@ where
         None
     }
 
-    fn finalized(&self, _: V::Commitment) {}
+    fn retire(&self, _: Retirement<V::Commitment>) {}
 
     fn send(&self, _: Round, _: Arc<V::Block>, _: Recipients<Self::PublicKey>) {}
 }

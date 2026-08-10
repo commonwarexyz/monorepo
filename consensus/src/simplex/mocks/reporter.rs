@@ -58,6 +58,7 @@ pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     pub certified: Arc<Mutex<HashSet<View>>>,
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
+    pub certifications: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
@@ -88,6 +89,7 @@ where
             certified: self.certified.clone(),
             notarizes: self.notarizes.clone(),
             notarizations: self.notarizations.clone(),
+            certifications: self.certifications.clone(),
             nullifies: self.nullifies.clone(),
             nullifications: self.nullifications.clone(),
             finalizes: self.finalizes.clone(),
@@ -120,6 +122,7 @@ where
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(hash_map::new())),
             notarizations: Arc::new(Mutex::new(hash_map::new())),
+            certifications: Arc::new(Mutex::new(hash_map::new())),
             nullifies: Arc::new(Mutex::new(hash_map::new())),
             nullifications: Arc::new(Mutex::new(hash_map::new())),
             finalizes: Arc::new(Mutex::new(hash_map::new())),
@@ -206,6 +209,11 @@ where
                 Notarization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.notarizations.lock().insert(view, notarization.clone());
+                if matches!(&activity, Activity::Certification(_)) {
+                    self.certifications
+                        .lock()
+                        .insert(view, notarization.clone());
+                }
                 self.certified(
                     notarization.round(),
                     notarization.view().next(),

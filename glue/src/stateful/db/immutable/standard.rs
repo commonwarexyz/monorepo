@@ -6,7 +6,7 @@
 //! so the batch API can read through to applied state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -141,6 +141,26 @@ where
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
     db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
+}
+
+impl<F, E, K, V, C, H, T, S> Clone for ImmutableMerkleized<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, K, V>: EncodeShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            db: self.db.clone(),
+        }
+    }
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -295,11 +315,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         ImmutableUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }
@@ -387,11 +407,11 @@ where
         )
     }
 
-    async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
-        let guard = db.read().await;
+    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+        let (database, shared) = database.into_parts();
         ImmutableUnmerkleized {
-            batch: guard.new_batch(),
-            db: db.clone(),
+            batch: database.new_batch(),
+            db: shared,
             metadata: None,
             inactivity_floor: None,
         }

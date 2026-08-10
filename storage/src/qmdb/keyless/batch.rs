@@ -267,8 +267,13 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        // Capture the DB boundary before `self` is consumed below.
-        let boundary = self.db();
+        let live_ancestors: Vec<_> =
+            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+                .collect();
+        let boundary = batch_chain::effective_boundary(
+            self.db(),
+            live_ancestors.last().map(|oldest| oldest.bounds.base),
+        );
 
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
@@ -289,10 +294,8 @@ where
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.
-        let ancestors =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors());
         let ancestors = batch_chain::collect_ancestor_bounds(
-            ancestors,
+            live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
