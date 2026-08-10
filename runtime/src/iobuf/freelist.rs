@@ -159,6 +159,15 @@ const SLOT_BITMAP_WORD_SHIFT: u32 = SLOT_BITMAP_WORD_BITS.trailing_zeros();
 /// Number of word masks stored on the stack before falling back to heap scratch.
 const INLINE_PUT_BATCH_MASKS: usize = 128;
 
+/// Number of bitmap words covered by one availability-summary bit.
+const SUMMARY_GROUP_WORDS: usize = 64;
+
+/// Minimum bitmap word count before the availability summary is maintained.
+///
+/// Below this, a full bitmap scan is bounded and cheap, so the summary would
+/// only add transition traffic without shortening misses.
+const SUMMARY_MIN_WORDS: usize = 64;
+
 /// Bounded lock-free freelist of tracked buffers for one size class.
 ///
 /// The freelist owns the [`Layout`] shared by every tracked buffer in the size
@@ -183,6 +192,26 @@ pub struct Freelist {
     /// created slot ids may still be owned by a pooled backing or parked in
     /// thread-local caches.
     created: AtomicUsize,
+    /// Cache-line-padded availability summary over the free-slot bitmap.
+    ///
+    /// One bit per group of [`SUMMARY_GROUP_WORDS`] bitmap words, set when the
+    /// group may contain free slots. Takes navigate set summary bits instead
+    /// of sweeping the bitmap, so a miss on an empty freelist costs one load
+    /// per summary word; large classes whose buffers are held long-term by
+    /// consumers would otherwise sweep the whole bitmap on every miss.
+    ///
+    /// The summary is a hint, not a synchronization point: the bitmap bit
+    /// transitions remain the ownership protocol. Puts publish a group only
+    /// when a word transitions from empty, so steady-state traffic does not
+    /// touch the summary. Takes clear a group bit only after re-checking the
+    /// group's words with RMW reads and republish it if a racing put landed,
+    /// so a set bit can be stale but a parked buffer is never left behind a
+    /// clear bit.
+    ///
+    /// Empty when the bitmap has fewer than [`SUMMARY_MIN_WORDS`] words: a
+    /// full scan of a small bitmap is already cheap, and the summary would
+    /// only add transition traffic.
+    summary: Box<[CachePadded<AtomicU64>]>,
     /// Cache-line-padded striped bitmap of reserved slot ids.
     ///
     /// Creation uses the same striped slot mapping and per-thread probe order as
@@ -264,6 +293,17 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let summary_words = if word_count >= SUMMARY_MIN_WORDS {
+            word_count
+                .div_ceil(SUMMARY_GROUP_WORDS)
+                .div_ceil(SLOT_BITMAP_WORD_BITS)
+        } else {
+            0
+        };
+        let summary = (0..summary_words)
+            .map(|_| CachePadded::new(AtomicU64::new(0)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
         // Constructor-exclusive prefill can reserve every valid slot without
         // running the concurrent affinity probe.
@@ -286,6 +326,7 @@ impl Freelist {
         let freelist = Self {
             layout,
             created: AtomicUsize::new(if prefill { capacity } else { 0 }),
+            summary,
             reserved,
             words,
             slots,
@@ -301,6 +342,30 @@ impl Freelist {
             }));
         }
 
+        freelist
+    }
+
+    /// Creates an unfilled freelist with the availability summary forced on.
+    ///
+    /// Bitmaps below [`SUMMARY_MIN_WORDS`] words normally skip the summary,
+    /// which would leave its maintenance unreachable at the small sizes the
+    /// tests and loom models can explore exhaustively.
+    #[cfg(test)]
+    pub(super) fn new_forced_summary(
+        capacity: NonZeroU32,
+        parallelism: NonZeroUsize,
+        layout: Layout,
+    ) -> Self {
+        let mut freelist = Self::new(capacity, parallelism, layout, false);
+        let summary_words = freelist
+            .words
+            .len()
+            .div_ceil(SUMMARY_GROUP_WORDS)
+            .div_ceil(SLOT_BITMAP_WORD_BITS);
+        freelist.summary = (0..summary_words)
+            .map(|_| CachePadded::new(AtomicU64::new(0)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         freelist
     }
 
@@ -403,6 +468,37 @@ impl Freelist {
         slot as u32
     }
 
+    /// Returns the summary word index and group bit mask covering a bitmap word.
+    #[inline(always)]
+    const fn summary_position(word_index: usize) -> (usize, u64) {
+        let group = word_index / SUMMARY_GROUP_WORDS;
+        (
+            group / SLOT_BITMAP_WORD_BITS,
+            1u64 << (group % SLOT_BITMAP_WORD_BITS),
+        )
+    }
+
+    /// Publishes a bitmap word's group in the availability summary.
+    ///
+    /// Callers invoke this only for words that transitioned from empty, so
+    /// publication stays off the steady-state path. The `fetch_or` must be
+    /// unconditional: guarding it with a load would race a taker's
+    /// clear-and-recheck, because the load can observe a stale set bit after
+    /// a recheck that missed this word's transition, leaving the buffer
+    /// hidden behind a clear summary bit.
+    #[inline]
+    fn mark_group_available(&self, word_index: usize) {
+        if self.summary.is_empty() {
+            return;
+        }
+
+        let (summary_index, mask) = Self::summary_position(word_index);
+        // The Release pairs with a taker's Acquire read or AcqRel clear, so
+        // observing this bit implies observing the word bits published
+        // before it.
+        self.summary[summary_index].fetch_or(mask, Ordering::Release);
+    }
+
     /// Returns the mask of valid slot bits for a bitmap word.
     ///
     /// Some words have unused high bits when capacity does not fill a complete
@@ -445,6 +541,12 @@ impl Freelist {
             0,
             "returned slot must not already be marked free"
         );
+
+        // A word transitioning from empty may need its group republished in
+        // the availability summary.
+        if previous == 0 {
+            self.mark_group_available(word_index);
+        }
     }
 
     /// Puts several tracked buffers into the global freelist.
@@ -543,6 +645,12 @@ impl Freelist {
                 0,
                 "returned slot batch must not already contain a free slot"
             );
+
+            // A word transitioning from empty may need its group republished
+            // in the availability summary.
+            if previous == 0 {
+                self.mark_group_available(word_index);
+            }
         }
     }
 
@@ -579,38 +687,136 @@ impl Freelist {
     /// bits from the same word can both succeed.
     #[inline]
     pub fn take(&self) -> Option<PooledBuffer> {
-        // Capture this thread's probe state once so the inner loop does not
+        // Capture this thread's probe state once so the inner loops do not
         // repeatedly touch thread-local storage.
         let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
 
-        for scanned in 0..self.words.len() {
-            let word_index = probe.word_index(scanned);
-            let word_ref = &self.words[word_index];
-            // This relaxed load only chooses candidate bits. The Acquire
-            // `fetch_and` below claims the bit if it is still present.
-            let mut word = word_ref.load(Ordering::Relaxed);
+        // Small bitmaps have no summary and scan every stripe directly.
+        if self.summary.is_empty() {
+            for scanned in 0..self.words.len() {
+                let word_index = probe.word_index(scanned);
+                if let Some(buffer) = self.take_from_word(&probe, word_index) {
+                    return Some(buffer);
+                }
+            }
+            return None;
+        }
 
-            while word != 0 {
-                // Probe a thread-specific bit order inside the chosen word so
-                // colliding threads do not all stampede bit 0 first.
-                let bit = probe.select_set_bit(word);
-                let mask = 1u64 << bit;
-                let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
-                if observed & mask != 0 {
-                    let slot = self.slot_index(word_index, bit);
-                    // The Acquire `fetch_and` above synchronizes with the
-                    // put-side Release operation.
-                    return Some(self.buffer(slot));
+        self.take_via_summary(&probe)
+    }
+
+    /// Claims one available slot from a single bitmap word.
+    #[inline(always)]
+    fn take_from_word(&self, probe: &SlotBitmapProbe, word_index: usize) -> Option<PooledBuffer> {
+        let word_ref = &self.words[word_index];
+        // This relaxed load only chooses candidate bits. The Acquire
+        // `fetch_and` below claims the bit if it is still present.
+        let mut word = word_ref.load(Ordering::Relaxed);
+
+        while word != 0 {
+            // Probe a thread-specific bit order inside the chosen word so
+            // colliding threads do not all stampede bit 0 first.
+            let bit = probe.select_set_bit(word);
+            let mask = 1u64 << bit;
+            let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
+            if observed & mask != 0 {
+                let slot = self.slot_index(word_index, bit);
+                // The Acquire `fetch_and` above synchronizes with the
+                // put-side Release operation.
+                return Some(self.buffer(slot));
+            }
+
+            // Another thread removed that bit first. Reuse the returned
+            // word value instead of restarting the whole scan from the
+            // beginning.
+            word = observed & !mask;
+        }
+
+        None
+    }
+
+    /// Claims one available slot by navigating set availability-summary bits.
+    ///
+    /// Groups whose summary bit is clear are skipped entirely, so a miss on
+    /// an empty freelist costs one load per summary word instead of a full
+    /// bitmap sweep.
+    fn take_via_summary(&self, probe: &SlotBitmapProbe) -> Option<PooledBuffer> {
+        // Start at this thread's home group and rotate every group scan by
+        // the home word's offset, so summary navigation preserves the
+        // bitmap's per-thread striping instead of funneling colliding
+        // threads onto each group's first word.
+        let home_word = probe.word_index(0);
+        let summary_len = self.summary.len();
+        let (home_summary, home_mask) = Self::summary_position(home_word);
+
+        for scanned in 0..summary_len {
+            let summary_index = (home_summary + scanned) % summary_len;
+            let summary_ref = &self.summary[summary_index];
+            // The Acquire load pairs with put-side Release publications so a
+            // set bit implies the word bits published before it are visible.
+            let mut summary_word = summary_ref.load(Ordering::Acquire);
+
+            while summary_word != 0 {
+                // Prefer the home group, then spread colliding threads with
+                // the thread-specific bit order.
+                let group_bit = if scanned == 0 && summary_word & home_mask != 0 {
+                    home_mask.trailing_zeros() as usize
+                } else {
+                    probe.select_set_bit(summary_word)
+                };
+                let group_mask = 1u64 << group_bit;
+                let group = summary_index * SLOT_BITMAP_WORD_BITS + group_bit;
+
+                if let Some(buffer) = self.take_from_group(probe, group, home_word) {
+                    return Some(buffer);
                 }
 
-                // Another thread removed that bit first. Reuse the returned
-                // word value instead of restarting the whole scan from the
-                // beginning.
-                word = observed & !mask;
+                // The group scanned empty: clear its bit, then recheck. The
+                // AcqRel clear pairs with put-side Release publications, so
+                // any word bit published before the clear is visible to the
+                // recheck; a put that publishes after re-sets the bit itself.
+                summary_ref.fetch_and(!group_mask, Ordering::AcqRel);
+                if self.group_holds_bits(group) {
+                    summary_ref.fetch_or(group_mask, Ordering::Release);
+                    if let Some(buffer) = self.take_from_group(probe, group, home_word) {
+                        return Some(buffer);
+                    }
+                }
+
+                summary_word &= !group_mask;
             }
         }
 
         None
+    }
+
+    /// Claims one available slot from the bitmap words of one summary group.
+    fn take_from_group(
+        &self,
+        probe: &SlotBitmapProbe,
+        group: usize,
+        home_word: usize,
+    ) -> Option<PooledBuffer> {
+        let start = group * SUMMARY_GROUP_WORDS;
+        let len = (self.words.len() - start).min(SUMMARY_GROUP_WORDS);
+        // Enter the group at this thread's stripe offset so colliding
+        // threads keep probing distinct words first.
+        let offset = home_word % SUMMARY_GROUP_WORDS;
+        (0..len).find_map(|i| {
+            let word_index = start + (offset + i) % len;
+            self.take_from_word(probe, word_index)
+        })
+    }
+
+    /// Rechecks a summary group for set word bits after clearing its bit.
+    ///
+    /// Uses RMW reads because they observe the latest value of each word,
+    /// where plain loads may lag a concurrent publication and leave a parked
+    /// buffer behind a cleared summary bit.
+    fn group_holds_bits(&self, group: usize) -> bool {
+        let start = group * SUMMARY_GROUP_WORDS;
+        let end = (start + SUMMARY_GROUP_WORDS).min(self.words.len());
+        (start..end).any(|word_index| self.words[word_index].fetch_or(0, Ordering::AcqRel) != 0)
     }
 
     /// Takes up to `max` available slots from the global freelist.
@@ -639,46 +845,149 @@ impl Freelist {
             return 1;
         }
 
-        // Capture this thread's probe state once so the inner loop does not
+        // Capture this thread's probe state once so the inner loops do not
         // repeatedly touch thread-local storage.
         let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
         let mut filled = 0;
 
-        for scanned in 0..self.words.len() {
+        // Small bitmaps have no summary and scan every stripe directly.
+        if self.summary.is_empty() {
+            for scanned in 0..self.words.len() {
+                if filled == max {
+                    break;
+                }
+
+                let word_index = probe.word_index(scanned);
+                filled +=
+                    self.take_batch_from_word(&probe, word_index, max - filled, &mut on_entry);
+            }
+            return filled;
+        }
+
+        // Navigate set summary bits, mirroring `take_via_summary`.
+        let home_word = probe.word_index(0);
+        let summary_len = self.summary.len();
+        let (home_summary, home_mask) = Self::summary_position(home_word);
+        for scanned in 0..summary_len {
             if filled == max {
                 break;
             }
 
-            let word_index = probe.word_index(scanned);
-            let word_ref = &self.words[word_index];
-            // This relaxed load only chooses candidate bits. The Acquire
-            // `fetch_and` below claims whichever candidates are still present.
-            let mut word = word_ref.load(Ordering::Relaxed);
+            let summary_index = (home_summary + scanned) % summary_len;
+            let summary_ref = &self.summary[summary_index];
+            // The Acquire load pairs with put-side Release publications so a
+            // set bit implies the word bits published before it are visible.
+            let mut summary_word = summary_ref.load(Ordering::Acquire);
 
-            while word != 0 && filled < max {
-                // Stage several candidate bits from the current word, then try
-                // to clear all of them with one atomic operation.
-                let claim = probe.select_set_bits(word, max - filled);
-                let observed = word_ref.fetch_and(!claim, Ordering::Acquire);
-                // `claim` is speculative. Intersect it with the observed word
-                // to keep only the bits this thread actually cleared.
-                let mut claimed = observed & claim;
+            while summary_word != 0 && filled < max {
+                // Prefer the home group, then spread colliding threads with
+                // the thread-specific bit order.
+                let group_bit = if scanned == 0 && summary_word & home_mask != 0 {
+                    home_mask.trailing_zeros() as usize
+                } else {
+                    probe.select_set_bit(summary_word)
+                };
+                let group_mask = 1u64 << group_bit;
+                let group = summary_index * SLOT_BITMAP_WORD_BITS + group_bit;
 
-                while claimed != 0 {
-                    let bit = claimed.trailing_zeros() as usize;
-                    let slot = self.slot_index(word_index, bit);
-                    // These bits were cleared by the Acquire `fetch_and` above,
-                    // so each corresponding slot is now owned by this caller.
-                    on_entry(self.buffer(slot));
-                    claimed &= claimed - 1;
-                    filled += 1;
+                let claimed = self.take_batch_from_group(
+                    &probe,
+                    group,
+                    home_word,
+                    max - filled,
+                    &mut on_entry,
+                );
+                filled += claimed;
+
+                if claimed == 0 {
+                    // The group scanned empty: clear its bit, then recheck.
+                    // The AcqRel clear pairs with put-side Release
+                    // publications, so any word bit published before the
+                    // clear is visible to the recheck; a put that publishes
+                    // after re-sets the bit itself.
+                    summary_ref.fetch_and(!group_mask, Ordering::AcqRel);
+                    if self.group_holds_bits(group) {
+                        summary_ref.fetch_or(group_mask, Ordering::Release);
+                        filled += self.take_batch_from_group(
+                            &probe,
+                            group,
+                            home_word,
+                            max - filled,
+                            &mut on_entry,
+                        );
+                    }
                 }
 
-                // Continue from the word snapshot returned by `fetch_and`.
-                word = observed & !claim;
+                summary_word &= !group_mask;
             }
         }
 
+        filled
+    }
+
+    /// Claims up to `want` slots from a single bitmap word.
+    #[inline(always)]
+    fn take_batch_from_word(
+        &self,
+        probe: &SlotBitmapProbe,
+        word_index: usize,
+        want: usize,
+        on_entry: &mut impl FnMut(PooledBuffer),
+    ) -> usize {
+        let word_ref = &self.words[word_index];
+        // This relaxed load only chooses candidate bits. The Acquire
+        // `fetch_and` below claims whichever candidates are still present.
+        let mut word = word_ref.load(Ordering::Relaxed);
+        let mut filled = 0;
+
+        while word != 0 && filled < want {
+            // Stage several candidate bits from the current word, then try
+            // to clear all of them with one atomic operation.
+            let claim = probe.select_set_bits(word, want - filled);
+            let observed = word_ref.fetch_and(!claim, Ordering::Acquire);
+            // `claim` is speculative. Intersect it with the observed word
+            // to keep only the bits this thread actually cleared.
+            let mut claimed = observed & claim;
+
+            while claimed != 0 {
+                let bit = claimed.trailing_zeros() as usize;
+                let slot = self.slot_index(word_index, bit);
+                // These bits were cleared by the Acquire `fetch_and` above,
+                // so each corresponding slot is now owned by this caller.
+                on_entry(self.buffer(slot));
+                claimed &= claimed - 1;
+                filled += 1;
+            }
+
+            // Continue from the word snapshot returned by `fetch_and`.
+            word = observed & !claim;
+        }
+
+        filled
+    }
+
+    /// Claims up to `want` slots from the bitmap words of one summary group.
+    fn take_batch_from_group(
+        &self,
+        probe: &SlotBitmapProbe,
+        group: usize,
+        home_word: usize,
+        want: usize,
+        on_entry: &mut impl FnMut(PooledBuffer),
+    ) -> usize {
+        let start = group * SUMMARY_GROUP_WORDS;
+        let len = (self.words.len() - start).min(SUMMARY_GROUP_WORDS);
+        // Enter the group at this thread's stripe offset so colliding
+        // threads keep probing distinct words first.
+        let offset = home_word % SUMMARY_GROUP_WORDS;
+        let mut filled = 0;
+        for i in 0..len {
+            if filled == want {
+                break;
+            }
+            let word_index = start + (offset + i) % len;
+            filled += self.take_batch_from_word(probe, word_index, want - filled, on_entry);
+        }
         filled
     }
 
@@ -711,6 +1020,12 @@ impl Freelist {
                 claimed &= claimed - 1;
                 drained += 1;
             }
+        }
+
+        // Teardown: clear the summary so stale bits do not outlive the
+        // drained bitmap.
+        for word in self.summary.iter() {
+            word.store(0, Ordering::Relaxed);
         }
 
         drained
@@ -909,6 +1224,14 @@ pub(super) mod tests {
             .sum()
     }
 
+    pub fn summary_bits(freelist: &Freelist) -> usize {
+        freelist
+            .summary
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed).count_ones() as usize)
+            .sum()
+    }
+
     pub fn num_words(freelist: &Freelist) -> usize {
         freelist.words.len()
     }
@@ -1090,6 +1413,91 @@ pub(super) mod tests {
         for buffer in taken {
             set.put(buffer);
         }
+    }
+
+    #[test]
+    fn test_freelist_summary_disabled_for_small_bitmaps() {
+        // Small bitmaps skip the summary entirely and scan directly.
+        let set = Freelist::new(NZU32!(8), NZUsize!(1), TEST_LAYOUT, false);
+        assert!(set.summary.is_empty());
+
+        // Large bitmaps maintain it: 8192 slots at parallelism 128 give 128
+        // words, above the minimum, covered by one summary word.
+        let set = Freelist::new(NZU32!(8192), NZUsize!(128), TEST_LAYOUT, false);
+        assert_eq!(set.summary.len(), 1);
+    }
+
+    #[test]
+    fn test_freelist_summary_tracks_group_population() {
+        let set = Freelist::new_forced_summary(NZU32!(8), NZUsize!(1), TEST_LAYOUT);
+
+        // A fresh freelist publishes no groups, so misses skip the bitmap.
+        assert_eq!(summary_bits(&set), 0);
+        assert!(set.take().is_none());
+        assert_eq!(set.take_batch(4, |_| unreachable!()), 0);
+
+        // Puts publish the group; takes leave the bit set while claiming.
+        let buffer0 = set.try_create(false).unwrap();
+        let buffer1 = set.try_create(false).unwrap();
+        assert_eq!(summary_bits(&set), 0);
+        set.put(buffer0);
+        set.put(buffer1);
+        assert_eq!(summary_bits(&set), 1);
+        let taken0 = set.take().expect("slot should be available");
+        let taken1 = set.take().expect("slot should be available");
+
+        // The drained group's bit is stale until a miss scans it, clears it,
+        // and confirms the clear against a recheck.
+        assert_eq!(len(&set), 0);
+        assert!(set.take().is_none());
+        assert_eq!(summary_bits(&set), 0);
+
+        // Batch puts and takes republish and re-clear the same way.
+        set.put_batch([taken0, taken1]);
+        assert_eq!(summary_bits(&set), 1);
+        let mut reclaimed = Vec::new();
+        assert_eq!(set.take_batch(8, |buffer| reclaimed.push(buffer)), 2);
+        assert_eq!(set.take_batch(8, |_| unreachable!()), 0);
+        assert_eq!(summary_bits(&set), 0);
+
+        // Drain clears the summary alongside the bitmap.
+        set.put_batch(reclaimed);
+        assert_eq!(summary_bits(&set), 1);
+        assert_eq!(set.drain(), 2);
+        assert_eq!(summary_bits(&set), 0);
+    }
+
+    #[test]
+    fn test_freelist_summary_finds_slots_in_far_groups() {
+        // 8192 slots at parallelism 128 give 128 words: two summary groups.
+        let set = Freelist::new_forced_summary(NZU32!(8192), NZUsize!(128), TEST_LAYOUT);
+        assert!(set.words.len() > SUMMARY_GROUP_WORDS);
+
+        // Create slots until one lands outside this thread's home group, then
+        // park only that buffer. Creation order is probe-affine, so the home
+        // group fills first and the loop is bounded by its capacity.
+        let probe = SlotBitmapProbe::new(set.word_mask, set.word_shift);
+        let home_group = Freelist::summary_position(probe.word_index(0));
+        let mut created = Vec::new();
+        let far = loop {
+            let buffer = set.try_create(false).expect("capacity spans two groups");
+            let (word, _) = set.slot_word(buffer.slot());
+            if Freelist::summary_position(word) != home_group {
+                break buffer;
+            }
+            created.push(buffer);
+        };
+        set.put(far);
+        assert_eq!(summary_bits(&set), 1);
+
+        // A take must navigate the summary to the far group regardless of
+        // this thread's home stripe.
+        let found = set.take().expect("far slot should be reachable");
+        assert!(set.take().is_none());
+
+        // Return every created buffer so the freelist owns deallocation.
+        set.put(found);
+        set.put_batch(created);
     }
 
     #[test]
@@ -1628,6 +2036,9 @@ mod loom_tests {
         SingleWordMultiBit,
         MultiWordSingleBit,
         MultiWordMultiBit,
+        /// Multi-word striping with the availability summary forced on, so
+        /// the models also cover group publication, clears, and rechecks.
+        MultiWordSummary,
     }
 
     impl Geometry {
@@ -1644,6 +2055,10 @@ mod loom_tests {
                     let layout = Layout::from_size_align(64, 64).unwrap();
                     Freelist::new(NZU32!(4), NZUsize!(2), layout, false)
                 }
+                Self::MultiWordSummary => {
+                    let layout = Layout::from_size_align(64, 64).unwrap();
+                    Freelist::new_forced_summary(NZU32!(4), NZUsize!(4), layout)
+                }
             }
         }
 
@@ -1655,6 +2070,7 @@ mod loom_tests {
                 Self::SingleWordMultiBit => &[0, 1],
                 Self::MultiWordSingleBit => &[0, 1, 2, 3],
                 Self::MultiWordMultiBit => &[0, 2, 1, 3],
+                Self::MultiWordSummary => &[0, 1, 2, 3],
             }
         }
 
@@ -1834,6 +2250,101 @@ mod loom_tests {
 
             // Keep the taken buffers checked out until the model is done:
             // Leases returns them to the freelist on drop.
+            drop(leases);
+        });
+    }
+
+    #[test]
+    fn summary_publish_reaches_taker() {
+        // Same publication edge as `put_publishes_before_take`, but the taker
+        // must reach the slot through summary navigation: the group bit is
+        // published after the word bit, and observing it must imply the word
+        // bit and the producer's side-table writes are visible.
+        model(&[Geometry::MultiWordSummary], |geometry, freelist| {
+            let slot = geometry.slots()[0];
+            let buffer = freelist.try_create(false).unwrap();
+            assert_eq!(buffer.slot(), slot);
+            let leases = Leases::new(freelist.clone());
+            let stamps = SlotStamps::new(4);
+
+            let writer = thread::spawn({
+                let freelist = freelist.clone();
+                let stamps = stamps.clone();
+                move || {
+                    stamps.write(slot);
+                    freelist.put(buffer)
+                }
+            });
+
+            let reader = thread::spawn({
+                let leases = leases.clone();
+                move || loop {
+                    if let Some(buffer) = freelist.take() {
+                        assert_eq!(buffer.slot(), slot);
+                        stamps.assert_visible(slot);
+                        leases.push(buffer);
+                        break;
+                    }
+                    thread::yield_now();
+                }
+            });
+
+            writer.join().unwrap();
+            reader.join().unwrap();
+            drop(leases);
+        });
+    }
+
+    #[test]
+    fn summary_clear_recheck_does_not_hide_puts() {
+        // A taker that scans a group empty clears its summary bit and then
+        // rechecks the group's words; a put whose empty-word transition races
+        // that clear must not end up hidden behind a clear summary bit. The
+        // taker's first take drains the pre-parked buffer so its second take
+        // exercises the clear-and-recheck path against the racing put.
+        loom::model(|| {
+            let freelist = Arc::new(Geometry::MultiWordSummary.freelist());
+            let (leases, mut entries) = Leases::reserve(freelist.clone());
+            let buffer0 = entries.pop().unwrap();
+            let buffer1 = entries.pop().unwrap();
+            // Hold the remaining reservations out of the model; Leases
+            // returns them at drop.
+            for entry in entries {
+                leases.push(entry);
+            }
+            freelist.put(buffer0);
+
+            let taker = thread::spawn({
+                let freelist = freelist.clone();
+                let leases = leases.clone();
+                move || {
+                    let mut taken = 0;
+                    for _ in 0..2 {
+                        if let Some(buffer) = freelist.take() {
+                            leases.push(buffer);
+                            taken += 1;
+                        }
+                    }
+                    taken
+                }
+            });
+
+            let putter = thread::spawn({
+                let freelist = freelist.clone();
+                move || freelist.put(buffer1)
+            });
+
+            let taken = taker.join().unwrap();
+            putter.join().unwrap();
+
+            // Every parked buffer must remain reachable: whatever the racing
+            // taker did not claim, quiescent takes must find.
+            let mut remaining = 0;
+            while let Some(buffer) = freelist.take() {
+                leases.push(buffer);
+                remaining += 1;
+            }
+            assert_eq!(taken + remaining, 2, "a parked buffer was hidden");
             drop(leases);
         });
     }

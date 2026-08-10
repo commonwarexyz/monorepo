@@ -34,7 +34,10 @@ use std::{
     sync::Arc,
 };
 
-const SLOTS: &[usize] = &[16, 64, 512];
+// 65536 slots produce a bitmap wide enough to activate the availability
+// summary, so its maintenance overhead is measured alongside the small
+// summary-free layouts.
+const SLOTS: &[usize] = &[16, 64, 512, 65536];
 const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 const BENCH_BUFFER_CAPACITY: usize = 256;

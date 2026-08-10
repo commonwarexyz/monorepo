@@ -83,6 +83,18 @@ cfg_if::cfg_if! {
 /// amortizing shared-queue traffic.
 const MIN_TLS_BATCH_CAPACITY: usize = 4;
 
+/// Upper bound for the derived per-thread cache capacity.
+///
+/// The derived capacity scales with the class limit so refill batches stay
+/// meaningful for bigger pools, but past a few hundred entries the extra
+/// amortization of shared-freelist traffic is negligible while the buffers a
+/// thread can strand in its local cache keep growing. Classes sized in the
+/// millions (for example to back a long-lived page cache) would otherwise
+/// derive per-thread caches of tens of thousands of buffers. An explicit
+/// [`BufferPoolConfig::with_max_thread_cache_capacity`] is not subject to
+/// this bound.
+const MAX_DERIVED_TLS_CAPACITY: usize = 256;
+
 /// Error returned when buffer pool allocation fails.
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
@@ -101,9 +113,10 @@ pub(crate) enum BufferPoolThreadCacheConfig {
     ///
     /// `None` derives the per-thread cache size from the pool's per-class
     /// capacity and expected parallelism, reserving about half of each class
-    /// for the shared freelist. Small per-class budgets may resolve to zero,
-    /// disabling thread-local caching so free buffers do not become stranded in
-    /// other threads.
+    /// for the shared freelist and capping the result at
+    /// [`MAX_DERIVED_TLS_CAPACITY`]. Small per-class budgets may resolve to
+    /// zero, disabling thread-local caching so free buffers do not become
+    /// stranded in other threads.
     ///
     /// `Some(n)` uses an explicit per-thread cache size, clamped independently
     /// to each size class's limit.
@@ -627,14 +640,15 @@ impl BufferPoolConfig {
     ///
     /// Derived capacities divide half of the class limit across the expected
     /// parallelism so cross-thread reuse remains effective. Small class limits
-    /// may resolve to zero. An explicit capacity replaces the derivation and
-    /// clamps to the class limit.
+    /// may resolve to zero, and large ones cap at
+    /// [`MAX_DERIVED_TLS_CAPACITY`]. An explicit capacity replaces the
+    /// derivation and clamps to the class limit.
     fn resolve_thread_cache_capacity(&self, class_limit: NonZeroU32) -> usize {
         let class_limit = class_limit.get() as usize;
         match self.thread_cache_config {
             BufferPoolThreadCacheConfig::Enabled(None) => {
                 let effective_threads = self.parallelism.get().min(class_limit);
-                class_limit / effective_threads.saturating_mul(2)
+                (class_limit / effective_threads.saturating_mul(2)).min(MAX_DERIVED_TLS_CAPACITY)
             }
             BufferPoolThreadCacheConfig::Enabled(Some(capacity)) => capacity.get().min(class_limit),
             BufferPoolThreadCacheConfig::Disabled => 0,
@@ -2234,6 +2248,28 @@ mod tests {
         let large_index = pool.class_index(4096).unwrap();
         assert_eq!(pool.inner.classes[small_index].thread_cache_capacity, 4);
         assert_eq!(pool.inner.classes[large_index].thread_cache_capacity, 16);
+    }
+
+    #[test]
+    fn test_derived_thread_cache_capacity_caps_large_classes() {
+        let config = BufferPoolConfig::for_storage().with_parallelism(NZUsize!(64));
+
+        // Small classes keep the uncapped half-the-limit derivation.
+        assert_eq!(config.resolve_thread_cache_capacity(NZU32!(4096)), 32);
+
+        // A class sized in the millions derives the capped capacity rather
+        // than tens of thousands of buffers per thread.
+        assert_eq!(
+            config.resolve_thread_cache_capacity(NZU32!(8_388_608)),
+            MAX_DERIVED_TLS_CAPACITY
+        );
+
+        // An explicit capacity is not subject to the derived cap.
+        let explicit = config.with_max_thread_cache_capacity(NZUsize!(1024));
+        assert_eq!(
+            explicit.resolve_thread_cache_capacity(NZU32!(8_388_608)),
+            1024
+        );
     }
 
     #[test]
