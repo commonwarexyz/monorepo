@@ -1208,14 +1208,10 @@ impl<
                 resolved = processed_resolved;
             },
             on_end => {
-                // Attempt the next proposal before constructing, syncing, and
-                // broadcasting this iteration's artifacts. Anything the branch
-                // above did that unblocks a proposal (recording our own proposal,
-                // handling a certificate that advances the view) is already
-                // reflected in state, and the automaton paces the returned build
-                // to the target block interval — dispatching the request now lets
-                // that pacing sleep absorb the signing and journal sync below
-                // instead of queueing the next block behind them.
+                // This iteration may make the next proposal eligible. Dispatch it
+                // before signing and journal sync so application pacing overlaps
+                // with that work. Its result is not consumed until the next
+                // iteration.
                 if pending_propose.is_none() {
                     pending_propose = self.try_propose().await;
                 }
