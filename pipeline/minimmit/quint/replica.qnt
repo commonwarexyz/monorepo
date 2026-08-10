@@ -154,10 +154,10 @@ module replica {
     }
 
     // Replica `r` ensures there are nullifications for all views `(v', v)`, and that there is
-    // a `notarization(c', v')` for the parent block `c'` -- for that exact block, not merely
-    // for the view. minimmit.md 7 says the proof is `notarization(c', v') in r.proofs[v']`,
-    // and 8.2 additionally requires `verify(c, c')`; carrying the parent in the proposal is
-    // what lets this be checked at all.
+    // a `notarization(c', v')` for the parent block `c'`. The certificate must be for that
+    // exact block, not merely for the view. minimmit.md 7 says the proof is
+    // `notarization(c', v') in r.proofs[v']`, and 8.2 additionally requires `verify(c, c')`;
+    // carrying the parent in the proposal is what lets this be checked at all.
     def valid_parent(proposal: Proposal, certificates: Set[Certificate]): bool = and {
         or {
             proposal.view_parent == GENESIS_VIEW and proposal.block_parent == GENESIS_BLOCK,
@@ -893,8 +893,8 @@ module replica {
     // Backing is taken from `sent_vote` alone, deliberately. `store_vote` is not consulted:
     // `on_vote_notarize` and `on_vote_nullify` accept a vote set by shape, exactly as
     // `on_certificate` accepts a certificate by shape, so counting stored votes as cast
-    // would let the same forgery move down one layer -- hand a replica forged honest votes
-    // and any certificate built from them becomes "backed". Under `step` this costs nothing,
+    // would let the same forgery move down one layer. Hand a replica forged honest votes and
+    // any certificate built from them becomes "backed". Under `step` this costs nothing,
     // because `correct_replica_step` draws votes from `powerset(sent_vote)` and a store is
     // therefore always a subset of what was broadcast.
     def cert_backing(cert: Certificate): Set[Signature] = {
@@ -927,7 +927,7 @@ module replica {
     })
 
     // Suppose that a proposal is finalized for some view v, then no other proposal for view v
-    // can be finalized -- neither at the same replica nor at any other one.
+    // can be finalized at the same replica or any other one.
     //
     // Stated as global uniqueness rather than as pairwise agreement between two replicas.
     // Agreement is implied by uniqueness but does not imply it: two replicas that both hold
@@ -1005,7 +1005,7 @@ module replica {
         })
     })
 
-    // No view carries both a nullification and a finalization certificate -- not even in two
+    // No view carries both a nullification and a finalization certificate, not even in two
     // different replicas' stores. This is what makes the committed sequence the same at
     // every correct replica, and so it is what `agreement` rests on: if one replica commits
     // the finalization of view v1 and another commits a later view v2 rooted at the same

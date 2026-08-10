@@ -1,4 +1,4 @@
-.PHONY: test typecheck repl check clean
+.PHONY: typecheck test repl run clean check
 
 typecheck:
 	quint typecheck types.qnt
@@ -7,11 +7,11 @@ typecheck:
 	quint typecheck option.qnt
 	quint typecheck tests/tests_n6f1b0.qnt
 	quint typecheck tests/tests_n6f1b1.qnt
+	quint typecheck tests/tests_n7f1b1.qnt
 	quint typecheck main_n6f1b0.qnt
 	quint typecheck main_n6f1b1.qnt
 	quint typecheck main_n6f1b2.qnt
 	quint typecheck main_twins_n6f1b1.qnt
-
 
 test:
 	cd tests && quint test --backend typescript tests_n6f1b0.qnt
@@ -21,12 +21,14 @@ test:
 repl:
 	echo "init\n step\n step\n step" | quint -r main_n6f1b0.qnt::main
 
+MAX_STEPS ?= 200
+MAX_SAMPLES ?= 1000
 run:
-	quint run --max-steps 100 --max-samples=100 \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
 		--invariant=all_invariants main_n6f1b0.qnt
-	quint run --max-steps 100 --max-samples=100 \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
 		--invariant=all_invariants main_n6f1b1.qnt	
-	quint run --max-steps 100 --max-samples=100 \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
 		--invariant=all_invariants main_twins_n6f1b1.qnt
 
 clean:
