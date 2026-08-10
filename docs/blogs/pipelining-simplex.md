@@ -38,7 +38,7 @@ A *view* is one opportunity for a leader to propose a block and for validators t
 
 These steps remain ordered for each block, but different blocks can be at different steps. Two waits otherwise limit how quickly new views begin: a proposer handoff and application certification.
 
-[Stable Leader](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term) removes the first wait. [Optimistic Validation](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html#optimistic-validation) moves the second wait out of the path between proposals.
+[Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) removes the first wait. [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416) moves the second wait out of the path between proposals.
 
 ## Wait One: The Proposer Handoff
 
@@ -165,7 +165,7 @@ Stable leadership keeps the leader on the transaction data path for the whole te
 
 Choose enough lookahead to cover measured certification lag at your target view rate. A larger window helps only when certification catches up before the window fills. It also costs CPU and memory. Choose the term length based on how long one leader should retain proposal authority.
 
-Stable terms currently use the round-robin elector. Every validator must use the same term length, while each validator can choose its own optimistic lookahead. See [`RoundRobin::with_term`](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term) for the configuration API. [Alto](https://github.com/commonwarexyz/alto) provides a complete blockchain integration.
+Stable terms currently use the round-robin elector. Every validator must use the same term length, while each validator can choose its own optimistic lookahead. The configuration API is [available on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/elector.rs#L282-L291) and will appear on docs.rs with the next release. [Alto](https://github.com/commonwarexyz/alto) provides a complete blockchain integration.
 
 ## The Next Ordering Opportunity
 
@@ -175,4 +175,4 @@ At Alto's measured cadence, that interval was 5ms at the median. Stable Leader a
 
 For builders who have already made dissemination and execution fast, the ordering clock can become the next visible limit. Each network can tune that clock around its own latency, capacity, and proposer-rotation requirements.
 
-If that is your bottleneck, explore the [Simplex documentation](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html), study the complete [Alto integration](https://github.com/commonwarexyz/alto), or ask an integration question in [Commonware Q&A](https://github.com/commonwarexyz/monorepo/discussions/categories/q-a).
+If that is your bottleneck, explore the [Simplex source documentation on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs), study the complete [Alto integration](https://github.com/commonwarexyz/alto), or ask an integration question in [Commonware Q&A](https://github.com/commonwarexyz/monorepo/discussions/categories/q-a).

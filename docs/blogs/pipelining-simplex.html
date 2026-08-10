@@ -136,9 +136,9 @@ Chou</a></div>
         quickly new views begin: a proposer handoff and application
         certification.</p>
         <p><a
-        href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term">Stable
+        href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> removes the first wait. <a
-        href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html#optimistic-validation">Optimistic
+        href="https://github.com/commonwarexyz/monorepo/pull/3416">Optimistic
         Validation</a> moves the second wait out of the path between
         proposals.</p>
         <h2 id="wait-one-the-proposer-handoff">Wait One: The Proposer
@@ -378,9 +378,11 @@ Chou</a></div>
         leader should retain proposal authority.</p>
         <p>Stable terms currently use the round-robin elector. Every
         validator must use the same term length, while each validator
-        can choose its own optimistic lookahead. See <a
-        href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/elector/struct.RoundRobin.html#method.with_term"><code>RoundRobin::with_term</code></a>
-        for the configuration API. <a
+        can choose its own optimistic lookahead. The configuration API
+        is <a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/elector.rs#L282-L291">available
+        on <code>main</code></a> and will appear on docs.rs with the
+        next release. <a
         href="https://github.com/commonwarexyz/alto">Alto</a> provides a
         complete blockchain integration.</p>
         <h2 id="the-next-ordering-opportunity">The Next Ordering
@@ -399,9 +401,9 @@ Chou</a></div>
         limit. Each network can tune that clock around its own latency,
         capacity, and proposer-rotation requirements.</p>
         <p>If that is your bottleneck, explore the <a
-        href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">Simplex
-        documentation</a>, study the complete <a
-        href="https://github.com/commonwarexyz/alto">Alto
+        href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs">Simplex
+        source documentation on <code>main</code></a>, study the
+        complete <a href="https://github.com/commonwarexyz/alto">Alto
         integration</a>, or ask an integration question in <a
         href="https://github.com/commonwarexyz/monorepo/discussions/categories/q-a">Commonware
         Q&amp;A</a>.</p>
