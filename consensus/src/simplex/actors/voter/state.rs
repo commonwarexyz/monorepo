@@ -158,8 +158,8 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     nullification_views: BTreeSet<View>,
 
     /// Views with a local certification rejection not covered by finalization.
-    /// A rejected view blocks same-term descendant certificates as ancestry.
-    /// Every entry sits above the retention floor, so [`Self::prune`] skips
+    /// A rejected view cannot support same-term descendant ancestry.
+    /// Every entry remains above the retention floor, so [`Self::prune`] skips
     /// this set.
     failed_certifications: BTreeSet<View>,
 
@@ -1087,11 +1087,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.insert(view);
     }
 
-    /// Queues the same-term child that `parent`'s certification or
-    /// finalization unblocked.
-    ///
-    /// Certification follows an immediate-parent chain inside a term, so a
-    /// blocked descendant stays dormant until its own parent certifies or
+    /// Queues a blocked immediate same-term child when `parent` certifies or
     /// finalizes.
     fn wake_certification_child(&mut self, parent: View) {
         let child = parent.next();
@@ -1133,10 +1129,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 if err.invalid_proposal() {
                     warn!(round = ?proposal.round, ?err, "proposal failed certification precheck");
                 } else {
-                    // An uncertified parent is the only blocking error (see
-                    // [`Self::certification_parent_ready`]), so every dropped
-                    // candidate has a wake through
-                    // [`Self::wake_certification_child`].
+                    // Dormant candidates wake only through
+                    // [`Self::wake_certification_child`]. Therefore,
+                    // [`Self::certification_parent_ready`] may block only on an
+                    // uncertified parent.
                     assert!(
                         matches!(err, ParentPayloadError::ParentNotCertified { .. }),
                         "blocked candidate has no wake: {err:?}"
