@@ -16,8 +16,6 @@ Today, we're introducing Stable Leader and Optimistic Validation, two options th
 
 In a global [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 successful views per second. Every successful view finalized one block, and the median block spacing was 5ms.
 
-The blocks were header-only, with no transactions or execution. This result measures consensus cadence, not transaction throughput.
-
 A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. The two measurements describe different clocks. At 5ms per view, one 300ms observer-latency window spans about 60 view intervals.
 
 The pipeline keeps new views moving while earlier blocks finish. Once data reaches the leader, it gets another ordering opportunity after one block interval.
