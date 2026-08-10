@@ -38,6 +38,7 @@ const DEFAULT_CHANNEL: u64 = 0;
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
+/// Returns a network configuration that accepts every supported application payload size.
 const fn network_config(max_peers_per_set: usize) -> Config {
     Config {
         max_size: MAX_SIZE,
@@ -910,7 +911,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn network_configuration_accepts_max_size() {
+    fn accepts_config() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let _ = Network::<_, ed25519::PublicKey>::new(context, network_config(1));
