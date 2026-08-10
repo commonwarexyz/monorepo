@@ -2929,7 +2929,6 @@ where
             // `extend_to`.
             bitmap.set_bit(db_size - 1, false);
             bitmap.set_bit(*batch.bounds.tip.size - 1, true);
-            drop(bitmap);
             snapshot
         });
 
