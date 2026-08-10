@@ -1087,7 +1087,7 @@ impl PooledOwner {
 /// This handle is a pointer to the owning side-table slot. The slot stores the
 /// data pointer, stable slot id, capacity, refcount sentinel, and optional live
 /// lease. Checkout initializes only the lease field in place and returns an
-/// [`OwnerRef`] to that slot. Return to the global freelist consumes the lease.
+/// owner reference to that slot. Return to the global freelist consumes the lease.
 ///
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.

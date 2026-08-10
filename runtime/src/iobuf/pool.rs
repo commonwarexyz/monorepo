@@ -535,9 +535,10 @@ impl BufferPoolConfig {
     ///
     /// Requests route to the smallest enabled class that fits, so in sparse
     /// layouts the returned class may be much larger than the request. This
-    /// reports class routing only: requests below [`Self::pool_min_size`]
-    /// bypass the pool, and oversized requests fall back to untracked
-    /// allocations of their exact size.
+    /// reports class shape only: zero-sized requests and requests below
+    /// [`Self::pool_min_size`] bypass the pool, and oversized requests fall
+    /// back to untracked aligned allocations with capacity at least as large
+    /// as the request.
     pub fn class_for(&self, size: usize) -> Option<BufferPoolClassConfig> {
         self.size_classes().find(|class| class.size.get() >= size)
     }

@@ -117,14 +117,92 @@ pub const fn cache_line_size() -> usize {
     align_of::<CachePadded<u8>>()
 }
 
-/// Benchmark-only re-exports of internal pool machinery.
+/// Benchmark-only access to internal pool machinery.
+///
+/// Returning a raw pooled buffer requires the caller to prove that the buffer
+/// came from the target freelist:
+///
+/// ```compile_fail,E0133
+/// use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
+///
+/// fn return_buffer(freelist: &Freelist, buffer: PooledBuffer) {
+///     freelist.put(buffer);
+/// }
+/// ```
 #[doc(hidden)]
 #[cfg(feature = "bench")]
 pub mod bench {
-    pub use super::{
-        freelist::Freelist,
-        owner::{PooledBuffer, PooledOwner},
+    pub use super::owner::{PooledBuffer, PooledOwner};
+    use std::{
+        alloc::Layout,
+        num::{NonZeroU32, NonZeroUsize},
     };
+
+    /// Raw freelist access for benchmarks.
+    ///
+    /// Pooled buffers carry no type-level identity for their originating
+    /// freelist, so return operations are unsafe at this public boundary.
+    pub struct Freelist(super::freelist::Freelist);
+
+    impl Freelist {
+        /// Creates a fixed-capacity benchmark freelist.
+        pub fn new(
+            capacity: NonZeroU32,
+            parallelism: NonZeroUsize,
+            layout: Layout,
+            prefill: bool,
+        ) -> Self {
+            Self(super::freelist::Freelist::new(
+                capacity,
+                parallelism,
+                layout,
+                prefill,
+            ))
+        }
+
+        /// Returns one available pooled buffer.
+        #[inline]
+        pub fn take(&self) -> Option<PooledBuffer> {
+            self.0.take()
+        }
+
+        /// Returns up to `max` available pooled buffers to `on_entry`.
+        #[inline]
+        pub fn take_batch(&self, max: usize, on_entry: impl FnMut(PooledBuffer)) -> usize {
+            self.0.take_batch(max, on_entry)
+        }
+
+        /// Returns one pooled buffer to this freelist.
+        ///
+        /// # Safety
+        ///
+        /// `buffer` must have been taken from this freelist, and its slot must
+        /// not already be available here.
+        #[inline]
+        pub unsafe fn put(&self, buffer: PooledBuffer) {
+            self.0.put(buffer);
+        }
+
+        /// Returns several pooled buffers to this freelist.
+        ///
+        /// If the iterator panics, buffers already accepted by this method may
+        /// leak.
+        ///
+        /// # Safety
+        ///
+        /// Every buffer must have been taken from this freelist. Their slots
+        /// must be unique within the batch and unavailable in the freelist.
+        #[inline]
+        pub unsafe fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
+            self.0.put_batch(buffers);
+        }
+
+        /// Drops every currently available pooled buffer.
+        #[inline]
+        pub fn drain(&self) -> usize {
+            self.0.drain()
+        }
+    }
 }
 
 /// Immutable byte buffer.

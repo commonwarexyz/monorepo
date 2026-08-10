@@ -310,12 +310,14 @@ impl FreelistImplementation for Freelist {
     fn put_batch(&self, buffers: &mut Vec<PooledBuffer>) {
         if buffers.len() == 1 {
             let buffer = buffers.pop().unwrap();
-            self.put(buffer);
+            // SAFETY: worker buffers are taken from this freelist and returned
+            // exactly once before another take.
+            unsafe { self.put(buffer) };
             return;
         }
-        // Every held buffer was taken from this freelist by a distinct take,
-        // so slots are unique and each is returned exactly once. The drain
-        // iterator cannot panic.
-        self.put_batch(buffers.drain(..));
+        // SAFETY: every held buffer was taken from this freelist by a distinct
+        // take, so slots are unique and each is returned exactly once. The
+        // drain iterator cannot panic.
+        unsafe { self.put_batch(buffers.drain(..)) };
     }
 }
