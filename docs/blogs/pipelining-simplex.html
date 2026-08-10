@@ -98,8 +98,8 @@ Chou</a></div>
         Validation, two options that pipeline <a
         href="https://eprint.iacr.org/2023/463">Simplex</a> views.
         Stable Leader removes the handoff between consecutive proposers.
-        Optimistic Validation lets validators begin checking the next
-        proposal while the application finishes checking its parent.</p>
+        Optimistic Validation lets validators notarize a child before
+        its parent is certified.</p>
         <p>In a global <a href="https://alto.commonware.xyz">Alto</a>
         deployment with 50 validators, this combination sustained about
         200 successful views per second. Every successful view finalized
@@ -148,14 +148,14 @@ Chou</a></div>
         application finishes any remaining work before finalization.</p>
         <p>These steps remain ordered for each block, but different
         blocks can be at different steps. Two waits otherwise limit how
-        quickly new views begin: a proposer handoff and the
-        application’s check.</p>
+        quickly new views notarize: a proposer handoff and waiting for
+        the parent.</p>
         <p><a
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> removes the first wait. <a
         href="https://github.com/commonwarexyz/monorepo/pull/3416">Optimistic
-        Validation</a> moves the second wait out of the path between
-        proposals.</p>
+        Validation</a> lets a validator vote to notarize the child
+        before the parent is certified.</p>
         <h2 id="wait-one-the-proposer-handoff">Wait One: The Proposer
         Handoff</h2>
         <p>Round-robin assigns each view to a new leader. The next
@@ -193,30 +193,34 @@ Chou</a></div>
         censorship resistance should use shorter terms.</p>
         <p>Every validator must use the same term length. Stable terms
         currently work with round-robin leader election.</p>
-        <p>Stable leadership removes the proposer handoff. One wait
-        remains: the application’s check.</p>
-        <h2 id="wait-two-the-application-check">Wait Two: The
-        Application Check</h2>
-        <p>An application check can take time for good reasons. An
-        erasure-coded application may wait until it has enough shards to
-        reconstruct a block. Optimistic Validation changes when the next
-        work begins.</p>
-        <p>A stable leader can propose view <code>v+1</code> as soon as
-        view <code>v</code> is notarized. Without Optimistic Validation,
-        followers wait for the application to finish checking
-        <code>v</code> before they check and vote on <code>v+1</code>.
-        The application check remains on the path of every view.</p>
-        <p>With Optimistic Validation, validators may check and vote on
-        the child while the application checks its parent. The
-        application still checks blocks in order. Validators finalize
-        each block only after its application check succeeds.</p>
-        <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application check. In the optimistic path, child proposals are closer together because validators check and vote on them while application checks continue in order on a parallel lane.">
-          <noscript>Without Optimistic Validation, each child proposal waits for its parent's application check. With Optimistic Validation, proposal checks and votes continue while application checks run in order on a parallel lane.</noscript>
+        <p>Stable leadership removes the proposer handoff. Followers can
+        still wait for the parent before voting on its child.</p>
+        <h2 id="wait-two-waiting-for-the-parent">Wait Two: Waiting for
+        the Parent</h2>
+        <p>The leader sees view <code>v</code> notarized before it
+        proposes view <code>v+1</code>. Other validators may receive the
+        child proposal before they see <code>v</code>’s notarization
+        certificate. The application may not have certified
+        <code>v</code> yet either.</p>
+        <p>Without Optimistic Validation, those validators wait for both
+        before they check and vote on <code>v+1</code>. An erasure-coded
+        application may add more delay while it gathers enough shards to
+        reconstruct <code>v</code>.</p>
+        <p>With Optimistic Validation, a validator that checked and
+        voted for <code>v</code> can check and vote on <code>v+1</code>
+        when the proposal arrives. It does not need to wait for
+        <code>v</code>’s notarization certificate or certification. The
+        same rule can carry the pipeline across several views within the
+        stable-leader term.</p>
+        <p>Certification still runs in order. Validators finalize each
+        block only after the application certifies it.</p>
+        <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child vote waits for its parent to be certified. In the optimistic path, child views notarize closer together while certification follows in order on a parallel lane.">
+          <noscript>Without Optimistic Validation, each child vote waits for its parent to be certified. With Optimistic Validation, child views can notarize while certification follows in order.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 3: Optimistic Validation pipelines proposal checks and
-        votes (red) over application checks (blue). Both panels use the
-        same horizontal time scale.</p>
+        <p>Figure 3: Optimistic Validation pipelines notarization (red)
+        over certification (blue). Both panels use the same horizontal
+        time scale.</p>
         </div>
         <h2 id="how-optimism-stays-safe">How Optimism Stays Safe</h2>
         <p><code>Optimistic</code> describes when a validator starts
@@ -224,11 +228,11 @@ Chou</a></div>
         finalization.</p>
         <p>A validator works ahead only if it has checked and voted for
         the parent, or holds usable quorum proof for it. The same rule
-        applies to every optimistic ancestor. Application checks still
-        proceed parent by parent. If an ancestor cannot pass its
-        application check, no descendant can pass its check or finalize.
-        Validators then abandon that part of the term through the normal
-        timeout path.</p>
+        applies to every optimistic ancestor. A validator only certifies
+        a child or votes to finalize it after the parent is certified.
+        If an ancestor fails to notarize or certify, optimistic votes
+        above it become inert. Validators then abandon that part of the
+        term through the normal timeout path.</p>
         <p>The lookahead stops at the term boundary. The first view of a
         new term must start from ancestry that has passed the
         application check.</p>
@@ -236,7 +240,7 @@ Chou</a></div>
         Optimistic Validation. Validators can choose different values
         without affecting safety. A larger value uses more CPU and
         memory on work that may later be discarded. A smaller value can
-        limit the pipeline when application checks fall behind.</p>
+        limit the pipeline when certification falls behind.</p>
         <h2 id="what-we-measured">What We Measured</h2>
         <p>Here are the relevant configuration and results for the
         50-validator Alto run:</p>
@@ -337,8 +341,7 @@ Chou</a></div>
         <td>Longer proposer authority</td>
         </tr>
         <tr>
-        <td>Application-check latency, with enough checking
-        capacity</td>
+        <td>Waiting for parent certification</td>
         <td>Add Optimistic Validation</td>
         <td>More speculative CPU and memory</td>
         </tr>
@@ -351,8 +354,8 @@ Chou</a></div>
         </tbody>
         </table>
         <p>Stable Leader reduces handoff latency. Optimistic Validation
-        hides application-check latency when those checks can still keep
-        up. Neither feature makes a slower stage process more work per
+        hides parent-certification latency from the notarization path.
+        Neither feature makes a slower stage process more work per
         second.</p>
         <p>The combined configuration fits networks with reliable
         connectivity and enough CPU and memory for many in-flight views.
@@ -367,11 +370,12 @@ Chou</a></div>
         dissemination from many producers can combine this pipeline with
         another design. <a href="/blogs/multimmit">Multimmit</a>
         describes one such approach.</p>
-        <p>Choose enough lookahead to cover measured application-check
-        lag at your target view rate. A larger window helps only when
-        those checks catch up before the window fills. It also costs CPU
-        and memory. Choose the term length based on how long one leader
-        should retain proposal authority.</p>
+        <p>Choose enough lookahead to cover how far local votes may run
+        ahead of certification at your target view rate. A larger window
+        helps only when certification catches up before the window
+        fills. It also costs CPU and memory. Choose the term length
+        based on how long one leader should retain proposal
+        authority.</p>
         <p>Stable terms currently use the round-robin elector. Every
         validator must use the same term length, while each validator
         can choose its own optimistic lookahead. The configuration API

@@ -238,14 +238,14 @@ function buildValidation(mount) {
   const x0 = 190;
   const sequentialGap = 186;
   const optimisticGap = 92;
-  const checkSpan = sequentialGap;
+  const parentSpan = sequentialGap;
 
-  addText(svg, 20, 35, 'Application check on the view path', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 35, 'Waiting for parent certification', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 20, 246, 'Optimistic validation', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 112, 92, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 151, 'check', { 'text-anchor': 'end', 'font-weight': 700 });
+  addText(svg, 112, 151, 'certified', { 'text-anchor': 'end', 'font-weight': 700 });
   addText(svg, 112, 303, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 362, 'check', { 'text-anchor': 'end', 'font-weight': 700 });
+  addText(svg, 112, 362, 'certified', { 'text-anchor': 'end', 'font-weight': 700 });
   [92, 151, 303, 362].forEach(y => addLine(svg, 130, y, 976, y, { stroke: LIGHT }));
 
   for (let index = 0; index < 5; index++) {
@@ -255,10 +255,10 @@ function buildValidation(mount) {
     animated.push(addReveal(block, 0.06 + index * 0.17));
     addText(svg, x, 70, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
     if (index < 4) {
-      const checkMidpoint = x + checkSpan / 2;
+      const parentMidpoint = x + parentSpan / 2;
       animated.push(addArrow(svg, x + 16, 92, x + sequentialGap - 16, 92, RED, 0.1 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, x, 108, checkMidpoint, 151, BLUE, 0.12 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, checkMidpoint, 151, x + sequentialGap - 16, 92, BLUE, 0.18 + index * 0.17, 0.08));
+      animated.push(addArrow(svg, x, 108, parentMidpoint, 151, BLUE, 0.12 + index * 0.17, 0.08));
+      animated.push(addArrow(svg, parentMidpoint, 151, x + sequentialGap - 16, 92, BLUE, 0.18 + index * 0.17, 0.08));
     }
   }
 
@@ -270,13 +270,13 @@ function buildValidation(mount) {
     addText(svg, x, 281, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
     if (index < 8) animated.push(addArrow(svg, x + 16, 303, x + optimisticGap - 16, 303, RED, 0.09 + index * 0.075, 0.05));
     if (index < 7) {
-      const check = svgEl('circle', { cx: x + checkSpan, cy: 362, r: 8, fill: BLUE, opacity: 0 });
-      svg.appendChild(check);
-      animated.push(addReveal(check, 0.22 + index * 0.075));
-      animated.push(addArrow(svg, x, 319, x + checkSpan - 9, 362, BLUE, 0.1 + index * 0.075, 0.11));
+      const parent = svgEl('circle', { cx: x + parentSpan, cy: 362, r: 8, fill: BLUE, opacity: 0 });
+      svg.appendChild(parent);
+      animated.push(addReveal(parent, 0.22 + index * 0.075));
+      animated.push(addArrow(svg, x, 319, x + parentSpan - 9, 362, BLUE, 0.1 + index * 0.075, 0.11));
     }
   }
-  const note = addText(svg, 968, 397, 'application checks follow in order', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
+  const note = addText(svg, 968, 397, 'certification follows in order', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
   animated.push(addReveal(note, 0.73));
   return animated;
 }
