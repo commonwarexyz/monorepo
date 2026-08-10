@@ -573,14 +573,10 @@ mod ordinary {
         let (selected_shard, selected_control) = fake_shard();
         clock_control.set_now(at(100));
         let shards = [Arc::clone(&clock_shard), Arc::clone(&selected_shard)];
-        let registered = register_relative(
-            &shards,
-            Duration::from_nanos(25),
-            || {
-                selected_control.set_now(at(1_000));
-                1
-            },
-        );
+        let registered = register_relative(&shards, Duration::from_nanos(25), || {
+            selected_control.set_now(at(1_000));
+            1
+        });
         let entry = Arc::clone(&registered.entry);
 
         // Selection time must not shift the captured 125 ns deadline to 1,025 ns.
@@ -1231,11 +1227,8 @@ mod ordinary {
 
         // Fail a producer clock read before completing the committed batch.
         control.fail_next_now();
-        let failed_registration = register_relative(
-            std::slice::from_ref(&shard),
-            Duration::from_nanos(1),
-            || 0,
-        );
+        let failed_registration =
+            register_relative(std::slice::from_ref(&shard), Duration::from_nanos(1), || 0);
 
         // Failure covers the new entry but cannot overwrite committed expirations.
         {
