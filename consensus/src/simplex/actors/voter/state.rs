@@ -131,7 +131,7 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     elector: L,
     epoch: Epoch,
 
-    /// Term geometry of the elector, fixed for its lifetime.
+    /// Cached term length and local optimistic-lookahead policy.
     lookahead: Lookahead,
     view_retention: ViewDelta,
     leader_timeout: Duration,
@@ -327,11 +327,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.viewport().admits_certificate(pending)
     }
 
-    /// Returns true if peers would admit locally emitted work for `view`
-    /// (see [Lookahead::admits]; views at or below the current view always
-    /// are). Unlike [Self::admits_vote] and [Self::admits_certificate], which
-    /// filter incoming messages, this gates our outgoing work.
-    fn peers_admit(&self, view: View) -> bool {
+    /// Returns whether `view` is eligible for locally emitted work under this
+    /// node's lookahead policy.
+    fn admits_outbound(&self, view: View) -> bool {
         self.lookahead.admits(self.view, view)
     }
 
@@ -688,7 +686,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Construct a notarize vote for this view when we're ready to sign.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
-        if !self.peers_admit(view) {
+        if !self.admits_outbound(view) {
             return None;
         }
         // Check the cheap round-local eligibility before the ancestry gates
@@ -729,7 +727,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        if !self.peers_admit(view) {
+        // Certificates can create rounds arbitrarily far ahead. Do not vote
+        // until the view is admissible under this node's lookahead policy.
+        if !self.admits_outbound(view) {
             return None;
         }
 
@@ -882,11 +882,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         round.latch_timeout(now, reason);
     }
 
-    /// Attempt to propose a new block.
+    /// Returns proposal context for the lowest locally admissible tracked view
+    /// ready to propose.
     pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
         // Nothing above the next term start is admissible (see
-        // [`Self::peers_admit`]), so bound the scan rather than walking every
+        // [`Self::admits_outbound`]), so bound the scan rather than walking every
         // tracked future round (certificates can land arbitrarily far ahead).
+        // Ascending order gives the current view precedence over optimistic work.
         let limit = self.view.next_term_start(self.term_length());
         let mut cursor = self.view;
         while let Some(view) = self.next_tracked_view(cursor) {
@@ -897,7 +899,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             if view == GENESIS_VIEW {
                 continue;
             }
-            if !self.peers_admit(view) {
+            if !self.admits_outbound(view) {
                 continue;
             }
             if !self
@@ -908,6 +910,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 continue;
             }
 
+            // Resolve ancestry before claiming the one-shot build request so a
+            // missing parent leaves the round eligible for a later retry.
             let (parent_view, parent_payload) = match self.find_parent(view) {
                 Ok(parent) => parent,
                 Err(missing) => {
@@ -973,12 +977,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
     }
 
-    /// Attempt to verify a proposed block.
+    /// Returns work for the lowest locally admissible tracked proposal awaiting
+    /// verification.
     ///
     /// Missing ancestry is requested from the proposal's elected leader
     /// (see [`Self::resolve_ancestry`] for when an error justifies a fetch).
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
+        // Ascending order gives the current view precedence over optimistic work.
         let limit = self.view.next_term_start(self.term_length());
         let mut cursor = self.view;
         while let Some(view) = self.next_tracked_view(cursor) {
@@ -986,7 +992,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 break;
             }
             cursor = view.next();
-            if !self.peers_admit(view) {
+            if !self.admits_outbound(view) {
                 continue;
             }
             let Some((leader, proposal)) = self
@@ -996,6 +1002,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             else {
                 continue;
             };
+
+            // Validate ancestry before claiming the request. Invalid structure
+            // times out the view; missing evidence either waits for live
+            // certification or produces one targeted fetch.
             let parent_payload = match self.parent_payload(&proposal) {
                 Ok(parent_payload) => parent_payload,
                 Err(err) => {

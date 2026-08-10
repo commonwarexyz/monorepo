@@ -33,8 +33,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// Whether certification succeeded.
         success: bool,
     },
-    /// Fetch proposal ancestry from the leader that claimed it, or from any
-    /// peer when the leader is unknown.
+    /// Fetch missing proposal ancestry.
     Resolve {
         /// The span carried with this message.
         span: Span,
@@ -44,7 +43,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         view: View,
         /// The certificate that is needed.
         kind: Kind,
-        /// Proposal leader to query, or `None` to ask any peer.
+        /// Preferred peer, or `None` to use ordinary resolver peer selection.
         target: Option<S::PublicKey>,
     },
 }
@@ -232,8 +231,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Request proposal ancestry from its leader, or from any peer when the
-    /// leader is unknown.
+    /// Requests missing proposal ancestry, preferring `target` when provided.
     pub(crate) fn resolve(
         &mut self,
         proposal: View,

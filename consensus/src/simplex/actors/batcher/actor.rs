@@ -393,8 +393,9 @@ where
         };
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
-        // Views to (re)process this iteration. Reused to keep the per-vote
-        // path allocation-free; a duplicate entry only costs a no-op pass.
+
+        // Views whose rounds may have become actionable. Capacity is reused
+        // across select-loop iterations.
         let mut dirty_views: Vec<View> = Vec::new();
         select_loop! {
             self.context,

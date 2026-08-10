@@ -33,7 +33,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
 
-    /// Term geometry bounding which future views are admitted and verified.
+    /// Controls term boundaries and how far ahead votes are processed optimistically.
     pub lookahead: Lookahead,
     pub forwarding: ForwardingPolicy,
 

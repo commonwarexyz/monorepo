@@ -35,9 +35,8 @@ fn nullification_conflicts(
     (nullified_view - 1) / term_length == (finalized_view - 1) / term_length
 }
 
-// Term index and term-start test derived from the same boundaries, kept
-// independent of the production predicates for the same reason. Genesis is its
-// own term, so term indices start at 1 for view 1.
+// Keep the fuzz oracle independent of the production term predicates. Genesis
+// is term 0; view 1 begins term 1.
 fn term_of(view: u64, term_length: TermLength) -> u64 {
     match view {
         0 => 0,
@@ -45,10 +44,12 @@ fn term_of(view: u64, term_length: TermLength) -> u64 {
     }
 }
 
+// A term starts at genesis or immediately after a complete term.
 fn is_term_start(view: u64, term_length: TermLength) -> bool {
     view == 0 || (view - 1).is_multiple_of(term_length.get())
 }
 
+/// Checks safety invariants across observations collected from every replica.
 pub fn check<P: Simplex>(
     configuration: Configuration,
     term_length: TermLength,

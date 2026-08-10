@@ -981,7 +981,6 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
-        let mut replayed_successful_certifications = Vec::new();
         let replayed;
         (self, replayed) = async {
             let mut replay = journal
@@ -1021,7 +1020,6 @@ impl<
                         resolver.certified(round.view(), success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
-                            replayed_successful_certifications.push(round.view());
                         }
                     }
                     Artifact::Nullify(nullify) => {
@@ -1075,24 +1073,6 @@ impl<
             .expect("leader not set");
         let (span, finalized) = self.state.batcher_context(observed_view);
         batcher.update(span, observed_view, leader, finalized, None);
-
-        // Re-attempt finalize votes for certifications that completed before
-        // shutdown: no later event re-triggers construction for an
-        // already-certified view (see [Self::construct]), so recovery would
-        // otherwise require abandoning the term through timeouts. This builds
-        // a fresh vote through `construct_finalize`'s usual gates rather than
-        // replaying an artifact, and is a no-op if the prior vote was
-        // journaled (replay restores its broadcast flag).
-        for view in replayed_successful_certifications {
-            let finalize;
-            (self, finalize) = self.prepare_finalize(view).await;
-            let Some(finalize) = finalize else {
-                continue;
-            };
-            self = self.sync_journal().await;
-            debug!(proposal=?finalize.proposal, "broadcasting replayed finalize");
-            self.publish_vote(&mut batcher, &mut vote_sender, Vote::Finalize(finalize));
-        }
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
