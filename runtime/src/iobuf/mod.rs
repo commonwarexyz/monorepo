@@ -1,11 +1,38 @@
 //! Buffer types for I/O operations.
 //!
-//! Each buffer type is backed by one of three storage variants:
-//! - [`Bytes`]/[`BytesMut`]: standard heap allocation (from `From` conversions)
-//! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`],
-//!   pool bypass for small requests, or fallback)
-//! - Pooled: tracked aligned allocation returned to its originating [`BufferPool`]
-//!   on drop
+//! `IoBuf` and `IoBufMut` store readable/writable cursor state directly in the
+//! public handle. Allocation ownership lives in a compact tagged owner
+//! reference: runtime-owned heap buffers keep a header inside their own
+//! allocation (in front of the data for low-alignment mutable buffers, at the
+//! tail for high-alignment ones and adopted vecs), pooled buffers keep their
+//! owner record in a per-slot side table owned by the size class,
+//! caller-supplied `Vec<u8>` values converted to immutable buffers are adopted
+//! into the native heap form when their spare capacity allows (mutable
+//! conversions copy to preserve the caller's capacity), and caller-supplied
+//! [`Bytes`] values are held zero-copy by a small external owner. This keeps
+//! `bytes::Buf` and `bytes::BufMut` hot paths as simple pointer/length
+//! arithmetic. `owner.rs` documents the owner model.
+//!
+//! Throughout this module, "native" means runtime-owned storage whose owner
+//! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
+//! allocations (front or tail header), pooled buffers, and adopted vecs, as
+//! opposed to external `Bytes` and `'static` views.
+//!
+//! # Conversions
+//!
+//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy: the
+//! payload is never copied. Most conversions require at most one small owner
+//! allocation. A `Vec<u8>` that cannot host an inline owner may require two
+//! small metadata allocations: one for `bytes` shared ownership and one for
+//! the external owner. Conversions into [`IoBufMut`] or [`IoBufsMut`] are
+//! zero-copy where the source allocation can back a mutable handle and copy
+//! otherwise. Each mutable conversion documents which one it is, and
+//! conversions out of the handles document their cost on each impl.
+//!
+//! Because untracked heap buffers embed their owner header in the same
+//! allocation, a power-of-two capacity request may land in the allocator's
+//! next size bin. Pooled buffers do not pay this: their side-table record
+//! keeps the data allocation exactly the class size.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -13,20 +40,54 @@
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
+//! - [`Builder`]: Assembles [`IoBufs`] from inline writes and zero-copy pieces
+//!
+//! # Examples
+//!
+//! The core lifecycle: fill a fixed-capacity mutable buffer, freeze it into
+//! cheaply cloneable immutable views, and recover the mutable handle (with
+//! its spare capacity) once the views are gone:
+//!
+//! ```
+//! use commonware_runtime::{Buf, BufMut, IoBuf, IoBufMut};
+//!
+//! let mut buf = IoBufMut::with_capacity(8);
+//! buf.put_slice(b"abcdef");
+//!
+//! let frozen: IoBuf = buf.freeze();
+//! let head = frozen.slice(..3);
+//! assert_eq!(head, b"abc"[..]);
+//!
+//! // A live view shares the owner, so recovery declines.
+//! let frozen = frozen.try_into_mut().unwrap_err();
+//! drop(head);
+//!
+//! // Unique again: the mutable handle returns with its spare capacity.
+//! let mut recovered = frozen.try_into_mut().unwrap();
+//! assert_eq!(recovered.as_ref(), b"abcdef");
+//! assert_eq!(recovered.capacity(), 8);
+//! recovered.put_slice(b"gh");
+//! ```
 
-mod buffer;
 mod freelist;
+mod owner;
 mod pool;
 
-pub(crate) use buffer::AlignedBuffer;
-use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
 use crossbeam_utils::CachePadded;
+use owner::{HeapOwner, OwnerRef, PooledBuffer};
 pub use pool::{
     BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache, PoolError,
 };
-use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, ops::RangeBounds};
+use std::{
+    collections::VecDeque,
+    io::IoSlice,
+    mem::{ManuallyDrop, align_of},
+    num::NonZeroUsize,
+    ops::{Bound, RangeBounds},
+    ptr::NonNull,
+};
 
 /// Returns the system page size.
 ///
@@ -56,125 +117,268 @@ pub const fn cache_line_size() -> usize {
     align_of::<CachePadded<u8>>()
 }
 
+/// Benchmark-only access to internal pool machinery.
+///
+/// Raw pooled buffers reference owner metadata stored by their freelist.
+/// Taking one requires the caller to keep that freelist alive, and returning
+/// one requires proof that it came from the target freelist:
+///
+/// ```compile_fail,E0133
+/// use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
+///
+/// fn return_buffer(freelist: &Freelist, buffer: PooledBuffer) {
+///     freelist.put(buffer);
+/// }
+/// ```
+#[doc(hidden)]
 #[cfg(feature = "bench")]
 pub mod bench {
-    pub use super::{buffer::PooledBuffer, freelist::Freelist};
+    pub use super::owner::{PooledBuffer, PooledOwner};
+    use std::{
+        alloc::Layout,
+        num::{NonZeroU32, NonZeroUsize},
+    };
+
+    /// Raw freelist access for benchmarks.
+    ///
+    /// Pooled buffers carry no type-level identity for their originating
+    /// freelist, so return operations are unsafe at this public boundary.
+    pub struct Freelist(super::freelist::Freelist);
+
+    impl Freelist {
+        /// Creates a fixed-capacity benchmark freelist.
+        pub fn new(
+            capacity: NonZeroU32,
+            parallelism: NonZeroUsize,
+            layout: Layout,
+            prefill: bool,
+        ) -> Self {
+            Self(super::freelist::Freelist::new(
+                capacity,
+                parallelism,
+                layout,
+                prefill,
+            ))
+        }
+
+        /// Returns one available pooled buffer.
+        ///
+        /// ```compile_fail,E0133
+        /// use commonware_runtime::iobuf::bench::Freelist;
+        ///
+        /// fn take(freelist: &Freelist) {
+        ///     let _buffer = freelist.take();
+        /// }
+        /// ```
+        ///
+        /// # Safety
+        ///
+        /// The returned buffer references owner metadata stored by this
+        /// freelist. This freelist must remain alive until the buffer is
+        /// returned here or deallocated.
+        #[inline]
+        pub unsafe fn take(&self) -> Option<PooledBuffer> {
+            self.0.take()
+        }
+
+        /// Returns up to `max` available pooled buffers to `on_entry`.
+        ///
+        /// `on_entry` must not panic. A panic can strand claimed buffers
+        /// outside the freelist and leak their allocations.
+        ///
+        /// ```compile_fail,E0133
+        /// use commonware_runtime::iobuf::bench::Freelist;
+        ///
+        /// fn take_batch(freelist: &Freelist) {
+        ///     freelist.take_batch(1, |_| {});
+        /// }
+        /// ```
+        ///
+        /// # Safety
+        ///
+        /// Every buffer passed to `on_entry` references owner metadata stored
+        /// by this freelist. This freelist must remain alive until all such
+        /// buffers are returned here or deallocated.
+        #[inline]
+        pub unsafe fn take_batch(&self, max: usize, on_entry: impl FnMut(PooledBuffer)) -> usize {
+            self.0.take_batch(max, on_entry)
+        }
+
+        /// Returns one pooled buffer to this freelist.
+        ///
+        /// # Safety
+        ///
+        /// `buffer` must have been taken from this freelist, and its slot must
+        /// not already be available here.
+        #[inline]
+        pub unsafe fn put(&self, buffer: PooledBuffer) {
+            self.0.put(buffer);
+        }
+
+        /// Returns several pooled buffers to this freelist.
+        ///
+        /// If the iterator panics, buffers already accepted by this method may
+        /// leak.
+        ///
+        /// # Safety
+        ///
+        /// Every buffer must have been taken from this freelist. Their slots
+        /// must be unique within the batch and unavailable in the freelist.
+        #[inline]
+        pub unsafe fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
+            self.0.put_batch(buffers);
+        }
+
+        /// Drops every currently available pooled buffer.
+        #[inline]
+        pub fn drain(&self) -> usize {
+            self.0.drain()
+        }
+    }
 }
 
 /// Immutable byte buffer.
 ///
-/// Backed by [`Bytes`], an untracked aligned allocation, or a pooled
-/// allocation.
+/// The handle stores the current readable pointer and length directly:
 ///
-/// Use this for immutable payloads. To build or mutate data, use
-/// [`IoBufMut`] and then [`IoBufMut::freeze`].
+/// ```text
+/// [ readable bytes .......... ]
+/// ^
+/// ptr
+/// len = readable bytes
+/// ```
 ///
-/// For pooled-backed values, the underlying buffer is returned to the pool
-/// when the final reference is dropped.
+/// Allocation ownership is represented by `owner`, a compact tagged pointer to
+/// an internal owner header. `bytes::Buf` methods use only `ptr` and `len`.
+/// Clone/drop/slice/split use `owner` on colder lifecycle paths.
+///
+/// Cloning and slicing are zero-copy. For pooled-backed values, the underlying
+/// allocation is returned to the pool when the final immutable reference is
+/// dropped.
 ///
 /// All `From<*> for IoBuf` implementations are guaranteed to be non-copy
 /// conversions. Use [`IoBuf::copy_from_slice`] when an explicit copy from
 /// borrowed data is required.
-///
-/// Cloning is cheap and does not copy underlying bytes.
-#[derive(Clone, Debug)]
 pub struct IoBuf {
-    inner: IoBufInner,
+    ptr: NonNull<u8>,
+    len: usize,
+    owner: OwnerRef,
 }
 
-/// Internal storage variant for [`IoBuf`].
-///
-/// - `Bytes`: from `From<Bytes>`, `From<Vec<u8>>`, `From<&'static [u8]>`, etc.
-/// - `Aligned`: from untracked aligned allocation ([`IoBufMut::with_alignment`],
-///   pool bypass for small requests, or fallback)
-/// - `Pooled`: from [`BufferPool`] allocation (returned to pool on final drop)
-#[derive(Clone, Debug)]
-enum IoBufInner {
-    Bytes(Bytes),
-    Aligned(AlignedBuf),
-    Pooled(PooledBuf),
+// SAFETY: immutable handles expose read-only bytes and synchronize shared
+// ownership through the owner refcount.
+unsafe impl Send for IoBuf {}
+// SAFETY: shared access is read-only and lifecycle state is atomic.
+unsafe impl Sync for IoBuf {}
+
+// Debug intentionally omits the data pointer: raw addresses differ across
+// identically-seeded deterministic runs and would leak heap layout into logs.
+impl std::fmt::Debug for IoBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoBuf")
+            .field("len", &self.len)
+            .field("pooled", &self.is_pooled())
+            .finish()
+    }
+}
+
+impl Clone for IoBuf {
+    #[inline]
+    fn clone(&self) -> Self {
+        // SAFETY: cloning an immutable view retains the shared owner when one
+        // exists. Static views have an empty owner and need no lifecycle work.
+        unsafe { self.owner.clone_shared() };
+        Self {
+            ptr: self.ptr,
+            len: self.len,
+            owner: self.owner,
+        }
+    }
+}
+
+impl Drop for IoBuf {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: dropping an immutable view releases exactly one shared owner
+        // reference. Static/empty views have no owner.
+        unsafe { self.owner.drop_shared() };
+    }
 }
 
 impl IoBuf {
     /// Create a buffer by copying data from a slice.
     ///
-    /// Use this when you have a non-static `&[u8]` that needs to be converted to an
-    /// [`IoBuf`]. For static slices, prefer [`IoBuf::from`] which is zero-copy.
+    /// Use this when you have a non-static `&[u8]` that needs owned storage.
+    /// For static slices, prefer [`IoBuf::from`] which is zero-copy.
+    ///
+    /// The copy lands in one native heap allocation with an inline owner
+    /// header, so the result supports zero-copy [`IoBuf::try_into_mut`].
     pub fn copy_from_slice(data: &[u8]) -> Self {
-        Self {
-            inner: IoBufInner::Bytes(Bytes::copy_from_slice(data)),
-        }
+        IoBufMut::from(data).freeze()
     }
 
-    /// Create a buffer from a pooled allocation.
     #[inline]
-    const fn from_pooled(pooled: PooledBuf) -> Self {
-        Self {
-            inner: IoBufInner::Pooled(pooled),
+    fn from_static(slice: &'static [u8]) -> Self {
+        if slice.is_empty() {
+            return Self::default();
         }
-    }
-
-    /// Create a buffer from an untracked aligned allocation.
-    #[inline]
-    const fn from_aligned(aligned: AlignedBuf) -> Self {
+        let ptr = NonNull::new(slice.as_ptr().cast_mut()).expect("static slice data is non-null");
         Self {
-            inner: IoBufInner::Aligned(aligned),
+            ptr,
+            len: slice.len(),
+            owner: OwnerRef::empty(),
         }
     }
 
     /// Returns `true` if this buffer is tracked by a pool.
-    ///
-    /// Tracked buffers originate from [`BufferPool`] allocations and are
-    /// returned to the pool when the final reference is dropped.
-    ///
-    /// Buffers backed by [`Bytes`], and untracked aligned allocations (from
-    /// [`IoBufMut::with_alignment`], pool bypass for small requests, or
-    /// fallback), return `false`.
     #[inline]
-    pub const fn is_pooled(&self) -> bool {
-        match &self.inner {
-            IoBufInner::Bytes(_) => false,
-            IoBufInner::Aligned(_) => false,
-            IoBufInner::Pooled(_) => true,
-        }
+    pub fn is_pooled(&self) -> bool {
+        self.owner.is_pooled()
     }
 
     /// Number of bytes remaining in the buffer.
     #[inline]
-    pub fn len(&self) -> usize {
-        self.remaining()
+    pub const fn len(&self) -> usize {
+        self.len
     }
 
     /// Whether the buffer is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
-    /// Get raw pointer to the buffer data.
+    /// Get raw pointer to the first readable byte.
     #[inline]
-    pub fn as_ptr(&self) -> *const u8 {
-        match &self.inner {
-            IoBufInner::Bytes(b) => b.as_ptr(),
-            IoBufInner::Aligned(a) => a.as_ptr(),
-            IoBufInner::Pooled(p) => p.as_ptr(),
-        }
+    pub const fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
     }
 
     /// Returns a slice of self for the provided range (zero-copy).
     ///
-    /// For pooled buffers, empty ranges return an empty detached buffer
-    /// ([`IoBuf::default`]) so the underlying pooled allocation is not retained.
+    /// Empty ranges return a detached empty buffer so pooled allocations are
+    /// not pinned by empty views.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is out of bounds of the readable bytes, if its
+    /// start is greater than its end, or if an inclusive bound overflows.
     #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
-        match &self.inner {
-            IoBufInner::Bytes(b) => Self {
-                inner: IoBufInner::Bytes(b.slice(range)),
-            },
-            IoBufInner::Aligned(a) => a
-                .slice(range)
-                .map_or_else(Self::default, Self::from_aligned),
-            IoBufInner::Pooled(p) => p.slice(range).map_or_else(Self::default, Self::from_pooled),
+        let (start, end) = resolve_range(self.len, range);
+        if start == end {
+            return Self::default();
+        }
+
+        // SAFETY: range resolution bounds `start <= self.len`.
+        let ptr = unsafe { self.ptr.add(start) };
+        // SAFETY: the returned view aliases immutable bytes and retains the
+        // owner while it is live.
+        unsafe { self.owner.clone_shared() };
+        Self {
+            ptr,
+            len: end - start,
+            owner: self.owner,
         }
     }
 
@@ -183,67 +387,94 @@ impl IoBuf {
     /// Afterwards `self` contains bytes `[at, len)`, and the returned [`IoBuf`]
     /// contains bytes `[0, at)`.
     ///
-    /// This is an `O(1)` zero-copy operation.
+    /// This is an `O(1)` zero-copy operation. Empty halves detach from the
+    /// owner so pooled allocations are not pinned by empty views.
     ///
     /// # Panics
     ///
     /// Panics if `at > len`.
     pub fn split_to(&mut self, at: usize) -> Self {
+        assert!(
+            at <= self.len,
+            "split_to out of bounds: {:?} <= {:?}",
+            at,
+            self.len,
+        );
         if at == 0 {
             return Self::default();
         }
-
-        if at == self.remaining() {
+        if at == self.len {
             return std::mem::take(self);
         }
 
-        match &mut self.inner {
-            IoBufInner::Bytes(b) => Self {
-                inner: IoBufInner::Bytes(b.split_to(at)),
-            },
-            IoBufInner::Aligned(a) => Self::from_aligned(a.split_to(at)),
-            IoBufInner::Pooled(p) => Self::from_pooled(p.split_to(at)),
+        // SAFETY: prefix aliases immutable bytes and retains the owner.
+        unsafe { self.owner.clone_shared() };
+        let prefix = Self {
+            ptr: self.ptr,
+            len: at,
+            owner: self.owner,
+        };
+        // SAFETY: `at < self.len`, so advancing within the current readable region is in bounds.
+        unsafe {
+            self.ptr = self.ptr.add(at);
         }
+        self.len -= at;
+        prefix
     }
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
-    /// Succeeds when `self` holds exclusive ownership of the backing storage
-    /// and returns an [`IoBufMut`] with the same contents. Fails and returns
-    /// `self` unchanged when ownership is shared.
+    /// Succeeds when this view is the unique owner of a native (heap,
+    /// pooled, or adopted-vec) allocation, including uniquely-owned slices:
+    /// capacity is recovered from the allocation base and the current view
+    /// offset, so spare capacity beyond the view returns with it. Views with
+    /// no owner (the default and detached empty views) convert trivially.
     ///
-    /// For [`Bytes`]-backed buffers, this matches [`Bytes::try_into_mut`]
-    /// semantics: succeeds only for uniquely-owned full buffers, and always
-    /// fails for [`Bytes::from_owner`] and [`Bytes::from_static`] buffers. For
-    /// pooled buffers, this succeeds for any uniquely-owned view (including
-    /// slices) and fails when shared.
+    /// Declines for shared owners, non-empty static views, and
+    /// external-backed views (`Bytes` cannot back a mutable handle). An empty
+    /// view that still holds a shared or external owner declines like any
+    /// other view.
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
-        match self.inner {
-            IoBufInner::Bytes(bytes) => bytes
-                .try_into_mut()
-                .map(|mut_bytes| IoBufMut {
-                    inner: IoBufMutInner::Bytes(mut_bytes),
-                })
-                .map_err(|bytes| Self {
-                    inner: IoBufInner::Bytes(bytes),
-                }),
-            IoBufInner::Aligned(aligned) => aligned
-                .try_into_mut()
-                .map(|mut_aligned| IoBufMut {
-                    inner: IoBufMutInner::Aligned(mut_aligned),
-                })
-                .map_err(|aligned| Self {
-                    inner: IoBufInner::Aligned(aligned),
-                }),
-            IoBufInner::Pooled(pooled) => pooled
-                .try_into_mut()
-                .map(|mut_pooled| IoBufMut {
-                    inner: IoBufMutInner::Pooled(mut_pooled),
-                })
-                .map_err(|pooled| Self {
-                    inner: IoBufInner::Pooled(pooled),
-                }),
+        if self.owner.is_empty() {
+            return if self.len == 0 {
+                Ok(IoBufMut::default())
+            } else {
+                Err(self)
+            };
         }
+
+        // External owners always decline: `Bytes` cannot back a mutable
+        // handle, so `IoBufMut` is never external-backed.
+        if self.owner.is_external() {
+            return Err(self);
+        }
+
+        // SAFETY: owner is non-empty and live.
+        if !unsafe { self.owner.is_unique() } {
+            return Err(self);
+        }
+
+        let me = ManuallyDrop::new(self);
+        // SAFETY: owner is unique and live.
+        let base = unsafe { me.owner.data_base() };
+        // SAFETY: owner is unique and live.
+        let usable_capacity = unsafe { me.owner.usable_capacity() };
+        let offset = (me.ptr.as_ptr() as usize)
+            .checked_sub(base.as_ptr() as usize)
+            .expect("view pointer must be within owner allocation");
+        assert!(
+            offset <= usable_capacity,
+            "view pointer out of owner bounds"
+        );
+        let cap = usable_capacity - offset;
+        assert!(me.len <= cap, "view length out of owner bounds");
+
+        Ok(IoBufMut {
+            ptr: me.ptr,
+            len: me.len,
+            cap,
+            owner: me.owner,
+        })
     }
 
     /// Convert this buffer into [`IoBufMut`], allocating from `pool` if needed.
@@ -266,18 +497,18 @@ impl IoBuf {
 impl AsRef<[u8]> for IoBuf {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        match &self.inner {
-            IoBufInner::Bytes(b) => b.as_ref(),
-            IoBufInner::Aligned(a) => a.as_ref(),
-            IoBufInner::Pooled(p) => p.as_ref(),
-        }
+        // SAFETY: `ptr..ptr+len` is initialized and kept alive by `owner` or is
+        // an immortal static slice.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 
 impl Default for IoBuf {
     fn default() -> Self {
         Self {
-            inner: IoBufInner::Bytes(Bytes::new()),
+            ptr: NonNull::dangling(),
+            len: 0,
+            owner: OwnerRef::empty(),
         }
     }
 }
@@ -319,113 +550,175 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
 }
 
 impl Buf for IoBuf {
-    #[inline]
+    #[inline(always)]
     fn remaining(&self) -> usize {
-        match &self.inner {
-            IoBufInner::Bytes(b) => b.remaining(),
-            IoBufInner::Aligned(a) => a.remaining(),
-            IoBufInner::Pooled(p) => p.remaining(),
-        }
+        self.len
     }
 
-    #[inline]
+    #[inline(always)]
     fn chunk(&self) -> &[u8] {
-        match &self.inner {
-            IoBufInner::Bytes(b) => b.chunk(),
-            IoBufInner::Aligned(a) => a.chunk(),
-            IoBufInner::Pooled(p) => p.chunk(),
+        self.as_ref()
+    }
+
+    #[inline(always)]
+    fn advance(&mut self, cnt: usize) {
+        if cnt > self.len {
+            panic_advance(cnt, self.len);
+        }
+        // SAFETY: `cnt <= self.len`, so the new pointer remains in or one byte
+        // past the readable region.
+        unsafe {
+            self.ptr = self.ptr.add(cnt);
+        }
+        self.len -= cnt;
+    }
+
+    #[inline]
+    fn copy_to_slice(&mut self, dst: &mut [u8]) {
+        if let Err(error) = self.try_copy_to_slice(dst) {
+            panic_try_get(error);
         }
     }
 
     #[inline]
-    fn advance(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufInner::Bytes(b) => b.advance(cnt),
-            IoBufInner::Aligned(a) => a.advance(cnt),
-            IoBufInner::Pooled(p) => p.advance(cnt),
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        if dst.len() > self.len {
+            return Err(TryGetError {
+                requested: dst.len(),
+                available: self.len,
+            });
         }
+        // SAFETY: source and destination are valid for `dst.len()` bytes and
+        // cannot overlap because `dst` is a unique mutable slice outside this
+        // immutable buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), dst.as_mut_ptr(), dst.len());
+            self.ptr = self.ptr.add(dst.len());
+        }
+        self.len -= dst.len();
+        Ok(())
     }
 
+    /// Drains `len` readable bytes into [`Bytes`].
+    ///
+    /// Zero-copy despite the trait method's name: a shared view is carved
+    /// off and converted through the `From<IoBuf> for Bytes` fast paths.
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        match &mut self.inner {
-            IoBufInner::Bytes(b) => b.copy_to_bytes(len),
-            IoBufInner::Aligned(a) => a.copy_to_bytes(len),
-            IoBufInner::Pooled(p) => {
-                // Full non-empty drain: transfer ownership so the drained source no
-                // longer retains the pooled allocation. Keep len == 0 on the normal
-                // path to avoid creating an empty Bytes that still pins pool memory.
-                if len != 0 && len == p.remaining() {
-                    let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
-                    match inner {
-                        IoBufInner::Pooled(p) => p.into_bytes(),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    p.copy_to_bytes(len)
-                }
-            }
+        assert!(len <= self.len, "copy_to_bytes out of bounds");
+        if len == 0 {
+            return Bytes::new();
         }
+        if len == self.len {
+            return Bytes::from(std::mem::take(self));
+        }
+
+        // External-backed views slice the inner Bytes directly: one inner
+        // refcount clone, instead of cloning and then dropping our owner
+        // through the shared-decrement path.
+        if self.owner.is_external() {
+            // SAFETY: the external owner is live while `self` holds its
+            // reference, and the view prefix lies within the inner `Bytes`
+            // range by invariant, as `slice_ref` requires.
+            let inner = unsafe { self.owner.external_bytes() };
+            let bytes = inner.slice_ref(&self.as_ref()[..len]);
+            self.advance(len);
+            return bytes;
+        }
+
+        let drained = Self {
+            ptr: self.ptr,
+            len,
+            owner: self.owner,
+        };
+        // SAFETY: `drained` is a new immutable view into the same owner.
+        unsafe { drained.owner.clone_shared() };
+        self.advance(len);
+        Bytes::from(drained)
     }
 }
 
-impl From<Bytes> for IoBuf {
-    fn from(bytes: Bytes) -> Self {
-        Self {
-            inner: IoBufInner::Bytes(bytes),
-        }
-    }
-}
-
+/// Convert a [`Vec<u8>`] into an [`IoBuf`] without copying.
+///
+/// Adopts the vec's allocation when its spare capacity can host the owner
+/// header, and otherwise moves it into [`Bytes`] behind an external owner.
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
-        Self {
-            inner: IoBufInner::Bytes(Bytes::from(vec)),
-        }
+        let (ptr, len, owner) = OwnerRef::from_vec(vec);
+        Self { ptr, len, owner }
     }
 }
 
+/// Convert [`Bytes`] into an [`IoBuf`] without copying.
+///
+/// The `Bytes` value moves into a small external owner and the handle points
+/// directly into its payload. Handle clones and drops never touch the inner
+/// refcount. Only the final release and the `slice_ref` conversion fast paths
+/// do.
+impl From<Bytes> for IoBuf {
+    fn from(bytes: Bytes) -> Self {
+        let (ptr, len, owner) = OwnerRef::from_bytes(bytes);
+        Self { ptr, len, owner }
+    }
+}
+
+/// Convert [`BytesMut`] into an [`IoBuf`] without copying (via `freeze`).
+impl From<BytesMut> for IoBuf {
+    fn from(bytes: BytesMut) -> Self {
+        Self::from(bytes.freeze())
+    }
+}
+
+/// Zero-copy: creates a static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBuf {
     fn from(array: &'static [u8; N]) -> Self {
-        Self {
-            inner: IoBufInner::Bytes(Bytes::from_static(array)),
-        }
+        Self::from_static(array)
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl From<&'static [u8]> for IoBuf {
     fn from(slice: &'static [u8]) -> Self {
-        Self {
-            inner: IoBufInner::Bytes(Bytes::from_static(slice)),
-        }
+        Self::from_static(slice)
     }
 }
 
 /// Convert an [`IoBuf`] into a [`Vec<u8>`].
 ///
-/// This conversion may copy:
-/// - [`Bytes`]-backed buffers may reuse allocation when possible
-/// - pooled buffers copy readable bytes into a new [`Vec<u8>`]
+/// This conversion copies the readable bytes.
 impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
-        match buf.inner {
-            IoBufInner::Bytes(bytes) => Self::from(bytes),
-            IoBufInner::Aligned(aligned) => aligned.as_ref().to_vec(),
-            IoBufInner::Pooled(pooled) => pooled.as_ref().to_vec(),
-        }
+        buf.as_ref().to_vec()
     }
 }
 
 /// Convert an [`IoBuf`] into [`Bytes`] without copying readable data.
 ///
-/// For pooled buffers, this wraps the pooled owner using [`Bytes::from_owner`].
+/// Static views convert via [`Bytes::from_static`] (free), external-backed
+/// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone,
+/// though the first conversion of a still-promotable inner `Bytes` pays
+/// bytes' one shared-header allocation), and native heap/pooled views via
+/// [`Bytes::from_owner`] (one box).
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
-        match buf.inner {
-            IoBufInner::Bytes(bytes) => bytes,
-            IoBufInner::Aligned(aligned) => Self::from_owner(aligned),
-            IoBufInner::Pooled(pooled) => Self::from_owner(pooled),
+        if buf.is_empty() {
+            return Self::new();
         }
+        if buf.owner.is_empty() {
+            // Non-empty views with no owner are 'static by invariant.
+            // SAFETY: `ptr..ptr+len` is an initialized immortal slice.
+            let slice: &'static [u8] =
+                unsafe { std::slice::from_raw_parts(buf.ptr.as_ptr(), buf.len) };
+            return Self::from_static(slice);
+        }
+        if buf.owner.is_external() {
+            // SAFETY: the external owner is live while `buf` holds its
+            // reference, and the view lies within the inner `Bytes` range by
+            // invariant, as `slice_ref` requires.
+            let inner = unsafe { buf.owner.external_bytes() };
+            return inner.slice_ref(buf.as_ref());
+        }
+        Self::from_owner(buf)
     }
 }
 
@@ -477,129 +770,175 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 
 /// Mutable byte buffer.
 ///
-/// Backed by [`BytesMut`], an untracked aligned allocation, or a pooled
-/// allocation.
+/// The handle stores the first readable byte, readable length, and writable
+/// view capacity directly:
 ///
-/// Use this to build or mutate payloads before freezing into [`IoBuf`].
+/// ```text
+/// before advance:
+/// [ readable len ][ writable cap-len ]
+/// ^
+/// ptr
 ///
-/// For pooled-backed values, dropping this buffer returns the underlying
-/// allocation to the pool. After [`IoBufMut::freeze`], the frozen `IoBuf`
-/// keeps the allocation alive until its final reference is dropped.
-#[derive(Debug)]
+/// after advance(n):
+/// [ consumed ][ readable len-n ][ writable cap-len ]
+///              ^
+///              ptr
+/// ```
+///
+/// `advance` moves `ptr` forward and shrinks both `len` and `cap`. `BufMut`
+/// writes always begin at `ptr + len`.
+///
+/// # Capacity
+///
+/// The capacity is fixed at construction: unlike [`BytesMut`], the buffer
+/// never grows, and every write past `capacity()` panics (including through
+/// [`BufMut`] methods such as `put_slice`). [`Self::default`] and zero-sized
+/// constructions own no storage, so any write to them panics. Allocate the
+/// full expected size up front. `remaining_mut()` reports the actual writable
+/// tail rather than `usize::MAX`.
 pub struct IoBufMut {
-    inner: IoBufMutInner,
+    ptr: NonNull<u8>,
+    len: usize,
+    cap: usize,
+    owner: OwnerRef,
 }
 
-/// Internal storage variant for [`IoBufMut`]. See [`IoBufInner`] for variant
-/// semantics.
-#[derive(Debug)]
-enum IoBufMutInner {
-    Bytes(BytesMut),
-    Aligned(AlignedBufMut),
-    Pooled(PooledBufMut),
+// SAFETY: mutable handles have unique ownership. Moving them across threads is
+// safe because final release uses thread-safe pool/allocator paths.
+unsafe impl Send for IoBufMut {}
+// SAFETY: shared references expose only immutable reads. Mutation requires
+// `&mut self`.
+unsafe impl Sync for IoBufMut {}
+
+// Debug intentionally omits the data pointer: raw addresses differ across
+// identically-seeded deterministic runs and would leak heap layout into logs.
+impl std::fmt::Debug for IoBufMut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoBufMut")
+            .field("len", &self.len)
+            .field("cap", &self.cap)
+            .field("pooled", &self.is_pooled())
+            .finish()
+    }
+}
+
+impl Drop for IoBufMut {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: mutable buffers uniquely own their allocation.
+        unsafe { self.owner.release_unique_mut_at(self.ptr, self.cap) };
+    }
 }
 
 impl Default for IoBufMut {
     fn default() -> Self {
         Self {
-            inner: IoBufMutInner::Bytes(BytesMut::new()),
+            ptr: NonNull::dangling(),
+            len: 0,
+            cap: 0,
+            owner: OwnerRef::empty(),
         }
     }
 }
 
 impl IoBufMut {
     /// Create a buffer with the given capacity.
+    ///
+    /// The capacity is exact and fixed. Writes past it panic (see the
+    /// [capacity](Self#capacity) section).
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            inner: IoBufMutInner::Bytes(BytesMut::with_capacity(capacity)),
-        }
+        Self::with_alignment(capacity, NonZeroUsize::MIN)
     }
 
     /// Create an untracked aligned buffer with the given capacity and alignment.
     ///
-    /// This uses the aligned backing path directly rather than `BytesMut`.
     /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
     /// deallocates the aligned allocation immediately.
     ///
-    /// Use this when the caller needs a specific alignment but does not need
-    /// pooled reuse.
+    /// For alignments above the owner header alignment (8 bytes on 64-bit
+    /// targets) the usable region rounds the request up to the header
+    /// alignment, so `capacity()` may exceed the request by up to that
+    /// alignment minus one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is nonzero and `alignment` is not a power of two.
     #[inline]
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
         if capacity == 0 {
-            return Self::with_capacity(0);
+            return Self::default();
         }
-        let buffer = AlignedBuffer::new(capacity, alignment.get());
-        Self::from_aligned(AlignedBufMut::new(buffer))
+        let (ptr, cap, owner) = HeapOwner::allocate_aligned_mut(capacity, alignment.get(), false);
+        Self {
+            ptr,
+            len: 0,
+            cap,
+            owner,
+        }
     }
 
     /// Create a zero-initialized untracked aligned buffer with the given
     /// length and alignment.
     ///
-    /// Unlike [`Self::with_alignment`], this initializes the full readable
-    /// range to zero and sets `len == capacity == len`.
+    /// For alignments above the owner header alignment (8 bytes on 64-bit
+    /// targets) the usable region rounds the request up to the header
+    /// alignment, so `capacity()` may exceed `len` by up to that alignment
+    /// minus one (zero-initialized) bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` is nonzero and `alignment` is not a power of two.
     #[inline]
     pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
         if len == 0 {
-            return Self::zeroed(0);
+            return Self::default();
         }
-        let buffer = AlignedBuffer::new_zeroed(len, alignment.get());
-        let mut buffer = Self::from_aligned(AlignedBufMut::new(buffer));
-        // SAFETY: the aligned allocation was zero-initialized for `len` bytes.
-        unsafe { buffer.set_len(len) };
-        buffer
+        let (ptr, cap, owner) = HeapOwner::allocate_aligned_mut(len, alignment.get(), true);
+        Self {
+            ptr,
+            len,
+            cap,
+            owner,
+        }
     }
 
     /// Create a buffer of `len` bytes, all initialized to zero.
     ///
-    /// Unlike `with_capacity`, this sets both capacity and length to `len`,
-    /// making the entire buffer immediately usable for read operations
-    /// (e.g., `file.read_exact`).
+    /// Unlike [`Self::with_capacity`], the full buffer is immediately
+    /// readable (`len() == capacity() == len`), which suits APIs that fill a
+    /// preallocated buffer such as `read_exact`.
     #[inline]
     pub fn zeroed(len: usize) -> Self {
-        Self {
-            inner: IoBufMutInner::Bytes(BytesMut::zeroed(len)),
-        }
+        Self::zeroed_with_alignment(len, NonZeroUsize::MIN)
     }
 
     /// Create a buffer from a pooled allocation.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must have an initialized live lease in its pooled slot.
     #[inline]
-    const fn from_pooled(pooled: PooledBufMut) -> Self {
+    pub(crate) unsafe fn from_pooled_parts(buffer: PooledBuffer) -> Self {
+        let cap = buffer.capacity();
+        let ptr = buffer.data_ptr();
+        // SAFETY: guaranteed by the caller.
+        let owner = unsafe { buffer.owner_ref() };
         Self {
-            inner: IoBufMutInner::Pooled(pooled),
-        }
-    }
-
-    /// Create a buffer from an untracked aligned allocation.
-    #[inline]
-    const fn from_aligned(aligned: AlignedBufMut) -> Self {
-        Self {
-            inner: IoBufMutInner::Aligned(aligned),
+            ptr,
+            len: 0,
+            cap,
+            owner,
         }
     }
 
     /// Returns `true` if this buffer is tracked by a pool.
-    ///
-    /// Tracked buffers originate from [`BufferPool`] allocations and are
-    /// returned to the pool when dropped.
-    ///
-    /// Buffers backed by [`BytesMut`], and untracked aligned allocations (from
-    /// [`IoBufMut::with_alignment`], pool bypass for small requests, or
-    /// fallback), return `false`.
     #[inline]
-    pub const fn is_pooled(&self) -> bool {
-        match &self.inner {
-            IoBufMutInner::Bytes(_) => false,
-            IoBufMutInner::Aligned(_) => false,
-            IoBufMutInner::Pooled(_) => true,
-        }
+    pub fn is_pooled(&self) -> bool {
+        self.owner.is_pooled()
     }
 
     /// Sets the length of the buffer.
-    ///
-    /// This will explicitly set the size of the buffer without actually
-    /// modifying the data, so it is up to the caller to ensure that the data
-    /// has been initialized.
     ///
     /// # Safety
     ///
@@ -611,109 +950,96 @@ impl IoBufMut {
     /// Panics if `len > capacity()`.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
-        unsafe {
-            assert!(
-                len <= self.capacity(),
-                "set_len({len}) exceeds capacity({})",
-                self.capacity()
-            );
-            match &mut self.inner {
-                IoBufMutInner::Bytes(b) => b.set_len(len),
-                IoBufMutInner::Aligned(b) => b.set_len(len),
-                IoBufMutInner::Pooled(b) => b.set_len(len),
-            }
-        }
+        assert!(
+            len <= self.capacity(),
+            "set_len({len}) exceeds capacity({})",
+            self.capacity()
+        );
+        self.len = len;
     }
 
-    /// Number of bytes remaining in the buffer.
+    /// Number of readable bytes remaining in the buffer.
     #[inline]
-    pub fn len(&self) -> usize {
-        self.remaining()
+    pub const fn len(&self) -> usize {
+        self.len
     }
 
-    /// Whether the buffer is empty.
+    /// Whether the buffer has no readable bytes.
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        match &self.inner {
-            IoBufMutInner::Bytes(b) => b.is_empty(),
-            IoBufMutInner::Aligned(b) => b.is_empty(),
-            IoBufMutInner::Pooled(b) => b.is_empty(),
-        }
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Freeze into immutable [`IoBuf`].
+    ///
+    /// Free: the owner word moves to the immutable handle without a refcount
+    /// operation (a reserved front heap header is initialized, including its
+    /// refcount sentinel, before the owner is shared). Freezing an empty
+    /// buffer releases the allocation immediately so empty immutable views
+    /// never pin pool memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
-        match self.inner {
-            IoBufMutInner::Bytes(b) => b.freeze().into(),
-            IoBufMutInner::Aligned(b) => b.freeze(),
-            IoBufMutInner::Pooled(b) => b.freeze(),
+        let mut me = ManuallyDrop::new(self);
+        if me.len == 0 {
+            // SAFETY: mutable buffers uniquely own their allocation. Empty
+            // freeze releases it so empty immutable views do not pin pool memory.
+            unsafe { me.owner.release_unique_mut_at(me.ptr, me.cap) };
+            return IoBuf::default();
+        }
+        let ptr = me.ptr;
+        let cap = me.cap;
+        // SAFETY: mutable buffers uniquely own their allocation. A reserved
+        // front heap header must be initialized before the owner is shared by
+        // the immutable handle.
+        unsafe { me.owner.ensure_heap_header_for_mut(ptr, cap) };
+        IoBuf {
+            ptr: me.ptr,
+            len: me.len,
+            owner: me.owner,
         }
     }
 
     /// Returns the number of bytes the buffer can hold without reallocating.
     #[inline]
-    pub fn capacity(&self) -> usize {
-        match &self.inner {
-            IoBufMutInner::Bytes(b) => b.capacity(),
-            IoBufMutInner::Aligned(b) => b.capacity(),
-            IoBufMutInner::Pooled(b) => b.capacity(),
-        }
+    pub const fn capacity(&self) -> usize {
+        self.cap
     }
 
-    /// Returns an unsafe mutable pointer to the buffer's data.
+    /// Returns an unsafe mutable pointer to the first readable byte.
     #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.as_mut_ptr(),
-            IoBufMutInner::Aligned(b) => b.as_mut_ptr(),
-            IoBufMutInner::Pooled(b) => b.as_mut_ptr(),
-        }
+    pub const fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr.as_ptr()
     }
 
     /// Truncates the buffer to `len` readable bytes.
     ///
-    /// If `len` is greater than the current length, this has no effect.
+    /// Has no effect when `len` is greater than the current length.
     #[inline]
     pub fn truncate(&mut self, len: usize) {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.truncate(len),
-            IoBufMutInner::Aligned(b) => b.truncate(len),
-            IoBufMutInner::Pooled(b) => b.truncate(len),
-        }
+        self.len = self.len.min(len);
     }
 
-    /// Clears the buffer, removing all data. Existing capacity is preserved.
+    /// Clears the buffer, removing all readable data. Existing view capacity is preserved.
     #[inline]
-    pub fn clear(&mut self) {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.clear(),
-            IoBufMutInner::Aligned(b) => b.clear(),
-            IoBufMutInner::Pooled(b) => b.clear(),
-        }
+    pub const fn clear(&mut self) {
+        self.len = 0;
     }
 }
 
 impl AsRef<[u8]> for IoBufMut {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        match &self.inner {
-            IoBufMutInner::Bytes(b) => b.as_ref(),
-            IoBufMutInner::Aligned(b) => b.as_ref(),
-            IoBufMutInner::Pooled(b) => b.as_ref(),
-        }
+        // SAFETY: bytes in `0..len` from `ptr` are initialized.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 
 impl AsMut<[u8]> for IoBufMut {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.as_mut(),
-            IoBufMutInner::Aligned(b) => b.as_mut(),
-            IoBufMutInner::Pooled(b) => b.as_mut(),
-        }
+        // SAFETY: bytes in `0..len` from `ptr` are initialized and `&mut self`
+        // proves unique access.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
 
@@ -746,143 +1072,272 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
 }
 
 impl Buf for IoBufMut {
-    #[inline]
+    #[inline(always)]
     fn remaining(&self) -> usize {
-        match &self.inner {
-            IoBufMutInner::Bytes(b) => b.remaining(),
-            IoBufMutInner::Aligned(b) => b.remaining(),
-            IoBufMutInner::Pooled(b) => b.remaining(),
-        }
+        self.len
     }
 
-    #[inline]
+    #[inline(always)]
     fn chunk(&self) -> &[u8] {
-        match &self.inner {
-            IoBufMutInner::Bytes(b) => b.chunk(),
-            IoBufMutInner::Aligned(b) => b.chunk(),
-            IoBufMutInner::Pooled(b) => b.chunk(),
+        self.as_ref()
+    }
+
+    #[inline(always)]
+    fn advance(&mut self, cnt: usize) {
+        if cnt > self.len {
+            panic_advance(cnt, self.len);
+        }
+        // SAFETY: `cnt <= len <= cap`, so the pointer stays within the view
+        // (zero-length pointer adds are always valid, so `cnt == 0` needs no
+        // special case).
+        unsafe {
+            self.ptr = self.ptr.add(cnt);
+        }
+        self.len -= cnt;
+        self.cap -= cnt;
+    }
+
+    #[inline]
+    fn copy_to_slice(&mut self, dst: &mut [u8]) {
+        if let Err(error) = self.try_copy_to_slice(dst) {
+            panic_try_get(error);
         }
     }
 
     #[inline]
-    fn advance(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.advance(cnt),
-            IoBufMutInner::Aligned(b) => b.advance(cnt),
-            IoBufMutInner::Pooled(b) => b.advance(cnt),
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        if dst.len() > self.len {
+            return Err(TryGetError {
+                requested: dst.len(),
+                available: self.len,
+            });
         }
+        // SAFETY: source and destination are valid for `dst.len()` bytes and
+        // cannot overlap because `dst` is a unique mutable slice outside this
+        // buffer (zero-length copies with valid pointers need no special
+        // case).
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), dst.as_mut_ptr(), dst.len());
+            self.ptr = self.ptr.add(dst.len());
+        }
+        self.len -= dst.len();
+        self.cap -= dst.len();
+        Ok(())
     }
 
+    /// Drains `len` readable bytes into [`Bytes`].
+    ///
+    /// Draining the full readable length consumes the whole handle
+    /// (`mem::take` plus `freeze`) to avoid a copy: unlike `BytesMut`, the
+    /// caller's handle keeps no spare capacity afterwards. A partial drain
+    /// copies the prefix and preserves the handle's remaining capacity.
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.copy_to_bytes(len),
-            IoBufMutInner::Aligned(a) => a.copy_to_bytes(len),
-            IoBufMutInner::Pooled(p) => {
-                // Full non-empty drain: transfer ownership so the drained source no
-                // longer retains the pooled allocation. Keep len == 0 on the normal
-                // path to avoid creating an empty Bytes that still pins pool memory.
-                if len != 0 && len == p.remaining() {
-                    let inner =
-                        std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
-                    match inner {
-                        IoBufMutInner::Pooled(p) => p.into_bytes(),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    p.copy_to_bytes(len)
-                }
-            }
+        assert!(len <= self.len, "copy_to_bytes out of bounds");
+        if len == 0 {
+            return Bytes::new();
         }
+        if len == self.len {
+            let drained = std::mem::take(self);
+            return Bytes::from(drained.freeze());
+        }
+
+        let bytes = Bytes::copy_from_slice(&self.as_ref()[..len]);
+        self.advance(len);
+        bytes
     }
 }
 
-// SAFETY: Delegates to BytesMut or PooledBufMut which implement BufMut safely.
+// SAFETY: `IoBufMut` exposes only the uninitialized tail `[len..cap)` through
+// `chunk_mut`, and `advance_mut` is bounded by that tail.
 unsafe impl BufMut for IoBufMut {
-    #[inline]
+    #[inline(always)]
     fn remaining_mut(&self) -> usize {
-        match &self.inner {
-            IoBufMutInner::Bytes(b) => b.remaining_mut(),
-            IoBufMutInner::Aligned(b) => b.remaining_mut(),
-            IoBufMutInner::Pooled(b) => b.remaining_mut(),
-        }
+        self.cap - self.len
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
+        let writable = self.cap - self.len;
+        if cnt > writable {
+            panic_advance(cnt, writable);
+        }
+        self.len += cnt;
+    }
+
+    #[inline(always)]
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        // SAFETY: `ptr + len` begins the uninitialized writable tail and
+        // `cap - len` is in bounds.
         unsafe {
-            match &mut self.inner {
-                IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
-                IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
-                IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
-            }
+            let ptr = self.ptr.as_ptr().add(self.len);
+            bytes::buf::UninitSlice::from_raw_parts_mut(ptr, self.cap - self.len)
         }
     }
 
     #[inline]
-    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        match &mut self.inner {
-            IoBufMutInner::Bytes(b) => b.chunk_mut(),
-            IoBufMutInner::Aligned(b) => b.chunk_mut(),
-            IoBufMutInner::Pooled(b) => b.chunk_mut(),
+    fn put_slice(&mut self, src: &[u8]) {
+        let writable = self.cap - self.len;
+        if src.len() > writable {
+            panic_advance(src.len(), writable);
+        }
+        // SAFETY: the unique writable tail has at least `src.len()` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.as_ptr().add(self.len), src.len());
+        }
+        self.len += src.len();
+    }
+
+    #[inline]
+    fn put_bytes(&mut self, val: u8, cnt: usize) {
+        let writable = self.cap - self.len;
+        if cnt > writable {
+            panic_advance(cnt, writable);
+        }
+        // SAFETY: the unique writable tail has at least `cnt` bytes.
+        unsafe {
+            std::ptr::write_bytes(self.ptr.as_ptr().add(self.len), val, cnt);
+        }
+        self.len += cnt;
+    }
+
+    #[inline]
+    fn put<T: Buf>(&mut self, mut src: T)
+    where
+        Self: Sized,
+    {
+        // Early check for a clear panic message, not a safety boundary.
+        let remaining = src.remaining();
+        if remaining > self.cap - self.len {
+            panic_advance(remaining, self.cap - self.len);
+        }
+        while src.has_remaining() {
+            let chunk = src.chunk();
+            let cnt = chunk.len();
+            // Safety boundary: `Buf` is a safe trait, so `src` may report a
+            // `remaining()` smaller than the chunks it hands out. Bound every
+            // copy by this buffer's own capacity arithmetic, never by `src`.
+            let writable = self.cap - self.len;
+            if cnt > writable {
+                panic_advance(cnt, writable);
+            }
+            // SAFETY: `cnt` is bounded by the unique writable tail just above.
+            unsafe {
+                std::ptr::copy_nonoverlapping(chunk.as_ptr(), self.ptr.as_ptr().add(self.len), cnt);
+            }
+            self.len += cnt;
+            src.advance(cnt);
         }
     }
 }
 
-impl From<Vec<u8>> for IoBufMut {
-    fn from(vec: Vec<u8>) -> Self {
-        Self::from(Bytes::from(vec))
-    }
-}
-
+/// Create a mutable buffer by copying the slice.
 impl From<&[u8]> for IoBufMut {
     fn from(slice: &[u8]) -> Self {
-        Self {
-            inner: IoBufMutInner::Bytes(BytesMut::from(slice)),
-        }
+        let mut buf = Self::with_capacity(slice.len());
+        buf.put_slice(slice);
+        buf
     }
 }
 
+/// Create a mutable buffer by copying the array.
 impl<const N: usize> From<[u8; N]> for IoBufMut {
     fn from(array: [u8; N]) -> Self {
         Self::from(array.as_ref())
     }
 }
 
+/// Create a mutable buffer by copying the array.
 impl<const N: usize> From<&[u8; N]> for IoBufMut {
     fn from(array: &[u8; N]) -> Self {
         Self::from(array.as_ref())
     }
 }
 
+/// Create a mutable buffer by copying `vec`.
+///
+/// Zero-copy adoption is not used because it would reserve owner header space
+/// inside the vec's allocation, shrinking the writable capacity below
+/// `vec.capacity()`. Use `From<Vec<u8>> for IoBuf` for zero-copy immutable
+/// conversion (and [`IoBuf::try_into_mut`] to recover mutability).
+impl From<Vec<u8>> for IoBufMut {
+    fn from(vec: Vec<u8>) -> Self {
+        let mut buf = Self::with_capacity(vec.capacity());
+        buf.put_slice(&vec);
+        buf
+    }
+}
+
+/// Create a mutable buffer by copying `bytes`.
+///
+/// A mutable buffer requires runtime-owned storage for its owner header, which
+/// a `BytesMut` allocation cannot host, so this conversion copies. The
+/// caller's reserved capacity is preserved.
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
-        Self {
-            inner: IoBufMutInner::Bytes(bytes),
-        }
+        let mut out = Self::with_capacity(bytes.capacity());
+        out.put_slice(bytes.as_ref());
+        out
     }
 }
 
+/// Create a mutable buffer by copying `bytes`.
+///
+/// A mutable buffer requires unique ownership of its storage, which shared
+/// [`Bytes`] cannot provide, so this conversion copies.
 impl From<Bytes> for IoBufMut {
-    /// Zero-copy if `bytes` is unique for the entire original buffer (refcount is 1),
-    /// copies otherwise. Always copies if the [`Bytes`] was constructed via
-    /// [`Bytes::from_owner`] or [`Bytes::from_static`].
     fn from(bytes: Bytes) -> Self {
-        Self {
-            inner: IoBufMutInner::Bytes(BytesMut::from(bytes)),
-        }
+        Self::from(bytes.as_ref())
     }
 }
 
+/// Zero-copy when exclusive ownership can be recovered (see
+/// [`IoBuf::try_into_mut`]), copies otherwise.
 impl From<IoBuf> for IoBufMut {
-    /// Zero-copy when exclusive ownership can be recovered, copies otherwise.
     fn from(buf: IoBuf) -> Self {
         match buf.try_into_mut() {
             Ok(buf) => buf,
             Err(buf) => Self::from(buf.as_ref()),
         }
     }
+}
+
+/// Panics for cursor or write operations that run past the available region.
+///
+/// Outlined so the `Buf`/`BufMut` fast paths inline as a compare, a branch,
+/// and a memcpy, mirroring the panic helpers in `bytes`.
+#[cold]
+#[inline(never)]
+fn panic_advance(requested: usize, available: usize) -> ! {
+    panic!("cannot advance past end of buffer: requested {requested}, available {available}");
+}
+
+/// Panics for a failed `copy_to_slice`, preserving the [`TryGetError`]
+/// message.
+#[cold]
+#[inline(never)]
+fn panic_try_get(error: TryGetError) -> ! {
+    panic!("{error}");
+}
+
+/// Resolves `range` against a buffer of length `len` into `(start, end)`.
+///
+/// Panics if a bound overflows `usize`, the range is inverted, or the end
+/// exceeds `len`. Callers forward these as their documented slice panics.
+fn resolve_range(len: usize, range: impl RangeBounds<usize>) -> (usize, usize) {
+    let start = match range.start_bound() {
+        Bound::Included(&n) => n,
+        Bound::Excluded(&n) => n.checked_add(1).expect("range start overflow"),
+        Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&n) => n.checked_add(1).expect("range end overflow"),
+        Bound::Excluded(&n) => n,
+        Bound::Unbounded => len,
+    };
+    assert!(start <= end, "slice start must be <= end");
+    assert!(end <= len, "slice out of bounds");
+    (start, end)
 }
 
 /// Container for one or more immutable buffers.
@@ -1273,12 +1728,19 @@ impl IoBufs {
 
     /// Coalesce all remaining bytes into a single contiguous [`IoBuf`].
     ///
-    /// Zero-copy if only one buffer. Copies if multiple buffers.
+    /// Zero-copy if only one buffer. Copies into one native heap allocation
+    /// if multiple buffers, so the result supports zero-copy
+    /// [`IoBuf::try_into_mut`].
     #[inline]
-    pub fn coalesce(mut self) -> IoBuf {
+    pub fn coalesce(self) -> IoBuf {
         match self.inner {
             IoBufsInner::Single(buf) => buf,
-            _ => self.copy_to_bytes(self.remaining()).into(),
+            inner => {
+                let bufs = Self { inner };
+                let mut out = IoBufMut::with_capacity(bufs.remaining());
+                bufs.for_each_chunk(|chunk| out.put_slice(chunk));
+                out.freeze()
+            }
         }
     }
 
@@ -1323,6 +1785,7 @@ impl IoBufs {
 }
 
 impl Buf for IoBufs {
+    #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufsInner::Single(buf) => buf.remaining(),
@@ -1338,6 +1801,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufsInner::Single(buf) => buf.chunk(),
@@ -1372,6 +1836,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         if dst.is_empty() {
             return 0;
@@ -1396,6 +1861,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         let should_canonicalize = match &mut self.inner {
             IoBufsInner::Single(buf) => {
@@ -1415,6 +1881,7 @@ impl Buf for IoBufs {
         }
     }
 
+    #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         let (result, needs_canonicalize) = match &mut self.inner {
             IoBufsInner::Single(buf) => return buf.copy_to_bytes(len),
@@ -1437,6 +1904,7 @@ impl Buf for IoBufs {
     }
 }
 
+/// Zero-copy: wraps the buffer as the single chunk.
 impl From<IoBuf> for IoBufs {
     fn from(buf: IoBuf) -> Self {
         Self {
@@ -1445,6 +1913,7 @@ impl From<IoBuf> for IoBufs {
     }
 }
 
+/// Zero-copy: freezes the buffer and wraps it as the single chunk.
 impl From<IoBufMut> for IoBufs {
     fn from(buf: IoBufMut) -> Self {
         Self {
@@ -1453,36 +1922,42 @@ impl From<IoBufMut> for IoBufs {
     }
 }
 
+/// Zero-copy via `From<Bytes> for IoBuf`.
 impl From<Bytes> for IoBufs {
     fn from(bytes: Bytes) -> Self {
         Self::from(IoBuf::from(bytes))
     }
 }
 
+/// Zero-copy via `From<BytesMut> for IoBuf`.
 impl From<BytesMut> for IoBufs {
     fn from(bytes: BytesMut) -> Self {
-        Self::from(IoBuf::from(bytes.freeze()))
+        Self::from(IoBuf::from(bytes))
     }
 }
 
+/// Zero-copy via `From<Vec<u8>> for IoBuf`.
 impl From<Vec<u8>> for IoBufs {
     fn from(vec: Vec<u8>) -> Self {
         Self::from(IoBuf::from(vec))
     }
 }
 
+/// Zero-copy: collects the chunks, dropping empty ones.
 impl From<Vec<IoBuf>> for IoBufs {
     fn from(bufs: Vec<IoBuf>) -> Self {
         Self::from_chunks_iter(bufs)
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBufs {
     fn from(array: &'static [u8; N]) -> Self {
         Self::from(IoBuf::from(array))
     }
 }
 
+/// Zero-copy: creates a static view with no owner.
 impl From<&'static [u8]> for IoBufs {
     fn from(slice: &'static [u8]) -> Self {
         Self::from(IoBuf::from(slice))
@@ -1490,6 +1965,29 @@ impl From<&'static [u8]> for IoBufs {
 }
 
 /// Container for one or more mutable buffers.
+///
+/// # Capacity retention
+///
+/// The intended usage is fill-then-read: write into the container (through
+/// [`BufMut`], [`Self::copy_from_slice`], or
+/// [`Blob::read_at_buf`](crate::Blob::read_at_buf)), then consume it through
+/// [`Buf`]. Caller-reserved write capacity generally survives read
+/// operations, with three exceptions:
+/// - The deque-backed read paths (four or more chunks) skip past a chunk
+///   with no readable bytes by popping it, so a never-filled chunk ordered
+///   before readable data loses its capacity when a read crosses it.
+/// - The same paths pop any chunk whose readable bytes a read fully
+///   consumes, releasing its writable tail. The two and three-chunk shapes
+///   advance in place and retain such tails, so `remaining_mut()` after an
+///   identical read can differ by shape.
+/// - A `copy_to_bytes` that exactly drains the front chunk's readable bytes
+///   consumes that chunk's whole handle on every shape (see [`IoBufMut`]'s
+///   `copy_to_bytes` doc), so spare capacity behind an exactly-drained chunk
+///   is released rather than retained.
+///
+/// Interleaving writes after reads is outside this contract: a read can
+/// leave a drained chunk's surviving tail ordered before later readable
+/// bytes, and a subsequent [`BufMut`] write fills that tail first.
 #[derive(Debug)]
 pub struct IoBufsMut {
     inner: IoBufsMutInner,
@@ -1497,10 +1995,12 @@ pub struct IoBufsMut {
 
 /// Internal mutable representation.
 ///
-/// - Construction from caller-provided writable chunks keeps chunks with
-///   non-zero capacity, even when `remaining() == 0`.
-/// - Read-canonicalization paths remove drained chunks (`remaining() == 0`)
-///   and collapse shape as readable chunk count shrinks.
+/// Construction and canonicalization keep every chunk that still owns
+/// storage (`capacity() > 0`), readable or not, so caller-reserved write
+/// capacity generally survives read operations. The reader-facing rules and
+/// the accepted exceptions are documented on [`IoBufsMut`] under "Capacity
+/// retention". Only fully-drained chunks (capacity consumed by `advance`)
+/// and empty defaults are removed as the shape collapses.
 #[derive(Debug)]
 enum IoBufsMutInner {
     /// Single buffer (common case, no allocation).
@@ -1524,10 +2024,8 @@ impl Default for IoBufsMut {
 impl IoBufsMut {
     /// Build mutable chunk storage from already-filtered chunks.
     ///
-    /// This helper intentionally does not filter.
-    /// Callers choose filter policy first:
-    /// - [`Self::from_writable_chunks_iter`] for construction from writable chunks (`capacity() > 0`)
-    /// - [`Self::from_readable_chunks_iter`] for read-canonicalization (`remaining() > 0`)
+    /// This helper intentionally does not filter. Callers route through
+    /// [`Self::from_writable_chunks_iter`] so storage-owning chunks are kept.
     fn from_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
         let mut iter = chunks.into_iter();
         let first = match iter.next() {
@@ -1572,27 +2070,27 @@ impl IoBufsMut {
 
     /// Build canonical mutable chunk storage from writable chunks.
     ///
-    /// Chunks with zero capacity are removed.
+    /// Keeps chunks that still own storage, readable or not (`capacity()`
+    /// covers both readable bytes and the writable tail), so a never-filled
+    /// chunk's reserved capacity is not discarded. Fully-drained chunks
+    /// (capacity consumed by `advance`) and empty defaults are removed.
     fn from_writable_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
-        // Keep chunks that can hold data (including len == 0 writable buffers).
         Self::from_chunks_iter(chunks.into_iter().filter(|buf| buf.capacity() > 0))
     }
 
-    /// Build canonical mutable chunk storage from readable chunks.
-    ///
-    /// Chunks with no remaining readable bytes are removed.
-    fn from_readable_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
-        Self::from_chunks_iter(chunks.into_iter().filter(|buf| buf.remaining() > 0))
-    }
-
     /// Re-establish canonical mutable representation invariants.
+    ///
+    /// Uses the same storage-keeping filter as construction: read operations
+    /// should not change `remaining_mut()` (see the [`IoBufsMutInner`] doc
+    /// for the accepted exceptions), so chunks that were drained of readable
+    /// bytes but still own writable capacity survive.
     fn canonicalize(&mut self) {
         let inner = std::mem::replace(&mut self.inner, IoBufsMutInner::Single(IoBufMut::default()));
         self.inner = match inner {
             IoBufsMutInner::Single(buf) => IoBufsMutInner::Single(buf),
-            IoBufsMutInner::Pair([a, b]) => Self::from_readable_chunks_iter([a, b]).inner,
-            IoBufsMutInner::Triple([a, b, c]) => Self::from_readable_chunks_iter([a, b, c]).inner,
-            IoBufsMutInner::Chunked(bufs) => Self::from_readable_chunks_iter(bufs).inner,
+            IoBufsMutInner::Pair([a, b]) => Self::from_writable_chunks_iter([a, b]).inner,
+            IoBufsMutInner::Triple([a, b, c]) => Self::from_writable_chunks_iter([a, b, c]).inner,
+            IoBufsMutInner::Chunked(bufs) => Self::from_writable_chunks_iter(bufs).inner,
         };
     }
 
@@ -1799,24 +2297,25 @@ impl IoBufsMut {
     ///
     /// Panics if `len` exceeds total capacity.
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: The caller guarantees that all bytes in `0..len` are initialized.
-        unsafe {
-            let capacity = self.capacity();
-            assert!(
-                len <= capacity,
-                "set_len({len}) exceeds capacity({capacity})"
-            );
-            let mut remaining = len;
-            self.for_each_chunk_mut(|buf| {
-                let cap = buf.capacity();
-                let to_set = remaining.min(cap);
-                buf.set_len(to_set);
-                remaining -= to_set;
-            });
-        }
+        let capacity = self.capacity();
+        assert!(
+            len <= capacity,
+            "set_len({len}) exceeds capacity({capacity})"
+        );
+        let mut remaining = len;
+        self.for_each_chunk_mut(|buf| {
+            let cap = buf.capacity();
+            let to_set = remaining.min(cap);
+            // SAFETY: forwarded from this method's contract. The caller
+            // initializes all `len` bytes before any read.
+            unsafe { buf.set_len(to_set) };
+            remaining -= to_set;
+        });
     }
 
     /// Copy data from a slice into the buffers.
+    ///
+    /// # Panics
     ///
     /// Panics if the slice length doesn't match the total buffer length.
     pub fn copy_from_slice(&mut self, src: &[u8]) {
@@ -1835,6 +2334,7 @@ impl IoBufsMut {
 }
 
 impl Buf for IoBufsMut {
+    #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufsMutInner::Single(buf) => buf.remaining(),
@@ -1850,6 +2350,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufsMutInner::Single(buf) => buf.chunk(),
@@ -1884,6 +2385,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         if dst.is_empty() {
             return 0;
@@ -1908,6 +2410,7 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         let should_canonicalize = match &mut self.inner {
             IoBufsMutInner::Single(buf) => {
@@ -1927,7 +2430,14 @@ impl Buf for IoBufsMut {
         }
     }
 
+    #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        // Zero-length drains must not disturb chunk state: the deque-backed
+        // path skips readable-empty chunks by popping them, which would
+        // discard a never-filled chunk's reserved capacity.
+        if len == 0 {
+            return Bytes::new();
+        }
         let (result, needs_canonicalize) = match &mut self.inner {
             IoBufsMutInner::Single(buf) => return buf.copy_to_bytes(len),
             IoBufsMutInner::Pair(pair) => {
@@ -1969,34 +2479,28 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunks.
+        // SAFETY: The caller guarantees `cnt <= self.remaining_mut()`, so each
+        // delegated advance remains within the writable chunks.
         unsafe {
-            match &mut self.inner {
-                IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
-                IoBufsMutInner::Pair(pair) => {
-                    let mut remaining = cnt;
-                    if advance_mut_in_chunks(pair, &mut remaining) {
-                        return;
-                    }
-                    panic!("cannot advance past end of buffer");
+            // On failure, every writable byte was consumed before the chunks ran
+            // out, so the advanced amount (`cnt - remaining`) is exactly what was
+            // available.
+            let mut remaining = cnt;
+            let advanced = match &mut self.inner {
+                IoBufsMutInner::Single(buf) => {
+                    buf.advance_mut(cnt);
+                    return;
                 }
-                IoBufsMutInner::Triple(triple) => {
-                    let mut remaining = cnt;
-                    if advance_mut_in_chunks(triple, &mut remaining) {
-                        return;
-                    }
-                    panic!("cannot advance past end of buffer");
-                }
+                IoBufsMutInner::Pair(pair) => advance_mut_in_chunks(pair, &mut remaining),
+                IoBufsMutInner::Triple(triple) => advance_mut_in_chunks(triple, &mut remaining),
                 IoBufsMutInner::Chunked(bufs) => {
-                    let mut remaining = cnt;
                     let (first, second) = bufs.as_mut_slices();
-                    if advance_mut_in_chunks(first, &mut remaining)
+                    advance_mut_in_chunks(first, &mut remaining)
                         || advance_mut_in_chunks(second, &mut remaining)
-                    {
-                        return;
-                    }
-                    panic!("cannot advance past end of buffer");
                 }
+            };
+            if !advanced {
+                panic_advance(cnt, cnt - remaining);
             }
         }
     }
@@ -2037,6 +2541,7 @@ unsafe impl BufMut for IoBufsMut {
     }
 }
 
+/// Zero-copy: wraps the buffer as the single chunk.
 impl From<IoBufMut> for IoBufsMut {
     fn from(buf: IoBufMut) -> Self {
         Self {
@@ -2045,6 +2550,10 @@ impl From<IoBufMut> for IoBufsMut {
     }
 }
 
+/// Convert a [`Vec<u8>`] into a single-buffer [`IoBufsMut`].
+///
+/// Copies via `From<Vec<u8>> for IoBufMut`, preserving the vec's capacity
+/// (see that impl for the copy-vs-adoption rationale).
 impl From<Vec<u8>> for IoBufsMut {
     fn from(vec: Vec<u8>) -> Self {
         Self {
@@ -2053,6 +2562,8 @@ impl From<Vec<u8>> for IoBufsMut {
     }
 }
 
+/// Copies via `From<BytesMut> for IoBufMut`, preserving the caller's
+/// capacity.
 impl From<BytesMut> for IoBufsMut {
     fn from(bytes: BytesMut) -> Self {
         Self {
@@ -2061,12 +2572,14 @@ impl From<BytesMut> for IoBufsMut {
     }
 }
 
+/// Zero-copy: collects the chunks, dropping zero-capacity ones.
 impl From<Vec<IoBufMut>> for IoBufsMut {
     fn from(bufs: Vec<IoBufMut>) -> Self {
         Self::from_writable_chunks_iter(bufs)
     }
 }
 
+/// Copies via `From<[u8; N]> for IoBufMut`.
 impl<const N: usize> From<[u8; N]> for IoBufsMut {
     fn from(array: [u8; N]) -> Self {
         Self {
@@ -2126,7 +2639,9 @@ fn copy_to_bytes_chunked<B: Buf>(
 
     if bufs.front().is_none() {
         assert_eq!(len, 0, "{not_enough_data_msg}");
-        return (Bytes::new(), false);
+        // The deque is empty now, so the container must collapse back to the
+        // canonical Single representation.
+        return (Bytes::new(), true);
     }
 
     if bufs.front().is_some_and(|front| front.remaining() >= len) {
@@ -2301,8 +2816,12 @@ impl Builder {
     /// Creates a new builder with a fixed-capacity inline buffer.
     ///
     /// `capacity` is the minimum number of inline bytes the buffer can hold.
-    /// The pool may round up to a larger size class. Writing more inline
-    /// bytes than the allocated capacity will panic.
+    /// The pool may round up to a larger size class.
+    ///
+    /// # Panics
+    ///
+    /// Panics are deferred to the write site: writing more inline bytes than
+    /// the allocated capacity panics there.
     pub fn new(pool: &BufferPool, capacity: NonZeroUsize) -> Self {
         Self {
             buf: pool.alloc(capacity.get()),
@@ -2325,6 +2844,8 @@ impl Builder {
             if offset > pos {
                 result.append(frozen.slice(pos..offset));
             }
+            // Zero-copy: pushed Bytes (for example a 1 MB shard payload held
+            // by Arc clone) become external-backed chunks, never a memcpy.
             result.append(IoBuf::from(pushed));
             pos = offset;
         }
@@ -2339,8 +2860,9 @@ impl Builder {
 
 // SAFETY: All methods delegate directly to `self.buf`, a pool-backed
 // `IoBufMut` with a sound `BufMut` implementation. The inline buffer has
-// fixed capacity; writes that exceed it will panic via the underlying
-// `IoBufMut` implementation.
+// fixed capacity. Writes that exceed it panic in bytes' `BufMut` trait
+// defaults (which check `remaining_mut`) or, for a direct `advance_mut`,
+// in `IoBufMut::advance_mut`.
 unsafe impl BufMut for Builder {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -2349,7 +2871,7 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        // SAFETY: `BufMut::advance_mut` requires the caller to stay within the writable chunk.
+        // SAFETY: The caller guarantees that `cnt` is within the writable chunk.
         unsafe {
             self.buf.advance_mut(cnt);
         }
@@ -2399,9 +2921,11 @@ pub trait EncodeExt: EncodeSize + Write {
     ///
     /// # Panics
     ///
-    /// Panics if [`EncodeSize::encode_inline_size`] underreports the number
-    /// of inline bytes written by [`Write::write_bufs`], or if
-    /// [`EncodeSize::encode_size`] does not match the total bytes written.
+    /// Panics if [`Write::write_bufs`] writes more inline bytes than the
+    /// builder's allocated capacity (at least
+    /// [`EncodeSize::encode_inline_size`], possibly rounded up to a size
+    /// class), or if [`EncodeSize::encode_size`] does not match the total
+    /// bytes written.
     fn encode_with_pool(&self, pool: &BufferPool) -> IoBufs {
         let len = self.encode_size();
         let capacity = NonZeroUsize::new(self.encode_inline_size()).unwrap_or(NonZeroUsize::MIN);
@@ -2419,13 +2943,17 @@ pub trait EncodeExt: EncodeSize + Write {
 
 impl<T: EncodeSize + Write> EncodeExt for T {}
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
-    use std::collections::{BTreeMap, HashMap};
+    use core::ops::Bound;
+    use std::{
+        collections::{BTreeMap, HashMap},
+        mem::size_of,
+    };
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -2502,6 +3030,43 @@ mod tests {
     }
 
     #[test]
+    fn test_iobuf_from_conversions_are_zero_copy() {
+        // The module doc guarantees every From conversion into IoBuf is
+        // zero-copy. Pin payload pointer identity for each route.
+
+        // A vec with header room adopts its own allocation.
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(b"adopt");
+        let ptr = vec.as_ptr();
+        let buf = IoBuf::from(vec);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // An exactly-sized vec moves into Bytes without copying.
+        let vec = b"exact".to_vec();
+        let ptr = vec.as_ptr();
+        let buf = IoBuf::from(vec);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // Bytes moves behind the external owner.
+        let bytes = Bytes::from(b"bytes".to_vec());
+        let ptr = bytes.as_ptr();
+        let buf = IoBuf::from(bytes);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // BytesMut freezes in place.
+        let mut bytes = BytesMut::with_capacity(16);
+        bytes.put_slice(b"frozen");
+        let ptr = bytes.as_ref().as_ptr();
+        let buf = IoBuf::from(bytes);
+        assert_eq!(buf.as_ref().as_ptr(), ptr);
+
+        // Static views point at the static data itself.
+        static DATA: [u8; 4] = *b"data";
+        let buf = IoBuf::from(&DATA[..]);
+        assert_eq!(buf.as_ref().as_ptr(), DATA.as_ptr());
+    }
+
+    #[test]
     fn test_iobuf_codec_roundtrip() {
         let cfg: RangeCfg<usize> = (0..=1024).into();
 
@@ -2541,6 +3106,112 @@ mod tests {
     fn test_iobuf_advance_past_end() {
         let mut buf = IoBuf::from(b"hello");
         buf.advance(10);
+    }
+
+    #[test]
+    fn test_iobuf_copy_to_slice_paths() {
+        let mut buf = IoBuf::from(b"hello world");
+        let mut dst = [0u8; 5];
+        buf.copy_to_slice(&mut dst);
+        assert_eq!(&dst, b"hello");
+        assert_eq!(buf.as_ref(), b" world");
+
+        let mut dst = [0u8; 3];
+        buf.try_copy_to_slice(&mut dst).unwrap();
+        assert_eq!(&dst, b" wo");
+
+        // Requesting more than remaining fails without consuming anything.
+        let mut dst = [0u8; 4];
+        let err = buf.try_copy_to_slice(&mut dst).unwrap_err();
+        assert_eq!(err.requested, 4);
+        assert_eq!(err.available, 3);
+        assert_eq!(buf.as_ref(), b"rld");
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough bytes remaining in buffer")]
+    fn test_iobuf_copy_to_slice_past_end() {
+        let mut buf = IoBuf::from(b"ab");
+        let mut dst = [0u8; 3];
+        buf.copy_to_slice(&mut dst);
+    }
+
+    #[test]
+    #[should_panic(expected = "copy_to_bytes out of bounds")]
+    fn test_iobuf_copy_to_bytes_past_end() {
+        let mut buf = IoBuf::from(b"ab");
+        let _ = buf.copy_to_bytes(3);
+    }
+
+    #[test]
+    fn test_iobuf_slice_excluded_start_bound() {
+        // Excluded start bounds resolve to start + 1.
+        let buf = IoBuf::from(b"hello");
+        let sliced = buf.slice((Bound::Excluded(0), Bound::Unbounded));
+        assert_eq!(sliced, b"ello");
+    }
+
+    #[test]
+    #[should_panic(expected = "slice out of bounds")]
+    fn test_iobuf_slice_out_of_bounds() {
+        let buf = IoBuf::from(b"hello");
+        let _ = buf.slice(..6);
+    }
+
+    #[test]
+    #[should_panic(expected = "slice start must be <= end")]
+    fn test_iobuf_slice_inverted_range() {
+        let buf = IoBuf::from(b"hello");
+        #[allow(clippy::reversed_empty_ranges)]
+        let _ = buf.slice(3..1);
+    }
+
+    #[test]
+    #[should_panic(expected = "range end overflow")]
+    fn test_iobuf_slice_inclusive_end_overflow() {
+        let buf = IoBuf::from(b"hello");
+        let _ = buf.slice(0..=usize::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "range start overflow")]
+    fn test_iobuf_slice_excluded_start_overflow() {
+        let buf = IoBuf::from(b"hello");
+        let _ = buf.slice((Bound::Excluded(usize::MAX), Bound::Unbounded));
+    }
+
+    #[test]
+    fn test_iobuf_try_into_mut_empty_and_static() {
+        // Empty views convert trivially.
+        let buf = IoBuf::default().try_into_mut().expect("empty converts");
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
+
+        // Non-empty static views decline: there is no allocation to recover.
+        let err = IoBuf::from(b"static").try_into_mut().unwrap_err();
+        assert_eq!(err, b"static");
+
+        // Empty buffers convert to empty Bytes without touching an owner.
+        let empty = Bytes::from(IoBuf::default());
+        assert!(empty.is_empty());
+
+        // Empty static slices detach to the default representation.
+        let empty = IoBuf::from(&b""[..]);
+        assert!(empty.is_empty());
+        assert!(empty.try_into_mut().is_ok());
+    }
+
+    #[test]
+    fn test_iobufs_for_each_chunk_single_and_empty() {
+        // The Single arm is bypassed by coalesce (which returns the buffer
+        // directly), so exercise the public method on both Single shapes.
+        let mut seen = Vec::new();
+        IoBufs::from(b"hello").for_each_chunk(|chunk| seen.push(chunk.to_vec()));
+        assert_eq!(seen, vec![b"hello".to_vec()]);
+
+        let mut count = 0;
+        IoBufs::default().for_each_chunk(|_| count += 1);
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -2595,7 +3266,7 @@ mod tests {
         assert_eq!(buf, &b"hello world"[..]);
         assert_eq!(buf.freeze(), b"hello world");
 
-        // `zeroed` creates readable initialized bytes; `set_len` can shrink safely.
+        // `zeroed` creates readable initialized bytes, so `set_len` can shrink safely.
         let mut zeroed = IoBufMut::zeroed(10);
         assert_eq!(zeroed, &[0u8; 10]);
         // SAFETY: shrinking readable length to initialized region.
@@ -2613,6 +3284,25 @@ mod tests {
         assert!(pooled.is_empty());
         pooled.put_slice(b"x");
         assert!(!pooled.is_empty());
+    }
+
+    #[test]
+    fn test_iobufmut_low_alignment_freeze_after_advance_recovers_capacity() {
+        let mut buf = IoBufMut::with_capacity(16);
+        assert_eq!(buf.capacity(), 16);
+        buf.put_slice(b"abcdefghijklmnop");
+        buf.advance(3);
+        assert_eq!(buf.as_ref(), b"defghijklmnop");
+        assert_eq!(buf.capacity(), 13);
+
+        let frozen = buf.freeze();
+        assert_eq!(frozen.as_ref(), b"defghijklmnop");
+
+        let recovered = frozen
+            .try_into_mut()
+            .expect("unique low-alignment buffer should recover mutability");
+        assert_eq!(recovered.as_ref(), b"defghijklmnop");
+        assert_eq!(recovered.capacity(), 13);
     }
 
     #[test]
@@ -3007,10 +3697,19 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_edge_cases() {
-        // Leading empty chunk should not affect copied payload.
-        let mut iobufs = IoBufs::from(IoBuf::from(b""));
-        iobufs.append(IoBuf::from(b"hello"));
+        // A non-canonical leading empty chunk in the deque path is popped
+        // without affecting the copied payload. Canonical construction never
+        // stores empties, so the state is built directly.
+        let mut iobufs = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([
+                IoBuf::default(),
+                IoBuf::from(b"hel"),
+                IoBuf::from(b"lo"),
+                IoBuf::from(b" world"),
+            ])),
+        };
         assert_eq!(iobufs.copy_to_bytes(5).as_ref(), b"hello");
+        assert_eq!(iobufs.remaining(), 6);
 
         // Boundary-aligned reads should return exact chunk payloads in-order.
         let mut boundary = IoBufs::from(IoBuf::from(b"hello"));
@@ -3202,15 +3901,6 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufsmut_coalesce() {
-        let buf1 = IoBufMut::from(b"hello");
-        let buf2 = IoBufMut::from(b" world");
-        let bufs = IoBufsMut::from(vec![buf1, buf2]);
-        let coalesced = bufs.coalesce();
-        assert_eq!(coalesced, b"hello world");
-    }
-
-    #[test]
     fn test_iobufsmut_from_vec() {
         // Empty Vec becomes Single with empty buffer
         let bufs = IoBufsMut::from(Vec::<IoBufMut>::new());
@@ -3228,22 +3918,6 @@ mod tests {
         let buf2 = IoBufMut::from(b" world");
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!bufs.is_single());
-    }
-
-    #[test]
-    fn test_iobufsmut_from_vec_filters_empty_chunks() {
-        let mut bufs = IoBufsMut::from(vec![
-            IoBufMut::default(),
-            IoBufMut::from(b"hello"),
-            IoBufMut::default(),
-            IoBufMut::from(b" world"),
-            IoBufMut::default(),
-        ]);
-        assert_eq!(bufs.chunk(), b"hello");
-        bufs.advance(5);
-        assert_eq!(bufs.chunk(), b" world");
-        bufs.advance(6);
-        assert_eq!(bufs.remaining(), 0);
     }
 
     #[test]
@@ -3309,6 +3983,134 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufmut_copy_to_slice_tracks_len_and_cap() {
+        // copy_to_slice must shrink len and cap in lockstep with the pointer
+        // advance: the front-heap release path derives the allocation size
+        // from ptr + cap, so a cap mismatch would corrupt the dealloc layout.
+        let mut buf = IoBufMut::with_capacity(16);
+        buf.put_slice(b"abcdefgh");
+
+        let mut dst = [0u8; 3];
+        buf.copy_to_slice(&mut dst);
+        assert_eq!(&dst, b"abc");
+        assert_eq!(buf.as_ref(), b"defgh");
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.capacity(), 13);
+
+        // try_copy_to_slice success mirrors copy_to_slice.
+        let mut dst = [0u8; 2];
+        buf.try_copy_to_slice(&mut dst).unwrap();
+        assert_eq!(&dst, b"de");
+        assert_eq!(buf.capacity(), 11);
+
+        // Requesting more than remaining fails without consuming anything.
+        let mut dst = [0u8; 4];
+        let err = buf.try_copy_to_slice(&mut dst).unwrap_err();
+        assert_eq!(err.requested, 4);
+        assert_eq!(err.available, 3);
+        assert_eq!(buf.as_ref(), b"fgh");
+        assert_eq!(buf.capacity(), 11);
+
+        // Freeze and recover: the owner must observe a consistent allocation
+        // for the advanced handle (view offset 5 leaves 16 - 5 = 11 bytes of
+        // capacity), and the final drop (checked under miri) must deallocate
+        // with the original layout.
+        let frozen = buf.freeze();
+        assert_eq!(frozen.as_ref(), b"fgh");
+        let recovered = frozen.try_into_mut().expect("unique buffer recovers");
+        assert_eq!(recovered.as_ref(), b"fgh");
+        assert_eq!(recovered.capacity(), 11);
+    }
+
+    #[test]
+    fn test_iobufmut_write_after_partial_advance_appends_at_tail() {
+        // A partial advance moves the view start while retaining readable
+        // bytes. A subsequent write must land at the initialized tail so old
+        // and new data stay adjacent, with len and cap tracked in lockstep.
+        let mut buf = IoBufMut::with_capacity(16);
+        buf.put_slice(b"hello");
+        buf.advance(2);
+        buf.put_slice(b"world");
+        assert_eq!(buf.as_ref(), b"lloworld");
+        assert_eq!(buf.len(), 8);
+        assert_eq!(buf.capacity(), 14);
+
+        // The same holds for pooled buffers, whose cursor bookkeeping feeds
+        // the thread-cache return path instead of a dealloc layout.
+        let pool = test_pool();
+        let mut buf = pool.alloc(16);
+        let capacity = buf.capacity();
+        buf.put_slice(b"hello");
+        buf.advance(2);
+        buf.put_slice(b"world");
+        assert_eq!(buf.as_ref(), b"lloworld");
+        assert_eq!(buf.len(), 8);
+        assert_eq!(buf.capacity(), capacity - 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough bytes remaining in buffer")]
+    fn test_iobufmut_copy_to_slice_past_end() {
+        let mut buf = IoBufMut::from(b"ab");
+        let mut dst = [0u8; 3];
+        buf.copy_to_slice(&mut dst);
+    }
+
+    #[test]
+    #[should_panic(expected = "copy_to_bytes out of bounds")]
+    fn test_iobufmut_copy_to_bytes_past_end() {
+        let mut buf = IoBufMut::from(b"ab");
+        let _ = buf.copy_to_bytes(3);
+    }
+
+    #[test]
+    fn test_iobufmut_put_bytes_success() {
+        let mut buf = IoBufMut::with_capacity(8);
+        buf.put_bytes(7, 5);
+        assert_eq!(buf.as_ref(), &[7u8; 5]);
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.remaining_mut(), 3);
+    }
+
+    #[test]
+    fn test_iobufmut_put_multi_chunk_source() {
+        let mut buf = IoBufMut::with_capacity(8);
+        buf.put((&b"hel"[..]).chain(&b"lo"[..]));
+        assert_eq!(buf.as_ref(), b"hello");
+        assert_eq!(buf.remaining_mut(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_put_slice_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        buf.put_slice(b"hello");
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_put_bytes_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        buf.put_bytes(0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_advance_mut_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        // SAFETY: the call panics on the bounds check before any byte in the
+        // advanced region could be observed.
+        unsafe { buf.advance_mut(5) };
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufmut_put_past_capacity() {
+        let mut buf = IoBufMut::with_capacity(4);
+        buf.put(&b"hello"[..]);
+    }
+
+    #[test]
     fn test_iobufsmut_buf_trait_chunked() {
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" ");
@@ -3350,12 +4152,12 @@ mod tests {
     #[test]
     fn test_iobufsmut_bufmut_trait_single() {
         let mut bufs = IoBufsMut::from(IoBufMut::with_capacity(20));
-        // BytesMut can grow, so remaining_mut is very large
-        assert!(bufs.remaining_mut() > 1000);
+        assert_eq!(bufs.remaining_mut(), 20);
 
         bufs.put_slice(b"hello");
         assert_eq!(bufs.chunk(), b"hello");
         assert_eq!(bufs.len(), 5);
+        assert_eq!(bufs.remaining_mut(), 15);
 
         bufs.put_slice(b" world");
         assert_eq!(bufs.coalesce(), b"hello world");
@@ -3455,6 +4257,69 @@ mod tests {
         bufs.advance(1);
         assert_eq!(bufs.chunk(), b"y");
         assert_eq!(bufs.remaining(), 1);
+    }
+
+    #[test]
+    fn test_iobufsmut_read_ops_preserve_writable_capacity() {
+        // Draining the filled first chunk must not discard the never-filled
+        // second chunk's reserved capacity: remaining_mut only changes via
+        // advance_mut per the BufMut contract.
+        let mut a = IoBufMut::with_capacity(8);
+        a.put_slice(&[1u8; 8]);
+        let b = IoBufMut::with_capacity(8);
+        let mut bufs = IoBufsMut::from(vec![a, b]);
+        assert_eq!(bufs.remaining(), 8);
+        assert_eq!(bufs.remaining_mut(), 8);
+        bufs.advance(8);
+        assert_eq!(bufs.remaining(), 0);
+        assert_eq!(bufs.remaining_mut(), 8);
+        bufs.put_slice(&[2u8; 8]);
+        assert_eq!(bufs.copy_to_bytes(8).as_ref(), &[2u8; 8]);
+
+        // copy_to_bytes drains must preserve capacity the same way.
+        let mut a = IoBufMut::with_capacity(8);
+        a.put_slice(&[3u8; 8]);
+        let b = IoBufMut::with_capacity(8);
+        let mut bufs = IoBufsMut::from(vec![a, b]);
+        assert_eq!(bufs.copy_to_bytes(8).as_ref(), &[3u8; 8]);
+        assert_eq!(bufs.remaining_mut(), 8);
+
+        // Zero-length drains do not disturb chunk state at all.
+        assert!(bufs.copy_to_bytes(0).is_empty());
+        assert_eq!(bufs.remaining_mut(), 8);
+    }
+
+    #[test]
+    fn test_iobufsmut_from_vec_u8_preserves_capacity() {
+        // The readable bytes are copied and the vec's reserved capacity is
+        // preserved exactly.
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(b"abc");
+        let cap = vec.capacity();
+        let mut bufs = IoBufsMut::from(vec);
+        assert_eq!(bufs.remaining(), 3);
+        assert_eq!(bufs.capacity(), cap);
+        bufs.put_slice(b"d");
+        assert_eq!(bufs.copy_to_bytes(4).as_ref(), b"abcd");
+
+        // Empty vec with reserved capacity keeps the full reservation, so
+        // the documented Vec::with_capacity(len) -> read_at_buf(len) reuse
+        // pattern holds: set_len(len) must fit.
+        let vec = Vec::<u8>::with_capacity(64);
+        let len = vec.capacity();
+        let mut bufs = IoBufsMut::from(vec);
+        assert!(bufs.is_empty());
+        assert_eq!(bufs.capacity(), len);
+        // SAFETY: all `len` bytes are initialized by copy_from_slice below.
+        unsafe { bufs.set_len(len) };
+        bufs.copy_from_slice(&vec![9u8; len]);
+        assert_eq!(bufs.copy_to_bytes(len).as_ref(), vec![9u8; len].as_slice());
+
+        // Exactly-sized vec: copied with contents intact.
+        let bufs = IoBufsMut::from(vec![1u8, 2, 3]);
+        assert_eq!(bufs.remaining(), 3);
+        assert_eq!(bufs.capacity(), 3);
+        assert_eq!(bufs.chunk(), &[1, 2, 3]);
     }
 
     #[test]
@@ -3583,7 +4448,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_matches_bytesmut_chain() {
-        // Create three BytesMut with capacity
+        // Create three BytesMut with capacity for final content comparison.
         let mut bm1 = BytesMut::with_capacity(5);
         let mut bm2 = BytesMut::with_capacity(6);
         let mut bm3 = BytesMut::with_capacity(7);
@@ -3595,14 +4460,8 @@ mod tests {
             IoBufMut::with_capacity(7),
         ]);
 
-        // Test initial chunk_mut length matches (spare capacity)
-        let chain_len = (&mut bm1)
-            .chain_mut(&mut bm2)
-            .chain_mut(&mut bm3)
-            .chunk_mut()
-            .len();
-        let iobufs_len = iobufs.chunk_mut().len();
-        assert_eq!(chain_len, iobufs_len);
+        // Fixed-capacity IoBufsMut exposes the current writable chunk.
+        assert_eq!(iobufs.chunk_mut().len(), 5);
 
         // Write some data
         (&mut bm1)
@@ -3611,14 +4470,7 @@ mod tests {
             .put_slice(b"hel");
         iobufs.put_slice(b"hel");
 
-        // Verify chunk_mut matches after partial write
-        let chain_len = (&mut bm1)
-            .chain_mut(&mut bm2)
-            .chain_mut(&mut bm3)
-            .chunk_mut()
-            .len();
-        let iobufs_len = iobufs.chunk_mut().len();
-        assert_eq!(chain_len, iobufs_len);
+        assert_eq!(iobufs.chunk_mut().len(), 2);
 
         // Write more data
         (&mut bm1)
@@ -3627,14 +4479,7 @@ mod tests {
             .put_slice(b"lo world!");
         iobufs.put_slice(b"lo world!");
 
-        // Verify chunk_mut matches after more writes
-        let chain_len = (&mut bm1)
-            .chain_mut(&mut bm2)
-            .chain_mut(&mut bm3)
-            .chunk_mut()
-            .len();
-        let iobufs_len = iobufs.chunk_mut().len();
-        assert_eq!(chain_len, iobufs_len);
+        assert_eq!(iobufs.chunk_mut().len(), 6);
 
         // Verify final content matches
         let frozen = iobufs.freeze().coalesce();
@@ -3901,13 +4746,22 @@ mod tests {
         let pooled = pooled_mut.freeze();
         assert!(!pooled.as_ptr().is_null());
 
-        let unique = IoBuf::from(Bytes::from(vec![1u8, 2, 3]));
-        let unique_mut = unique.try_into_mut().expect("unique bytes should convert");
+        // A vec with spare capacity adopts its allocation, so the unique
+        // immutable view recovers mutability zero-copy.
+        let mut adopted_vec = Vec::with_capacity(64);
+        adopted_vec.extend_from_slice(&[1u8, 2, 3]);
+        let unique = IoBuf::from(adopted_vec);
+        let unique_mut = unique.try_into_mut().expect("adopted vec should convert");
         assert_eq!(unique_mut.as_ref(), &[1u8, 2, 3]);
 
-        let shared = IoBuf::from(Bytes::from(vec![4u8, 5, 6]));
+        let shared = IoBuf::from(vec![4u8, 5, 6]);
         let _shared_clone = shared.clone();
         assert!(shared.try_into_mut().is_err());
+
+        // External-backed views (exactly-sized vecs, `Bytes`) always decline
+        // mutable recovery.
+        let external = IoBuf::from(vec![7u8, 8, 9]);
+        assert!(external.try_into_mut().is_err());
 
         let expected: &[u8] = &[9u8, 8];
         let eq_buf = IoBuf::from(vec![9u8, 8]);
@@ -3923,6 +4777,110 @@ mod tests {
         let bytes_out: Bytes = pooled.into();
         assert_eq!(vec_out, b"xyz");
         assert_eq!(bytes_out.as_ref(), b"xyz");
+    }
+
+    #[test]
+    fn test_iobuf_from_bytes_zero_copy_round_trip() {
+        // Bytes -> IoBuf is zero-copy: the handle points into the payload.
+        let bytes = Bytes::from(vec![1u8; 64]);
+        let payload_ptr = bytes.as_ptr();
+        let buf = IoBuf::from(bytes.clone());
+        assert_eq!(buf.as_ptr(), payload_ptr);
+        assert_eq!(buf, bytes.as_ref());
+
+        // IoBuf -> Bytes on an external backing uses slice_ref: same payload,
+        // no copy, no extra owner box.
+        let out: Bytes = buf.into();
+        assert_eq!(out.as_ptr(), payload_ptr);
+        assert_eq!(out, bytes);
+
+        // Sliced external views convert through slice_ref too.
+        let sliced = IoBuf::from(bytes).slice(8..32);
+        let sliced_ptr = sliced.as_ptr();
+        let sliced_out: Bytes = sliced.into();
+        assert_eq!(sliced_out.as_ptr(), sliced_ptr);
+        assert_eq!(sliced_out.len(), 24);
+    }
+
+    #[test]
+    fn test_iobuf_from_bytes_mut_zero_copy() {
+        let mut bytes = BytesMut::with_capacity(32);
+        bytes.extend_from_slice(b"hello");
+        let payload_ptr = bytes.as_ref().as_ptr();
+        let buf = IoBuf::from(bytes);
+        assert_eq!(buf.as_ptr(), payload_ptr);
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn test_iobuf_static_into_bytes_uses_from_static() {
+        let buf = IoBuf::from(b"static-payload");
+        let payload_ptr = buf.as_ptr();
+        let bytes: Bytes = buf.into();
+        assert_eq!(bytes.as_ptr(), payload_ptr);
+        assert_eq!(bytes.as_ref(), b"static-payload");
+    }
+
+    #[test]
+    fn test_iobuf_vec_adoption_round_trip_zero_copy() {
+        // Vec with spare capacity -> IoBuf adopts the allocation, and
+        // try_into_mut recovers a writable handle at the same address.
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(b"adopted payload");
+        let base = vec.as_ptr() as usize;
+        let buf = IoBuf::from(vec);
+        assert_eq!(buf.as_ptr() as usize, base);
+
+        let mut recovered = buf
+            .try_into_mut()
+            .expect("adopted vec recovers mutability zero-copy");
+        assert_eq!(recovered.as_mut_ptr() as usize, base);
+        assert_eq!(recovered.as_ref(), b"adopted payload");
+        assert!(recovered.capacity() > recovered.len());
+        recovered.put_slice(b"!");
+        assert_eq!(recovered.as_ref(), b"adopted payload!");
+    }
+
+    #[test]
+    fn test_iobuf_read_cfg_zero_copy_from_iobuf_source() {
+        // Decoding an IoBuf field from an IoBuf source must not copy the
+        // payload: copy_to_bytes carves a zero-copy slice and From wraps it.
+        let cfg: RangeCfg<usize> = (0..=1024).into();
+        let mut source = IoBuf::from(IoBuf::from(vec![7u8; 100]).encode());
+        let prefix = source.len() - 100;
+        let payload_ptr = source.as_ref()[prefix..].as_ptr();
+        let decoded = IoBuf::read_cfg(&mut source, &cfg).unwrap();
+        assert_eq!(decoded.len(), 100);
+        assert_eq!(decoded.as_ptr(), payload_ptr);
+        assert_eq!(decoded, [7u8; 100]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance")]
+    fn test_iobufmut_put_does_not_trust_lying_buf() {
+        // `Buf` is a safe trait: a misbehaving source may hand out chunks
+        // larger than its reported remaining(). `put` must bound each copy by
+        // its own capacity and panic instead of overflowing the buffer.
+        struct LyingBuf;
+        impl Buf for LyingBuf {
+            fn remaining(&self) -> usize {
+                1
+            }
+            fn chunk(&self) -> &[u8] {
+                &[0xAB; 64]
+            }
+            fn advance(&mut self, _cnt: usize) {}
+        }
+
+        let mut buf = IoBufMut::with_capacity(8);
+        buf.put(LyingBuf);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_iobuf_handle_sizes() {
+        assert_eq!(size_of::<IoBuf>(), 24);
+        assert_eq!(size_of::<IoBufMut>(), 32);
     }
 
     #[test]
@@ -3968,7 +4926,7 @@ mod tests {
     #[test]
     fn test_iobufmut_additional_conversion_and_trait_paths() {
         // Basic mutable operations should keep readable bytes consistent.
-        let mut buf = IoBufMut::from(vec![1u8, 2, 3, 4]);
+        let mut buf = IoBufMut::from([1u8, 2, 3, 4]);
         assert!(!buf.is_empty());
         buf.truncate(2);
         assert_eq!(buf.as_ref(), &[1u8, 2]);
@@ -3984,8 +4942,8 @@ mod tests {
         assert!(buf == b"xyz");
 
         // Conversions from common owned/shared containers preserve contents.
-        let from_vec = IoBufMut::from(vec![7u8, 8]);
-        assert_eq!(from_vec.as_ref(), &[7u8, 8]);
+        let from_array = IoBufMut::from([7u8, 8]);
+        assert_eq!(from_array.as_ref(), &[7u8, 8]);
 
         let from_bytesmut = IoBufMut::from(BytesMut::from(&b"hi"[..]));
         assert_eq!(from_bytesmut.as_ref(), b"hi");
@@ -3996,6 +4954,49 @@ mod tests {
         // `Bytes::from_static` cannot be converted to mutable without copy.
         let from_iobuf = IoBufMut::from(IoBuf::from(Bytes::from_static(b"io")));
         assert_eq!(from_iobuf.as_ref(), b"io");
+    }
+
+    #[test]
+    fn test_iobufmut_from_bytesmut_preserves_capacity() {
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.put_slice(b"abc");
+        let cap = bytes.capacity();
+        let buf = IoBufMut::from(bytes);
+        assert_eq!(buf.as_ref(), b"abc");
+        assert_eq!(buf.capacity(), cap);
+
+        // An empty reserved BytesMut keeps its reservation writable.
+        let bytes = BytesMut::with_capacity(64);
+        let cap = bytes.capacity();
+        let mut buf = IoBufMut::from(bytes);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), cap);
+        buf.put_bytes(7, cap);
+        assert_eq!(buf.len(), cap);
+    }
+
+    #[test]
+    fn test_iobufmut_from_vec_preserves_capacity() {
+        let mut vec = Vec::with_capacity(100);
+        vec.extend_from_slice(b"abc");
+        let buf = IoBufMut::from(vec);
+        assert_eq!(buf.as_ref(), b"abc");
+        assert_eq!(buf.capacity(), 100);
+
+        // An empty reservation converts to a writable buffer of the same
+        // capacity.
+        let mut buf = IoBufMut::from(Vec::with_capacity(64));
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 64);
+        buf.put_bytes(7, 64);
+        assert_eq!(buf.len(), 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "front heap layout size overflow")]
+    fn test_iobufmut_with_capacity_rejects_oversized_request() {
+        // Constructs the layout (and must panic) before any allocation.
+        let _ = IoBufMut::with_capacity(isize::MAX as usize);
     }
 
     #[test]
@@ -4115,6 +5116,41 @@ mod tests {
         assert!(zeroed.is_empty());
         assert_eq!(zeroed.len(), 0);
         assert_eq!(zeroed.capacity(), 0);
+
+        // Zero-sized buffers do not allocate, so alignment is not validated.
+        let invalid_alignment = NonZeroUsize::new(3).expect("non-zero alignment");
+        assert_eq!(IoBufMut::with_alignment(0, invalid_alignment).capacity(), 0);
+        assert_eq!(
+            IoBufMut::zeroed_with_alignment(0, invalid_alignment).capacity(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_iobufmut_aligned_capacity_stable_across_recovery() {
+        // High-alignment requests round the usable region up to the header
+        // alignment. The handle must report that capacity from construction
+        // so a freeze/try_into_mut round trip cannot grow it.
+        let alignment = NonZeroUsize::new(4096).expect("non-zero alignment");
+        let mut buf = IoBufMut::with_alignment(100, alignment);
+        assert_eq!(buf.capacity(), 104);
+
+        buf.put_slice(b"data");
+        let recovered = buf
+            .freeze()
+            .try_into_mut()
+            .expect("unique native view recovers");
+        assert_eq!(recovered.capacity(), 104);
+
+        // Zeroed variant: the rounded tail is writable and zero-initialized,
+        // while len stays at the request.
+        let zeroed = IoBufMut::zeroed_with_alignment(100, alignment);
+        assert_eq!(zeroed.len(), 100);
+        assert_eq!(zeroed.capacity(), 104);
+
+        // Multiple-of-8 requests stay exact.
+        let exact = IoBufMut::with_alignment(128, alignment);
+        assert_eq!(exact.capacity(), 128);
     }
 
     #[test]
@@ -4416,11 +5452,13 @@ mod tests {
 
     #[test]
     fn test_iobuf_internal_chunk_helpers() {
-        // `copy_to_bytes_chunked` should drop leading empties on zero-length reads.
+        // `copy_to_bytes_chunked` drops leading empties on zero-length reads
+        // and asks for canonicalization so the emptied deque collapses back
+        // to the Single representation.
         let mut empty_with_leading = VecDeque::from([IoBuf::default()]);
         let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut empty_with_leading, 0, "x");
         assert!(bytes.is_empty());
-        assert!(!needs_canonicalize);
+        assert!(needs_canonicalize);
         assert!(empty_with_leading.is_empty());
 
         // Fast path: front chunk can fully satisfy the request.
@@ -4450,7 +5488,7 @@ mod tests {
         let (bytes, needs_canonicalize) =
             copy_to_bytes_chunked(&mut empty_with_leading_mut, 0, "x");
         assert!(bytes.is_empty());
-        assert!(!needs_canonicalize);
+        assert!(needs_canonicalize);
         assert!(empty_with_leading_mut.is_empty());
 
         // Mirror the fast/slow chunked helper paths for mutable chunks too.
@@ -4543,7 +5581,7 @@ mod tests {
         // `advance_mut_in_chunks` should skip non-writable chunks.
         let pool = test_pool();
         let mut full = pool.alloc(1);
-        // SAFETY: We only mark initialized capacity; bytes are not read.
+        // SAFETY: We only mark initialized capacity and never read bytes.
         unsafe { full.set_len(full.capacity()) };
         let mut writable_after_full = [full, IoBufMut::with_capacity(2)];
         let mut remaining = 2usize;
@@ -4601,10 +5639,11 @@ mod tests {
         let mut chunked = IoBufsMut {
             inner: IoBufsMutInner::Chunked(wrapped),
         };
+        let before = chunked.remaining_mut();
         // SAFETY: We only verify cursor movement (`remaining`) and do not read bytes.
         unsafe { chunked.advance_mut(to_advance) };
         assert_eq!(chunked.remaining(), to_advance);
-        assert!(chunked.remaining_mut() > 0);
+        assert_eq!(chunked.remaining_mut(), before - to_advance);
     }
 
     #[test]
@@ -4783,6 +5822,36 @@ mod tests {
         assert_eq!(buf.len(), value.encode_size());
     }
 
+    /// Claims a larger encoding than `write` produces, driving the
+    /// [`EncodeExt`] size asserts in the failing direction.
+    struct UnderWriter;
+
+    impl Write for UnderWriter {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_slice(b"ab");
+        }
+    }
+
+    impl EncodeSize for UnderWriter {
+        fn encode_size(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes into pooled buffer")]
+    fn test_encode_with_pool_mut_rejects_short_write() {
+        let pool = test_pool();
+        let _ = UnderWriter.encode_with_pool_mut(&pool);
+    }
+
+    #[test]
+    #[should_panic(expected = "write_bufs() did not write expected bytes")]
+    fn test_encode_with_pool_rejects_short_write() {
+        let pool = test_pool();
+        let _ = UnderWriter.encode_with_pool(&pool);
+    }
+
     #[test]
     fn test_iobuf_encode_with_pool_matches_encode() {
         let value = IoBuf::from(vec![0xAB; 512]);
@@ -4865,6 +5934,18 @@ mod tests {
             assert_eq!(r.copy_to_bytes(1024), data);
         }
 
+        // Pushed Bytes appear in the output without a payload copy.
+        #[test]
+        fn test_push_is_zero_copy() {
+            let mut b = builder(64);
+            b.put_u16(99);
+            let payload = Bytes::from(vec![0xDD; 1024]);
+            b.push(payload.clone());
+            let mut r = b.finish();
+            r.advance(2);
+            assert_eq!(r.chunk().as_ptr(), payload.as_ptr());
+        }
+
         // Interleaved: inline header, zero-copy push, inline trailer.
         #[test]
         fn test_inline_push_inline() {
@@ -4900,9 +5981,11 @@ mod tests {
             assert_eq!(bufs.remaining(), 0);
         }
 
-        // Inline writes exceeding capacity panic.
+        // Inline writes exceeding capacity panic. `Builder` does not override
+        // the `BufMut` write methods, so the panic (and message) comes from
+        // bytes' trait defaults checking `remaining_mut`.
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_inline_overflow_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
@@ -4934,9 +6017,9 @@ mod tests {
             assert_eq!(r.copy_to_bytes(200), c);
         }
 
-        // put() exceeding capacity panics.
+        // put() exceeding capacity panics (in bytes' trait default).
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_put_exceeding_capacity_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
@@ -4944,9 +6027,9 @@ mod tests {
             b.put(src);
         }
 
-        // put_slice() exceeding capacity panics.
+        // put_slice() exceeding capacity panics (in bytes' trait default).
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_put_slice_exceeding_capacity_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
@@ -5008,9 +6091,10 @@ mod tests {
             assert_eq!(r.get_u8(), 0xAB);
         }
 
-        // Writing past a full buffer panics (fixed capacity).
+        // Writing past a full buffer panics (fixed capacity, with the panic coming
+        // from bytes' trait default).
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "advance out of bounds")]
         fn test_write_past_full_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
