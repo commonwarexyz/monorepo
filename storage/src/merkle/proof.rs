@@ -387,23 +387,31 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        self.try_verify_proof_and_pinned_nodes(hasher, elements, start_loc, pinned_nodes, root)
-            .is_some()
+        self.verify_proof_and_pinned_nodes_and_extract_digests(
+            hasher,
+            elements,
+            start_loc,
+            pinned_nodes,
+            root,
+        )
+        .is_some()
     }
 
-    /// Fallible implementation of [`verify_proof_and_pinned_nodes`](Self::verify_proof_and_pinned_nodes).
+    /// Verify this proof and the pinned nodes against `root`, returning the authenticated node
+    /// digests on success.
     ///
-    /// Returns `Some(())` if the proof and pins are consistent with `root`, `None` otherwise. The
-    /// `Option` return lets the body use `?` on each fallible step; the public wrapper converts to
-    /// `bool` via `.is_some()`.
-    fn try_verify_proof_and_pinned_nodes<H, E>(
+    /// The result contains every digest authenticated while reconstructing the range, plus the
+    /// fold-prefix peak digests rebuilt from the pinned nodes. A range that ends at the tree's
+    /// last leaf therefore exposes a digest for every peak, which lets a caller rebuild peak
+    /// state from a bounded operation range instead of replaying the full history.
+    pub fn verify_proof_and_pinned_nodes_and_extract_digests<H, E>(
         &self,
         hasher: &H,
         elements: &[E],
         start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
-    ) -> Option<()>
+    ) -> Option<Vec<(Position<F>, D)>>
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
@@ -414,7 +422,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             .ok()?;
 
         if elements.is_empty() {
-            return pinned_nodes.is_empty().then_some(());
+            return pinned_nodes.is_empty().then(Vec::new);
         }
 
         if !start_loc.is_valid() || start_loc > self.leaves {
@@ -442,12 +450,16 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
         // Fold-prefix peaks of the larger tree may have merged several pins together. Reconstruct
         // each peak's digest by hashing the pins beneath it up to the peak, then compare the
-        // folded accumulator against the one the proof carries.
+        // folded accumulator against the one the proof carries. The reconstructed peak digests
+        // are not otherwise exposed by the proof walk, so record them for the caller.
+        let mut fold_prefix_peaks = Vec::with_capacity(bp.fold_prefix.len());
         if let Some((first_sub, rest)) = bp.fold_prefix.split_first() {
             let &expected = self.digests.first()?;
             let mut acc = first_sub.reconstruct_from_pins(hasher, &mut pinned_map)?;
+            fold_prefix_peaks.push((first_sub.pos, acc));
             for sub in rest {
                 let d = sub.reconstruct_from_pins(hasher, &mut pinned_map)?;
+                fold_prefix_peaks.push((sub.pos, d));
                 acc = hasher.fold(&acc, &d);
             }
             if acc != expected {
@@ -478,7 +490,11 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         // Every pin must have been consumed by one of the two reconstructions above.
-        pinned_map.is_empty().then_some(())
+        if !pinned_map.is_empty() {
+            return None;
+        }
+
+        Some(extracted.into_iter().chain(fold_prefix_peaks).collect())
     }
 
     /// Reconstruct a root from range-proof digests and optionally collect authenticated nodes.
@@ -2524,6 +2540,74 @@ mod tests {
         }
     }
 
+    /// A pinned-node proof over a range ending at the last leaf must expose a digest for every
+    /// peak of the tree, letting callers rebuild peak state from a bounded element suffix.
+    fn suffix_range_with_pins_exposes_all_peaks<F: Family>() {
+        // Sweep tree sizes with single-element and longer suffixes. Sizes with many peaks
+        // (e.g. 2^k - 1) maximize fold-prefix peaks that only pins can reconstruct.
+        let cases: &[(u64, u64)] = &[
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (4, 3),
+            (5, 4),
+            (7, 6),
+            (10, 9),
+            (15, 14),
+            (20, 19),
+            (50, 49),
+            (63, 62),
+            (100, 99),
+            (255, 254),
+            (1000, 999),
+            (10, 7),
+            (100, 90),
+            (1000, 900),
+        ];
+
+        let hasher = H::new(ForwardFold);
+        for &(n, start) in cases {
+            let mem = build_raw::<F>(&hasher, n);
+            let root = plain_root(&mem, &hasher);
+
+            let pinned: Vec<D> = F::nodes_to_pin(Location::<F>::new(start))
+                .map(|pos| mem.get_node(pos).unwrap())
+                .collect();
+
+            let proof = mem
+                .range_proof(
+                    &hasher,
+                    Location::<F>::new(start)..Location::<F>::new(n),
+                    0,
+                )
+                .unwrap();
+            let elements: Vec<_> = (start..n).map(|i| i.to_be_bytes()).collect();
+
+            let digests = proof
+                .verify_proof_and_pinned_nodes_and_extract_digests(
+                    &hasher,
+                    &elements,
+                    Location::<F>::new(start),
+                    &pinned,
+                    &root,
+                )
+                .unwrap_or_else(|| panic!("extraction failed: leaves={n}, start={start}"));
+            let digests: BTreeMap<Position<F>, D> = digests.into_iter().collect();
+
+            let size = Position::try_from(Location::<F>::new(n)).unwrap();
+            for (pos, _) in F::peaks(size) {
+                let &digest = digests.get(&pos).unwrap_or_else(|| {
+                    panic!("peak digest missing at {pos}: leaves={n}, start={start}")
+                });
+                assert_eq!(
+                    digest,
+                    mem.get_node(pos).unwrap(),
+                    "peak digest mismatch at {pos}: leaves={n}, start={start}"
+                );
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // MMR tests
     // ---------------------------------------------------------------------------
@@ -2619,6 +2703,10 @@ mod tests {
     #[test]
     fn mmr_verify_proof_and_pinned_nodes_across_sizes() {
         verify_proof_and_pinned_nodes_across_sizes::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_suffix_range_with_pins_exposes_all_peaks() {
+        suffix_range_with_pins_exposes_all_peaks::<mmr::Family>();
     }
 
     // ---------------------------------------------------------------------------
@@ -2724,5 +2812,9 @@ mod tests {
     #[test]
     fn mmb_verify_proof_and_pinned_nodes_across_sizes() {
         verify_proof_and_pinned_nodes_across_sizes::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_suffix_range_with_pins_exposes_all_peaks() {
+        suffix_range_with_pins_exposes_all_peaks::<mmb::Family>();
     }
 }
