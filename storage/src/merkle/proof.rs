@@ -2575,11 +2575,7 @@ mod tests {
                 .collect();
 
             let proof = mem
-                .range_proof(
-                    &hasher,
-                    Location::<F>::new(start)..Location::<F>::new(n),
-                    0,
-                )
+                .range_proof(&hasher, Location::<F>::new(start)..Location::<F>::new(n), 0)
                 .unwrap();
             let elements: Vec<_> = (start..n).map(|i| i.to_be_bytes()).collect();
 
