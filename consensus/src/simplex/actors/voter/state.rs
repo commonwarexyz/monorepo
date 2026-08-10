@@ -158,7 +158,9 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     nullification_views: BTreeSet<View>,
 
     /// Views with a local certification rejection not covered by finalization.
-    /// Direct descendant certificates remain subject to these ancestry verdicts.
+    /// A rejected view cannot support same-term descendant ancestry.
+    /// Every entry remains above the retention floor, so [`Self::prune`] skips
+    /// this set.
     failed_certifications: BTreeSet<View>,
 
     certification_candidates: BTreeSet<View>,
@@ -612,8 +614,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if view > self.last_finalized {
             self.last_finalized = view;
 
-            // Finalization makes local certification verdicts at or below its
-            // view irrelevant to descendant ancestry.
+            // Finalization overrides local certification rejections at or
+            // below its view.
             self.failed_certifications = self.failed_certifications.split_off(&view.next());
 
             // Prune certification candidates at or below finalized view.
@@ -1085,11 +1087,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.insert(view);
     }
 
-    /// Queues the one same-term child whose certification dependency was satisfied.
-    ///
-    /// Certification follows an immediate-parent chain inside a term, so
-    /// blocked descendants remain dormant until this transition advances the
-    /// ready frontier.
+    /// Queues a blocked immediate same-term child when `parent` certifies or
+    /// finalizes.
     fn wake_certification_child(&mut self, parent: View) {
         let child = parent.next();
         if self.previous_in_term(child) != Some(parent)
@@ -1130,6 +1129,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 if err.invalid_proposal() {
                     warn!(round = ?proposal.round, ?err, "proposal failed certification precheck");
                 } else {
+                    // Dormant candidates wake only through
+                    // [`Self::wake_certification_child`]. Therefore,
+                    // [`Self::certification_parent_ready`] may block only on an
+                    // uncertified parent.
+                    assert!(
+                        matches!(err, ParentPayloadError::ParentNotCertified { .. }),
+                        "blocked candidate has no wake: {err:?}"
+                    );
                     fetches.extend(self.certification_fetch(&err));
                 }
                 continue;
@@ -1235,7 +1242,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let removed = replace(&mut self.views, kept).into_keys().collect();
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
-        self.failed_certifications = self.failed_certifications.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -3395,7 +3401,7 @@ mod tests {
             assert!(state.is_me(leader.idx));
             assert!(fetches[0].target.is_none());
 
-            // The round deduplicates the fetch while it is outstanding.
+            // The blocked candidate is dormant, so another pass emits nothing.
             let (ready, fetches) = state.certify_candidates();
             assert!(ready.is_empty());
             assert!(fetches.is_empty());
