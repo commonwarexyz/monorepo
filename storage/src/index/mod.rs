@@ -14,7 +14,40 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 use crate::translator::Translator;
+use commonware_parallel::Strategy;
 use commonware_runtime::Metrics;
+
+/// Apply one value diff for `key` against `index`: insert a value, replace a known
+/// value, or delete a known value (see [Unordered::apply_sorted_diffs]).
+pub(crate) fn apply_one_diff<I: Unordered + ?Sized>(
+    index: &mut I,
+    key: &[u8],
+    old: Option<I::Value>,
+    new: Option<I::Value>,
+) where
+    I::Value: PartialEq + Copy,
+{
+    match (old, new) {
+        (None, Some(new)) => index.insert(key, new),
+        (Some(old), Some(new)) => {
+            let mut cursor = index.get_mut(key).expect("key should be known to exist");
+            assert!(
+                cursor.find(|v| *v == old),
+                "known key with given old value should have been found"
+            );
+            cursor.update(new);
+        }
+        (Some(old), None) => {
+            let mut cursor = index.get_mut(key).expect("key should be known to exist");
+            assert!(
+                cursor.find(|v| *v == old),
+                "known key with given old value should have been found"
+            );
+            cursor.delete();
+        }
+        (None, None) => {}
+    }
+}
 
 mod storage;
 
@@ -160,6 +193,27 @@ pub trait Unordered: Send + Sync {
 
     /// Inserts a new value for the translated key.
     fn insert(&mut self, key: &[u8], value: Self::Value);
+
+    /// Apply a batch of value diffs, sorted by key. Each `(key, old, new)` entry inserts
+    /// `new` (`old = None`), replaces the known value `old` with `new`, or deletes the
+    /// known value `old` (`new = None`). Implementations may apply disjoint key ranges in
+    /// parallel on `strategy`; this default applies the batch sequentially.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an entry carries `old = Some(v)` and `key` does not hold `v`, or if
+    /// `diffs` is not sorted by key.
+    fn apply_sorted_diffs<S: Strategy>(
+        &mut self,
+        _strategy: &S,
+        diffs: &[(&[u8], Option<Self::Value>, Option<Self::Value>)],
+    ) where
+        Self::Value: PartialEq + Copy,
+    {
+        for &(key, old, new) in diffs {
+            apply_one_diff(self, key, old, new);
+        }
+    }
 
     /// Insert a value at the given translated key, and remove any values for which
     /// `should_retain` returns `false`.
