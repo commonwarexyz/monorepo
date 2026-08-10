@@ -378,15 +378,15 @@ pub(crate) mod test {
         -> impl Future<Output = Result<Self, Error>> + Send;
     }
 
-    impl<E, U, C, I, H, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
+    impl<E, C, I, H, U, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
     where
         E: crate::Context,
-        U: UpdateTrait,
         C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        AnyOperation<mmr::Family, U>: Codec,
+        U: UpdateTrait,
         S: Strategy,
+        AnyOperation<mmr::Family, U>: Codec,
     {
         async fn rewind_to_size(self, size: Location) -> Result<Self, Error> {
             self.rewind(size).await

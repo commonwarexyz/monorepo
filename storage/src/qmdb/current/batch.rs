@@ -756,10 +756,10 @@ async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
 where
     F: Graftable,
     E: Context,
-    U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update + Send + Sync,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -1110,10 +1110,10 @@ impl<F, E, C, I, H, U, const N: usize, S> super::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context,
-    U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update + Send + Sync,
     S: Strategy,
     Operation<F, U>: Codec,
 {
