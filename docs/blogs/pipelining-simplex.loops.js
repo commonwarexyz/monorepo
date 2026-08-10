@@ -1,4 +1,4 @@
-// Animated SVG diagrams for the Stable Leader and Optimistic Validation post.
+// Animated SVG diagrams for the Pipelining Simplex post.
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const WIDTH = 1024;
@@ -91,6 +91,48 @@ const makeSvg = (mount, height) => {
   return svg;
 };
 
+function buildCadence(mount) {
+  const svg = makeSvg(mount, 400);
+  const squares = [];
+  addText(svg, 20, 38, '5ms view intervals', { 'font-size': 20, 'font-weight': 700 });
+  const counter = addText(svg, 1004, 38, '000 / 200', {
+    'font-size': 20,
+    'font-weight': 700,
+    'text-anchor': 'end',
+    fill: BLUE,
+  });
+
+  const x0 = 197;
+  const y0 = 72;
+  const size = 22;
+  const xGap = 10;
+  const yGap = 6;
+  for (let index = 0; index < 200; index++) {
+    const column = index % 20;
+    const row = Math.floor(index / 20);
+    const x = x0 + column * (size + xGap);
+    const y = y0 + row * (size + yGap);
+    const background = svgEl('rect', { x, y, width: size, height: size, rx: 2, fill: LIGHT });
+    const square = svgEl('rect', { x, y, width: size, height: size, rx: 2, fill: RED, opacity: 0 });
+    svg.appendChild(background);
+    svg.appendChild(square);
+    squares.push(square);
+  }
+
+  addText(svg, 512, 378, '5ms is faster than a typical screen refresh', {
+    'text-anchor': 'middle',
+    fill: GRAY,
+  });
+
+  return [{
+    set(progress) {
+      const count = Math.min(200, Math.floor(progress * 200));
+      squares.forEach((square, index) => square.setAttribute('opacity', index < count ? 1 : 0));
+      counter.textContent = `${String(count).padStart(3, '0')} / 200`;
+    },
+  }];
+}
+
 function buildLeaders(mount) {
   const svg = makeSvg(mount, 430);
   const animated = [];
@@ -181,14 +223,14 @@ function buildValidation(mount) {
   const x0 = 190;
   const sequentialGap = 186;
   const optimisticGap = 92;
-  const certificationSpan = sequentialGap;
+  const checkSpan = sequentialGap;
 
-  addText(svg, 20, 35, 'Certification on the view path', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 35, 'Application check on the view path', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 20, 246, 'Optimistic validation', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 112, 92, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 151, 'certify', { 'text-anchor': 'end', 'font-weight': 700 });
+  addText(svg, 112, 151, 'check', { 'text-anchor': 'end', 'font-weight': 700 });
   addText(svg, 112, 303, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 362, 'certify', { 'text-anchor': 'end', 'font-weight': 700 });
+  addText(svg, 112, 362, 'check', { 'text-anchor': 'end', 'font-weight': 700 });
   [92, 151, 303, 362].forEach(y => addLine(svg, 130, y, 976, y, { stroke: LIGHT }));
 
   for (let index = 0; index < 5; index++) {
@@ -198,10 +240,10 @@ function buildValidation(mount) {
     animated.push(addReveal(block, 0.06 + index * 0.17));
     addText(svg, x, 70, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
     if (index < 4) {
-      const certificationMidpoint = x + certificationSpan / 2;
+      const checkMidpoint = x + checkSpan / 2;
       animated.push(addArrow(svg, x + 16, 92, x + sequentialGap - 16, 92, RED, 0.1 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, x, 108, certificationMidpoint, 151, BLUE, 0.12 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, certificationMidpoint, 151, x + sequentialGap - 16, 92, BLUE, 0.18 + index * 0.17, 0.08));
+      animated.push(addArrow(svg, x, 108, checkMidpoint, 151, BLUE, 0.12 + index * 0.17, 0.08));
+      animated.push(addArrow(svg, checkMidpoint, 151, x + sequentialGap - 16, 92, BLUE, 0.18 + index * 0.17, 0.08));
     }
   }
 
@@ -213,18 +255,18 @@ function buildValidation(mount) {
     addText(svg, x, 281, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
     if (index < 8) animated.push(addArrow(svg, x + 16, 303, x + optimisticGap - 16, 303, RED, 0.09 + index * 0.075, 0.05));
     if (index < 7) {
-      const cert = svgEl('circle', { cx: x + certificationSpan, cy: 362, r: 8, fill: BLUE, opacity: 0 });
-      svg.appendChild(cert);
-      animated.push(addReveal(cert, 0.22 + index * 0.075));
-      animated.push(addArrow(svg, x, 319, x + certificationSpan - 9, 362, BLUE, 0.1 + index * 0.075, 0.11));
+      const check = svgEl('circle', { cx: x + checkSpan, cy: 362, r: 8, fill: BLUE, opacity: 0 });
+      svg.appendChild(check);
+      animated.push(addReveal(check, 0.22 + index * 0.075));
+      animated.push(addArrow(svg, x, 319, x + checkSpan - 9, 362, BLUE, 0.1 + index * 0.075, 0.11));
     }
   }
-  const note = addText(svg, 968, 397, 'certification follows in order', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
+  const note = addText(svg, 968, 397, 'application checks follow in order', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
   animated.push(addReveal(note, 0.73));
   return animated;
 }
 
-function run(mount, builder) {
+function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS) {
   const description = mount.getAttribute('aria-label');
   const animated = builder(mount);
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -241,14 +283,14 @@ function run(mount, builder) {
     mount.setAttribute('aria-label', `${description} Activate to pause or resume the animation.`);
   };
   const progressAt = elapsed =>
-    Math.max(0, Math.min(1, (elapsed - HOLD_MS) / (LOOP_MS - HOLD_MS * 2)));
+    Math.max(0, Math.min(1, (elapsed - holdMs) / (loopMs - holdMs * 2)));
 
   const frozen = new URLSearchParams(window.location.search).get('freeze');
   if (frozen !== null) {
     const seconds = Number(frozen);
     const elapsed = Number.isFinite(seconds)
-      ? ((seconds * 1000) % LOOP_MS + LOOP_MS) % LOOP_MS
-      : LOOP_MS - HOLD_MS;
+      ? ((seconds * 1000) % loopMs + loopMs) % loopMs
+      : loopMs - holdMs;
     makeStatic();
     animated.forEach(item => item.set(progressAt(elapsed)));
     return;
@@ -267,7 +309,7 @@ function run(mount, builder) {
   let frame;
 
   const render = now => {
-    const progress = progressAt((now - started) % LOOP_MS);
+    const progress = progressAt((now - started) % loopMs);
     animated.forEach(item => item.set(progress));
     if (!userPaused && visible) frame = requestAnimationFrame(render);
   };
@@ -325,10 +367,11 @@ style.textContent = `
 document.head.appendChild(style);
 
 const figures = [
-  ['simplex-fig-leaders', buildLeaders],
-  ['simplex-fig-validation', buildValidation],
+  ['simplex-fig-cadence', buildCadence, 2800, 900],
+  ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS],
+  ['simplex-fig-validation', buildValidation, LOOP_MS, HOLD_MS],
 ];
-for (const [id, builder] of figures) {
+for (const [id, builder, loopMs, holdMs] of figures) {
   const mount = document.getElementById(id);
-  if (mount) run(mount, builder);
+  if (mount) run(mount, builder, loopMs, holdMs);
 }

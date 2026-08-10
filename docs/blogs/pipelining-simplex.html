@@ -8,7 +8,7 @@
     <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
-    <title>commonware > A Finer Ordering Clock</title>
+    <title>commonware > Simplex, Pipelined</title>
     <meta name="description" content="In a 50-validator Alto deployment,
 Stable Leader and Optimistic Validation sustained about 200 successful
 views per second at 5ms median block spacing.">
@@ -19,7 +19,7 @@ views per second at 5ms median block spacing.">
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/pipelining-simplex.png" />
-    <meta property="og:title" content="A Finer Ordering Clock" />
+    <meta property="og:title" content="Simplex, Pipelined" />
     <meta property="og:description" content="In a 50-validator Alto
 deployment, Stable Leader and Optimistic Validation sustained about 200
 successful views per second at 5ms median block spacing." />
@@ -32,7 +32,7 @@ successful views per second at 5ms median block spacing." />
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/pipelining-simplex" />
-    <meta property="twitter:title" content="A Finer Ordering Clock" />
+    <meta property="twitter:title" content="Simplex, Pipelined" />
     <meta property="twitter:description" content="In a 50-validator Alto
 deployment, Stable Leader and Optimistic Validation sustained about 200
 successful views per second at 5ms median block spacing." />
@@ -85,16 +85,15 @@ successful views per second at 5ms median block spacing." />
         </div>
     </div>
     <div class="content">
-        <h1>A Finer Ordering Clock</h1>
+        <h1>Simplex, Pipelined</h1>
         <div class="meta">
 
                         <div class="author">By <a href="https://x.com/B_Chou">Brendan
 Chou</a></div>
                         <div class="date">August 10th, 2026</div>
         </div>
-        <p>For applications sequencing already-disseminated data, the
-        wait for the next block can matter as much as the wait for
-        finality.</p>
+        <p>Finality tells you when a block is settled. Block spacing
+        tells you how soon the next one can start.</p>
         <p>Today, we’re introducing Stable Leader and Optimistic
         Validation, two options that pipeline <a
         href="https://eprint.iacr.org/2023/463">Simplex</a> views.
@@ -105,6 +104,37 @@ Chou</a></div>
         deployment with 50 validators, this combination sustained about
         200 successful views per second. Every successful view finalized
         one block, and the median block spacing was 5ms.</p>
+        <style>
+          .simplex-loop {
+            aspect-ratio: 1024 / 430;
+            margin: 28px 0 6px;
+          }
+
+          .simplex-loop-cadence {
+            aspect-ratio: 1024 / 400;
+          }
+        </style>
+        <noscript>
+          <style>
+            .simplex-loop {
+              aspect-ratio: auto;
+              border-left: 2px solid #d9251c;
+              color: gray;
+              margin: 28px 0 6px;
+              padding-left: 12px;
+            }
+          </style>
+        </noscript>
+        <div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="Animated 20 by 10 grid showing 200 view intervals in one second. The grid fills at a rate of one red square per 5ms interval until all 200 squares are visible.">
+          <noscript>At a 5ms target, 200 view intervals fit into one second. This figure shows them as a 20 by 10 grid of red squares.</noscript>
+        </div>
+        <script type="module" src="pipelining-simplex.loops.js"></script>
+        <div class="image-caption">
+        <p>Figure 1: Each square represents one 5ms target interval. A
+        20 by 10 grid fills in one second. Alto sustained 198.1
+        successful views per nominal second against this 200-view
+        target.</p>
+        </div>
         <p>A separate capture measured 300ms median latency from the
         leader-stamped block timestamp until an external observer
         received its finalization certificate. The two measurements
@@ -113,25 +143,13 @@ Chou</a></div>
         <p>The pipeline keeps new views moving while earlier blocks
         finish. Once data reaches the leader, it gets another ordering
         opportunity after one block interval.</p>
-        <img src="/imgs/pipelining-simplex.png" alt="About sixty view intervals fit inside a 300ms median external-observer finalization-latency window at 5ms median block spacing.">
-        <div class="image-caption">
-        <p>Figure 1: Alto’s median block spacing was 5ms. Median
-        external-observer finalization latency was 300ms. Their ratio
-        gives about 60 view intervals per observer-latency window.</p>
-        </div>
         <p>A <em>view</em> is one opportunity for a leader to propose a
-        block and for validators to vote. Three steps matter here:</p>
-        <ol type="1">
-        <li>The leader proposes a block.</li>
-        <li>Validators verify and notarize the proposal.</li>
-        <li>The application runs its full deterministic safety check
-        before validators finalize the block. Commonware calls this
-        check <em>certification</em>.</li>
-        </ol>
+        block. Validators check and vote on the proposal. The
+        application finishes any remaining work before finalization.</p>
         <p>These steps remain ordered for each block, but different
         blocks can be at different steps. Two waits otherwise limit how
-        quickly new views begin: a proposer handoff and application
-        certification.</p>
+        quickly new views begin: a proposer handoff and the
+        application’s check.</p>
         <p><a
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> removes the first wait. <a
@@ -149,27 +167,9 @@ Chou</a></div>
         block notarized, the same leader already has the block and
         ancestry needed for the next proposal. Election still runs at
         the term boundary.</p>
-        <style>
-          .simplex-loop {
-            aspect-ratio: 1024 / 430;
-            margin: 28px 0 6px;
-          }
-        </style>
-        <noscript>
-          <style>
-            .simplex-loop {
-              aspect-ratio: auto;
-              border-left: 2px solid #d9251c;
-              color: gray;
-              margin: 28px 0 6px;
-              padding-left: 12px;
-            }
-          </style>
-        </noscript>
         <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="Animated comparison of round-robin and stable leaders across six views. With round-robin rotation, responsibility moves among three leaders and every view crosses a proposer handoff. With a stable leader, one leader proposes all six views in the term, then leadership changes once at the term boundary.">
           <noscript>In this round-robin example, responsibility moves among three leaders across six views. With a stable leader, one leader proposes all six views and leadership changes once at the term boundary.</noscript>
         </div>
-        <script type="module" src="pipelining-simplex.loops.js"></script>
         <div class="image-caption">
         <p>Figure 2: Round-robin rotation changes the proposer every
         view. A stable leader extends its own chain and pays the handoff
@@ -194,50 +194,49 @@ Chou</a></div>
         <p>Every validator must use the same term length. Stable terms
         currently work with round-robin leader election.</p>
         <p>Stable leadership removes the proposer handoff. One wait
-        remains: application certification.</p>
-        <h2 id="wait-two-certification-on-the-view-path">Wait Two:
-        Certification on the View Path</h2>
-        <p>Application certification can take time for good reasons. An
+        remains: the application’s check.</p>
+        <h2 id="wait-two-the-application-check">Wait Two: The
+        Application Check</h2>
+        <p>An application check can take time for good reasons. An
         erasure-coded application may wait until it has enough shards to
         reconstruct a block. Optimistic Validation changes when the next
         work begins.</p>
         <p>A stable leader can propose view <code>v+1</code> as soon as
         view <code>v</code> is notarized. Without Optimistic Validation,
-        followers wait for the application to certify <code>v</code>
-        before they verify and notarize <code>v+1</code>. Certification
-        remains on the critical path of every view.</p>
-        <p>With Optimistic Validation, a validator may verify and
-        notarize the child while the application certifies its parent.
-        The application still certifies blocks in order. Validators
-        finalize each block only after its own certification.</p>
-        <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application certification before validators verify and notarize it. In the optimistic path, child proposals are closer together because validators verify and notarize them while application certification continues in order on a parallel lane.">
-          <noscript>Without Optimistic Validation, each child proposal waits for its parent to certify. With Optimistic Validation, proposal verification and notarization continue while certification runs in order on a parallel lane.</noscript>
+        followers wait for the application to finish checking
+        <code>v</code> before they check and vote on <code>v+1</code>.
+        The application check remains on the path of every view.</p>
+        <p>With Optimistic Validation, validators may check and vote on
+        the child while the application checks its parent. The
+        application still checks blocks in order. Validators finalize
+        each block only after its application check succeeds.</p>
+        <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic proposal validation. In the sequential path, each child proposal waits for its parent's application check. In the optimistic path, child proposals are closer together because validators check and vote on them while application checks continue in order on a parallel lane.">
+          <noscript>Without Optimistic Validation, each child proposal waits for its parent's application check. With Optimistic Validation, proposal checks and votes continue while application checks run in order on a parallel lane.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 3: Optimistic Validation pipelines proposal
-        verification and notarization (red) over application
-        certification (blue). Both panels use the same horizontal time
-        scale.</p>
+        <p>Figure 3: Optimistic Validation pipelines proposal checks and
+        votes (red) over application checks (blue). Both panels use the
+        same horizontal time scale.</p>
         </div>
         <h2 id="how-optimism-stays-safe">How Optimism Stays Safe</h2>
         <p><code>Optimistic</code> describes when a validator starts
         work. It does not weaken the evidence required for
         finalization.</p>
-        <p>A validator works ahead only if it has verified and voted for
+        <p>A validator works ahead only if it has checked and voted for
         the parent, or holds usable quorum proof for it. The same rule
-        applies to every optimistic ancestor. Application certification
-        still proceeds parent by parent. If the application rejects an
-        ancestor, no descendant can certify or finalize through it.
+        applies to every optimistic ancestor. Application checks still
+        proceed parent by parent. If an ancestor cannot pass its
+        application check, no descendant can pass its check or finalize.
         Validators then abandon that part of the term through the normal
         timeout path.</p>
         <p>The lookahead stops at the term boundary. The first view of a
-        new term must start from certified ancestry.</p>
+        new term must start from ancestry that has passed the
+        application check.</p>
         <p>The lookahead is local policy. A value of zero disables
         Optimistic Validation. Validators can choose different values
         without affecting safety. A larger value uses more CPU and
         memory on work that may later be discarded. A smaller value can
-        limit the pipeline when application certification falls
-        behind.</p>
+        limit the pipeline when application checks fall behind.</p>
         <h2 id="what-we-measured">What We Measured</h2>
         <p>Here are the relevant configuration and results for the
         50-validator Alto run:</p>
@@ -338,13 +337,13 @@ Chou</a></div>
         <td>Longer proposer authority</td>
         </tr>
         <tr>
-        <td>Certification latency, with enough certification
+        <td>Application-check latency, with enough checking
         capacity</td>
         <td>Add Optimistic Validation</td>
         <td>More speculative CPU and memory</td>
         </tr>
         <tr>
-        <td>Certification, execution, storage, verification, or
+        <td>Application checks, execution, storage, proposal checks, or
         dissemination capacity</td>
         <td>Improve that stage first</td>
         <td>A deeper window will fill</td>
@@ -352,14 +351,14 @@ Chou</a></div>
         </tbody>
         </table>
         <p>Stable Leader reduces handoff latency. Optimistic Validation
-        hides certification latency when certification can still keep
+        hides application-check latency when those checks can still keep
         up. Neither feature makes a slower stage process more work per
         second.</p>
         <p>The combined configuration fits networks with reliable
         connectivity and enough CPU and memory for many in-flight views.
-        Application certification must run concurrently, and
-        transactions or block references still need a reliable path to
-        the current leader.</p>
+        Application checks must run concurrently, and transactions or
+        block references still need a reliable path to the current
+        leader.</p>
         <p>A rotating leader or smaller lookahead may fit better when
         validators are heterogeneous, leaders frequently fail, or
         proposer rotation is an important censorship defense.</p>
@@ -368,11 +367,11 @@ Chou</a></div>
         dissemination from many producers can combine this pipeline with
         another design. <a href="/blogs/multimmit">Multimmit</a>
         describes one such approach.</p>
-        <p>Choose enough lookahead to cover measured certification lag
-        at your target view rate. A larger window helps only when
-        certification catches up before the window fills. It also costs
-        CPU and memory. Choose the term length based on how long one
-        leader should retain proposal authority.</p>
+        <p>Choose enough lookahead to cover measured application-check
+        lag at your target view rate. A larger window helps only when
+        those checks catch up before the window fills. It also costs CPU
+        and memory. Choose the term length based on how long one leader
+        should retain proposal authority.</p>
         <p>Stable terms currently use the round-robin elector. Every
         validator must use the same term length, while each validator
         can choose its own optimistic lookahead. The configuration API
