@@ -21,6 +21,38 @@ module tests {
         assumptions_valid
     }
 
+    run certKindBoundariesTest = {
+        val proposal = {
+            block: "val_b0",
+            view: 0,
+            block_parent: GENESIS_BLOCK,
+            view_parent: GENESIS_VIEW,
+            sig: sig_of("n0")
+        }
+        all {
+            assert(cert_kind(notarization(
+                proposal,
+                Set(sig_of("n0"), sig_of("n1"), sig_of("n2")),
+                sig_of("n0"))) == NotarizationKind),
+            assert(cert_kind(notarization(
+                proposal,
+                Set(sig_of("n0"), sig_of("n1"), sig_of("n2"), sig_of("n3")),
+                sig_of("n0"))) == NotarizationKind),
+            assert(cert_kind(notarization(
+                proposal,
+                Set(sig_of("n0"), sig_of("n1"), sig_of("n2"), sig_of("n3"), sig_of("n4")),
+                sig_of("n0"))) == FinalizationKind),
+            assert(cert_kind(nullification(
+                0,
+                Set(sig_of("n0"), sig_of("n1"), sig_of("n2")),
+                sig_of("n0"))) == NullificationKind),
+            assert(cert_kind(nullification(
+                0,
+                Set(sig_of("n0"), sig_of("n1"), sig_of("n2"), sig_of("n3"), sig_of("n4")),
+                sig_of("n0"))) == NullificationKind),
+        }
+    }
+
     // Simple init test
     run initTest = {
         initWithLeader(Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
@@ -171,7 +203,6 @@ module tests {
             .expect(select_votes(0, NotarizeKind, store_vote.get("n5")).size()==6)
 
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n0")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n0")))
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n1")))
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n2")))
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n3")))
@@ -233,15 +264,14 @@ module tests {
             sig: sig_of("n0")
         }
 
-        val cert_n0n1n2n3n4 = {
-                view: 0,
-                kind: FinalizationKind,
-                proposal: Some(proposal),
-                signatures: Set("n0", "n1", "n2", "n3", "n4"),
-                ghost_sender: sig_of("n0"),
-            }
+        val cert_n0n1n2n3n4 = notarization(
+            proposal,
+            Set("n0", "n1", "n2", "n3", "n4"),
+            sig_of("n0")
+        )
 
         initWithLeader(Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
+            .expect(cert_kind(cert_n0n1n2n3n4) == FinalizationKind)
             // Leader n0 proposes in view 0
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .then( all {
@@ -362,7 +392,8 @@ module tests {
                 assert(replica_state.get("n5").ghost_last_seen_notarization==0),
                 assert(replica_state.get("n5").last_finalized==0),
                 assert(store_certificate.get("n5").size() == 1),
-                assert(store_certificate.get("n5").filter(cert=> cert.kind==FinalizationKind).size() == 1),
+                assert(store_certificate.get("n5")
+                    .filter(cert => cert_kind(cert) == FinalizationKind).size() == 1),
                 assert(is_view_notarized(0, store_certificate.get("n5"))),
                 assert(is_view_finalized(0, store_certificate.get("n5"))),
                 unchanged_all
@@ -375,7 +406,6 @@ module tests {
             .expect(select_votes(0, NotarizeKind, store_vote.get("n4")).size()==6)
 
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n0")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n0")))
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n1")))
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n2")))
             .expect(is_proposal_finalized_votes(proposal, store_vote.get("n3")))
@@ -383,27 +413,27 @@ module tests {
             .expect(is_view_finalized(0, store_certificate.get("n5")))
 
             .expect(store_certificate.get("n0").size() == 2)
-            .expect(store_certificate.get("n0").filter(cert => cert.kind==FinalizationKind).size() == 1)
-            .expect(store_certificate.get("n0").filter(cert => cert.kind==NotarizationKind).size() == 1)
+            .expect(store_certificate.get("n0").filter(cert => cert_kind(cert) == FinalizationKind).size() == 1)
+            .expect(store_certificate.get("n0").filter(cert => cert_kind(cert) == NotarizationKind).size() == 1)
 
             .expect(store_certificate.get("n1").size() == 2)
-            .expect(store_certificate.get("n1").filter(cert => cert.kind==FinalizationKind).size() == 1)
-            .expect(store_certificate.get("n1").filter(cert => cert.kind==NotarizationKind).size() == 1)
+            .expect(store_certificate.get("n1").filter(cert => cert_kind(cert) == FinalizationKind).size() == 1)
+            .expect(store_certificate.get("n1").filter(cert => cert_kind(cert) == NotarizationKind).size() == 1)
 
             .expect(store_certificate.get("n2").size() == 2)
-            .expect(store_certificate.get("n2").filter(cert => cert.kind==FinalizationKind).size() == 1)
-            .expect(store_certificate.get("n2").filter(cert => cert.kind==NotarizationKind).size() == 1)
+            .expect(store_certificate.get("n2").filter(cert => cert_kind(cert) == FinalizationKind).size() == 1)
+            .expect(store_certificate.get("n2").filter(cert => cert_kind(cert) == NotarizationKind).size() == 1)
 
             .expect(store_certificate.get("n3").size() == 2)
-            .expect(store_certificate.get("n3").filter(cert => cert.kind==FinalizationKind).size() == 1)
-            .expect(store_certificate.get("n3").filter(cert => cert.kind==NotarizationKind).size() == 1)
+            .expect(store_certificate.get("n3").filter(cert => cert_kind(cert) == FinalizationKind).size() == 1)
+            .expect(store_certificate.get("n3").filter(cert => cert_kind(cert) == NotarizationKind).size() == 1)
 
             .expect(store_certificate.get("n4").size() == 2)
-            .expect(store_certificate.get("n4").filter(cert => cert.kind==FinalizationKind).size() == 1)
-            .expect(store_certificate.get("n4").filter(cert => cert.kind==NotarizationKind).size() == 1)
+            .expect(store_certificate.get("n4").filter(cert => cert_kind(cert) == FinalizationKind).size() == 1)
+            .expect(store_certificate.get("n4").filter(cert => cert_kind(cert) == NotarizationKind).size() == 1)
 
             .expect(store_certificate.get("n5").size() == 1)
-            .expect(store_certificate.get("n4").filter(cert => cert.kind==FinalizationKind).size() == 1)
+            .expect(store_certificate.get("n5").filter(cert => cert_kind(cert) == FinalizationKind).size() == 1)
 
             .expect(is_view_notarized(0, store_certificate.get("n0")))
             .expect(is_view_notarized(0, store_certificate.get("n1")))
@@ -473,30 +503,19 @@ module tests {
             sig: sig_of("n0")
         }
 
-        val n4_vote = {
-            view: 0,
-            proposal: Some(proposal),
-            sig: sig_of("n4"),
-            kind: NotarizeKind
-        }
+        val n4_vote = notarize(proposal, sig_of("n4"))
 
-        val n5_vote = {
-            view: 0,
-            proposal: Some(proposal),
-            sig: sig_of("n5"),
-            kind: NotarizeKind
-        }
+        val n5_vote = notarize(proposal, sig_of("n5"))
 
-        val cert_n0n1n2 = {
-            view: 0,
-            kind: NotarizationKind,
-            proposal: Some(proposal),
-            signatures: Set("n0", "n1", "n2"),
-            ghost_sender: sig_of("n0"),
-        }
+        val cert_n0n1n2 = notarization(
+            proposal,
+            Set("n0", "n1", "n2"),
+            sig_of("n0")
+        )
 
 
         initWithLeader(Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
+            .expect(cert_kind(cert_n0n1n2) == NotarizationKind)
             // Leader n0 proposes in view 0
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .then( all {
@@ -548,7 +567,11 @@ module tests {
 
             .then(all{
                 assert(not(sent_vote.contains(n4_vote))),
-                assert(store_vote.get("n4").filter(v=>v.view==0 and v.kind==NotarizeKind and v.proposal.option_has(p => p.block == "val_b0")).size() == 0),
+                assert(store_vote.get("n4").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v).option_has(p => p.block == "val_b0"),
+                }).size() == 0),
                 assert(store_certificate.get("n4").size() == 0),
                 unchanged_all
             })
@@ -565,7 +588,11 @@ module tests {
             .then(replica_receives_notarize_vote("n5", proposal, "n1"))
             .then(all{
                 assert(not(sent_vote.contains(n5_vote))),
-                assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.proposal.option_has(p => p.block == "val_b0")).size() == 2),
+                assert(store_vote.get("n5").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v).option_has(p => p.block == "val_b0"),
+                }).size() == 2),
                 assert(store_certificate.get("n5").size() == 0),
                 assert(not(is_view_notarized(0, store_certificate.get("n5")))),
                 assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 0),
@@ -692,31 +719,23 @@ module tests {
             sig: sig_of("n0")
         }
 
-        val n5_vote = {
-            view: 0,
-            proposal: Some(proposal),
-            sig: sig_of("n5"),
-            kind: NotarizeKind
-        }
+        val n5_vote = notarize(proposal, sig_of("n5"))
 
-        val notarization_n0n1n2 = {
-            view: 0,
-            kind: NotarizationKind,
-            proposal: Some(proposal),
-            signatures: Set("n0", "n1", "n2"),
-            ghost_sender: sig_of("n0"),
-        }
+        val notarization_n0n1n2 = notarization(
+            proposal,
+            Set("n0", "n1", "n2"),
+            sig_of("n0")
+        )
 
-        val finalization_n0n1n2n3n4 = {
-            view: 0,
-            kind: FinalizationKind,
-            proposal: Some(proposal),
-            signatures: Set("n0", "n1", "n2", "n3", "n4"),
-            ghost_sender: sig_of("n0"),
-        }
+        val finalization_n0n1n2n3n4 = notarization(
+            proposal,
+            Set("n0", "n1", "n2", "n3", "n4"),
+            sig_of("n0")
+        )
 
 
         initWithLeader(Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
+            .expect(cert_kind(notarization_n0n1n2) == NotarizationKind)
             // Leader n0 proposes in view 0
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .then( all {
@@ -745,7 +764,7 @@ module tests {
                 assert(replica_state.get("n4").notarized.get(0).option_has(p => p.block == "val_b0")),
                 unchanged_all
             })
-
+            .expect(cert_kind(finalization_n0n1n2n3n4) == FinalizationKind)
             .expect(all_invariants)
 
             // All replicas collect votes and notarize the block
@@ -781,7 +800,11 @@ module tests {
 
             .then(all{
                 assert(not(sent_vote.contains(n5_vote))),
-                assert(store_vote.get("n5").filter(v=>v.view==0 and v.kind==NotarizeKind and v.proposal.option_has(p => p.block == "val_b0")).size() == 0),
+                assert(store_vote.get("n5").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v).option_has(p => p.block == "val_b0"),
+                }).size() == 0),
                 assert(store_certificate.get("n5").size() == 0),
                 unchanged_all
             })
@@ -1135,11 +1158,11 @@ module tests {
             .then(replica_receives_notarize_vote("n5", proposal1, "n5"))
 
             .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
+            .expect(is_view_notarized(0, store_certificate.get("n1")))
+            .expect(is_view_notarized(0, store_certificate.get("n2")))
+            .expect(is_view_notarized(0, store_certificate.get("n3")))
+            .expect(is_view_notarized(0, store_certificate.get("n4")))
+            .expect(is_view_notarized(0, store_certificate.get("n5")))
 
             .expect(not(is_proposal_finalized_votes(proposal1, store_vote.get("n0"))))
             .expect(not(is_proposal_finalized_votes(proposal1, store_vote.get("n1"))))
@@ -1198,11 +1221,11 @@ module tests {
             .then(replica_receives_notarize_vote("n5", proposal1, "n3"))
 
             .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
+            .expect(is_view_notarized(0, store_certificate.get("n1")))
+            .expect(is_view_notarized(0, store_certificate.get("n2")))
+            .expect(is_view_notarized(0, store_certificate.get("n3")))
+            .expect(is_view_notarized(0, store_certificate.get("n4")))
+            .expect(is_view_notarized(0, store_certificate.get("n5")))
 
             // Verify first block is finalized and committed
             .expect(is_proposal_finalized_votes(proposal1, store_vote.get("n0")))
@@ -1425,21 +1448,17 @@ module tests {
             sig: sig_of("n0")
         }
 
-        val nullification_n1n2n3 = {
-            view: 0,
-            kind: NullificationKind,
-            proposal: None,
-            signatures: Set("n1", "n2", "n3"),
-            ghost_sender: sig_of("n1"),
-        }
+        val nullification_n1n2n3 = nullification(
+            0,
+            Set("n1", "n2", "n3"),
+            sig_of("n1")
+        )
 
-        val nullification_n2n3n4 = {
-            view: 0,
-            kind: NullificationKind,
-            proposal: None,
-            signatures: Set("n4", "n2", "n3"),
-            ghost_sender: sig_of("n2"),
-        }
+        val nullification_n2n3n4 = nullification(
+            0,
+            Set("n4", "n2", "n3"),
+            sig_of("n2")
+        )
 
         initWithLeader(Map(0 -> "n0", 1 -> "n5", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
             // === view 0 ===
@@ -1551,8 +1570,13 @@ module tests {
             .then(replica_receives_nullify_vote("n0", 0, "n4"))
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.proposal.option_has(p => p.block != "val_b0")).size() == 0),
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 2),
+                assert(store_vote.get("n0").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v).option_has(p => p.block != "val_b0"),
+                }).size() == 0),
+                assert(store_vote.get("n0").filter(v =>
+                    vote_view(v) == 0 and vote_kind(v) == NullifyKind).size() == 2),
                 assert(replica_state.get("n0").nullified == false),
                 assert(replica_state.get("n0").notarized.get(0).option_has(p => p.block == "val_b0")),
                 assert(is_contradicted(replica_state.get("n0"), 0, store_vote.get("n0")) == false),
@@ -1562,7 +1586,7 @@ module tests {
             // no contradiction, no nullification will be sent.
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0).size() == 4),
+                assert(store_vote.get("n0").filter(v => vote_view(v) == 0).size() == 4),
                 assert(replica_state.get("n0").nullified == false),
                 unchanged_all,
             })
@@ -1570,15 +1594,16 @@ module tests {
             // n1 gets vote for block from n0 and 3 nullify votes from n3-n5
             .then(replica_receives_nullify_vote("n1", 0, "n3"))
             .then(all {
-                assert(store_vote.get("n1").filter(v=>v.view==0).size() == 2),
+                assert(store_vote.get("n1").filter(v => vote_view(v) == 0).size() == 2),
                 assert(replica_state.get("n1").nullified == false),
                 unchanged_all,
             })
             .then(replica_receives_nullify_vote("n1", 0, "n4"))
             .then(replica_receives_nullify_vote("n1", 0, "n5"))
             .then(all {
-                assert(store_vote.get("n1").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 3),
-                assert(store_vote.get("n1").filter(v=>v.view==0).size() == 4),
+                assert(store_vote.get("n1").filter(v =>
+                    vote_view(v) == 0 and vote_kind(v) == NullifyKind).size() == 3),
+                assert(store_vote.get("n1").filter(v => vote_view(v) == 0).size() == 4),
                 assert(replica_state.get("n1").view == 1),
                 unchanged_all,
             })

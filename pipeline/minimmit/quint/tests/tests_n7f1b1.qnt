@@ -119,9 +119,18 @@ module tests {
             })
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NotarizeKind and v.proposal == Some(proposal_from_n6_1)).size() == 3),
-                assert(store_vote.get("n3").filter(v=>v.view==0 and v.kind==NotarizeKind and v.proposal == Some(proposal_from_n6_2)).size() == 3),
-                assert(store_vote.get("n0").filter(v=>v.view==0 and v.kind==NullifyKind).size() == 0),
+                assert(store_vote.get("n0").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v) == Some(proposal_from_n6_1),
+                }).size() == 3),
+                assert(store_vote.get("n3").filter(v => and {
+                    vote_view(v) == 0,
+                    vote_kind(v) == NotarizeKind,
+                    vote_proposal(v) == Some(proposal_from_n6_2),
+                }).size() == 3),
+                assert(store_vote.get("n0").filter(v =>
+                    vote_view(v) == 0 and vote_kind(v) == NullifyKind).size() == 0),
                 assert(replica_state.get("n0").nullified == false),
                 assert(replica_state.get("n3").nullified == false),
                 assert(replica_state.get("n0").notarized.get(0).option_has(p => p.block == "val_b0")),

@@ -21,10 +21,9 @@ module tests {
         assumptions_valid
     }
 
-    // `on_certificate` accepts a finalization solely from its shape: kind,
-    // signature-set size, and block validity. Two threshold-shaped finalizations for
-    // different blocks in the same view can therefore be stored by different replicas,
-    // even though no corresponding votes were observed.
+    // `on_certificate` accepts a finalization once its signature set reaches L. Two
+    // threshold-sized finalizations for different blocks in the same view can therefore be
+    // stored by different replicas, even though no corresponding votes were observed.
     //
     // This state is NOT reachable from `init` via `step`: both certificates name n0..n4,
     // and `byzantine_replica_step` draws `agg_sig` from the signatures of real votes united
@@ -44,22 +43,20 @@ module tests {
             block: "val_b1", view: 0,
             view_parent: GENESIS_VIEW, block_parent: GENESIS_BLOCK, sig: sig_of("n0")
         }
-        pure val forged_finalization_b0 = {
-            view: 0,
-            kind: FinalizationKind,
-            proposal: Some(proposal_b0),
-            signatures: Set("n0", "n1", "n2", "n3", "n4"),
-            ghost_sender: sig_of("n5"),
-        }
-        pure val forged_finalization_b1 = {
-            view: 0,
-            kind: FinalizationKind,
-            proposal: Some(proposal_b1),
-            signatures: Set("n0", "n1", "n2", "n3", "n4"),
-            ghost_sender: sig_of("n5"),
-        }
+        pure val forged_finalization_b0 = notarization(
+            proposal_b0,
+            Set("n0", "n1", "n2", "n3", "n4"),
+            sig_of("n5")
+        )
+        pure val forged_finalization_b1 = notarization(
+            proposal_b1,
+            Set("n0", "n1", "n2", "n3", "n4"),
+            sig_of("n5")
+        )
 
         initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n0"))
+            .expect(cert_kind(forged_finalization_b0) == FinalizationKind)
+            .expect(cert_kind(forged_finalization_b1) == FinalizationKind)
             .then(on_certificate("n0", forged_finalization_b0))
             .then(on_certificate("n1", forged_finalization_b1))
             .then(all {
@@ -105,9 +102,9 @@ module tests {
             .then(all {
                 assert(replica_state.get("n0").last_finalized == 0),
                 assert(store_certificate.get("n0").exists(c => and {
-                    c.kind == FinalizationKind,
-                    c.view == 0,
-                    c.proposal == Some(proposal_from_n0),
+                    cert_kind(c) == FinalizationKind,
+                    cert_view(c) == 0,
+                    cert_proposal(c) == Some(proposal_from_n0),
                 })),
                 assert(certificates_are_backed),
                 assert(all_invariants),
@@ -307,7 +304,7 @@ module tests {
             .expect(all_invariants)
 
             .then(all {
-                assert(store_vote.get("n0").filter(v=>v.view==1).size() == 3),
+                assert(store_vote.get("n0").filter(v => vote_view(v) == 1).size() == 3),
                 assert(store_vote.get("n0").subseteq(sent_vote)),
                 assert(replica_state.get("n0").nullified == true),
                 unchanged_all,
@@ -394,9 +391,9 @@ module tests {
     // Regression test for the "out-of-order commit at the top view" defect.
     //
     // `enter_new_view` gates all of its bookkeeping -- including the `last_finalized`
-    // update -- behind `VIEWS.contains(cert.view + 1)`, so for a certificate on the top
+    // update -- behind `VIEWS.contains(cert_view(cert) + 1)`, so for a certificate on the top
     // view (8 here) the whole function is a no-op and `last_finalized` is never advanced.
-    // When the commit was an append guarded by `cert.view > self.last_finalized`, that
+    // When the commit was an append guarded by `cert_view(cert) > self.last_finalized`, that
     // stale watermark let n4 record view 8's block and then view 0's block after it.
     // The rebuilt chain does not consult `last_finalized` at all and derives its order
     // from parent links, so the defect can no longer reach `ghost_committed_blocks`.
@@ -419,25 +416,22 @@ module tests {
             sig: sig_of("n0")
         }
         // assembled by n0 on the last rung of the nullification ladder
-        pure val nullification_7 = {
-            view: 7,
-            proposal: None,
-            signatures: Set("n0", "n1", "n5"),
-            ghost_sender: "n0",
-            kind: NullificationKind
-        }
+        pure val nullification_7 = nullification(
+            7,
+            Set("n0", "n1", "n5"),
+            "n0"
+        )
         // assembled and broadcast by n4 when it finalizes view 0, after view 8
-        pure val finalization_0 = {
-            view: 0,
-            proposal: Some(proposal_from_n0),
-            signatures: Set("n0", "n1", "n2", "n3", "n4"),
-            ghost_sender: "n4",
-            kind: FinalizationKind
-        }
+        pure val finalization_0 = notarization(
+            proposal_from_n0,
+            Set("n0", "n1", "n2", "n3", "n4"),
+            "n4"
+        )
 
         // n5 leads views 1-7 and never proposes, so those views time out.
         initWithLeader(Map(0 -> "n0", 1 -> "n5", 2 -> "n5", 3 -> "n5", 4 -> "n5",
                            5 -> "n5", 6 -> "n5", 7 -> "n5", 8 -> "n0"))
+            .expect(cert_kind(finalization_0) == FinalizationKind)
             // === view 0: notarized by all of n0-n4, but nobody finalizes it yet ===
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .then(on_proposal("n1", proposal_from_n0))

@@ -60,17 +60,81 @@ module replica {
     // sequences of committed proposals for every local correct-style actor
     var ghost_committed_blocks: ReplicaId -> List[Proposal]
 
+    pure def vote_kind(vote: Vote): Kind = {
+        match vote {
+            | Notarize(_) => NotarizeKind
+            | Nullify(_) => NullifyKind
+        }
+    }
+
+    pure def vote_view(vote: Vote): ViewNumber = {
+        match vote {
+            | Notarize(v) => v.proposal.view
+            | Nullify(v) => v.view
+        }
+    }
+
+    pure def vote_sig(vote: Vote): Signature = {
+        match vote {
+            | Notarize(v) => v.sig
+            | Nullify(v) => v.sig
+        }
+    }
+
+    pure def vote_proposal(vote: Vote): Option[Proposal] = {
+        match vote {
+            | Notarize(v) => Some(v.proposal)
+            | Nullify(_) => None
+        }
+    }
+
+    pure def cert_view(cert: Certificate): ViewNumber = {
+        match cert {
+            | Notarization(c) => c.proposal.view
+            | Nullification(c) => c.view
+        }
+    }
+
+    pure def cert_signatures(cert: Certificate): Set[Signature] = {
+        match cert {
+            | Notarization(c) => c.signatures
+            | Nullification(c) => c.signatures
+        }
+    }
+
+    pure def cert_ghost_sender(cert: Certificate): Signature = {
+        match cert {
+            | Notarization(c) => c.ghost_sender
+            | Nullification(c) => c.ghost_sender
+        }
+    }
+
+    pure def cert_proposal(cert: Certificate): Option[Proposal] = {
+        match cert {
+            | Notarization(c) => Some(c.proposal)
+            | Nullification(_) => None
+        }
+    }
+
+    pure def cert_kind(cert: Certificate): Kind = {
+        match cert {
+            | Notarization(c) =>
+                if (c.signatures.size() >= L) FinalizationKind else NotarizationKind
+            | Nullification(_) => NullificationKind
+        }
+    }
+
     // Filter votes by view and kind.
     pure def select_votes(view: ViewNumber, kind: Kind, votes: Set[Vote]): Set[Vote] = {
-        votes.filter(v => v.kind == kind and v.view == view)
+        votes.filter(v => vote_kind(v) == kind and vote_view(v) == view)
     }
 
     // The vote a replica casts on adopting a certificate's proposal. The None branch is
     // unreachable: `should_send_notarize_vote` only fires for a notarization or finalization.
     pure def cert_notarize_vote(id: ReplicaId, c: Certificate): Vote = {
-        match c.proposal {
+        match cert_proposal(c) {
             | Some(p) => notarize(p, sig_of(id))
-            | None => nullify(c.view, sig_of(id))
+            | None => nullify(cert_view(c), sig_of(id))
         }
     }
 
@@ -80,14 +144,24 @@ module replica {
     }
 
     def has_notarized_view(id: ReplicaId, view:ViewNumber, votes: Set[Vote]): bool = {
-        votes.exists(v=> v.view == view and v.kind == NotarizeKind and v.sig == sig_of(id))
+        votes.exists(v => and {
+            vote_view(v) == view,
+            vote_kind(v) == NotarizeKind,
+            vote_sig(v) == sig_of(id),
+        })
     }
 
     // Does a set of certificates have a notarization certificate for a view?
     pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
-        certificates.exists(v => v.kind == NotarizationKind and v.view == view),
-        certificates.exists(v => v.kind == FinalizationKind and v.view == view)
+        certificates.exists(c => and {
+            cert_kind(c) == NotarizationKind,
+            cert_view(c) == view,
+        }),
+        certificates.exists(c => and {
+            cert_kind(c) == FinalizationKind,
+            cert_view(c) == view,
+        })
     }
 
     // Does a set of votes contain an M-quorum for this exact proposal? Votes are counted per
@@ -95,8 +169,8 @@ module replica {
     // parents are different proposals, so their votes never join the same quorum.
     pure def is_proposal_notarized_votes(p: Proposal, votes: Set[Vote]): bool = {
         select_votes(p.view, NotarizeKind, votes)
-            .filter(v => v.proposal == Some(p))
-            .map(v => v.sig)
+            .filter(v => vote_proposal(v) == Some(p))
+            .map(v => vote_sig(v))
             .size() >= M
     }
 
@@ -106,25 +180,27 @@ module replica {
     // must be stored and rebroadcast rather than silently dropped.
     pure def is_proposal_certified(p: Option[Proposal], certificates: Set[Certificate]): bool = {
         certificates.exists(c => and {
-            c.kind == NotarizationKind or c.kind == FinalizationKind,
-            c.proposal == p,
+            cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
+            cert_proposal(c) == p,
         })
     }
 
     pure def is_proposal_finalized(p: Option[Proposal], certificates: Set[Certificate]): bool = {
-        certificates.exists(c => c.kind == FinalizationKind and c.proposal == p)
+        certificates.exists(c =>
+            cert_kind(c) == FinalizationKind and cert_proposal(c) == p)
     }
 
     pure def is_view_finalized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
-        certificates.exists(v => v.kind == FinalizationKind and v.view == view)
+        certificates.exists(c =>
+            cert_kind(c) == FinalizationKind and cert_view(c) == view)
     }
 
     // Does a set of votes contain an L-quorum for this exact proposal?
     pure def is_proposal_finalized_votes(p: Proposal, votes: Set[Vote]): bool = {
         select_votes(p.view, NotarizeKind, votes)
-            .filter(v => v.proposal == Some(p))
-            .map(v => v.sig)
+            .filter(v => vote_proposal(v) == Some(p))
+            .map(v => vote_sig(v))
             .size() >= L
     }
 
@@ -132,19 +208,20 @@ module replica {
     pure def is_view_finalized_votes(view: ViewNumber, votes: Set[Vote]): bool = or {
         view == GENESIS_VIEW,
         select_votes(view, NotarizeKind, votes)
-            .exists(v => v.proposal.option_has(p => is_proposal_finalized_votes(p, votes)))
+            .exists(v => vote_proposal(v).option_has(p => is_proposal_finalized_votes(p, votes)))
     }
 
     // Does a set of certificates contain nullification certificates for this view?
     pure def is_view_nullified(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
-        certificates.exists(v => v.kind == NullificationKind and v.view == view)
+        certificates.exists(c =>
+            cert_kind(c) == NullificationKind and cert_view(c) == view)
     }
 
     pure def is_view_nullified_votes(view: ViewNumber, votes: Set[Vote]): bool = or {
         view == GENESIS_VIEW,
         select_votes(view, NullifyKind, votes)
-            .map(v => v.sig)
+            .map(v => vote_sig(v))
             .size() >= M
     }
 
@@ -162,9 +239,9 @@ module replica {
         or {
             proposal.view_parent == GENESIS_VIEW and proposal.block_parent == GENESIS_BLOCK,
             certificates.exists(c => and {
-                c.kind == NotarizationKind or c.kind == FinalizationKind,
-                c.view == proposal.view_parent,
-                c.proposal.option_has(pp => pp.block == proposal.block_parent),
+                cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
+                cert_view(c) == proposal.view_parent,
+                cert_proposal(c).option_has(pp => pp.block == proposal.block_parent),
             }),
         },
         are_views_nullified(proposal.view_parent, proposal.view, certificates),
@@ -180,10 +257,11 @@ module replica {
     // already been committed.
     def next_committable_cert(tip: Proposal, certificates: Set[Certificate]): Option[Certificate] = {
         val candidates = certificates.filter(c => and {
-            c.kind == FinalizationKind,
-            c.view > tip.view,
-            c.proposal.option_has(p => p.view_parent == tip.view and p.block_parent == tip.block),
-            are_views_nullified(tip.view, c.view, certificates),
+            cert_kind(c) == FinalizationKind,
+            cert_view(c) > tip.view,
+            cert_proposal(c).option_has(p =>
+                p.view_parent == tip.view and p.block_parent == tip.block),
+            are_views_nullified(tip.view, cert_view(c), certificates),
         })
         if (candidates.size() == 1)
             candidates.fold(None, (_acc, c) => Some(c))
@@ -199,7 +277,7 @@ module replica {
     def rebuild_committed_chain(certificates: Set[Certificate]): List[Proposal] = {
         VIEWS.fold((List(), GENESIS_PROPOSAL), (acc, _view) =>
             match next_committable_cert(acc._2, certificates) {
-                | Some(c) => match c.proposal {
+                | Some(c) => match cert_proposal(c) {
                     | Some(p) => (acc._1.append(p), p)
                     | None => acc
                   }
@@ -211,21 +289,19 @@ module replica {
     // Create a nullify certificate from a set of votes.
     def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
-            v.view == view,
-            v.kind == NullifyKind
+            vote_view(v) == view,
+            vote_kind(v) == NullifyKind
         })
         val votes_count = similar_votes.size()
 
         if (votes_count < M)
             None
         else
-            Some({
-                view: view,
-                proposal: None,
-                signatures: similar_votes.map(v => v.sig),
-                ghost_sender: sig_of(id),
-                kind: NullificationKind
-            })
+            Some(nullification(
+                view,
+                similar_votes.map(v => vote_sig(v)),
+                sig_of(id)
+            ))
     }
 
     // Assemble a certificate for one proposal. The quorum is "same proposal", not
@@ -233,21 +309,19 @@ module replica {
     def create_notarization(id: ReplicaId,
             proposal: Proposal, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
-            v.kind == NotarizeKind,
-            v.proposal == Some(proposal)
+            vote_kind(v) == NotarizeKind,
+            vote_proposal(v) == Some(proposal)
         })
 
         val votes_count = similar_votes.size()
         if (votes_count < M)
             None
         else
-            Some({
-                view: proposal.view,
-                proposal: Some(proposal),
-                signatures: similar_votes.map(v => v.sig),
-                ghost_sender: sig_of(id),
-                kind: if (votes_count >= L) FinalizationKind else NotarizationKind
-            })
+            Some(notarization(
+                proposal,
+                similar_votes.map(v => vote_sig(v)),
+                sig_of(id)
+            ))
     }
 
     // Check whether a proposal cannot be notarized in a view. A notarize vote for a
@@ -255,11 +329,13 @@ module replica {
     // proposals build on different parents and their votes never join one quorum.
     def is_proposal_in_view_cannot_be_notarized(p: Proposal, view: ViewNumber, votes: Set[Vote]): bool = {
         val vs1 = votes.filter(v => and {
-            v.kind == NotarizeKind,
-            v.view == view,
-            v.proposal != Some(p),
-        }).map(v => v.sig)
-        val vs2 = votes.filter(v => v.kind == NullifyKind and v.view == view).map(v => v.sig)
+            vote_kind(v) == NotarizeKind,
+            vote_view(v) == view,
+            vote_proposal(v) != Some(p),
+        }).map(v => vote_sig(v))
+        val vs2 = votes
+            .filter(v => vote_kind(v) == NullifyKind and vote_view(v) == view)
+            .map(v => vote_sig(v))
         vs1.union(vs2).size() >= M
     }
 
@@ -273,7 +349,9 @@ module replica {
 
     // Enter a new view, unless it is older than the current view.
     pure def enter_new_view(self: ReplicaState, cert: Certificate): ReplicaState = {
-        val new_view = cert.view + 1
+        val view = cert_view(cert)
+        val kind = cert_kind(cert)
+        val new_view = view + 1
         if (not(VIEWS.contains(new_view)))
             self // no change
         else
@@ -285,9 +363,9 @@ module replica {
                 view:
                     if (self.view < new_view) new_view else self.view,
                 last_finalized:
-                    if (self.last_finalized < cert.view and cert.kind == FinalizationKind) cert.view else self.last_finalized,
+                    if (self.last_finalized < view and kind == FinalizationKind) view else self.last_finalized,
                 ghost_last_seen_notarization:
-                    if (self.ghost_last_seen_notarization < cert.view and cert.kind != NullificationKind) cert.view else self.ghost_last_seen_notarization
+                    if (self.ghost_last_seen_notarization < view and kind != NullificationKind) view else self.ghost_last_seen_notarization
             }
     }
 
@@ -306,9 +384,9 @@ module replica {
             // the parent block is notarized in the parent view
             or {
                 certs.exists(c => and {
-                    c.kind == NotarizationKind or c.kind == FinalizationKind,
-                    c.view == parent_view,
-                    c.proposal.option_has(p => p.block == parent_block),
+                    cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
+                    cert_view(c) == parent_view,
+                    cert_proposal(c).option_has(p => p.block == parent_block),
                 }),
                 parent_view < 0 and parent_block == GENESIS_BLOCK,
             }
@@ -536,7 +614,8 @@ module replica {
             votes.forall(v => and {
                 // Note, `proposal.view` is not the current view of the replica; the votes
                 // are all for one proposal, which is what a quorum is counted over.
-                v.kind == NotarizeKind, v.proposal == Some(proposal),
+                vote_kind(v) == NotarizeKind,
+                vote_proposal(v) == Some(proposal),
             }),
             val new_store = store_vote.get(id).union(votes)
 
@@ -582,7 +661,11 @@ module replica {
         val store = store_vote.get(id)
         all {
             votes != Set(),
-            votes.forall(v => v.view == view and v.kind == NullifyKind and not(v.in(store))),
+            votes.forall(v => and {
+                vote_view(v) == view,
+                vote_kind(v) == NullifyKind,
+                not(v.in(store)),
+            }),
             val new_store = store_vote.get(id).union(votes)
 
             all {
@@ -624,9 +707,15 @@ module replica {
             not(cert.in(store_certificate.get(id))),
 
             or {
-                cert.kind == NullificationKind and cert.signatures.size() >= M and not(is_view_nullified(cert.view, certificates)),
-                cert.kind == NotarizationKind  and cert.signatures.size() >= M and not(is_proposal_certified(cert.proposal, certificates)),
-                cert.kind == FinalizationKind  and cert.signatures.size() >= L and not(is_proposal_finalized(cert.proposal, certificates)),
+                cert_kind(cert) == NullificationKind
+                    and cert_signatures(cert).size() >= M
+                    and not(is_view_nullified(cert_view(cert), certificates)),
+                cert_kind(cert) == NotarizationKind
+                    and cert_signatures(cert).size() >= M
+                    and not(is_proposal_certified(cert_proposal(cert), certificates)),
+                cert_kind(cert) == FinalizationKind
+                    and cert_signatures(cert).size() >= L
+                    and not(is_proposal_finalized(cert_proposal(cert), certificates)),
             },
 
             // is_new_cert set to true, because this is a certificate and at this moment the view is not nullified, notarized, or finalized
@@ -646,16 +735,18 @@ module replica {
             store_certificate.get(id).union(Set(cert))
         else
             store_certificate.get(id)
+        val view = cert_view(cert)
+        val proposal = cert_proposal(cert)
         val should_send_notarize_vote = and {
-            self.view == cert.view,
+            self.view == view,
             not(self.has_notarized()),
             not(self.nullified),
-            cert.kind == NotarizationKind or cert.kind == FinalizationKind,
+            cert_kind(cert) == NotarizationKind or cert_kind(cert) == FinalizationKind,
             is_new_cert
         }
 
         all {
-            cert.signatures.size() >= M,
+            cert_signatures(cert).size() >= M,
 
             if (is_new_cert) all {
                 store_certificate' = store_certificate.set(id, next_certs),
@@ -680,8 +771,8 @@ module replica {
                     sent_vote' = sent_vote.union(Set(cert_notarize_vote(id, cert))),
                     replica_state' = replica_state.set(id, {
                         ...new_self,
-                        notarized: self.notarized.put(cert.view, cert.proposal),
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(cert.view, old => old.append(cert.proposal))
+                        notarized: self.notarized.put(view, proposal),
+                        ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(proposal))
                     }),
                 }
             else
@@ -749,24 +840,22 @@ module replica {
             nondet view = VIEWS.oneOf()
             nondet p = oneOf(sent_proposal.union(Set(GENESIS_PROPOSAL)))
             nondet kind = oneOf(Set(NotarizeKind, NullifyKind))
-            val cert_view = if (kind == NullifyKind) view else p.view
+            val certificate_view = if (kind == NullifyKind) view else p.view
             val cert_prop = if (kind == NullifyKind) None else Some(p)
             val votes = sent_vote.filter(v => and {
-                v.view == cert_view,
-                v.proposal == cert_prop,
-                v.kind == kind
+                vote_view(v) == certificate_view,
+                vote_proposal(v) == cert_prop,
+                vote_kind(v) == kind
             })
-            nondet agg_sig = votes.map(v => v.sig).union(BYZANTINE.map(id => sig_of(id))).powerset().oneOf()
-            val cert_kind = if (kind == NullifyKind) {
-                NullificationKind
-            } else if (agg_sig.size()>= L) FinalizationKind else NotarizationKind
-            val cert = {
-                view: cert_view,
-                proposal: cert_prop,
-                signatures: agg_sig,
-                ghost_sender: sig_of(sender),
-                kind: cert_kind
-            }
+            nondet agg_sig = votes
+                .map(v => vote_sig(v))
+                .union(BYZANTINE.map(id => sig_of(id)))
+                .powerset()
+                .oneOf()
+            val cert = if (kind == NullifyKind)
+                nullification(certificate_view, agg_sig, sig_of(sender))
+            else
+                notarization(p, agg_sig, sig_of(sender))
             sent_certificate' = sent_certificate.union(Set(cert))
         },
         // Adversary may inject arbitrary proposal.
@@ -847,7 +936,7 @@ module replica {
         val certs = store_certificate.get(id)
         val votes = store_vote.get(id)
         val views_with_nullification =
-            certs.filter(c => c.kind == NullificationKind).map(c => c.view)
+            certs.filter(c => cert_kind(c) == NullificationKind).map(c => cert_view(c))
         val views_with_finalization =
             VIEWS.filter(v => is_view_finalized_votes(v, votes))
         views_with_nullification.intersect(views_with_finalization) == Set()
@@ -870,19 +959,20 @@ module replica {
     })
 
 
-    // Make sure that no invalid certificates are stored.
+    // Make sure that no invalid certificates are stored. Variant/proposal consistency is
+    // structural, and finalization is derived from signature count. Only raw payload
+    // constraints remain here.
     val certificates_are_valid_inv = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
-        certs.forall(cert => and {
-            cert.view >= 0,
-            or {
-                cert.signatures.size() >= M and (cert.kind == NotarizationKind or cert.kind == NullificationKind),
-                cert.signatures.size() >= L and cert.kind == FinalizationKind,
-            },
-            cert.kind == NotarizationKind or cert.kind == NullificationKind or cert.kind == FinalizationKind,
-            (cert.proposal == None) iff (cert.kind == NullificationKind),
-            cert.proposal.option_has(p => VALID_BLOCKS.contains(p.block) and p.view == cert.view)
-                or (cert.kind == NullificationKind)
+        store_certificate.get(id).forall(cert => match cert {
+            | Notarization(c) => and {
+                c.proposal.view >= 0,
+                c.signatures.size() >= M,
+                VALID_BLOCKS.contains(c.proposal.block),
+            }
+            | Nullification(c) => and {
+                c.view >= 0,
+                c.signatures.size() >= M,
+            }
         })
     })
 
@@ -898,17 +988,18 @@ module replica {
     // because `correct_replica_step` draws votes from `powerset(sent_vote)` and a store is
     // therefore always a subset of what was broadcast.
     def cert_backing(cert: Certificate): Set[Signature] = {
-        val votes = if (cert.kind == NullificationKind)
-            select_votes(cert.view, NullifyKind, sent_vote)
+        val votes = if (cert_kind(cert) == NullificationKind)
+            select_votes(cert_view(cert), NullifyKind, sent_vote)
         else
-            select_votes(cert.view, NotarizeKind, sent_vote).filter(v => v.proposal == cert.proposal)
-        votes.map(v => v.sig).union(FAULTY_KEYS)
+            select_votes(cert_view(cert), NotarizeKind, sent_vote)
+                .filter(v => vote_proposal(v) == cert_proposal(cert))
+        votes.map(v => vote_sig(v)).union(FAULTY_KEYS)
     }
 
     // Certificate signatures cannot be forged. `on_certificate` accepts a certificate by its
-    // shape alone: kind, number of signatures, and block validity. It never checks that the
-    // signatures belong to replicas that really voted, so it depends on this property being
-    // true. Two places make it true: `byzantine_replica_step`, which builds `agg_sig` from
+    // variant and signature threshold. It never checks that the signatures belong to replicas
+    // that really voted, so it depends on this property. Two places make it true:
+    // `byzantine_replica_step`, which builds `agg_sig` from
     // the signatures of real votes plus BYZANTINE, and `create_notarization` /
     // `create_nullification`, which build `signatures` from votes the replica observed.
     //
@@ -916,9 +1007,10 @@ module replica {
     // two steps are enough to store finalizations for two different blocks in the same view
     // and break `validity`. See `forgedFinalizationCertificatesViolateValidityTest`.
     val certificates_are_backed = and {
-        sent_certificate.forall(cert => cert.signatures.subseteq(cert_backing(cert))),
+        sent_certificate.forall(cert => cert_signatures(cert).subseteq(cert_backing(cert))),
         CORRECT.forall(id =>
-            store_certificate.get(id).forall(cert => cert.signatures.subseteq(cert_backing(cert)))),
+            store_certificate.get(id).forall(cert =>
+                cert_signatures(cert).subseteq(cert_backing(cert)))),
     }
 
     val notarized_consistency = CORRECT.forall(id => {
@@ -942,11 +1034,13 @@ module replica {
         val finalized_proposals = CORRECT.fold(Set(), (acc, id) =>
             acc.union(store_certificate.get(id)
                 .filter(c => and {
-                    c.kind == FinalizationKind,
-                    c.signatures.size() >= L,
-                    c.view == v,
+                    cert_kind(c) == FinalizationKind,
+                    // Keep the raw threshold so a lowered kind threshold cannot admit a
+                    // sub-L certificate as a finalization.
+                    cert_signatures(c).size() >= L,
+                    cert_view(c) == v,
                 })
-                .map(c => c.proposal)))
+                .map(c => cert_proposal(c))))
         finalized_proposals.size() <= 1
     })
 
@@ -957,7 +1051,7 @@ module replica {
         or {
             not(is_view_finalized_votes(v, votes)),
             select_votes(v, NullifyKind, votes)
-                .map(vote => vote.sig)
+                .map(vote => vote_sig(vote))
                 .size() < M
         }
     })
@@ -967,10 +1061,10 @@ module replica {
         val self = replica_state.get(id)
         val votes = store_vote.get(id)
         select_votes(v, NotarizeKind, votes).forall(fin_vote => or {
-            not(fin_vote.proposal.option_has(p => is_proposal_finalized_votes(p, votes))),
+            not(vote_proposal(fin_vote).option_has(p => is_proposal_finalized_votes(p, votes))),
             select_votes(v, NotarizeKind, votes)
-                .filter(vote => vote.proposal != fin_vote.proposal)
-                .map(vote => vote.sig)
+                .filter(vote => vote_proposal(vote) != vote_proposal(fin_vote))
+                .map(vote => vote_sig(vote))
                 .size() < M
         })
     })
@@ -987,8 +1081,8 @@ module replica {
         val chain = ghost_committed_blocks.get(id)
         val certs = store_certificate.get(id)
         chain.indices().forall(i => certs.exists(c => and {
-            c.kind == FinalizationKind,
-            c.proposal == Some(chain[i]),
+            cert_kind(c) == FinalizationKind,
+            cert_proposal(c) == Some(chain[i]),
         }))
     })
 
@@ -1014,8 +1108,12 @@ module replica {
     // why it is quantified across all stored certificates.
     val no_nullification_and_finalization_globally = {
         val all_certs = CORRECT.fold(Set(), (acc, id) => acc.union(store_certificate.get(id)))
-        val nullified = all_certs.filter(c => c.kind == NullificationKind).map(c => c.view)
-        val finalized = all_certs.filter(c => c.kind == FinalizationKind).map(c => c.view)
+        val nullified = all_certs
+            .filter(c => cert_kind(c) == NullificationKind)
+            .map(c => cert_view(c))
+        val finalized = all_certs
+            .filter(c => cert_kind(c) == FinalizationKind)
+            .map(c => cert_view(c))
         nullified.intersect(finalized) == Set()
     }
 
@@ -1040,13 +1138,13 @@ module replica {
     // Test invariants.
 
     val correct_nodes_sent_certificates_valid = sent_certificate
-        .filter(cert => CORRECT_KEYS.contains(cert.ghost_sender))
+        .filter(cert => CORRECT_KEYS.contains(cert_ghost_sender(cert)))
         .forall(cert => {
-            cert.signatures.size() >= M
+            cert_signatures(cert).size() >= M
         })
     val store_certificates_are_valid = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
-        certs.forall(cert => cert.signatures.size() >= M)
+        certs.forall(cert => cert_signatures(cert).size() >= M)
     })
 
     val certificates_are_valid = and {

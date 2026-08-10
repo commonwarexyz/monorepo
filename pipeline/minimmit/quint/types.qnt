@@ -5,8 +5,6 @@ module types {
 
     type Signature = str
 
-    type Weight = int
-
     type ViewNumber = int
 
     type Block = str
@@ -22,12 +20,10 @@ module types {
 
     pure val GENESIS_BLOCK: Block = "GENESIS_BLOCK"
     pure val DUMMY_BLOCK: Block = "DUMMY_BLOCK"
-    pure val EMPTY_BLOCK = "EMPTY_BLOCK"
 
     pure val GENESIS_VIEW = -1
 
     pure val NotarizeKind = "NOTARIZE_KIND"
-    pure val EmptyKind = "EMPTY_KIND"
     pure val NullifyKind = "NULLIFY_KIND"
 
     pure val NotarizationKind = "NOTARIZATION_KIND"
@@ -64,41 +60,74 @@ module types {
         sig: ""
     }
 
-    // Vote for a proposal at height h. A `notarize` names the whole proposal it votes for;
-    // a `nullify` is about the view alone and carries None.
-    type Vote = {
-        view: ViewNumber,
-        proposal: Option[Proposal],
-        sig: Signature,
-        kind: Kind
+    // A notarize vote signs the complete proposal.
+    type NotarizeVote = {
+        proposal: Proposal,
+        sig: Signature
     }
 
+    // A nullify vote signs only a view.
+    type NullifyVote = {
+        view: ViewNumber,
+        sig: Signature
+    }
+
+    type Vote =
+        | Notarize(NotarizeVote)
+        | Nullify(NullifyVote)
+
     pure def nullify(v: ViewNumber,  id: Signature): Vote = {
-        {
+        Nullify({
             view: v,
-            proposal: None,
-            sig: id,
-            kind: NullifyKind
-        }
+            sig: id
+        })
     }
 
     pure def notarize(p: Proposal, id: Signature): Vote = {
-        {
-            view: p.view,
-            proposal: Some(p),
-            sig: id,
-            kind: NotarizeKind
-        }
+        Notarize({
+            proposal: p,
+            sig: id
+        })
     }
 
-    // A notarization or finalization certifies one proposal; a nullification certifies a
-    // view and carries None.
-    type Certificate = {
-        view: ViewNumber,
-        proposal: Option[Proposal],
-        kind: Kind,
+    type NotarizationCert = {
+        proposal: Proposal,
         signatures: Set[Signature],
         ghost_sender: Signature
+    }
+
+    type NullificationCert = {
+        view: ViewNumber,
+        signatures: Set[Signature],
+        ghost_sender: Signature
+    }
+
+    type Certificate =
+        | Notarization(NotarizationCert)
+        | Nullification(NullificationCert)
+
+    pure def notarization(
+        proposal: Proposal,
+        signatures: Set[Signature],
+        ghost_sender: Signature
+    ): Certificate = {
+        Notarization({
+            proposal: proposal,
+            signatures: signatures,
+            ghost_sender: ghost_sender
+        })
+    }
+
+    pure def nullification(
+        view: ViewNumber,
+        signatures: Set[Signature],
+        ghost_sender: Signature
+    ): Certificate = {
+        Nullification({
+            view: view,
+            signatures: signatures,
+            ghost_sender: ghost_sender
+        })
     }
 
     // Local state kept by each replica
