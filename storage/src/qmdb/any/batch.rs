@@ -1115,41 +1115,8 @@ where
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
     /// caller gathered and read ahead of time, consumed by the raise before scanning live.
     #[allow(clippy::too_many_arguments)]
-    async fn finish<E, C, I, const N: usize>(
-        self,
-        ops: Vec<Operation<F, U>>,
-        diff: DiffVec<U::Key, F, U::Value>,
-        superseded_locs: Vec<Location<F>>,
-        active_keys_delta: isize,
-        user_steps: u64,
-        metadata: Option<U::Value>,
-        prefetched: Option<PrefetchedCandidates<F, U>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-        db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        self.finish_pending(
-            ops,
-            diff,
-            superseded_locs,
-            active_keys_delta,
-            user_steps,
-            metadata,
-            prefetched,
-            fill_candidates,
-            db,
-        )
-        .await?
-        .seal()
-        .await
-    }
-
-    /// [`Self::finish`], stopping after the journal merkleize job is submitted: the
-    /// returned [`PendingMerkleize`] carries the in-flight job so the caller can overlap
+    /// Complete merkleization through the journal job's submission: the returned
+    /// [`PendingMerkleize`] carries the in-flight job so the caller can overlap
     /// independent work with it before sealing.
     async fn finish_pending<E, C, I, const N: usize>(
         self,
@@ -2169,6 +2136,33 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        self.merkleize_with_floor_scan_pending(
+            db,
+            metadata,
+            staged_updates,
+            prefetched,
+            fill_candidates,
+        )
+        .await?
+        .seal()
+        .await
+    }
+
+    /// [`Self::merkleize_with_floor_scan`], stopping with the journal merkleize job in
+    /// flight (see [`PendingMerkleize`]).
+    pub(crate) async fn merkleize_with_floor_scan_pending<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+        staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
+        prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
+        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+    ) -> Result<PendingMerkleize<F, H, update::Unordered<K, V>, S>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys.
@@ -2311,7 +2305,7 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(
+        m.finish_pending(
             ops,
             diff,
             superseded_locs,
