@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{Bounded, FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -223,7 +223,7 @@ async fn setup_network<P: simplex::Simplex>(
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
         NetworkConfig {
-            max_size: Bounded!(1024 * 1024),
+            max_size: 1024 * 1024,
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),

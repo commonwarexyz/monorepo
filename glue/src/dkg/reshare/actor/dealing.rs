@@ -303,8 +303,7 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, Bounded, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact,
-        ordered::Set,
+        Acknowledgement, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
     };
     use std::{
         collections::VecDeque,
@@ -449,7 +448,7 @@ mod tests {
             let (_network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 NetworkConfig {
-                    max_size: Bounded!(1024),
+                    max_size: 1024,
                     max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),

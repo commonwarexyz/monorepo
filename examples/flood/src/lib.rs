@@ -102,37 +102,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_codec::FixedSize as _;
-use commonware_utils::Bounded;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU32, NonZeroUsize};
-
-const MIN_MESSAGE_SIZE: u32 = u64::SIZE as u32;
-
-fn deserialize_message_size<'de, D>(
-    deserializer: D,
-) -> Result<Bounded<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let message_size = u32::deserialize(deserializer)?;
-    message_size.try_into().map_err(|message_size| {
-        D::Error::custom(format_args!(
-            "message_size must be between {MIN_MESSAGE_SIZE} and {} bytes (received {message_size})",
-            commonware_p2p::authenticated::MAX_SIZE,
-        ))
-    })
-}
-
-fn serialize_message_size<S>(
-    message_size: &Bounded<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    message_size.get().serialize(serializer)
-}
 
 /// Configuration for flood.
 #[derive(Deserialize, Serialize)]
@@ -142,71 +113,8 @@ pub struct Config {
     pub allowed_peers: Vec<String>,
     pub bootstrappers: Vec<String>,
     pub worker_threads: usize,
-    #[serde(
-        deserialize_with = "deserialize_message_size",
-        serialize_with = "serialize_message_size"
-    )]
-    pub message_size: Bounded<u32, MIN_MESSAGE_SIZE, { commonware_p2p::authenticated::MAX_SIZE }>,
+    pub message_size: u32,
     pub message_rate: NonZeroU32,
     pub mailbox_size: NonZeroUsize,
     pub instrument: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn config_with_message_size(message_size: u32) -> String {
-        format!(
-            r#"private_key: key
-port: 1
-allowed_peers: []
-bootstrappers: []
-worker_threads: 1
-message_size: {message_size}
-message_rate: 1
-mailbox_size: 1
-instrument: false
-"#
-        )
-    }
-
-    #[test]
-    fn rejects_invalid_message_sizes_during_deserialization() {
-        for message_size in [0, MIN_MESSAGE_SIZE - 1] {
-            let error = serde_yaml::from_str::<Config>(&config_with_message_size(message_size))
-                .err()
-                .expect("undersized message should be rejected");
-            assert!(error.to_string().contains("message_size"));
-        }
-
-        let oversized = commonware_p2p::authenticated::MAX_SIZE + 1;
-        let oversized_error = serde_yaml::from_str::<Config>(&config_with_message_size(oversized))
-            .err()
-            .expect("oversized message size should be rejected");
-        assert!(oversized_error.to_string().contains("message_size"));
-        assert!(
-            oversized_error
-                .to_string()
-                .contains(&commonware_p2p::authenticated::MAX_SIZE.to_string())
-        );
-
-        let minimum = serde_yaml::from_str::<Config>(&config_with_message_size(MIN_MESSAGE_SIZE))
-            .expect("minimum message size should be accepted");
-        assert_eq!(minimum.message_size.get(), MIN_MESSAGE_SIZE);
-
-        let maximum = serde_yaml::from_str::<Config>(&config_with_message_size(
-            commonware_p2p::authenticated::MAX_SIZE,
-        ))
-        .expect("maximum message size should be accepted");
-        assert_eq!(
-            maximum.message_size.get(),
-            commonware_p2p::authenticated::MAX_SIZE
-        );
-
-        let serialized = serde_yaml::to_string(&maximum).expect("config should serialize");
-        let round_trip: Config =
-            serde_yaml::from_str(&serialized).expect("serialized config should deserialize");
-        assert_eq!(round_trip.message_size, maximum.message_size);
-    }
 }

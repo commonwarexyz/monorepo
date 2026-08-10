@@ -16,7 +16,7 @@ use commonware_p2p::{
     simulated::{self, Link, Network},
 };
 use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
-use commonware_utils::{Bounded, NZUsize, TryCollect, channel::mpsc, ordered::Set};
+use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set};
 use rand::seq::IndexedRandom;
 use std::{
     collections::HashSet,
@@ -472,7 +472,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
             ctx.child("network"),
             simulated::Config {
-                max_size: Bounded!(self.max_message_size),
+                max_size: self.max_message_size,
                 max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),

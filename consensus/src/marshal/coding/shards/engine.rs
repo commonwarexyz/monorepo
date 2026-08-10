@@ -1899,7 +1899,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        Bounded, N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
     };
     use std::{
         future::Future,
@@ -1935,8 +1935,6 @@ mod tests {
 
     /// The max size of a shard sent over the wire.
     const MAX_SHARD_SIZE: usize = 1024 * 1024; // 1 MiB
-    const MAX_NETWORK_SHARD_SIZE: Bounded<u32, 1, { simulated::MAX_SIZE }> =
-        Bounded!(u32, MAX_SHARD_SIZE as u32);
 
     /// The default link configuration for tests.
     const DEFAULT_LINK: Link = Link {
@@ -2121,7 +2119,7 @@ mod tests {
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.child("network"),
                         simulated::Config {
-                            max_size: MAX_NETWORK_SHARD_SIZE,
+                            max_size: MAX_SHARD_SIZE as u32,
                             max_peers_per_set: NZUsize!(
                                 self.num_primary_peers
                                     + self.num_secondary_peers.max(self.num_future_peers)
@@ -4697,7 +4695,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_NETWORK_SHARD_SIZE,
+                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -4825,7 +4823,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_NETWORK_SHARD_SIZE,
+                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -5674,7 +5672,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_NETWORK_SHARD_SIZE,
+                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -5801,7 +5799,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_NETWORK_SHARD_SIZE,
+                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -5880,7 +5878,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_NETWORK_SHARD_SIZE,
+                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(num_peers - 1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -6019,7 +6017,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_NETWORK_SHARD_SIZE,
+                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),

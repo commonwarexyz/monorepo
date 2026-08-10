@@ -7,6 +7,7 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         discovery::types::InfoVerifier,
         router,
@@ -37,6 +38,7 @@ pub struct Network<
 > {
     context: ContextCell<E>,
     cfg: Config<C>,
+    max_frame_size: u32,
     max_peer_set_size: u64,
 
     channels: Channels<C::PublicKey>,
@@ -61,8 +63,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if configured bit-vector or retained-peer capacity arithmetic overflows.
+    /// Panics if configured frame, bit-vector, or retained-peer capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let max_frame_size = cfg
+            .max_message_size
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
+            .expect("maximum frame size overflow");
         let max_peer_set_size =
             u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
 
@@ -101,12 +107,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             },
         );
         let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
-        let channels = Channels::new(messenger, cfg.max_message_size.get(), max_retained_peers);
+        let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
             Self {
                 context: ContextCell::new(context),
                 cfg,
+                max_frame_size,
                 max_peer_set_size,
 
                 channels,
@@ -221,11 +228,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Start listener
-        let max_frame_size = self.cfg.max_frame_size();
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: max_frame_size,
+            max_message_size: self.max_frame_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

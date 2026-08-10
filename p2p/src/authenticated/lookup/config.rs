@@ -1,8 +1,6 @@
-use crate::authenticated::{MAX_PAYLOAD_OVERHEAD, MAX_SIZE};
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_stream::encrypted::MAX_SIZE as STREAM_MAX_SIZE;
-use commonware_utils::{Bounded, NZU32, NZUsize};
+use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
@@ -43,12 +41,14 @@ pub struct Config<C: Signer> {
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
+    /// The largest supported value is [`crate::authenticated::MAX_SIZE`].
+    ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
-    pub max_message_size: Bounded<u32, 1, MAX_SIZE>,
+    pub max_message_size: u32,
 
     /// Maximum number of distinct identities at one peer-set index, including the local identity.
     ///
@@ -129,18 +129,13 @@ pub struct Config<C: Signer> {
 }
 
 impl<C: Signer> Config<C> {
-    /// Returns the encrypted-stream payload limit for this configuration.
-    pub(super) fn max_frame_size(&self) -> Bounded<u32, 1, STREAM_MAX_SIZE> {
-        Bounded!(self.max_message_size.get() + MAX_PAYLOAD_OVERHEAD)
-    }
-
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
-        max_message_size: Bounded<u32, 1, MAX_SIZE>,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
@@ -180,7 +175,7 @@ impl<C: Signer> Config<C> {
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
-        max_message_size: Bounded<u32, 1, MAX_SIZE>,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
@@ -210,11 +205,7 @@ impl<C: Signer> Config<C> {
     }
 
     #[cfg(test)]
-    pub fn test(
-        crypto: C,
-        listen: SocketAddr,
-        max_message_size: Bounded<u32, 1, MAX_SIZE>,
-    ) -> Self {
+    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),
@@ -240,25 +231,5 @@ impl<C: Signer> Config<C> {
             tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_mins(1),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_cryptography::ed25519::PrivateKey;
-    use commonware_utils::Bounded;
-    use std::net::{Ipv4Addr, SocketAddr};
-
-    #[test]
-    fn test_max_message_size_config_is_compatible() {
-        let config = Config::test(
-            PrivateKey::from_seed(0),
-            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
-            Bounded!(MAX_SIZE),
-        );
-
-        assert_eq!(config.max_message_size.get(), MAX_SIZE);
-        assert_eq!(config.max_frame_size().get(), STREAM_MAX_SIZE);
     }
 }

@@ -656,7 +656,7 @@ mod tests {
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
-    use commonware_utils::{Bounded, NZU32, NZUsize, channel::oneshot, non_empty_vec, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, channel::oneshot, non_empty_vec, sync::Mutex};
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
@@ -810,7 +810,7 @@ mod tests {
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 NetworkConfig {
-                    max_size: Bounded!(1024 * 1024),
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -985,7 +985,7 @@ mod tests {
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 NetworkConfig {
-                    max_size: Bounded!(1024 * 1024),
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),

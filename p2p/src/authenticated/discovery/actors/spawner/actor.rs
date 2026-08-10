@@ -173,7 +173,7 @@ mod tests {
         Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
         listen,
     };
-    use commonware_utils::{Bounded, NZUsize, SystemTimeExt};
+    use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -192,7 +192,7 @@ mod tests {
         StreamConfig {
             signing_key: key,
             namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: Bounded!(MAX_MESSAGE_SIZE),
+            max_message_size: MAX_MESSAGE_SIZE,
             synchrony_bound: Duration::from_secs(10),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),

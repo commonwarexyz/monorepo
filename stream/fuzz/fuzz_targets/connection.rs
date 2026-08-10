@@ -3,7 +3,6 @@
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::encrypted::{Config, dial, listen};
-use commonware_utils::Bounded;
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -97,7 +96,7 @@ fn fuzz(input: FuzzInput) {
         let dialer_config = Config {
             signing_key: dialer_crypto.clone(),
             namespace: input.namespace.clone(),
-            max_message_size: Bounded!(max_message_size),
+            max_message_size,
             synchrony_bound,
             max_handshake_age,
             handshake_timeout,
@@ -106,7 +105,7 @@ fn fuzz(input: FuzzInput) {
         let listener_config = Config {
             signing_key: listener_crypto.clone(),
             namespace: input.namespace.clone(),
-            max_message_size: Bounded!(max_message_size),
+            max_message_size,
             synchrony_bound,
             max_handshake_age,
             handshake_timeout,

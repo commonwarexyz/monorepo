@@ -17,7 +17,7 @@ use commonware_glue::dkg::{
 };
 use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
-use commonware_utils::{Bounded, NZUsize};
+use commonware_utils::NZUsize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -51,7 +51,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        Bounded!(MAX_MESSAGE_SIZE),
+        MAX_MESSAGE_SIZE,
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);

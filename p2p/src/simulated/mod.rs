@@ -62,7 +62,7 @@
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{Bounded, NZU32, NZUsize};
+//! use commonware_utils::{NZU32, NZUsize};
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -75,7 +75,7 @@
 //!
 //! // Configure network
 //! let p2p_cfg = Config {
-//!     max_size: Bounded!(1024 * 1024), // 1MB
+//!     max_size: 1024 * 1024, // 1MB
 //!     max_peers_per_set: NZUsize!(4),
 //!     disconnect_on_block: true,
 //!     tracked_peer_sets: NZUsize!(3),
@@ -197,7 +197,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Bounded, NZU32, NZUsize,
+        NZU32, NZUsize,
         channel::mpsc,
         hostname, ordered,
         ordered::{Map, Set},
@@ -212,7 +212,6 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-    const MAX_MESSAGE_SIZE: Bounded<u32, 1, MAX_SIZE> = Bounded!(u32, 1024 * 1024);
 
     async fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, peers: I)
     where
@@ -244,7 +243,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(size),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -360,7 +359,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -401,7 +400,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -445,7 +444,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -548,7 +547,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -602,7 +601,7 @@ mod tests {
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -655,7 +654,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -742,7 +741,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -803,7 +802,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -878,7 +877,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1065,7 +1064,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1165,7 +1164,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(101),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1316,7 +1315,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1382,7 +1381,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1487,7 +1486,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1579,7 +1578,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1673,7 +1672,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(11),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1772,7 +1771,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1918,7 +1917,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -2024,7 +2023,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -2127,7 +2126,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -2218,7 +2217,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -2297,7 +2296,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -2376,7 +2375,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2405,7 +2404,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2465,7 +2464,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2504,7 +2503,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2551,7 +2550,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2591,7 +2590,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2629,7 +2628,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -2681,7 +2680,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2), // Only track 2 peer sets
@@ -2790,7 +2789,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -2833,7 +2832,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -2945,7 +2944,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -3043,7 +3042,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -3095,7 +3094,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -3189,7 +3188,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_MESSAGE_SIZE,
+                max_size: 1024 * 1024,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
@@ -3259,7 +3258,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_MESSAGE_SIZE,
+                max_size: 1024 * 1024,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
@@ -3324,7 +3323,7 @@ mod tests {
         let executor = deterministic::Runner::new(cfg);
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_MESSAGE_SIZE,
+                max_size: 1024 * 1024,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(3),
@@ -3404,7 +3403,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),
@@ -3447,7 +3446,7 @@ mod tests {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 Config {
-                    max_size: MAX_MESSAGE_SIZE,
+                    max_size: 1024 * 1024,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(3),

@@ -50,8 +50,6 @@ pub(crate) const DATA_PREFIX: u8 = 0;
 pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
 
 /// Maximum supported application payload size.
-///
-/// This leaves room for authenticated framing before encryption.
 pub const MAX_SIZE: u32 = commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD;
 
 /// Pre-encoded data ready for transmission.
@@ -119,16 +117,10 @@ mod tests {
 
     #[test]
     fn test_max_size_bounds() {
-        use commonware_utils::Bounded;
-
         assert_eq!(
-            MAX_SIZE,
-            commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD
+            MAX_SIZE + MAX_PAYLOAD_OVERHEAD,
+            commonware_stream::encrypted::MAX_SIZE
         );
-        let maximum: Bounded<u32, 1, MAX_SIZE> = Bounded!(MAX_SIZE);
-        assert_eq!(maximum.get(), MAX_SIZE);
-        assert!(Bounded::<u32, 1, MAX_SIZE>::try_from(0).is_err());
-        assert!(Bounded::<u32, 1, MAX_SIZE>::try_from(MAX_SIZE + 1).is_err());
     }
 
     #[test]

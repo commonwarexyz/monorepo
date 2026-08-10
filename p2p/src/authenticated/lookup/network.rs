@@ -7,6 +7,7 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         router,
     },
@@ -30,6 +31,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
+    max_frame_size: u32,
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
@@ -53,8 +55,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if configured retained-peer capacity arithmetic overflows.
+    /// Panics if configured frame or retained-peer capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let max_frame_size = cfg
+            .max_message_size
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
+            .expect("maximum frame size overflow");
         let max_retained_peers =
             max_retained_peers(cfg.max_peers_per_set, cfg.tracked_peer_sets, 0);
         let (listener_mailbox, listener) = listener::Mailbox::new();
@@ -74,12 +80,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             },
         );
         let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
-        let channels = Channels::new(messenger, cfg.max_message_size.get(), max_retained_peers);
+        let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
             Self {
                 context: ContextCell::new(context),
                 cfg,
+                max_frame_size,
 
                 channels,
                 tracker,
@@ -190,11 +197,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Start listener
-        let max_frame_size = self.cfg.max_frame_size();
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: max_frame_size,
+            max_message_size: self.max_frame_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

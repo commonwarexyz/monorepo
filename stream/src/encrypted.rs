@@ -70,7 +70,7 @@ use commonware_runtime::{
     BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
     Stream,
 };
-use commonware_utils::{Bounded, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -81,9 +81,7 @@ const TAG_SIZE: u32 = {
 };
 
 /// Maximum supported plaintext message size.
-///
-/// This leaves room for the AEAD tag and the ciphertext's `u32` length prefix.
-pub const MAX_SIZE: u32 = crate::utils::codec::MAX_SIZE - TAG_SIZE;
+pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
@@ -143,9 +141,11 @@ pub struct Config<S> {
 
     /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
     ///
+    /// The largest supported value is [`MAX_SIZE`].
+    ///
     /// Fixed-size handshake frames use their protocol-defined sizes instead of
     /// inheriting this limit.
-    pub max_message_size: Bounded<u32, 1, MAX_SIZE>,
+    pub max_message_size: u32,
 
     /// Maximum time drift allowed for future timestamps. Handles clock skew.
     pub synchrony_bound: Duration,
@@ -198,11 +198,10 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
     let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
-        let max_message_size = config.max_message_size.get();
         send_frame(
             &mut sink,
             config.signing_key.public_key().encode(),
-            max_message_size,
+            config.max_message_size,
         )
         .await?;
 
@@ -217,24 +216,24 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
                 peer,
             ),
         );
-        send_frame(&mut sink, syn.encode(), max_message_size).await?;
+        send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
 
         let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_frame(&mut sink, ack.encode(), max_message_size).await?;
+        send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
 
         Ok((
             Sender {
                 cipher: send,
                 sink,
-                max_message_size,
+                max_message_size: config.max_message_size,
                 pool: pool.clone(),
             },
             Receiver {
                 cipher: recv,
                 stream,
-                max_message_size,
+                max_message_size: config.max_message_size,
                 pool,
             },
         ))
@@ -265,7 +264,6 @@ pub async fn listen<
     let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
-        let max_message_size = config.max_message_size.get();
         let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
         if !bouncer(peer.clone()).await {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
@@ -285,7 +283,7 @@ pub async fn listen<
             ),
             msg1,
         )?;
-        send_frame(&mut sink, syn_ack.encode(), max_message_size).await?;
+        send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
 
         let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
 
@@ -296,13 +294,13 @@ pub async fn listen<
             Sender {
                 cipher: send,
                 sink,
-                max_message_size,
+                max_message_size: config.max_message_size,
                 pool: pool.clone(),
             },
             Receiver {
                 cipher: recv,
                 stream,
-                max_message_size,
+                max_message_size: config.max_message_size,
                 pool,
             },
         ))
@@ -335,7 +333,7 @@ impl<O: Sink> Sender<O> {
     fn encrypted_frame_len(&self, plaintext_len: usize) -> Result<usize, Error> {
         framed_len(
             plaintext_len + TAG_SIZE as usize,
-            self.max_message_size + TAG_SIZE,
+            self.max_message_size.saturating_add(TAG_SIZE),
         )
     }
 
@@ -352,7 +350,7 @@ impl<O: Sink> Sender<O> {
         append_frame(
             chunk,
             bufs.len() + TAG_SIZE as usize,
-            self.max_message_size + TAG_SIZE,
+            self.max_message_size.saturating_add(TAG_SIZE),
             |chunk, plaintext_offset| {
                 // Copy the plaintext directly into the frame.
                 chunk.put(&mut bufs);
@@ -500,7 +498,11 @@ impl<I: Stream> Receiver<I> {
     /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
     /// pool, copies the ciphertext, and decrypts the copy in-place.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        let encrypted = recv_frame(&mut self.stream, self.max_message_size + TAG_SIZE).await?;
+        let encrypted = recv_frame(
+            &mut self.stream,
+            self.max_message_size.saturating_add(TAG_SIZE),
+        )
+        .await?;
 
         // Recover the received frame for in-place decryption when it is a
         // single, uniquely-owned buffer. Otherwise, copy the ciphertext into
@@ -536,7 +538,7 @@ mod test {
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{Bounded, NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use std::{
         sync::{
             Arc,
@@ -548,30 +550,20 @@ mod test {
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
+    #[test]
+    fn test_max_message_size_bounds() {
+        assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
+    }
+
     fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {
         Config {
             signing_key,
             namespace: NAMESPACE.to_vec(),
-            max_message_size: Bounded!(MAX_MESSAGE_SIZE),
+            max_message_size: MAX_MESSAGE_SIZE,
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
         }
-    }
-
-    #[test]
-    fn test_max_message_size_bounds() {
-        type MessageSize = Bounded<u32, 1, MAX_SIZE>;
-
-        assert_eq!(MAX_SIZE + TAG_SIZE, crate::utils::codec::MAX_SIZE);
-
-        let maximum: MessageSize = Bounded!(MAX_SIZE);
-        assert_eq!(maximum.get(), MAX_SIZE);
-        assert!(MessageSize::try_from(0).is_err());
-        assert!(MessageSize::try_from(MAX_SIZE + 1).is_err());
-
-        let configured: MessageSize = transport_config(PrivateKey::from_seed(0)).max_message_size;
-        assert_eq!(configured.get(), MAX_MESSAGE_SIZE);
     }
 
     fn oversized_handshake_prefix(message: &impl commonware_codec::Encode) -> IoBuf {
@@ -1022,7 +1014,7 @@ mod test {
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
             let mut listener_config = transport_config(listener_crypto);
-            listener_config.max_message_size = Bounded!(1024 * 1024);
+            listener_config.max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public
             // key and send no payload. The old behavior accepted this because it
@@ -1061,7 +1053,7 @@ mod test {
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
             let mut dialer_config = transport_config(dialer_crypto);
-            dialer_config.max_message_size = Bounded!(1024 * 1024);
+            dialer_config.max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.

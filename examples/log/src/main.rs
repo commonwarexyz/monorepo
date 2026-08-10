@@ -59,7 +59,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_utils::{Bounded, NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -161,7 +161,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        Bounded!(1024 * 1024), // 1MB
+        1024 * 1024, // 1MB
     );
 
     // Start context

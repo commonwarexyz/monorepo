@@ -119,7 +119,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_utils::{Bounded, NZU32, NZUsize, ordered::Map};
+//! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -158,7 +158,7 @@
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
-//!     Bounded!(MAX_MESSAGE_SIZE),
+//!     MAX_MESSAGE_SIZE,
 //! );
 //!
 //! // Start context
@@ -226,7 +226,7 @@ mod tests {
         Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_utils::{
-        Bounded, Hostname, NZU32, NZUsize, TryCollect,
+        Hostname, NZU32, NZUsize, TryCollect,
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
@@ -245,7 +245,7 @@ mod tests {
         One,
     }
 
-    const MAX_MESSAGE_SIZE: Bounded<u32, 1, MAX_SIZE> = Bounded!(u32, 1_024 * 1_024); // 1MB
+    const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
 
     #[test]
     fn test_drop_before_start_closes_channels() {
@@ -304,7 +304,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     async fn run_network(
         context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-        max_message_size: Bounded<u32, 1, MAX_SIZE>,
+        max_message_size: u32,
         base_port: u16,
         n: usize,
         mode: Mode,
@@ -548,7 +548,7 @@ mod tests {
                 let config = Config::test(
                     peer_sk.clone(),
                     *peer_addr,
-                    MAX_MESSAGE_SIZE, // 1MB
+                    1_024 * 1_024, // 1MB
                 );
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
@@ -612,6 +612,20 @@ mod tests {
         });
     }
 
+    #[test]
+    #[should_panic(expected = "maximum frame size overflow")]
+    fn test_max_message_size_overflow_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                u32::MAX,
+            );
+            let _ = Network::new(context.child("network"), config);
+        });
+    }
+
     #[test_traced]
     #[should_panic(expected = "message too large")]
     fn test_message_too_large() {
@@ -642,7 +656,7 @@ mod tests {
             let config = Config::test(
                 sk,
                 addr,
-                MAX_MESSAGE_SIZE, // 1MB
+                1_024 * 1_024, // 1MB
             );
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
@@ -691,7 +705,7 @@ mod tests {
             let (sk1, pk1, addr1) = peers_and_sks[1].clone();
 
             // Create network for peer 0
-            let config0 = Config::test(sk0, addr0, MAX_MESSAGE_SIZE); // 1MB
+            let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
             oracle0.track(0, peers.clone());
@@ -699,7 +713,7 @@ mod tests {
             network0.start();
 
             // Create network for peer 1
-            let config1 = Config::test(sk1, addr1, MAX_MESSAGE_SIZE); // 1MB
+            let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
             oracle1.track(0, peers.clone());
@@ -747,7 +761,7 @@ mod tests {
                 peers_and_sks.push((sk, pk, addr));
             }
             let peer0 = peers_and_sks[0].clone();
-            let config = Config::test(peer0.0, peer0.2, MAX_MESSAGE_SIZE);
+            let config = Config::test(peer0.0, peer0.2, 1_024 * 1_024);
             let (network, mut oracle) = Network::new(context.child("network"), config);
             network.start();
 
@@ -826,7 +840,7 @@ mod tests {
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
             for (i, (sk, pk, addr)) in peers_and_sks.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
-                let config = Config::test(sk.clone(), *addr, MAX_MESSAGE_SIZE);
+                let config = Config::test(sk.clone(), *addr, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
@@ -950,7 +964,7 @@ mod tests {
             let other_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
             // Create network for peer0 (self)
-            let config = Config::test(self_sk, self_addr, MAX_MESSAGE_SIZE);
+            let config = Config::test(self_sk, self_addr, 1_024 * 1_024);
             let (network, mut oracle) = Network::new(context.child("network"), config);
             network.start();
 
@@ -1080,7 +1094,7 @@ mod tests {
                 let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
-                let config = Config::test(private_key.clone(), *socket, MAX_MESSAGE_SIZE);
+                let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers with DNS addresses
@@ -1213,7 +1227,7 @@ mod tests {
                 let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
-                let config = Config::test(private_key.clone(), *socket, MAX_MESSAGE_SIZE);
+                let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers with mixed addresses
@@ -1314,7 +1328,7 @@ mod tests {
             context.resolver_register("peer-0.local".to_string(), Some(vec![socket0.ip()]));
 
             // Create peer 0 with allow_private_ips=true
-            let mut config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
+            let mut config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
             config0.allow_private_ips = true;
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
@@ -1330,7 +1344,7 @@ mod tests {
             network0.start();
 
             // Create peer 1 with allow_private_ips=false
-            let mut config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
+            let mut config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
             config1.allow_private_ips = false; // This should prevent dialing the private IP
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
@@ -1436,7 +1450,7 @@ mod tests {
                 ];
 
                 // Create peer 0
-                let config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
+                let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
                     Network::new(context.child("peer").with_attribute("index", 0), config0);
                 oracle0.track(0, Map::try_from(peers.clone()).unwrap());
@@ -1445,7 +1459,7 @@ mod tests {
                 network0.start();
 
                 // Create peer 1
-                let config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
+                let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
                     Network::new(context.child("peer").with_attribute("index", 1), config1);
                 oracle1.track(0, Map::try_from(peers.clone()).unwrap());
@@ -2139,7 +2153,7 @@ mod tests {
             messenger.bind(mailbox.clone());
 
             let channels =
-                channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE.get(), NZUsize!(2));
+                channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE, NZUsize!(2));
             let _handle = router.start(channels);
 
             let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();

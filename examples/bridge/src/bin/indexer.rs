@@ -27,7 +27,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
 use commonware_stream::encrypted::{Config as StreamConfig, listen};
 use commonware_utils::{
-    Bounded, TryCollect,
+    TryCollect,
     channel::{mpsc, oneshot},
     ordered::Set,
     union,
@@ -240,7 +240,7 @@ fn main() {
         let config = StreamConfig {
             signing_key: signer,
             namespace: INDEXER_NAMESPACE.to_vec(),
-            max_message_size: Bounded!(1024 * 1024),
+            max_message_size: 1024 * 1024,
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(5),
