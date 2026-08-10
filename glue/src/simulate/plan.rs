@@ -68,7 +68,7 @@ pub struct Plan<D: EngineDefinition> {
     pub link: Link,
 
     /// Maximum size of a p2p message (bytes).
-    pub max_message_size: Bounded<u32, 1, { simulated::MAX_SIZE }>,
+    pub max_message_size: u32,
 
     /// Engine definition (how to wire up each validator).
     pub engine: D,
@@ -105,7 +105,7 @@ pub struct PlanBuilder<D: EngineDefinition> {
     seeds: Vec<u64>,
     participants: Vec<D::PublicKey>,
     link: Link,
-    max_message_size: Bounded<u32, 1, { simulated::MAX_SIZE }>,
+    max_message_size: u32,
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
@@ -149,7 +149,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: 1.0,
             },
-            max_message_size: Bounded!(1024 * 1024),
+            max_message_size: 1024 * 1024,
             engine,
             crashes: vec![],
             required_finalizations: 10,
@@ -181,10 +181,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
         self
     }
 
-    pub const fn max_message_size(
-        mut self,
-        size: Bounded<u32, 1, { simulated::MAX_SIZE }>,
-    ) -> Self {
+    pub const fn max_message_size(mut self, size: u32) -> Self {
         self.max_message_size = size;
         self
     }
@@ -475,7 +472,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
             ctx.child("network"),
             simulated::Config {
-                max_size: self.max_message_size,
+                max_size: Bounded!(self.max_message_size),
                 max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -1082,22 +1079,6 @@ mod tests {
                 ))
             })
         }
-    }
-
-    #[test]
-    fn max_message_size_is_validated_before_building() {
-        type MessageSize = Bounded<u32, 1, { commonware_p2p::simulated::MAX_SIZE }>;
-
-        assert!(MessageSize::try_from(0).is_err());
-        assert!(MessageSize::try_from(commonware_p2p::simulated::MAX_SIZE + 1).is_err());
-
-        let maximum: MessageSize = commonware_p2p::simulated::MAX_SIZE
-            .try_into()
-            .expect("simulated maximum should be valid");
-        let plan = PlanBuilder::new(FinalizingEngine::new(1, Duration::ZERO, 1))
-            .max_message_size(maximum)
-            .build();
-        assert_eq!(plan.max_message_size, maximum);
     }
 
     #[test]

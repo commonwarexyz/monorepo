@@ -309,7 +309,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{Bounded, NZU64, NZUsize, channel::mpsc};
+    use commonware_utils::{NZU64, NZUsize, channel::mpsc};
     use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
@@ -364,7 +364,7 @@ mod tests {
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
                     sync_config: SyncEngineConfig {
-                        fetch_batch_size: Bounded!(1),
+                        fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NZUsize!(1),

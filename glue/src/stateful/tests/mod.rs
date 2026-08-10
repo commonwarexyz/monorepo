@@ -55,7 +55,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{
-    Acknowledgement as _, Bounded, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+    Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
     non_empty_range, sync::Mutex,
 };
 use properties::{
@@ -1207,7 +1207,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 plan,
                 resolvers: NoopQmdbResolver,
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: Bounded!(1),
+                    fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NZUsize!(1),
@@ -1337,7 +1337,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 plan,
                 resolvers: (NoopQmdbResolver, NoopCompactQmdbResolver),
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: Bounded!(1),
+                    fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NZUsize!(1),
@@ -1591,7 +1591,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 plan,
                 resolvers: (NoopQmdbResolver, NoopCompactQmdbResolver),
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: Bounded!(1),
+                    fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NZUsize!(1),

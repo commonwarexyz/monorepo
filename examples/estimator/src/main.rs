@@ -17,15 +17,14 @@ use commonware_utils::{
     channel::{mpsc, oneshot},
 };
 use estimator::{
-    Command, Distribution, Latencies, MAX_COMMAND_MESSAGE_SIZE, RegionConfig,
-    calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
-    mean, median, parse_task, std_dev,
+    Command, Distribution, Latencies, RegionConfig, calculate_proposer_region, calculate_threshold,
+    count_peers, crate_version, get_latency_data, mean, median, parse_task, std_dev,
 };
 use futures::future::try_join_all;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZeroU32,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
@@ -39,29 +38,15 @@ const DEFAULT_CHANNEL: u64 = 0;
 /// The success rate over all links (1.0 = 100%)
 const DEFAULT_SUCCESS_RATE: f64 = 1.0;
 
-/// Configure the network for the estimator's static peer set.
-fn network_config(max_peers_per_set: NonZeroUsize) -> Config {
-    Config {
-        max_size: Bounded!(MAX_SIZE),
-        max_peers_per_set,
-        disconnect_on_block: true,
-        tracked_peer_sets: NZUsize!(1),
-    }
-}
-
 /// The message type
 type Message = Vec<u8>;
 
 /// Create a message containing the ID encoded as a big-endian u32,
 /// padded to the given size.
-fn create_message(
-    id: u32,
-    target_size: Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>,
-) -> Message {
+fn create_message(id: u32, target_size: Option<usize>) -> Message {
     target_size.map_or_else(
         || id.to_be_bytes().to_vec(),
         |size| {
-            let size = size.get();
             let mut message = Vec::with_capacity(size);
             message.extend_from_slice(&id.to_be_bytes());
             if size > 4 {
@@ -326,7 +311,12 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
 
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
-        network_config(NZUsize!(peer_addresses.len())),
+        Config {
+            max_size: Bounded!(MAX_SIZE),
+            max_peers_per_set: NZUsize!(peer_addresses.len()),
+            disconnect_on_block: true,
+            tracked_peer_sets: NZUsize!(1),
+        },
         peer_addresses.iter().map(|(k, _)| k.clone()),
     )
     .await;
@@ -908,18 +898,5 @@ fn print_aggregated_regional_statistics(observations: &Observations, line_num: u
             "    [all] mean: {overall_mean:.2}ms (stdv: {overall_std:.2}ms) | median: {overall_median:.2}ms"
         );
         println!("{}", stat_line.white());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn network_config_is_compatible() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let _ = Network::<_, ed25519::PublicKey>::new(context, network_config(NZUsize!(1)));
-        });
     }
 }

@@ -10,7 +10,6 @@ use commonware_cryptography::{
     ed25519::{self, PublicKey},
 };
 use commonware_p2p::Recipients;
-use commonware_utils::Bounded;
 use reqwest::blocking::Client;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -24,10 +23,6 @@ use tracing::debug;
 
 const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
 const CLOUDPING_DIVISOR: f64 = 2.0; // cloudping.co reports ping times not latency
-
-/// Maximum message size accepted by task commands.
-pub const MAX_COMMAND_MESSAGE_SIZE: u32 =
-    commonware_p2p::simulated::MAX_SIZE - commonware_codec::varint::MAX_U32_VARINT_SIZE as u32;
 const MILLISECONDS_TO_SECONDS: f64 = 1000.0;
 
 // =============================================================================
@@ -70,9 +65,9 @@ struct PeerState {
 
 #[derive(Clone)]
 pub enum Command {
-    Propose(u32, Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>), // id, size in bytes
-    Broadcast(u32, Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>), // id, size in bytes
-    Reply(u32, Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>>),   // id, size in bytes
+    Propose(u32, Option<usize>),   // id, size in bytes
+    Broadcast(u32, Option<usize>), // id, size in bytes
+    Reply(u32, Option<usize>),     // id, size in bytes
     Collect(u32, Threshold, Option<(Duration, Duration)>),
     Wait(u32, Threshold, Option<(Duration, Duration)>),
     Or(Box<Self>, Box<Self>),
@@ -196,15 +191,21 @@ fn parse_single_command(line: &str) -> Command {
 
     match command {
         "propose" => {
-            let size = parse_message_size(&parsed_args);
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
             Command::Propose(id, size)
         }
         "broadcast" => {
-            let size = parse_message_size(&parsed_args);
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
             Command::Broadcast(id, size)
         }
         "reply" => {
-            let size = parse_message_size(&parsed_args);
+            let size = parsed_args
+                .get("size")
+                .map(|s| s.parse::<usize>().expect("Invalid size"));
             Command::Reply(id, size)
         }
         "collect" | "wait" => {
@@ -250,18 +251,6 @@ fn parse_single_command(line: &str) -> Command {
         }
         _ => panic!("Unknown command: {command}"),
     }
-}
-
-/// Parses and validates an optional message size.
-fn parse_message_size(
-    parsed_args: &HashMap<String, String>,
-) -> Option<Bounded<usize, 0, MAX_COMMAND_MESSAGE_SIZE>> {
-    parsed_args.get("size").map(|size| {
-        size.parse::<usize>()
-            .expect("Invalid size")
-            .try_into()
-            .expect("Invalid size")
-    })
 }
 
 /// Parse a complex expression with parentheses and operators
@@ -1374,7 +1363,7 @@ reply{4}
         match &commands[0].1 {
             Command::Propose(id, size) => {
                 assert_eq!(*id, 1);
-                assert_eq!(size.unwrap().get(), 1024);
+                assert_eq!(*size, Some(1024));
             }
             _ => panic!("Expected Propose command with size"),
         }
@@ -1382,7 +1371,7 @@ reply{4}
         match &commands[1].1 {
             Command::Broadcast(id, size) => {
                 assert_eq!(*id, 2);
-                assert_eq!(size.unwrap().get(), 100);
+                assert_eq!(*size, Some(100));
             }
             _ => panic!("Expected Broadcast command with size"),
         }
@@ -1390,7 +1379,7 @@ reply{4}
         match &commands[2].1 {
             Command::Reply(id, size) => {
                 assert_eq!(*id, 3);
-                assert_eq!(size.unwrap().get(), 64);
+                assert_eq!(*size, Some(64));
             }
             _ => panic!("Expected Reply command with size"),
         }
@@ -1401,26 +1390,6 @@ reply{4}
                 assert_eq!(*size, None);
             }
             _ => panic!("Expected Reply command without size"),
-        }
-    }
-
-    #[test]
-    fn test_parse_task_command_message_size_bounds() {
-        let maximum = usize::try_from(MAX_COMMAND_MESSAGE_SIZE).unwrap();
-        assert_eq!(
-            maximum + commonware_codec::varint::MAX_U32_VARINT_SIZE,
-            usize::try_from(commonware_p2p::simulated::MAX_SIZE).unwrap()
-        );
-
-        for command in ["propose", "broadcast", "reply"] {
-            let maximum_command = format!("{command}{{1, size={maximum}}}");
-            assert_eq!(parse_task(&maximum_command).len(), 1);
-
-            let oversized_command = format!("{command}{{1, size={}}}", maximum + 1);
-            assert!(
-                std::panic::catch_unwind(|| parse_task(&oversized_command)).is_err(),
-                "{command} accepted an oversized message"
-            );
         }
     }
 }

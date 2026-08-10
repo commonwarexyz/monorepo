@@ -240,7 +240,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
-            max_serve_ops: Bounded!(16),
+            max_serve_ops: NZU64!(16),
             priority_requests: false,
             priority_responses: false,
         },

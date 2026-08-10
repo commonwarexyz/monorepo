@@ -7042,15 +7042,16 @@ mod tests {
     {
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
-        let framework = twins::Framework::new(
-            Bounded!(usize::try_from(n).expect("participant count should fit usize")),
-            NZUsize!(faults),
-            NZUsize!(campaign.rounds),
-            campaign.mode,
-            NZUsize!(campaign.max_cases),
-        )
-        .expect("faults must be less than participants");
-        let cases = twins::cases(rng, framework);
+        let cases = twins::cases(
+            rng,
+            twins::Framework {
+                participants: n as usize,
+                faults,
+                rounds: campaign.rounds,
+                mode: campaign.mode,
+                max_cases: campaign.max_cases,
+            },
+        );
         assert!(
             !cases.is_empty(),
             "twins campaign should generate at least one case"

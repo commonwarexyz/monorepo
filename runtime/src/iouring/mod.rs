@@ -130,7 +130,7 @@
 //! that are still queued behind the capacity limit, the loop cannot make progress until some
 //! in-flight request completes or is canceled.
 //!
-//! Concrete example with a configured ring size of 2:
+//! Concrete example with `cfg.size = 2`:
 //!
 //! 1. Queue `read(fd1)`, `read(fd2)`, `write(fd1)`, `write(fd2)` in that order.
 //! 2. The loop stages the first two reads and reaches waiter capacity.
@@ -159,12 +159,9 @@ use crate::{
     Error, IoBufMut, IoBufs, WriteOptions,
     telemetry::metrics::{Gauge, Register, raw},
 };
-use commonware_utils::{
-    Bounded,
-    channel::{
-        mpsc::{self, error::TryRecvError},
-        oneshot,
-    },
+use commonware_utils::channel::{
+    mpsc::{self, error::TryRecvError},
+    oneshot,
 };
 use io_uring::{
     IoUring,
@@ -197,10 +194,9 @@ mod spinner;
 pub use spinner::Config as SpinnerConfig;
 use spinner::Spinner;
 
-/// Ring-size ceiling imposed by submission-sequence ordering.
+/// Maximum rounded ring size accepted by [`Config::size`].
 ///
-/// Its power-of-two value prevents ring-size rounding from crossing the
-/// sequence-ordering boundary.
+/// Requested sizes are rounded up to the next power of two before validation.
 pub const MAX_RING_SIZE: u32 = HALF_SUBMISSION_SEQUENCE_DOMAIN / 2;
 
 /// Packed `io_uring` `user_data` value.
@@ -236,9 +232,10 @@ pub struct Config {
     /// Requested size of the ring.
     ///
     /// This value is rounded up to the next power of two when constructing
-    /// [IoUringLoop], with zero rounding to one, so the configured in-flight
-    /// waiter capacity matches the effective ring sizing behavior.
-    pub size: Bounded<u32, 0, MAX_RING_SIZE>,
+    /// [IoUringLoop], so the configured in-flight waiter capacity matches the
+    /// effective ring sizing behavior. After rounding, the maximum allowed size
+    /// is [`MAX_RING_SIZE`], larger rounded sizes panic during construction.
+    pub size: u32,
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
     /// If true, use single issuer mode.
@@ -275,7 +272,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            size: 128.try_into().expect("default ring size should be valid"),
+            size: 128,
             io_poll: false,
             single_issuer: false,
             max_request_timeout: Duration::from_secs(60),
@@ -577,11 +574,19 @@ impl IoUringLoop {
             !cfg.timeout_wheel_tick.is_zero(),
             "timeout_wheel_tick must be non-zero for timeout wheel"
         );
-        let size = cfg.size.get().next_power_of_two();
-        cfg.size = size
-            .try_into()
-            .expect("rounded bounded ring size should be valid");
-        let size = size as usize;
+        cfg.size = cfg
+            .size
+            .checked_next_power_of_two()
+            .expect("ring size exceeds u32::MAX");
+        // `pending()` interprets packed submission-sequence deltas with
+        // half-range modular ordering. After rounding to a power of two, that
+        // means the maximum admissible ring size is `MAX_RING_SIZE`.
+        assert!(
+            cfg.size <= MAX_RING_SIZE,
+            "rounded ring size must be at most {}",
+            MAX_RING_SIZE
+        );
+        let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
         let waker = Waker::new().expect("unable to create wake eventfd");
@@ -1145,7 +1150,7 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
         builder = builder.setup_defer_taskrun();
     }
 
-    builder.build(cfg.size.get())
+    builder.build(cfg.size)
 }
 
 #[cfg(test)]
@@ -1274,42 +1279,34 @@ mod tests {
         // Ring size is rounded to the next power of two.
         let mut registry = Registry::default();
         let cfg = Config {
-            size: Bounded!(1_000),
+            size: 1_000,
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
-        assert_eq!(iouring.cfg.size.get(), 1_024);
+        assert_eq!(iouring.cfg.size, 1_024);
 
         // Already-power-of-two size is preserved.
         let cfg = Config {
-            size: Bounded!(1_024),
+            size: 1_024,
             ..Default::default()
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
-        assert_eq!(iouring.cfg.size.get(), 1_024);
-
-        // Zero remains valid and rounds to one.
-        let cfg = Config {
-            size: Bounded!(0),
-            ..Default::default()
-        };
-        let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
-        assert_eq!(iouring.cfg.size.get(), 1);
+        assert_eq!(iouring.cfg.size, 1_024);
     }
 
     #[test]
-    fn test_config_size_rejects_values_above_max_ring_size() {
+    #[should_panic(expected = "rounded ring size must be at most")]
+    fn test_iouring_loop_rejects_sizes_that_exceed_max_ring_size() {
         // The wake state reserves 29 bits for the submission sequence, and
-        // `pending()` relies on half-range modular ordering. `MAX_RING_SIZE`
-        // preserves that ordering after power-of-two rounding.
-        let size = Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE)
-            .expect("maximum ring size should be valid");
+        // `pending()` relies on half-range modular ordering. The rounded
+        // request channel size must therefore stay at or below
+        // `MAX_RING_SIZE`.
+        let mut registry = Registry::default();
         let cfg = Config {
-            size,
+            size: MAX_RING_SIZE + 1,
             ..Default::default()
         };
-        assert_eq!(cfg.size.get(), MAX_RING_SIZE);
-        assert!(Bounded::<u32, 0, MAX_RING_SIZE>::try_from(MAX_RING_SIZE + 1).is_err());
+        let _ = IoUringLoop::new(cfg, &mut registry);
     }
 
     #[test]
@@ -1353,7 +1350,7 @@ mod tests {
         // Verify cancel staging reports waiter pressure when the waiter table
         // is already full, even if the SQ is also saturated.
         let cfg = Config {
-            size: Bounded!(8),
+            size: 8,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1362,7 +1359,7 @@ mod tests {
 
         // Queue enough in-flight cancellations to overflow one staging pass once
         // wake poll rearm also consumes an SQE.
-        for _ in 0..cfg.size.get() as usize {
+        for _ in 0..cfg.size as usize {
             let (sock_left, _sock_right) =
                 UnixStream::pair().expect("failed to create unix socket pair");
             // SAFETY: sock_left is a valid fd that we own.
@@ -1396,7 +1393,7 @@ mod tests {
         // Verify requeued work reports waiter pressure when the waiter table is
         // already full, even if the SQ is also saturated.
         let cfg = Config {
-            size: Bounded!(8),
+            size: 8,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1405,7 +1402,7 @@ mod tests {
 
         // Leave wake rearm enabled so the wake poll consumes one SQE and the
         // ready queue cannot fully drain in a single staging pass.
-        for _ in 0..cfg.size.get() as usize {
+        for _ in 0..cfg.size as usize {
             let (sock_left, _sock_right) =
                 UnixStream::pair().expect("failed to create unix socket pair");
             // SAFETY: sock_left is a valid fd that we own.
@@ -1444,7 +1441,7 @@ mod tests {
         // - ready-queue staging fills the local SQ with restaged requests
         for path in [EarlyReturnPath::Cancel, EarlyReturnPath::Ready] {
             let cfg = Config {
-                size: Bounded!(8),
+                size: 8,
                 ..Default::default()
             };
             let mut registry = Registry::default();
@@ -1455,7 +1452,7 @@ mod tests {
                 EarlyReturnPath::Cancel => {
                     // Queue enough in-flight cancellations to overflow one
                     // staging pass once wake poll rearm also consumes an SQE.
-                    for _ in 0..cfg.size.get() as usize {
+                    for _ in 0..cfg.size as usize {
                         let (sock_left, _sock_right) =
                             UnixStream::pair().expect("failed to create unix socket pair");
                         // SAFETY: sock_left is a valid fd that we own.
@@ -1482,7 +1479,7 @@ mod tests {
                     // Leave wake rearm enabled so the wake poll consumes one
                     // SQE and the ready queue cannot fully drain in a single
                     // staging pass.
-                    for _ in 0..cfg.size.get() as usize {
+                    for _ in 0..cfg.size as usize {
                         let (sock_left, _sock_right) =
                             UnixStream::pair().expect("failed to create unix socket pair");
                         // SAFETY: sock_left is a valid fd that we own.
@@ -1527,7 +1524,7 @@ mod tests {
     fn test_fill_submission_queue_returns_submission_queue_capacity_when_fresh_staging_fills_sq() {
         // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
         let cfg = Config {
-            size: Bounded!(8),
+            size: 8,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1538,7 +1535,7 @@ mod tests {
         // request staging loop should then stop because the SQ fills first,
         // while waiter capacity still has room left.
         futures::executor::block_on(async {
-            for _ in 0..cfg.size.get() as usize {
+            for _ in 0..cfg.size as usize {
                 let (sock_left, _sock_right) =
                     UnixStream::pair().expect("failed to create unix socket pair");
                 // SAFETY: sock_left is a valid fd that we own.
@@ -1559,7 +1556,7 @@ mod tests {
 
         assert_eq!(fill_result, FillResult::AtSubmissionQueueCapacity);
         assert!(ring.submission().is_full());
-        assert!(iouring.waiters.len() < cfg.size.get() as usize);
+        assert!(iouring.waiters.len() < cfg.size as usize);
     }
 
     #[test]
@@ -1567,7 +1564,7 @@ mod tests {
         // Verify staging reports waiter pressure even when the SQ itself still
         // has room.
         let cfg = Config {
-            size: Bounded!(8),
+            size: 8,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1576,7 +1573,7 @@ mod tests {
 
         iouring.wake_rearm_needed = false;
 
-        for _ in 0..cfg.size.get() as usize {
+        for _ in 0..cfg.size as usize {
             let (sock_left, _sock_right) =
                 UnixStream::pair().expect("failed to create unix socket pair");
             // SAFETY: sock_left is a valid fd that we own.
@@ -1601,7 +1598,7 @@ mod tests {
         // Verify a full fresh staging pass reports waiter pressure when both
         // the SQ and waiter table saturate in the same iteration.
         let cfg = Config {
-            size: Bounded!(8),
+            size: 8,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -1611,7 +1608,7 @@ mod tests {
         iouring.wake_rearm_needed = false;
 
         futures::executor::block_on(async {
-            for _ in 0..cfg.size.get() as usize {
+            for _ in 0..cfg.size as usize {
                 let (sock_left, _sock_right) =
                     UnixStream::pair().expect("failed to create unix socket pair");
                 // SAFETY: sock_left is a valid fd that we own.
@@ -1632,7 +1629,7 @@ mod tests {
 
         assert_eq!(fill_result, FillResult::AtWaiterCapacity);
         assert!(ring.submission().is_full());
-        assert_eq!(iouring.waiters.len(), cfg.size.get() as usize);
+        assert_eq!(iouring.waiters.len(), cfg.size as usize);
     }
 
     #[test]
@@ -1757,7 +1754,7 @@ mod tests {
         let cfg = Config {
             // Keep ring size realistic; size=1 can deadlock progress in some setups.
             // Waiter slot reuse is still exercised because we complete op1 before op2.
-            size: Bounded!(8),
+            size: 8,
             max_request_timeout: Duration::from_millis(200),
             timeout_wheel_tick: Duration::from_millis(5),
             ..Default::default()
@@ -2088,7 +2085,7 @@ mod tests {
         // If the publish wake were lost, the second recv would stall until the
         // first recv was manually released.
         let cfg = Config {
-            size: Bounded!(2),
+            size: 2,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -2179,7 +2176,7 @@ mod tests {
         // reinstall attempt must fail without consuming the retry flag.
         {
             let cfg = Config {
-                size: Bounded!(8),
+                size: 8,
                 ..Default::default()
             };
             let mut registry = Registry::default();
@@ -2213,7 +2210,7 @@ mod tests {
         // on the futex path before entering the kernel, so the reinstall only
         // becomes live on a later non-idle iteration.
         let cfg = Config {
-            size: Bounded!(2),
+            size: 2,
             ..Default::default()
         };
         let mut registry = Registry::default();
@@ -2521,7 +2518,7 @@ mod tests {
         // path without ever calling `try_recv()`. This is the exact shape that
         // previously hid producer disconnect forever.
         let cfg = Config {
-            size: Bounded!(1),
+            size: 1,
             shutdown_timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         };
@@ -2574,7 +2571,7 @@ mod tests {
         // straight to shutdown if there is still buffered channel work that
         // has not yet been admitted into the waiter table.
         let cfg = Config {
-            size: Bounded!(1),
+            size: 1,
             shutdown_timeout: None,
             ..Default::default()
         };
@@ -2743,7 +2740,7 @@ mod tests {
         // Verify timed requests are still drained correctly when timeout-driven
         // cancel traffic exceeds the ring's SQ capacity in a single pass.
         let cfg = Config {
-            size: Bounded!(8),
+            size: 8,
             max_request_timeout: Duration::from_millis(50),
             ..Default::default()
         };

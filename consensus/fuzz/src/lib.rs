@@ -62,66 +62,32 @@ const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
-/// Number of nodes supported by the fuzz harness.
-pub type Nodes = Bounded<u32, 1, 21>;
-
-/// Number of nodes in a subset of the fuzz harness.
-pub type Subset = Bounded<u32, 0, 21>;
-
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Configuration {
     /// Total number of nodes.
-    n: Nodes,
+    pub n: u32,
     /// Number of faulty (Byzantine) nodes.
-    faults: Subset,
+    pub faults: u32,
     /// Number of correct (honest) nodes.
-    correct: Subset,
+    pub correct: u32,
 }
 
 impl Configuration {
-    /// Creates a node configuration.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `faults` exceeds `n` or if `faults + correct` does not equal `n`.
-    pub const fn new(n: Nodes, faults: Subset, correct: Subset) -> Self {
-        let node_count = n.get();
-        let fault_count = faults.get();
-        let correct_count = correct.get();
-        assert!(fault_count <= node_count, "faults must not exceed n");
-        assert!(
-            fault_count + correct_count == node_count,
-            "faults + correct must equal n"
-        );
+    pub const fn new(n: u32, faults: u32, correct: u32) -> Self {
         Self { n, faults, correct }
-    }
-
-    /// Returns the total number of nodes.
-    pub const fn n(&self) -> Nodes {
-        self.n
-    }
-
-    /// Returns the number of faulty nodes.
-    pub const fn faults(&self) -> Subset {
-        self.faults
-    }
-
-    /// Returns the number of correct nodes.
-    pub const fn correct(&self) -> Subset {
-        self.correct
     }
 
     /// Returns true if this configuration can make progress (liveness).
     pub fn can_finalize(&self) -> bool {
-        self.faults.get() <= bounds::max_faults(self.n)
+        self.faults <= bounds::max_faults(self.n)
     }
 }
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
-pub const N4F1C3: Configuration = Configuration::new(Bounded!(4), Bounded!(1), Bounded!(3));
+pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
-pub const N4F3C1: Configuration = Configuration::new(Bounded!(4), Bounded!(3), Bounded!(1));
+pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,
@@ -253,7 +219,7 @@ async fn setup_network<P: simplex::Simplex>(
         participants,
         schemes,
         ..
-    } = P::fixture(context, NAMESPACE, input.configuration.n.get());
+    } = P::fixture(context, NAMESPACE, input.configuration.n);
     let (network, mut oracle) = Network::new_with_peers(
         context.child("network"),
         NetworkConfig {
@@ -459,12 +425,9 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
-        let n = config.n;
-        let participant_count = n.get();
-        let fault_count = config.faults.get();
 
         // Spawn Byzantine nodes (Disrupters only)
-        for i in 0..fault_count as usize {
+        for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
             let ctx = context
@@ -474,7 +437,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Spawn honest validators
-        for i in (fault_count as usize)..(participant_count as usize) {
+        for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context
@@ -524,9 +487,9 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 .into_iter()
                 .map(|(_, reporter)| reporter)
                 .collect(),
-            participant_count as usize,
+            config.n as usize,
         );
-        invariants::check::<P>(n, input.term_length, states);
+        invariants::check::<P>(config.n, input.term_length, states);
     });
 }
 
@@ -555,13 +518,10 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
-        let n = config.n;
-        let participant_count = n.get();
-        let fault_count = config.faults.get();
         let term_length = input.term_length;
 
         // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
-        for (idx, validator) in participants.iter().enumerate().take(fault_count as usize) {
+        for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
             let context = context
                 .child("twin")
                 .with_attribute("public_key", validator);
@@ -711,7 +671,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         // Spawn honest validators
-        for (idx, validator) in participants.iter().enumerate().skip(fault_count as usize) {
+        for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
             let ctx = context
                 .child("honest")
                 .with_attribute("public_key", validator);
@@ -762,9 +722,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .into_iter()
                 .map(|(_, reporter)| reporter)
                 .collect(),
-            participant_count as usize,
+            config.n as usize,
         );
-        invariants::check::<P>(n, input.term_length, states);
+        invariants::check::<P>(config.n, input.term_length, states);
     });
 }
 

@@ -28,8 +28,6 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
-#[cfg(feature = "iouring-network")]
-use commonware_utils::Bounded;
 use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
@@ -459,7 +457,7 @@ impl crate::Runner for Runner {
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
-                        size: Bounded!(IOURING_NETWORK_SIZE),
+                        size: IOURING_NETWORK_SIZE,
                         max_request_timeout: self.cfg.network_cfg.read_write_timeout,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()

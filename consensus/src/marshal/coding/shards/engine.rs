@@ -1934,7 +1934,9 @@ mod tests {
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
     /// The max size of a shard sent over the wire.
-    const MAX_SHARD_SIZE: u32 = 1024 * 1024; // 1 MiB
+    const MAX_SHARD_SIZE: usize = 1024 * 1024; // 1 MiB
+    const MAX_NETWORK_SHARD_SIZE: Bounded<u32, 1, { simulated::MAX_SIZE }> =
+        Bounded!(u32, MAX_SHARD_SIZE as u32);
 
     /// The default link configuration for tests.
     const DEFAULT_LINK: Link = Link {
@@ -2119,7 +2121,7 @@ mod tests {
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.child("network"),
                         simulated::Config {
-                            max_size: Bounded!(MAX_SHARD_SIZE),
+                            max_size: MAX_NETWORK_SHARD_SIZE,
                             max_peers_per_set: NZUsize!(
                                 self.num_primary_peers
                                     + self.num_secondary_peers.max(self.num_future_peers)
@@ -2189,7 +2191,7 @@ mod tests {
                         scheme_provider,
                         blocker: control.clone(),
                         shard_codec_cfg: CodecConfig {
-                            maximum_shard_size: MAX_SHARD_SIZE as _,
+                            maximum_shard_size: MAX_SHARD_SIZE,
                         },
                         block_codec_cfg: (),
                         strategy: STRATEGY,
@@ -2234,7 +2236,7 @@ mod tests {
                         scheme_provider,
                         blocker: control.clone(),
                         shard_codec_cfg: CodecConfig {
-                            maximum_shard_size: MAX_SHARD_SIZE as _,
+                            maximum_shard_size: MAX_SHARD_SIZE,
                         },
                         block_codec_cfg: (),
                         strategy: STRATEGY,
@@ -4695,7 +4697,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: Bounded!(MAX_SHARD_SIZE),
+                    max_size: MAX_NETWORK_SHARD_SIZE,
                     max_peers_per_set: NZUsize!(2),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -4762,7 +4764,7 @@ mod tests {
                 scheme_provider,
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,
@@ -4823,7 +4825,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: Bounded!(MAX_SHARD_SIZE),
+                    max_size: MAX_NETWORK_SHARD_SIZE,
                     max_peers_per_set: NZUsize!(4),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -4892,7 +4894,7 @@ mod tests {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,
@@ -4915,7 +4917,7 @@ mod tests {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,
@@ -5672,7 +5674,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: Bounded!(MAX_SHARD_SIZE),
+                    max_size: MAX_NETWORK_SHARD_SIZE,
                     max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -5724,7 +5726,7 @@ mod tests {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,
@@ -5799,7 +5801,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: Bounded!(MAX_SHARD_SIZE),
+                    max_size: MAX_NETWORK_SHARD_SIZE,
                     max_peers_per_set: NZUsize!(1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -5828,7 +5830,7 @@ mod tests {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control,
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,
@@ -5878,7 +5880,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: Bounded!(MAX_SHARD_SIZE),
+                    max_size: MAX_NETWORK_SHARD_SIZE,
                     max_peers_per_set: NZUsize!(num_peers - 1),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -5940,7 +5942,7 @@ mod tests {
                     .with_epoch(Epoch::new(1), scheme_epoch1),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,
@@ -6017,7 +6019,7 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: Bounded!(MAX_SHARD_SIZE),
+                    max_size: MAX_NETWORK_SHARD_SIZE,
                     max_peers_per_set: NZUsize!(num_peers),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
@@ -6096,7 +6098,7 @@ mod tests {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {
-                    maximum_shard_size: MAX_SHARD_SIZE as _,
+                    maximum_shard_size: MAX_SHARD_SIZE,
                 },
                 block_codec_cfg: (),
                 strategy: STRATEGY,

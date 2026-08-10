@@ -1,5 +1,5 @@
 use crate::{
-    Nodes, bounds,
+    bounds,
     simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
@@ -35,7 +35,7 @@ fn nullification_conflicts(
     (nullified_view - 1) / term_length == (finalized_view - 1) / term_length
 }
 
-pub fn check<P: Simplex>(n: Nodes, term_length: TermLength, replicas: Vec<ReplicaState>) {
+pub fn check<P: Simplex>(n: u32, term_length: TermLength, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
@@ -282,7 +282,7 @@ where
 mod tests {
     use super::*;
     use crate::simplex::SimplexEd25519;
-    use commonware_utils::{Bounded, NZU32};
+    use commonware_utils::NZU32;
     use std::{collections::HashMap, panic};
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
 
         let result = panic::catch_unwind(|| {
             check::<SimplexEd25519>(
-                Bounded!(4),
+                4,
                 TermLength::new(NZU32!(5)),
                 vec![(notarizations, nullifications, finalizations)],
             );

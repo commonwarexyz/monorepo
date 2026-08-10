@@ -72,7 +72,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Bounded, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
+    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Set},
     range::NonEmptyRange,
     sync::Mutex,
@@ -862,7 +862,7 @@ impl EngineDefinition for ReshareEngine {
                 initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
-                max_serve_ops: Bounded!(16),
+                max_serve_ops: NZU64!(16),
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -947,7 +947,7 @@ impl EngineDefinition for ReshareEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: Bounded!(16),
+                    fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: 8,
                     update_channel_size: NZUsize!(256),

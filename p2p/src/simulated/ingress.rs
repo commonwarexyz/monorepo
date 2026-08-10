@@ -231,7 +231,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         if sender == receiver {
             return Err(Error::LinkingSelf);
         }
-        if !(0.0..=1.0).contains(&config.success_rate) {
+        if config.success_rate < 0.0 || config.success_rate > 1.0 {
             return Err(Error::InvalidSuccessRate(config.success_rate));
         }
 

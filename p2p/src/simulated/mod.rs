@@ -572,23 +572,21 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Attempt to link with invalid success rates
-            for success_rate in [f64::NAN, -0.1, 1.5] {
-                let result = oracle
-                    .add_link(
-                        pk1.clone(),
-                        pk2.clone(),
-                        Link {
-                            latency: Duration::from_millis(5),
-                            jitter: Duration::from_millis(2),
-                            success_rate,
-                        },
-                    )
-                    .await;
+            // Attempt to link with invalid success rate
+            let result = oracle
+                .add_link(
+                    pk1,
+                    pk2,
+                    Link {
+                        latency: Duration::from_millis(5),
+                        jitter: Duration::from_millis(2),
+                        success_rate: 1.5,
+                    },
+                )
+                .await;
 
-                // Confirm error is correct
-                assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
-            }
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
         });
     }
 

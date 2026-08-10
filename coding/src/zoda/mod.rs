@@ -341,7 +341,9 @@ pub struct CheckedShard {
 ///
 /// Panics if `total` exceeds `u32::MAX`.
 fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
-    let total = u32::try_from(total).expect("encoded row bound should fit u32");
+    let total: u32 = total
+        .try_into()
+        .expect("encoded_rows exceeds u32::MAX; data too large for ZODA");
     let mut out = (0..total).collect::<Vec<_>>();
     transcript.shuffle(b"shuffle", &mut out);
     out
@@ -388,7 +390,7 @@ impl<D: Digest> CheckingData<D> {
         root: D,
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
-        let topology = Topology::reckon(config, data_bytes)?;
+        let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
@@ -492,12 +494,6 @@ pub enum Error {
     InsufficientUniqueRows(usize, usize),
     #[error("failed to create inclusion proof: {0}")]
     FailedToCreateInclusionProof(BmtError),
-    #[error("ZODA topology arithmetic overflowed")]
-    TopologyOverflow,
-    #[error("encoded row count exceeds the ZODA maximum of 2^31")]
-    TooManyEncodedRows,
-    #[error("total shard count {0} exceeds the ZODA maximum of 65536")]
-    TooManyTotalShards(u32),
 }
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
@@ -536,7 +532,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes)?;
+        let topology = Topology::reckon(config, data_bytes);
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
@@ -577,7 +573,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         // because followers have to encode the checksum itself to prevent the leader from
         // cheating.
         transcript.commit(checksum.encode());
-        let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
+        let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
 
         // Step 6: Produce the shards in parallel.
         let shards = strategy.try_map_collect_vec(0..topology.total_shards, |shard_idx| {
