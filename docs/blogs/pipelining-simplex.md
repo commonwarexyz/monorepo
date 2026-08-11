@@ -52,13 +52,13 @@ Figure 1: Each square represents one 5ms target interval. Alto sustained 200 suc
 
 A *view* is one opportunity for a leader to propose a block. Validators verify the proposal and vote. Once a quorum votes for the same proposal, it is *notarized*.
 
-Traditionally, two network hops separate consecutive views: the next leader must receive the previous proposal, then votes must cross the network to form its notarization. Stable Leader and Optimistic Validation remove these hops in turn.
+Traditionally, two network hops separate consecutive views: the next leader must receive the previous proposal, then votes must cross the network to form its notarization. Stable Leader and Optimistic Validation remove both waits from the critical path.
 
 ## Wait One: The Proposer Handoff
 
-Traditionally, rotating leadership assigns each view to a new proposer. The next proposer must first receive the previous proposal. It still cannot safely build: the previous leader may have sent other validators a different block, so the next proposer must wait for a notarization showing which block won a quorum.
+Traditionally, rotating leadership assigns each view to a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
-Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. Because that leader built the previous block, it already knows the block and its ancestry before a single network message arrives. There is no handoff before the next proposal. Election still runs at the term boundary.
+Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. Because that leader built the previous block, it already knows the block and its ancestry before a single network message arrives. There is no handoff before the next proposal.
 
 ```{=html}
 <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
