@@ -240,12 +240,12 @@ function buildValidation(mount) {
   const optimisticGap = 92;
   const parentSpan = sequentialGap;
 
-  addText(svg, 20, 35, 'Waiting for parent certification', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 35, 'Waiting for parent notarization', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 20, 246, 'Optimistic validation', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 112, 92, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 151, 'certified', { 'text-anchor': 'end', 'font-weight': 700 });
+  addText(svg, 112, 151, 'parent proof', { 'text-anchor': 'end', 'font-weight': 700 });
   addText(svg, 112, 303, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 362, 'certified', { 'text-anchor': 'end', 'font-weight': 700 });
+  addText(svg, 112, 362, 'parent proof', { 'text-anchor': 'end', 'font-weight': 700 });
   [92, 151, 303, 362].forEach(y => addLine(svg, 130, y, 976, y, { stroke: LIGHT }));
 
   for (let index = 0; index < 5; index++) {
@@ -276,7 +276,7 @@ function buildValidation(mount) {
       animated.push(addArrow(svg, x, 319, x + parentSpan - 9, 362, BLUE, 0.1 + index * 0.075, 0.11));
     }
   }
-  const note = addText(svg, 968, 397, 'certification follows in order', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
+  const note = addText(svg, 968, 397, 'parent proofs form in parallel', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
   animated.push(addReveal(note, 0.73));
   return animated;
 }
