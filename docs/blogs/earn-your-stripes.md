@@ -12,9 +12,9 @@ url: "https://commonware.xyz/blogs/earn-your-stripes"
 image: "https://commonware.xyz/imgs/reed-solomon-stripes.png"
 ---
 
-In `marshal::coding`, a leader erasure-codes a block into shards and sends one to each validator. Validators can check their shard and vote on the commitment without waiting for the whole payload.
+[Deliver Us in Pieces](/blogs/coding) introduced `marshal::coding`: a leader erasure-encodes a block and sends one shard to each validator. Validators can check that shard and vote on the commitment without waiting for the whole payload.
 
-But eventually, a node needs the full block. Once it gathers enough checked shards, it can begin reconstruction. The most expensive part of this reconstruction is Reed-Solomon recovery, and until recently, it was stuck on a single core.
+The expensive transforms still sit on the critical path. The leader must finish encoding before it can disperse the block. At `certify`, each validator must reconstruct the full block before full application verification can begin. On the original recovery path, it also re-encoded the recovered originals to verify the commitment. Reed-Solomon recovery was the most expensive part, and until recently, it was stuck on a single core.
 
 ## Where `Strategy` fell short
 
