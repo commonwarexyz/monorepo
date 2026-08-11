@@ -244,6 +244,47 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
+    /// Names each test `<stem>_<impl>_<compression>`.
+    ///
+    /// `both` covers prunable and immutable; `prunable` is for scenarios needing [MultiArchive],
+    /// which only `create_prunable` returns. The fixture says what the scenario is handed.
+    macro_rules! archive_tests {
+        ($($stem:ident => $scenario:ident, $fixture:tt, $variants:tt;)*) => {
+            $( archive_tests!(@variants $variants, $stem, $scenario, $fixture); )*
+        };
+        (@variants both, $stem:ident, $scenario:ident, $fixture:tt) => {
+            archive_tests!(@one $stem, _prunable_no_compression, $scenario, $fixture, create_prunable, None);
+            archive_tests!(@one $stem, _prunable_compression, $scenario, $fixture, create_prunable, Some(3));
+            archive_tests!(@one $stem, _immutable_no_compression, $scenario, $fixture, create_immutable, None);
+            archive_tests!(@one $stem, _immutable_compression, $scenario, $fixture, create_immutable, Some(3));
+        };
+        (@variants prunable, $stem:ident, $scenario:ident, $fixture:tt) => {
+            archive_tests!(@one $stem, _prunable, $scenario, $fixture, create_prunable, None);
+        };
+        (@one $stem:ident, $sfx:ident, $scenario:ident, $fixture:tt, $create:ident, $comp:expr) => {
+            paste::paste! {
+                #[test_traced]
+                fn [<$stem $sfx>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        archive_tests!(@fixture $fixture, $scenario, $create, $comp, context);
+                    });
+                }
+            }
+        };
+        (@fixture archive, $scenario:ident, $create:ident, $comp:expr, $ctx:ident) => {
+            let archive = $create($ctx, $comp).await;
+            $scenario(archive).await;
+        };
+        (@fixture creator, $scenario:ident, $create:ident, $comp:expr, $ctx:ident) => {
+            $scenario($ctx, $create, $comp).await;
+        };
+        (@fixture context_archive, $scenario:ident, $create:ident, $comp:expr, $ctx:ident) => {
+            let archive = $create($ctx.child("storage"), $comp).await;
+            $scenario($ctx, archive).await;
+        };
+    }
+
     async fn create_prunable(
         context: Context,
         compression: Option<u8>,
@@ -342,40 +383,19 @@ mod tests {
         archive.sync().await.expect("Failed to sync data");
     }
 
-    #[test_traced]
-    fn test_put_get_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_put_get_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_put_get_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, Some(3)).await;
-            test_put_get_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_put_get_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, None).await;
-            test_put_get_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_put_get_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, Some(3)).await;
-            test_put_get_impl(archive).await;
-        });
+    archive_tests! {
+        test_put_get                                   => test_put_get_impl,                                   archive,         both;
+        test_duplicate_key                             => test_duplicate_key_impl,                             archive,         both;
+        test_duplicate_key_cross_index                 => test_duplicate_key_cross_index_impl,                 archive,         both;
+        test_get_nonexistent                           => test_get_nonexistent_impl,                           archive,         both;
+        test_persistence                               => test_persistence_impl,                               creator,         both;
+        test_ranges                                    => test_ranges_impl,                                    creator,         both;
+        test_put_multi_and_get                         => test_put_multi_and_get_impl,                         context_archive, prunable;
+        test_put_multi_duplicate_key                   => test_put_multi_duplicate_key_impl,                   context_archive, prunable;
+        test_put_multi_mixed_indices                   => test_put_multi_mixed_indices_impl,                   context_archive, prunable;
+        test_get_all                                   => test_get_all_impl,                                   archive,         prunable;
+        test_put_multi_preserves_archive_put_semantics => test_put_multi_preserves_archive_put_semantics_impl, archive,         prunable;
+        test_put_multi_restart                         => test_put_multi_restart_impl,                         creator,         prunable;
     }
 
     async fn test_duplicate_key_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
@@ -412,33 +432,6 @@ mod tests {
         assert_eq!(retrieved, data1);
     }
 
-    #[test_traced]
-    fn test_duplicate_key_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_duplicate_key_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_duplicate_key_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, Some(3)).await;
-            test_duplicate_key_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_duplicate_key_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, None).await;
-            test_duplicate_key_impl(archive).await;
-        });
-    }
-
     async fn test_duplicate_key_cross_index_impl(
         mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>,
     ) {
@@ -471,51 +464,6 @@ mod tests {
         assert!(archive.has(Identifier::Key(&key)).await.unwrap());
     }
 
-    #[test_traced]
-    fn test_duplicate_key_cross_index_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_duplicate_key_cross_index_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_duplicate_key_cross_index_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, Some(3)).await;
-            test_duplicate_key_cross_index_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_duplicate_key_cross_index_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, None).await;
-            test_duplicate_key_cross_index_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_duplicate_key_cross_index_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, Some(3)).await;
-            test_duplicate_key_cross_index_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_duplicate_key_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, Some(3)).await;
-            test_duplicate_key_impl(archive).await;
-        });
-    }
-
     async fn test_get_nonexistent_impl(archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
         // Attempt to get an index that doesn't exist
         let index = 1u64;
@@ -532,42 +480,6 @@ mod tests {
             .await
             .expect("Failed to get data");
         assert!(retrieved.is_none());
-    }
-
-    #[test_traced]
-    fn test_get_nonexistent_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_get_nonexistent_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_get_nonexistent_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, Some(3)).await;
-            test_get_nonexistent_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_get_nonexistent_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, None).await;
-            test_get_nonexistent_impl(archive).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_get_nonexistent_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_immutable(context, Some(3)).await;
-            test_get_nonexistent_impl(archive).await;
-        });
     }
 
     async fn test_persistence_impl<A, F, Fut>(context: Context, creator: F, compression: Option<u8>)
@@ -625,38 +537,6 @@ mod tests {
                 assert_eq!(retrieved, *expected_data);
             }
         }
-    }
-
-    #[test_traced]
-    fn test_persistence_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_persistence_impl(context, create_prunable, None).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_persistence_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_persistence_impl(context, create_prunable, Some(3)).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_persistence_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_persistence_impl(context, create_immutable, None).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_persistence_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_persistence_impl(context, create_immutable, Some(3)).await;
-        });
     }
 
     async fn test_ranges_impl<A, F, Fut>(mut context: Context, creator: F, compression: Option<u8>)
@@ -744,38 +624,6 @@ mod tests {
             assert!(current_end.is_some());
             assert!(start_next.is_none());
         }
-    }
-
-    #[test_traced]
-    fn test_ranges_prunable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_ranges_impl(context, create_prunable, None).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_ranges_prunable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_ranges_impl(context, create_prunable, Some(3)).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_ranges_immutable_no_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_ranges_impl(context, create_immutable, None).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_ranges_immutable_compression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_ranges_impl(context, create_immutable, Some(3)).await;
-        });
     }
 
     async fn test_many_keys_impl<A, F, Fut>(
@@ -948,15 +796,6 @@ mod tests {
         assert!(has_metric_value(&buffer, "items_tracked", 1));
     }
 
-    #[test_traced]
-    fn test_put_multi_and_get_prunable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context.child("storage"), None).await;
-            test_put_multi_and_get_impl(context, archive).await;
-        });
-    }
-
     async fn test_put_multi_duplicate_key_impl(
         context: Context,
         mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
@@ -979,15 +818,6 @@ mod tests {
 
         let buffer = context.encode();
         assert!(has_metric_value(&buffer, "items_tracked", 2));
-    }
-
-    #[test_traced]
-    fn test_put_multi_duplicate_key_prunable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context.child("storage"), None).await;
-            test_put_multi_duplicate_key_impl(context, archive).await;
-        });
     }
 
     async fn test_get_all_impl(mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>) {
@@ -1013,15 +843,6 @@ mod tests {
 
         // Archive::get(Index) still returns only the first
         assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
-    }
-
-    #[test_traced]
-    fn test_get_all_prunable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_get_all_impl(archive).await;
-        });
     }
 
     async fn test_put_multi_preserves_archive_put_semantics_impl(
@@ -1073,15 +894,6 @@ mod tests {
             .unwrap()
             .expect("should find first");
         assert_eq!(first, 10);
-    }
-
-    #[test_traced]
-    fn test_put_multi_preserves_archive_put_semantics_prunable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context, None).await;
-            test_put_multi_preserves_archive_put_semantics_impl(archive).await;
-        });
     }
 
     async fn test_put_multi_restart_impl<A, F, Fut>(
@@ -1138,14 +950,6 @@ mod tests {
         // items_tracked reflects two unique indices after restart
         let buffer = context.encode();
         assert!(has_metric_value(&buffer, "items_tracked", 2));
-    }
-
-    #[test_traced]
-    fn test_put_multi_restart_prunable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            test_put_multi_restart_impl(context, create_prunable, None).await;
-        });
     }
 
     async fn test_put_multi_mixed_indices_impl(
@@ -1207,15 +1011,6 @@ mod tests {
 
         let buffer = context.encode();
         assert!(has_metric_value(&buffer, "items_tracked", 3));
-    }
-
-    #[test_traced]
-    fn test_put_multi_mixed_indices_prunable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let archive = create_prunable(context.child("storage"), None).await;
-            test_put_multi_mixed_indices_impl(context, archive).await;
-        });
     }
 
     fn assert_send<T: Send>(_: T) {}
