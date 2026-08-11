@@ -236,7 +236,7 @@ mod tests {
                     None
                 };
                 started.push(
-                    Node::start_with_gate_epoch(
+                    Node::start(
                         context.child("node").with_attribute("index", index),
                         &oracle,
                         fixture,
@@ -244,6 +244,7 @@ mod tests {
                         boundary,
                         state_sync,
                         gate_epoch,
+                        oracle.manager(),
                     )
                     .await,
                 );
@@ -264,8 +265,17 @@ mod tests {
             index: usize,
         ) {
             self.nodes[index].abort();
-            self.nodes[index] =
-                Node::start(context, &self.oracle, fixture, index, None, None).await;
+            self.nodes[index] = Node::start(
+                context,
+                &self.oracle,
+                fixture,
+                index,
+                None,
+                None,
+                Epoch::new(1),
+                self.oracle.manager(),
+            )
+            .await;
         }
     }
 
@@ -289,50 +299,8 @@ mod tests {
     }
 
     impl Node {
-        async fn start(
-            context: deterministic::Context,
-            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
-            fixture: &mocks::SchemeFixture,
-            index: usize,
-            boundary: Option<mocks::TestBlock>,
-            state_sync: Option<TestStateSync>,
-        ) -> Self {
-            Self::start_with_gate_epoch(
-                context,
-                oracle,
-                fixture,
-                index,
-                boundary,
-                state_sync,
-                Epoch::new(1),
-            )
-            .await
-        }
-
-        async fn start_with_gate_epoch(
-            context: deterministic::Context,
-            oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
-            fixture: &mocks::SchemeFixture,
-            index: usize,
-            boundary: Option<mocks::TestBlock>,
-            state_sync: Option<TestStateSync>,
-            gate_epoch: Epoch,
-        ) -> Self {
-            Self::start_with_manager(
-                context,
-                oracle,
-                fixture,
-                index,
-                boundary,
-                state_sync,
-                gate_epoch,
-                oracle.manager(),
-            )
-            .await
-        }
-
         #[allow(clippy::too_many_arguments)]
-        async fn start_with_manager<M>(
+        async fn start<M>(
             context: deterministic::Context,
             oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
             fixture: &mocks::SchemeFixture,
@@ -667,7 +635,7 @@ mod tests {
             )
             .await;
             let network = network.start();
-            let mut node = Node::start_with_manager(
+            let mut node = Node::start(
                 context.child("node"),
                 &oracle,
                 &fixture,
