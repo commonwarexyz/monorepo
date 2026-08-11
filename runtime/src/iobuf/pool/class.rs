@@ -1,8 +1,10 @@
-//! Size-class lifetime management and thread-local buffer caching.
+//! Buffer-pool size classes and thread-local caching.
 //!
-//! The raw size-class reference protocol, lease transitions, cache ownership,
-//! and TLS teardown machinery stay together here so their safety invariants can
-//! be audited as one unit.
+//! A size class owns buffers of one fixed capacity and a shared global
+//! freelist. Each thread may cache a bounded number of buffers per size class,
+//! allocations check that cache before the global freelist, and returned
+//! buffers spill back to the global freelist when the cache is full or the
+//! thread exits.
 
 use super::Freelist;
 use crate::iobuf::owner::{PooledBuffer, PooledOwner};
@@ -295,44 +297,6 @@ impl SizeClassHandle {
     #[inline(always)]
     pub(super) fn drain_global(&self) {
         self.global.drain();
-    }
-
-    /// Returns the configured per-thread cache capacity.
-    #[cfg(all(test, not(feature = "loom")))]
-    pub(super) fn thread_cache_capacity(&self) -> usize {
-        self.thread_cache_capacity
-    }
-
-    /// Returns the number of globally parked buffers for tests.
-    #[cfg(all(test, not(feature = "loom")))]
-    pub(super) fn test_global_len(&self) -> usize {
-        super::freelist::tests::len(&self.global)
-    }
-
-    /// Returns the number of created buffers for tests.
-    #[cfg(all(test, not(feature = "loom")))]
-    pub(super) fn test_global_created(&self) -> usize {
-        super::freelist::tests::created(&self.global)
-    }
-
-    /// Returns the number of global freelist stripes for tests.
-    #[cfg(all(test, not(feature = "loom")))]
-    pub(super) fn test_global_num_words(&self) -> usize {
-        super::freelist::tests::num_words(&self.global)
-    }
-
-    /// Returns the number of buffers cached by the current thread for tests.
-    #[cfg(all(test, not(feature = "loom")))]
-    pub(super) fn test_local_len(&self) -> usize {
-        BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES.with(|caches| {
-            // SAFETY: this TLS value is only ever accessed by the current thread.
-            let caches = unsafe { &*caches.get() };
-            caches
-                .bins
-                .get(self.class_id)
-                .and_then(Option::as_ref)
-                .map_or(0, |cache| cache.len)
-        })
     }
 }
 
@@ -1047,7 +1011,7 @@ impl BufferPoolThreadCache {
 }
 
 #[cfg(all(test, not(feature = "loom")))]
-mod tests {
+pub(super) mod tests {
     use super::{
         super::{BufferPool, BufferPoolConfig, NEXT_SIZE_CLASS_ID},
         *,
@@ -1110,15 +1074,29 @@ mod tests {
         (get_global_len(class) + get_local_len(class)) as i64
     }
 
-    fn get_global_len(class: &SizeClass) -> usize {
+    /// Returns the configured per-thread cache capacity.
+    pub const fn get_thread_cache_capacity(class: &SizeClass) -> usize {
+        class.thread_cache_capacity
+    }
+
+    /// Helper to get the number of free buffers parked in the global freelist.
+    pub fn get_global_len(class: &SizeClass) -> usize {
         super::super::freelist::tests::len(&class.global)
     }
 
-    fn get_global_created(class: &SizeClass) -> usize {
+    /// Helper to get the number of buffers created by the global freelist.
+    pub fn get_global_created(class: &SizeClass) -> usize {
         super::super::freelist::tests::created(&class.global)
     }
 
-    fn get_local_len(class: &SizeClass) -> usize {
+    /// Returns the number of global freelist stripes for tests.
+    pub fn get_global_num_words(class: &SizeClass) -> usize {
+        super::super::freelist::tests::num_words(&class.global)
+    }
+
+    /// Helper to get the number of free buffers parked in the current thread's
+    /// local cache for a size class.
+    pub fn get_local_len(class: &SizeClass) -> usize {
         BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES.with(|caches| {
             // SAFETY: this TLS value is only ever accessed by the current thread.
             let caches = unsafe { &*caches.get() };

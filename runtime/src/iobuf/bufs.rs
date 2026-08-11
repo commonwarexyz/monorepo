@@ -1,12 +1,12 @@
-//! Aggregate I/O buffers and zero-copy encoding helpers.
+//! Immutable and mutable collections of I/O buffers.
 //!
-//! [`IoBufs`] and [`IoBufsMut`] canonicalize zero or more buffer handles into
-//! inline single-, pair-, and triple-chunk forms, using deque storage only for
-//! larger sets. [`Builder`] and [`EncodeExt`] provide pool-backed encoding
-//! paths that keep pushed byte segments zero-copy.
+//! [`IoBufs`] and [`IoBufsMut`] present multiple buffers as one logical byte
+//! stream. [`Builder`] assembles an [`IoBufs`] from encoded bytes and existing
+//! byte segments, and [`EncodeExt`] provides pool-backed encoding helpers.
 
 use super::{
-    buf::{IoBuf, IoBufMut, panic_advance},
+    buf::{IoBuf, IoBufMut},
+    panic_advance,
     pool::BufferPool,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};

@@ -112,6 +112,16 @@ pub const fn cache_line_size() -> usize {
     align_of::<CachePadded<u8>>()
 }
 
+/// Panics for cursor or write operations that run past the available region.
+///
+/// Outlined so the `Buf`/`BufMut` fast paths inline as a compare, a branch,
+/// and a memcpy, mirroring the panic helpers in `bytes`.
+#[cold]
+#[inline(never)]
+fn panic_advance(requested: usize, available: usize) -> ! {
+    panic!("cannot advance past end of buffer: requested {requested}, available {available}");
+}
+
 /// Benchmark-only access to internal pool machinery.
 ///
 /// Raw pooled buffers reference owner metadata stored by their freelist.

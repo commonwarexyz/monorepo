@@ -1119,7 +1119,13 @@ impl BufferPool {
 
 #[cfg(all(test, not(feature = "loom")))]
 mod tests {
-    use super::*;
+    use super::{
+        class::tests::{
+            get_global_created, get_global_len, get_global_num_words, get_local_len,
+            get_thread_cache_capacity,
+        },
+        *,
+    };
     use crate::{
         iobuf::{IoBuf, cache_line_size},
         telemetry::metrics::Registry,
@@ -1185,22 +1191,6 @@ mod tests {
         (get_global_len(class) + get_local_len(class)) as i64
     }
 
-    /// Helper to get the number of free buffers parked in the global freelist.
-    fn get_global_len(class: &SizeClassHandle) -> usize {
-        class.test_global_len()
-    }
-
-    /// Helper to get the number of buffers created by the global freelist.
-    fn get_global_created(class: &SizeClassHandle) -> usize {
-        class.test_global_created()
-    }
-
-    /// Helper to get the number of free buffers parked in the current thread's
-    /// local cache for a size class.
-    fn get_local_len(class: &SizeClassHandle) -> usize {
-        class.test_local_len()
-    }
-
     #[test]
     fn test_page_size() {
         let size = page_size();
@@ -1224,7 +1214,10 @@ mod tests {
         config.validate();
         let pool = test_pool(config);
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].thread_cache_capacity(), 10);
+        assert_eq!(
+            get_thread_cache_capacity(&pool.inner.classes[class_index]),
+            10
+        );
 
         // Per-class limits clamp independently: a small class cannot lower a
         // larger class's explicit capacity.
@@ -1234,8 +1227,14 @@ mod tests {
         let pool = test_pool(config);
         let small_index = pool.class_index(1024).unwrap();
         let large_index = pool.class_index(4096).unwrap();
-        assert_eq!(pool.inner.classes[small_index].thread_cache_capacity(), 4);
-        assert_eq!(pool.inner.classes[large_index].thread_cache_capacity(), 16);
+        assert_eq!(
+            get_thread_cache_capacity(&pool.inner.classes[small_index]),
+            4
+        );
+        assert_eq!(
+            get_thread_cache_capacity(&pool.inner.classes[large_index]),
+            16
+        );
     }
 
     #[test]
@@ -1906,12 +1905,18 @@ mod tests {
         // Half the class budget is divided across expected threads.
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(8)));
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].thread_cache_capacity(), 4);
+        assert_eq!(
+            get_thread_cache_capacity(&pool.inner.classes[class_index]),
+            4
+        );
 
         // Large classes scale past the previous eight-slot cap.
         let pool = test_pool(test_config(page, page, 4096).with_parallelism(NZUsize!(8)));
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].thread_cache_capacity(), 256);
+        assert_eq!(
+            get_thread_cache_capacity(&pool.inner.classes[class_index]),
+            256
+        );
     }
 
     #[test]
@@ -1925,7 +1930,7 @@ mod tests {
         let pool = test_pool(test_config(page, page, 2).with_parallelism(NZUsize!(8)));
         let class_index = pool.class_index(page).unwrap();
         let class = &pool.inner.classes[class_index];
-        assert_eq!(class.thread_cache_capacity(), 0);
+        assert_eq!(get_thread_cache_capacity(class), 0);
 
         // Exhaust the size class so the only way the main thread can allocate
         // again is if the worker's returned buffers are globally visible.
@@ -1965,14 +1970,14 @@ mod tests {
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(16)));
 
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].test_global_num_words(), 16);
+        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 16);
 
         // When expected parallelism rounds above capacity, the freelist caps
         // stripes so every word can contain at least one slot.
         let pool = test_pool(test_config(page, page, 12).with_parallelism(NZUsize!(9)));
 
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].test_global_num_words(), 8);
+        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 8);
 
         // Disabling thread-local caches should not change global striping.
         let pool = test_pool(
@@ -1982,7 +1987,7 @@ mod tests {
         );
 
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(pool.inner.classes[class_index].test_global_num_words(), 16);
+        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 16);
     }
 
     #[test]
@@ -1996,8 +2001,11 @@ mod tests {
         let class_index = pool.class_index(page).unwrap();
 
         // Fixed capacity should bypass the derived parallelism heuristic.
-        assert_eq!(pool.inner.classes[class_index].thread_cache_capacity(), 7);
-        assert_eq!(pool.inner.classes[class_index].test_global_num_words(), 8);
+        assert_eq!(
+            get_thread_cache_capacity(&pool.inner.classes[class_index]),
+            7
+        );
+        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 8);
     }
 
     #[test]
@@ -2012,7 +2020,7 @@ mod tests {
 
         // Disabled thread caching still routes returns through the global
         // freelist, but should never retain buffers in the current thread.
-        assert_eq!(class.thread_cache_capacity(), 0);
+        assert_eq!(get_thread_cache_capacity(class), 0);
         assert_eq!(get_local_len(class), 0);
         assert_eq!(get_global_len(class), 1);
     }

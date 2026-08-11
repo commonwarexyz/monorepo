@@ -1,12 +1,14 @@
 //! Contiguous immutable and mutable I/O buffer handles.
 //!
-//! [`IoBuf`] and [`IoBufMut`] keep cursor and capacity state in the handle
-//! while delegating allocation ownership and reclamation to [`super::owner`].
+//! [`IoBuf`] and [`IoBufMut`] keep readable cursor state in the handle, and
+//! [`IoBufMut`] also tracks writable capacity there. Allocation ownership and
+//! reclamation are delegated to [`super::owner`].
 //! This module implements slicing, freezing, mutable recovery, conversions,
 //! and codec integration for a single buffer.
 
 use super::{
     owner::{HeapOwner, OwnerRef, PooledBuffer},
+    panic_advance,
     pool::BufferPool,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
@@ -1081,16 +1083,6 @@ impl From<IoBuf> for IoBufMut {
             Err(buf) => Self::from(buf.as_ref()),
         }
     }
-}
-
-/// Panics for cursor or write operations that run past the available region.
-///
-/// Outlined so the `Buf`/`BufMut` fast paths inline as a compare, a branch,
-/// and a memcpy, mirroring the panic helpers in `bytes`.
-#[cold]
-#[inline(never)]
-pub(super) fn panic_advance(requested: usize, available: usize) -> ! {
-    panic!("cannot advance past end of buffer: requested {requested}, available {available}");
 }
 
 /// Panics for a failed `copy_to_slice`, preserving the [`TryGetError`]
