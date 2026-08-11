@@ -109,7 +109,8 @@ Chou</a></div>
         <p>In a globally distributed <a
         href="https://alto.commonware.xyz">Alto</a> deployment with 50
         validators, this combination sustained about 200 blocks per
-        second.</p>
+        second. The pipeline kept new views moving while earlier blocks
+        finalized.</p>
         <style>
           .simplex-loop {
             aspect-ratio: 1024 / 430;
@@ -139,17 +140,15 @@ Chou</a></div>
         <p>Figure 1: Each square represents one 5ms target interval.
         Alto sustained 200 successful blocks per second.</p>
         </div>
-        <p>The pipeline keeps new views moving while earlier blocks
-        finalize.</p>
         <h2 id="from-one-view-to-the-next">From One View to the
         Next</h2>
         <p>A <em>view</em> is one opportunity for a leader to propose a
         block. Validators verify the proposal and vote. Once a quorum
         votes for the same proposal, it is <em>notarized</em>.</p>
-        <p>Traditionally, two network waits separate consecutive views.
-        The next leader must receive the previous proposal. Then votes
+        <p>Traditionally, two network hops separate consecutive views:
+        the next leader must receive the previous proposal, then votes
         must cross the network to form its notarization. Stable Leader
-        and Optimistic Validation remove these waits in turn.</p>
+        and Optimistic Validation remove these hops in turn.</p>
         <h2 id="wait-one-the-proposer-handoff">Wait One: The Proposer
         Handoff</h2>
         <p>Traditionally, rotating leadership assigns each view to a new

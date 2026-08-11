@@ -14,7 +14,7 @@ Network latency does not have to set the pace of new blocks.
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two options that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader lets one proposer lead many views in a row, reducing the overhead of leader handoff. Optimistic Validation lets that leader keep proposing, and validators keep voting, without waiting for the previous view's notarization. Together, they take network round trips out of the critical path for producing new blocks.
 
-In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 blocks per second.
+In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 blocks per second. The pipeline kept new views moving while earlier blocks finalized.
 
 ```{=html}
 <style>
@@ -48,13 +48,11 @@ In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50
 Figure 1: Each square represents one 5ms target interval. Alto sustained 200 successful blocks per second.
 :::
 
-The pipeline keeps new views moving while earlier blocks finalize.
-
 ## From One View to the Next
 
 A *view* is one opportunity for a leader to propose a block. Validators verify the proposal and vote. Once a quorum votes for the same proposal, it is *notarized*.
 
-Traditionally, two network waits separate consecutive views. The next leader must receive the previous proposal. Then votes must cross the network to form its notarization. Stable Leader and Optimistic Validation remove these waits in turn.
+Traditionally, two network hops separate consecutive views: the next leader must receive the previous proposal, then votes must cross the network to form its notarization. Stable Leader and Optimistic Validation remove these hops in turn.
 
 ## Wait One: The Proposer Handoff
 
