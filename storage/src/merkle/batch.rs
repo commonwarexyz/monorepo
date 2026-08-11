@@ -140,6 +140,17 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         &self.parent.strategy
     }
 
+    /// Retain the live ancestor chain while consuming this batch in a multi-step operation.
+    pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
+        let mut ancestors = Vec::new();
+        let mut current = Some(Arc::clone(&self.parent));
+        while let Some(batch) = current {
+            current = batch.parent.as_ref().and_then(Weak::upgrade);
+            ancestors.push(batch);
+        }
+        ancestors
+    }
+
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position<F> {
         Position::new(*self.parent.size() + self.appended.len() as u64)

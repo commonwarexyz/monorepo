@@ -50,6 +50,11 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.inner.leaves()
     }
 
+    /// Retain the live ancestor chain while consuming this batch in a multi-step operation.
+    pub(crate) fn retain_ancestors(&self) -> Vec<Arc<batch::MerkleizedBatch<F, D, S>>> {
+        self.inner.retain_ancestors()
+    }
+
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] with computed root.
     pub fn merkleize(
         self,
