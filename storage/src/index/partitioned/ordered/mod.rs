@@ -1808,6 +1808,79 @@ mod tests {
         });
     }
 
+    /// The sharded path must also hold at P=2: a sparse slice of a 65,536-entry
+    /// partition array, keys of exactly P bytes (empty sub-keys), and spills,
+    /// none of which the P=1 tests can produce.
+    #[test_traced]
+    fn apply_sorted_diffs_parallel_matches_sequential_p2() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut parallel =
+                Index::<OneCap, u64, 2>::with_threshold(context.child("parallel"), OneCap, 4);
+            let mut sequential =
+                Index::<OneCap, u64, 2>::with_threshold(context.child("sequential"), OneCap, 4);
+            let rayon =
+                commonware_parallel::Rayon::new(std::num::NonZeroUsize::new(4).unwrap()).unwrap();
+
+            // Sparse partitions spread across the 65,536-entry array; per
+            // partition, keys of exactly P bytes (empty sub-key) and longer,
+            // several values per translated key to cross the spill threshold.
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            for i in 0u16..48 {
+                let p = i.wrapping_mul(1381).to_be_bytes();
+                keys.push(vec![p[0], p[1]]);
+                for suffix in 0u8..6 {
+                    keys.push(vec![p[0], p[1], suffix]);
+                    keys.push(vec![p[0], p[1], suffix, 0xEE]);
+                }
+            }
+            keys.sort();
+            keys.dedup();
+            for (n, key) in keys.iter().enumerate() {
+                parallel.insert(key, n as u64);
+                sequential.insert(key, n as u64);
+            }
+
+            // Key-sorted diffs mixing moves, deletes, and fresh inserts
+            // (including fresh empty-sub-key keys).
+            let mut fresh: Vec<Vec<u8>> = Vec::new();
+            for i in 0u16..48 {
+                let p = i.wrapping_mul(2749).to_be_bytes();
+                fresh.push(vec![p[0], p[1]]);
+            }
+            fresh.sort();
+            fresh.dedup();
+            let mut diffs: Vec<(&[u8], Option<u64>, Option<u64>)> = Vec::new();
+            for (n, key) in keys.iter().enumerate() {
+                match n % 3 {
+                    0 => diffs.push((key.as_slice(), Some(n as u64), Some(n as u64 + 10_000))),
+                    1 => diffs.push((key.as_slice(), Some(n as u64), None)),
+                    _ => {}
+                }
+            }
+            for (n, key) in fresh.iter().enumerate() {
+                diffs.push((key.as_slice(), None, Some(n as u64 + 20_000)));
+            }
+            diffs.sort_by(|a, b| a.0.cmp(b.0));
+
+            parallel.apply_sorted_diffs(&rayon, &diffs);
+            for &(key, old, new) in &diffs {
+                crate::index::apply_one_diff(&mut sequential, key, old, new);
+            }
+
+            for key in keys.iter().chain(fresh.iter()) {
+                let mut a: Vec<u64> = parallel.get(key).copied().collect();
+                let mut b: Vec<u64> = sequential.get(key).copied().collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "mismatch at key {key:?}");
+            }
+            assert_eq!(parallel.keys(), sequential.keys());
+            assert_eq!(parallel.items(), sequential.items());
+            assert_eq!(parallel.spilled_count(), sequential.spilled_count());
+        });
+    }
+
     /// Sequential-executing strategy that records the work hints passed to the
     /// multiplier-aware map, reporting parallelism 4 so the sharded path engages.
     #[derive(Clone, Debug)]
