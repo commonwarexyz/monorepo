@@ -74,7 +74,7 @@ Figure 2: Round-robin spaces views two network hops apart. With four-view terms,
 
 Without Optimistic Validation, validators wait for view `v` to be notarized before voting to notarize `v+1`. Network latency still paces each view.
 
-With Optimistic Validation, the leader can start `v+1` immediately after it builds and votes for `v`. A validator that voted for `v` can also vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
+With Optimistic Validation, validators can vote to notarize `v+1` as soon as its proposal arrives, provided they already voted for `v`. They do not need to receive `v`'s notarization first.
 
 View `v+1` can therefore be proposed and voted on while `v`'s notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone.
 
@@ -92,7 +92,7 @@ Figure 3: Stable Leader spaces views one network hop apart. Here, Optimistic Val
 
 *Optimistic* means a participant can vote to notarize a proposal before it receives notarizations for every ancestor in the term. It does not weaken the evidence required for finalization.
 
-Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish checks such as confirming that enough erasure-coded data is available.
+Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish any checks required before commit, such as confirming data availability or validating application-specific block and transaction rules.
 
 For every ancestor in the term, a participant must have either voted for it or obtained usable quorum proof. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If an ancestor fails to notarize or certify, optimistic votes later in the term become inert. Validators then abandon the rest of the term through Simplex's normal nullification path.
 

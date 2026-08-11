@@ -175,11 +175,10 @@ Chou</a></div>
         <p>Without Optimistic Validation, validators wait for view
         <code>v</code> to be notarized before voting to notarize
         <code>v+1</code>. Network latency still paces each view.</p>
-        <p>With Optimistic Validation, the leader can start
-        <code>v+1</code> immediately after it builds and votes for
-        <code>v</code>. A validator that voted for <code>v</code> can
-        also vote on <code>v+1</code> when the proposal arrives. Neither
-        needs to receive the notarization for <code>v</code> first.</p>
+        <p>With Optimistic Validation, validators can vote to notarize
+        <code>v+1</code> as soon as its proposal arrives, provided they
+        already voted for <code>v</code>. They do not need to receive
+        <code>v</code>’s notarization first.</p>
         <p>View <code>v+1</code> can therefore be proposed and voted on
         while <code>v</code>’s notarization is still forming. The same
         rule can carry the pipeline across several views within the
@@ -203,8 +202,9 @@ Chou</a></div>
         follows is called <em>certification</em>. After a block is
         notarized, each validator asks its application to certify the
         payload before voting to finalize it. This lets an application
-        finish checks such as confirming that enough erasure-coded data
-        is available.</p>
+        finish any checks required before commit, such as confirming
+        data availability or validating application-specific block and
+        transaction rules.</p>
         <p>For every ancestor in the term, a participant must have
         either voted for it or obtained usable quorum proof. A validator
         still waits for the parent to be certified before certifying the
