@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
-    Spawner, Storage, Supervisor,
+    Spawner, Storage, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -604,21 +604,19 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        if !self.pending.tracking() {
-            return self.inner.write_at_sync(offset, bufs).await;
+        if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
+            return self.inner.write_at(offset, bufs, options).await;
         }
-        self.inner.write_at(offset, bufs).await?;
-        self.pending.wait().await?;
-        self.inner.sync().await
+        self.inner
+            .write_at(offset, bufs, options.without(WriteOptions::SYNC))
+            .await?;
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -818,7 +816,7 @@ impl PendingSyncs {
     }
 }
 
-/// Controls a [WriteFaultContext]: while armed, every `write_at`/`write_at_sync` fails with an
+/// Controls a [WriteFaultContext]: while armed, every `write_at` fails with an
 /// injected error. Successful writes are counted.
 #[derive(Clone, Default)]
 pub struct WriteFaults {
@@ -861,7 +859,7 @@ impl WriteFaults {
     }
 }
 
-/// Context wrapper whose blobs fail `write_at`/`write_at_sync` while the shared [WriteFaults]
+/// Context wrapper whose blobs fail `write_at` while the shared [WriteFaults]
 /// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
 /// into inline writes issued before any blob sync starts.
 #[derive(Clone)]
@@ -901,7 +899,7 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
     }
 }
 
-/// Blob wrapper that fails `write_at`/`write_at_sync` while its [WriteFaults] is armed.
+/// Blob wrapper that fails `write_at` while its [WriteFaults] is armed.
 #[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
@@ -922,20 +920,14 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.faults.check()?;
-        self.inner.write_at(offset, bufs).await?;
-        self.faults.note();
-        Ok(())
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         self.faults.check()?;
-        self.inner.write_at_sync(offset, bufs).await?;
+        self.inner.write_at(offset, bufs, options).await?;
         self.faults.note();
         Ok(())
     }
@@ -1012,16 +1004,13 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
         self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.inner.write_at(offset, bufs).await
-    }
-
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     CertifiableAutomaton, Relay, Reporter,
-    simplex::{Plan, scheme::Scheme},
+    simplex::{Lookahead, Plan, scheme::Scheme},
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
@@ -75,13 +75,14 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
+                track_historical_votes: cfg.track_historical_votes,
                 relay: cfg.relay.clone(),
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 view_retention: cfg.view_retention,
                 skip_timeout: cfg.skip_timeout,
-                term_length,
+                lookahead: Lookahead::new(&terms),
                 forwarding: cfg.forwarding,
                 floor: cfg.floor.view(),
             },
@@ -120,7 +121,6 @@ impl<
                 strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
                 term_length,
             },
@@ -177,7 +177,7 @@ impl<
     /// Used for request-response certificate fetching. When a node needs to
     /// catch up on a view it missed (e.g., to verify a proposal's parent), it
     /// uses this channel to request certificates from peers. The resolver handles
-    /// rate limiting, retries, and peer selection for these requests.
+    /// retries and peer selection for these requests.
     pub fn start(
         mut self,
         vote_network: (

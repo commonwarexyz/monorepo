@@ -60,16 +60,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the mailboxes
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let oracle = Oracle::new(sender.clone());
+        let local = cfg.crypto.public_key();
+        let oracle = Oracle::new(sender.clone(), local.clone(), cfg.max_peers_per_set);
         let releaser = Releaser::new(sender.clone());
 
         // Create the directory
-        let directory = Directory::init(
-            context.child("directory"),
-            cfg.crypto.public_key(),
-            directory_cfg,
-            releaser,
-        );
+        let directory = Directory::init(context.child("directory"), local, directory_cfg, releaser);
 
         (
             Self {
@@ -265,6 +261,7 @@ mod tests {
             Config {
                 crypto,
                 mailbox_size: NZUsize!(1024),
+                max_peers_per_set: 1024,
                 tracked_peer_sets: NZUsize!(2),
                 peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
@@ -760,6 +757,7 @@ mod tests {
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
             cfg.tracked_peer_sets = NZUsize!(1);
+            cfg.max_peers_per_set = 2;
 
             let TestHarness {
                 mailbox,

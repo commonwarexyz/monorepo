@@ -5,7 +5,7 @@ use crate::{
         metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
-    types::{Participant, Round as Rnd},
+    types::{Participant, Round as Rnd, View},
 };
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -37,7 +37,14 @@ enum CertifyState {
 
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
-    start: SystemTime,
+    // When the local node entered this view (see `State::enter_view`). Unset
+    // for rounds created early by optimistic lookahead or future-view
+    // messages. Latency samples fall back to this when `proposed_at` is unset.
+    entered_at: Option<SystemTime>,
+    // When the local node completed building its own proposal for this view
+    // (see `Self::proposed`). An optimistic leader proposes before it enters
+    // the view, so latency samples anchor here when set.
+    proposed_at: Option<SystemTime>,
     scheme: S,
 
     round: Rnd,
@@ -69,12 +76,18 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalize: bool,
     broadcast_finalization: bool,
     certify: CertifyState,
+    last_ancestry_request: Option<View>,
+
+    // Proposal and resolved parent payload selected when peer verification
+    // started. A certificate may replace either while the request is in flight.
+    verifying: Option<(Proposal<D>, D)>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
-    pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
+    pub const fn new(scheme: S, round: Rnd) -> Self {
         Self {
-            start,
+            entered_at: None,
+            proposed_at: None,
             scheme,
             round,
             span: ViewSpan::new(),
@@ -95,6 +108,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_finalize: false,
             broadcast_finalization: false,
             certify: CertifyState::Ready,
+            last_ancestry_request: None,
+            verifying: None,
         }
     }
 
@@ -122,26 +137,52 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if self.is_signer(leader.idx) || self.broadcast_nullify {
+        if self.is_signer(leader.idx) || self.broadcast_nullify || !self.proposal.should_verify() {
             return None;
         }
         Some(leader)
     }
 
-    /// Returns the leader key and proposal when the view is ready for verification.
+    /// Returns the leader key and proposal ready for verification, without
+    /// recording the request. Resolve ancestry before calling
+    /// [`Self::request_verify`], after which this method returns `None`.
     #[allow(clippy::type_complexity)]
-    pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
+    pub fn pending_verification(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
         Some((leader.clone(), proposal))
     }
 
     /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
-    pub fn try_verify(&mut self) -> bool {
+    pub fn request_verify(&mut self) -> bool {
         if self.verify_ready().is_none() {
             return false;
         }
         self.proposal.request_verify()
+    }
+
+    /// Records an ancestry view requested from the leader.
+    pub fn request(&mut self, view: View) -> bool {
+        if self.last_ancestry_request == Some(view) {
+            return false;
+        }
+        self.last_ancestry_request = Some(view);
+        true
+    }
+
+    /// Records the proposal and parent payload selected when verification started.
+    pub const fn set_verifying(&mut self, proposal: Proposal<D>, parent_payload: D) {
+        self.verifying = Some((proposal, parent_payload));
+    }
+
+    /// Returns the proposal binding recorded when verification started, if any.
+    pub const fn verifying(&self) -> Option<&(Proposal<D>, D)> {
+        self.verifying.as_ref()
+    }
+
+    /// Clears the recorded verification binding.
+    pub const fn clear_verifying(&mut self) {
+        self.verifying = None;
     }
 
     /// Attempt to certify this round's proposal.
@@ -254,6 +295,35 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns true if we observed a notarization or finalization certificate
+    /// for this round, as opposed to one only implied by a descendant's.
+    pub const fn is_directly_notarized(&self) -> bool {
+        self.notarization.is_some() || self.finalization.is_some()
+    }
+
+    /// Returns true if this round's certificate supports building on its
+    /// proposal: finalized, or notarized unless our own certification
+    /// rejected it (a finalization overrides the rejection).
+    const fn has_usable_certificate(&self) -> bool {
+        self.finalization.is_some()
+            || (self.notarization.is_some() && !self.is_failed_certification())
+    }
+
+    /// Returns the payload of ancestry this round's certificate supports
+    /// (see [`Self::has_usable_certificate`]), read from the certificate
+    /// rather than the slot's proposal.
+    pub fn certificate_ancestry_payload(&self) -> Option<&D> {
+        if !self.has_usable_certificate() {
+            return None;
+        }
+        if let Some(finalization) = &self.finalization {
+            return Some(&finalization.proposal.payload);
+        }
+        self.notarization
+            .as_ref()
+            .map(|notarization| &notarization.proposal.payload)
+    }
+
     /// Returns the certified proposal for this round, if any (a finalized
     /// round is implicitly certified).
     pub const fn certified_proposal(&self) -> Option<&Proposal<D>> {
@@ -272,23 +342,61 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    /// Returns the proposal if it is eligible for forwarding (see
+    /// [`Self::has_usable_certificate`]).
+    pub const fn forwardable_proposal(&self) -> Option<&Proposal<D>> {
+        if self.has_usable_certificate() {
+            return self.proposal();
+        }
+        None
+    }
+
+    /// Returns true if certification completed and rejected the proposal.
+    const fn is_failed_certification(&self) -> bool {
+        matches!(self.certify, CertifyState::Certified(false))
+    }
+
+    /// Returns true if this node has verified the proposal.
+    ///
+    /// This includes both locally built proposals and peer proposals that
+    /// completed local verification.
+    pub const fn is_verified(&self) -> bool {
+        matches!(self.proposal.status(), ProposalStatus::Verified)
+    }
+
+    /// Returns true if we already broadcast a notarize vote for this round.
+    pub const fn broadcast_notarize(&self) -> bool {
+        self.broadcast_notarize
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
         matches!(self.certify, CertifyState::Aborted)
     }
 
-    /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
-    pub fn elapsed_since_start(&self, now: SystemTime) -> Duration {
-        now.duration_since(self.start).unwrap_or_default()
+    /// Records when the local node entered this view. First entry wins.
+    pub fn mark_entered(&mut self, now: SystemTime) {
+        self.entered_at.get_or_insert(now);
+    }
+
+    /// Returns how much time elapsed since the local node started work on
+    /// this view: since it built its own proposal when it led the view, or
+    /// since it entered the view otherwise. None if neither happened (e.g. a
+    /// round created by optimistic lookahead that we never proposed in).
+    pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
+        self.proposed_at
+            .or(self.entered_at)
+            .map(|start| now.duration_since(start).unwrap_or_default())
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
-    pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
+    pub fn proposed(&mut self, now: SystemTime, proposal: Proposal<D>) -> bool {
         if self.broadcast_nullify {
             return false;
         }
         self.proposal.built(proposal);
+        self.proposed_at = Some(now);
         self.leader_deadline = None;
         true
     }
@@ -340,6 +448,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     pub const fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
+    }
+
+    /// Returns true if the round contains a proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.has_unequivocated_proposal()
     }
 
     /// Arms the round's deadlines when its view is entered.
@@ -554,26 +667,28 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         None
     }
 
+    /// Returns true if [Self::construct_notarize] would yield a proposal,
+    /// without marking it broadcast.
+    pub const fn can_construct_notarize(&self) -> bool {
+        // Ensure we haven't already broadcast a notarize vote or nullify vote.
+        // Even if we've already seen a notarization, we are still willing to
+        // broadcast our notarize vote in case someone is recording our activity.
+        //
+        // Requiring a verified proposal prevents us from voting for a proposal if
+        // we have observed equivocation (where the proposal would be set to
+        // ProposalStatus::Equivocated) or if verification hasn't completed yet.
+        !self.broadcast_notarize
+            && !self.broadcast_nullify
+            && matches!(self.proposal.status(), ProposalStatus::Verified)
+    }
+
     /// Returns a proposal candidate for notarization if we're ready to vote.
     ///
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
     pub const fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
-        // Ensure we haven't already broadcast a notarize vote or nullify vote.
-        if self.broadcast_notarize || self.broadcast_nullify {
+        if !self.can_construct_notarize() {
             return None;
         }
-        // Even if we've already seen a notarization, we are still willing to broadcast
-        // our notarize vote in case someone is recording our activity.
-
-        // If we don't have a verified proposal, return None.
-        //
-        // This check prevents us from voting for a proposal if we have observed equivocation (where
-        // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
-        // completed yet.
-        if !matches!(self.proposal.status(), ProposalStatus::Verified) {
-            return None;
-        }
-
         self.broadcast_notarize = true;
         self.proposal.proposal()
     }
@@ -626,10 +741,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // proposal was built locally; follower rounds also journal local
                 // notarize votes over other leaders' proposals.
                 //
-                // This relies on journal replay remaining append-ordered. By the
-                // time we replay a local vote for round `v`, the earlier
-                // certificate for `v - 1` has already replayed and seeded this
-                // round's leader.
+                // A vote for the current view replays after the certificate for
+                // `v - 1` (journal replay is append-ordered), which seeds this
+                // round's leader. An optimistic vote replays with no leader set
+                // (the parent certificate did not exist when it was journaled),
+                // so a leader-owned optimistic round takes the `notarized`
+                // branch; the two branches restore the same slot state.
                 if self
                     .leader
                     .as_ref()
@@ -688,6 +805,65 @@ mod tests {
     use commonware_utils::{futures::AbortablePool, test_rng};
 
     #[test]
+    fn ancestry_request_deduplicates_view() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(10));
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        let requested = View::new(3);
+
+        assert!(round.request(requested));
+        assert!(!round.request(requested));
+        assert!(round.request(requested.next()));
+        assert!(!round.request(requested.next()));
+    }
+
+    /// The latency sample anchors at our own proposal when we built one,
+    /// falls back to view entry, and is absent for rounds we never started.
+    /// First entry wins across repeated [Round::mark_entered] calls.
+    #[test]
+    fn elapsed_since_start_anchors_at_proposal_then_entry() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(10));
+        let t0 = SystemTime::UNIX_EPOCH;
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+
+        // Never started: no sample.
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        assert!(round.elapsed_since_start(at(5)).is_none());
+
+        // Follower: anchored at view entry, first entry wins.
+        round.mark_entered(at(1));
+        round.mark_entered(at(3));
+        assert_eq!(
+            round.elapsed_since_start(at(5)),
+            Some(Duration::from_secs(4))
+        );
+
+        // Optimistic leader: proposing before entering the view anchors the
+        // sample at the proposal.
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        let proposal = Proposal::new(round_info, View::new(9), Sha256Digest::from([1u8; 32]));
+        assert!(round.proposed(at(2), proposal.clone()));
+        round.mark_entered(at(4));
+        assert_eq!(
+            round.elapsed_since_start(at(6)),
+            Some(Duration::from_secs(4))
+        );
+
+        // Normal leader: the proposal anchors the sample even when the view
+        // was entered first, not whichever timestamp is earlier.
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        round.mark_entered(at(1));
+        assert!(round.proposed(at(3), proposal));
+        assert_eq!(
+            round.elapsed_since_start(at(6)),
+            Some(Duration::from_secs(3))
+        );
+    }
+
+    #[test]
     fn equivocation_detected_on_proposal_notarization_conflict() {
         let mut rng = test_rng();
         let namespace = b"ns";
@@ -708,7 +884,7 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(leader_scheme, proposal_a.round);
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
@@ -762,7 +938,7 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(leader_scheme, proposal_a.round);
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
@@ -830,7 +1006,7 @@ mod tests {
         let proposal_y = Proposal::new(round_info, View::new(0), Sha256Digest::from([2u8; 32]));
 
         // We are participant 1; participant 0 is the equivocating leader.
-        let mut round = Round::new(schemes[1].clone(), round_info, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(schemes[1].clone(), round_info);
         round.set_leader(Participant::new(0));
 
         // Restart: replay our journaled notarize for the leader's first proposal.
@@ -874,7 +1050,7 @@ mod tests {
         let proposal_y = Proposal::new(round_info, View::new(0), Sha256Digest::from([2u8; 32]));
 
         // We are participant 1; participant 0 is the equivocating leader.
-        let mut round = Round::new(schemes[1].clone(), round_info, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(schemes[1].clone(), round_info);
         round.set_leader(Participant::new(0));
 
         // Restart: replay our journaled notarize for the leader's first proposal.
@@ -919,7 +1095,7 @@ mod tests {
             Sha256Digest::from([1u8; 32]),
         );
         let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(leader_scheme, proposal.round, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(leader_scheme, proposal.round);
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
@@ -948,7 +1124,7 @@ mod tests {
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([9u8; 32]));
 
-        let mut round = Round::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(schemes[0].clone(), round_info);
         round.set_leader(Participant::new(0));
 
         // Recover a certificate built entirely from remote votes.
@@ -984,7 +1160,7 @@ mod tests {
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([10u8; 32]));
 
-        let mut round = Round::new(schemes[0].clone(), round_info, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(schemes[0].clone(), round_info);
         round.set_leader(Participant::new(0));
 
         // Recover a certificate built entirely from remote votes.
@@ -1020,7 +1196,6 @@ mod tests {
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
-        let now = SystemTime::UNIX_EPOCH;
         let view = 2;
         let round = Rnd::new(Epoch::new(5), View::new(view));
         let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([40u8; 32]));
@@ -1055,7 +1230,7 @@ mod tests {
                 .expect("finalization");
 
         // Replay messages and verify broadcast flags
-        let mut round = Round::new(local_scheme, round, now);
+        let mut round = Round::new(local_scheme, round);
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
@@ -1091,13 +1266,12 @@ mod tests {
         let local_scheme = schemes[0].clone();
 
         // Create a proposal where we (participant 0) are the leader.
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(5), View::new(2));
         let proposal = Proposal::new(round_info, View::new(1), Sha256Digest::from([41u8; 32]));
         let notarize_local = Notarize::sign(&local_scheme, proposal.clone()).expect("notarize");
 
         // Replay the local notarize into a fresh round.
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
 
@@ -1108,7 +1282,7 @@ mod tests {
 
         // No verification request should be emitted.
         assert!(
-            !round.try_verify(),
+            !round.request_verify(),
             "leader-owned replay should not request verification again"
         );
 
@@ -1135,7 +1309,6 @@ mod tests {
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
-        let now = SystemTime::UNIX_EPOCH;
         let view = 2;
         let round_info = Rnd::new(Epoch::new(5), View::new(view));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
@@ -1144,7 +1317,7 @@ mod tests {
         let finalize_local = Finalize::sign(&local_scheme, proposal).expect("finalize");
 
         // Replay finalize and verify nullify is blocked
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Finalize(finalize_local));
 
@@ -1159,11 +1332,10 @@ mod tests {
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal));
         assert!(round.verified());
@@ -1181,11 +1353,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
@@ -1224,13 +1395,12 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([7u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.proposed(proposal.clone()));
+        assert!(round.proposed(std::time::UNIX_EPOCH, proposal.clone()));
 
         let notarization_votes: Vec<_> = schemes
             .iter()
@@ -1256,11 +1426,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
@@ -1298,11 +1467,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
@@ -1342,11 +1510,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(1));
         // Don't set proposal yet
 
@@ -1375,11 +1542,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
 
@@ -1416,11 +1582,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
         assert!(round.set_proposal(proposal.clone()));
         assert!(round.verified());
@@ -1460,11 +1625,10 @@ mod tests {
         } = ed25519::fixture(&mut rng, namespace, 4);
         let local_scheme = schemes[0].clone();
 
-        let now = SystemTime::UNIX_EPOCH;
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([3u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info, now);
+        let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
 
         // Recover the proposal and notarization without running local verify.

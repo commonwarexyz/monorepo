@@ -31,7 +31,7 @@ use commonware_glue::{
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Buf, BufMut, buffer::paged::CacheRef};
+use commonware_runtime::{Buf, BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
@@ -42,7 +42,11 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU64, NZUsize, ordered::Set, range::NonEmptyRange, sequence::U64, sync::Mutex,
+    Acknowledgement, NZU32, NZU64, NZUsize,
+    ordered::Set,
+    range::NonEmptyRange,
+    sequence::{U64, Unit},
+    sync::Mutex,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -64,7 +68,7 @@ pub type Database<E> = Shared<Qmdb<E>>;
 pub const NAMESPACE: &[u8] = b"_COMMONWARE_RESHARE_EXAMPLE";
 /// Number of blocks in each epoch.
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(64);
-/// Maximum participant count accepted when decoding DKG payloads.
+/// Maximum entries accepted in each DKG participant set.
 pub const MAX_PARTICIPANTS: NonZeroU32 = commonware_utils::NZU32!(64);
 /// Share derivation mode used by DKG and reshare ceremonies.
 pub const SHARING_MODE: Mode = Mode::NonZeroCounter;
@@ -94,8 +98,8 @@ pub const DKG_CHANNEL: u64 = 6;
 pub const DKG_PROBE_CHANNEL: u64 = 7;
 /// Mailbox capacity for every actor.
 pub const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(100);
-/// Maximum queued messages per P2P channel.
-pub const MESSAGE_BACKLOG: usize = 128;
+/// Per-peer message quota for every P2P channel.
+pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// Maximum P2P message size in bytes.
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
@@ -203,6 +207,7 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MinSig;
     type Signer = ed25519::PrivateKey;
+    type Directory = Unit;
 
     fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
         self.payload.clone()
@@ -302,9 +307,14 @@ impl Participants {
 
 impl ParticipantsProvider for Participants {
     type PublicKey = ed25519::PublicKey;
+    type Directory = Unit;
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         self.get(epoch)
+    }
+
+    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {
+        Unit
     }
 }
 
@@ -480,7 +490,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
 pub const fn sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
         fetch_batch_size: NZU64!(16),
-        apply_batch_size: 64,
+        apply_batch_size: NZU64!(64),
         max_outstanding_requests: 8,
         update_channel_size: NZUsize!(256),
         max_retained_roots: 8,
@@ -627,6 +637,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: Unit,
         };
 
         write_genesis(&path, &info).unwrap();
@@ -656,6 +667,7 @@ mod tests {
             output,
             players: participants.clone(),
             next_players: participants,
+            directory: Unit,
         };
 
         write_genesis(&path, &info).unwrap();

@@ -2,8 +2,9 @@
 //!
 //! The engine runs an independent Ed25519 Simplex chain for one epoch and uses
 //! the reshare actor's crate-private DKG mode to perform the ceremony.
-//! The resulting [`EpochInfo`] can be used as the genesis threshold artifact for
-//! a separate application that will later run continuous resharing.
+//! The resulting [`EpochInfo`] describes only the ceremony participants. An
+//! application using it to start continuous resharing must supply the next
+//! players and a transport directory covering the resulting participant union.
 //!
 //! See [`reshare`] for the protocol flow that this engine reuses and for the
 //! application contract of a continuously reshared chain.
@@ -11,6 +12,7 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
+    network::{Directory, Manager},
     reshare::{self, DkgConfig},
     state_sync::Plan as StateSyncPlan,
     types::{EpochInfo, Participants, Payload, SchemeInfo},
@@ -36,8 +38,7 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
-use commonware_macros::select;
-use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
@@ -48,6 +49,7 @@ use commonware_utils::{
     NZU16, NZU32, NZU64, NZUsize,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
+    sequence::Unit,
 };
 use rand_core::{CryptoRng, Rng};
 use std::{
@@ -65,7 +67,7 @@ const ARCHIVE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 type ConsensusScheme = simplex::scheme::ed25519::Scheme;
 
 /// Configuration for [`Engine`].
-pub struct Config<M, X, SS, T> {
+pub struct Config<M, X, SS, T, D = Unit> {
     /// Ed25519 signer used for the one-shot consensus chain and DKG protocol messages.
     pub signer: ed25519::PrivateKey,
 
@@ -96,26 +98,38 @@ pub struct Config<M, X, SS, T> {
     /// Participants in the DKG.
     pub participants: Set<ed25519::PublicKey>,
 
+    /// Transport directory for the participants.
+    ///
+    /// Used to activate the one-shot chain's peer set and embedded verbatim in
+    /// the emitted genesis artifact. Every participant must configure the same
+    /// directory.
+    pub directory: D,
+
     /// Length of the one-shot consensus epoch.
     pub blocks_per_epoch: NonZeroU64,
 }
 
 /// Completion produced when the one-shot DKG chain finalizes its final block.
-pub struct Completion<V: Variant> {
+pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     /// Final DKG artifact, if the ceremony succeeded.
-    pub info: Option<EpochInfo<V, ed25519::PublicKey>>,
+    ///
+    /// Its `next_players` set is empty and its directory covers the one-shot
+    /// ceremony participants. Before using it as continuous-resharing genesis,
+    /// the application must choose a nonempty next-player set and ensure the
+    /// directory exactly covers the resulting participant union.
+    pub info: Option<EpochInfo<V, ed25519::PublicKey, D>>,
 }
 
 /// Block type used by the one-shot DKG chain.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Block<V: Variant> {
+pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
-    payload: Option<Payload<V, ed25519::PrivateKey>>,
+    payload: Option<Payload<V, ed25519::PrivateKey, D>>,
 }
 
-impl<V: Variant> Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
     const fn genesis(leader: ed25519::PublicKey) -> Self {
         Self {
             context: Context {
@@ -130,7 +144,7 @@ impl<V: Variant> Block<V> {
     }
 
     /// Returns the DKG result carried by this block, if present.
-    pub const fn epoch_info(&self) -> Option<&EpochInfo<V, ed25519::PublicKey>> {
+    pub const fn epoch_info(&self) -> Option<&EpochInfo<V, ed25519::PublicKey, D>> {
         match &self.payload {
             Some(Payload::EpochInfo(info)) => Some(info),
             _ => None,
@@ -138,7 +152,7 @@ impl<V: Variant> Block<V> {
     }
 }
 
-impl<V: Variant> Write for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> Write for Block<V, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
         self.parent.write(buf);
@@ -147,7 +161,7 @@ impl<V: Variant> Write for Block<V> {
     }
 }
 
-impl<V: Variant> EncodeSize for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> EncodeSize for Block<V, D> {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.parent.encode_size()
@@ -156,7 +170,7 @@ impl<V: Variant> EncodeSize for Block<V> {
     }
 }
 
-impl<V: Variant> Read for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -164,12 +178,12 @@ impl<V: Variant> Read for Block<V> {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,
             height: Height::read(buf)?,
-            payload: Option::<Payload<V, ed25519::PrivateKey>>::read_cfg(buf, cfg)?,
+            payload: Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
         })
     }
 }
 
-impl<V: Variant> Digestible for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> Digestible for Block<V, D> {
     type Digest = sha256::Digest;
 
     fn digest(&self) -> sha256::Digest {
@@ -177,19 +191,19 @@ impl<V: Variant> Digestible for Block<V> {
     }
 }
 
-impl<V: Variant> Heightable for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> Heightable for Block<V, D> {
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl<V: Variant> ConsensusBlock for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> ConsensusBlock for Block<V, D> {
     fn parent(&self) -> sha256::Digest {
         self.parent
     }
 }
 
-impl<V: Variant> CertifiableBlock for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> CertifiableBlock for Block<V, D> {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
 
     fn context(&self) -> Self::Context {
@@ -197,31 +211,32 @@ impl<V: Variant> CertifiableBlock for Block<V> {
     }
 }
 
-impl<V: Variant> ReshareBlock for Block<V> {
+impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> {
     type Variant = V;
     type Signer = ed25519::PrivateKey;
+    type Directory = D;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
         self.payload.clone()
     }
 }
 
 /// Self-contained DKG engine.
-pub struct Engine<E, V, M, X, SS, T>
+pub struct Engine<E, V, M, X, SS, T, D = Unit>
 where
     V: Variant,
 {
     context: ContextCell<E>,
-    config: Config<M, X, SS, T>,
+    config: Config<M, X, SS, T, D>,
     _variant: PhantomData<V>,
 }
 
-impl<E, V, M, X, SS, T> Engine<E, V, M, X, SS, T>
+impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
     V: Variant,
 {
     /// Creates a new engine.
-    pub const fn new(context: E, config: Config<M, X, SS, T>) -> Self {
+    pub const fn new(context: E, config: Config<M, X, SS, T, D>) -> Self {
         assert!(
             config.max_supported_mode.supports(&config.sharing_mode),
             "sharing mode must be supported by max supported mode",
@@ -234,14 +249,15 @@ where
     }
 }
 
-impl<E, V, M, X, SS, T> Engine<E, V, M, X, SS, T>
+impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
     E: CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
     V: Variant,
-    M: Manager<PublicKey = ed25519::PublicKey> + Clone,
+    M: Manager<PublicKey = ed25519::PublicKey, Directory = D> + Clone,
     X: Blocker<PublicKey = ed25519::PublicKey> + Clone,
     SS: SecretStore,
     T: Strategy + Clone,
+    D: Directory<ed25519::PublicKey>,
     ed25519::Batch: BatchVerifier<PublicKey = ed25519::PublicKey> + Send + 'static,
 {
     /// Starts consensus, marshal, broadcast, and the private reshare DKG actor.
@@ -272,7 +288,7 @@ where
             impl Sender<PublicKey = ed25519::PublicKey>,
             impl Receiver<PublicKey = ed25519::PublicKey>,
         ),
-    ) -> (Handle<()>, oneshot::Receiver<Completion<V>>) {
+    ) -> (Handle<()>, oneshot::Receiver<Completion<V, D>>) {
         let (completion_tx, completion_rx) = oneshot::channel();
         let handle = spawn_cell!(
             self.context,
@@ -316,7 +332,7 @@ where
             impl Sender<PublicKey = ed25519::PublicKey>,
             impl Receiver<PublicKey = ed25519::PublicKey>,
         ),
-        completion: oneshot::Sender<Completion<V>>,
+        completion: oneshot::Sender<Completion<V, D>>,
     ) {
         assert!(
             !self.config.participants.is_empty(),
@@ -349,7 +365,7 @@ where
         )
         .expect("DKG signer must be a participant");
         let provider = ConstantProvider::<_, Epoch>::new(scheme.clone());
-        let genesis = Block::<V>::genesis(
+        let genesis = Block::<V, D>::genesis(
             self.config
                 .participants
                 .iter()
@@ -443,6 +459,7 @@ where
                 blocker: self.config.blocker.clone(),
                 participants_provider: StaticParticipants {
                     participants: self.config.participants.clone(),
+                    directory: self.config.directory.clone(),
                 },
                 secret_store: self.config.secret_store,
                 strategy: self.config.strategy.clone(),
@@ -460,6 +477,7 @@ where
             },
             DkgConfig {
                 participants: self.config.participants.clone(),
+                directory: self.config.directory.clone(),
                 completion: Box::new(move |info| {
                     let _ = completion.send_lossy(Completion { info });
                 }),
@@ -500,8 +518,8 @@ where
                 view_retention: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(5),
                 fetch_timeout: Duration::from_secs(2),
-                fetch_concurrent: NZUsize!(4),
                 forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
             },
         );
 
@@ -513,56 +531,30 @@ where
         );
         let simplex_handle = simplex.start(votes, certificates, resolver_network);
 
-        BootstrapActors {
+        Handle::select([
             buffer_handle,
             reshare_handle,
             marshal_handle,
             simplex_handle,
-        }
-        .supervise()
-        .await;
-    }
-}
-
-struct BootstrapActors {
-    buffer_handle: Handle<()>,
-    reshare_handle: Handle<()>,
-    marshal_handle: Handle<()>,
-    simplex_handle: Handle<()>,
-}
-
-impl BootstrapActors {
-    async fn supervise(mut self) {
-        select! {
-            result = &mut self.buffer_handle => result.expect("failed dkg"),
-            result = &mut self.reshare_handle => result.expect("failed dkg"),
-            result = &mut self.marshal_handle => result.expect("failed dkg"),
-            result = &mut self.simplex_handle => result.expect("failed dkg"),
-        }
-    }
-}
-
-impl Drop for BootstrapActors {
-    fn drop(&mut self) {
-        self.buffer_handle.abort();
-        self.reshare_handle.abort();
-        self.marshal_handle.abort();
-        self.simplex_handle.abort();
+        ])
+        .await
+        .expect("failed dkg");
     }
 }
 
 #[derive(Clone)]
-struct DkgApp<V: Variant>(PhantomData<V>);
+struct DkgApp<V: Variant, D>(PhantomData<(V, D)>);
 
-impl<E, V> Application<E> for DkgApp<V>
+impl<E, V, D> Application<E> for DkgApp<V, D>
 where
     E: Rng + Spawner + Metrics + Clock,
     V: Variant,
+    D: Directory<ed25519::PublicKey>,
 {
     type SigningScheme = ConsensusScheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
-    type Block = Block<V>;
-    type Input = reshare::Input<(), V, ed25519::PrivateKey>;
+    type Block = Block<V, D>;
+    type Input = reshare::Input<(), V, ed25519::PrivateKey, D>;
 
     async fn propose(
         &mut self,
@@ -592,18 +584,25 @@ where
 }
 
 #[derive(Clone)]
-struct StaticParticipants<P> {
+struct StaticParticipants<P, D> {
     participants: Set<P>,
+    directory: D,
 }
 
-impl<P> ParticipantsProvider for StaticParticipants<P>
+impl<P, D> ParticipantsProvider for StaticParticipants<P, D>
 where
     P: PublicKey,
+    D: Directory<P>,
 {
     type PublicKey = P;
+    type Directory = D;
 
     async fn participants(&mut self, _: Epoch) -> Set<Self::PublicKey> {
         self.participants.clone()
+    }
+
+    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {
+        self.directory.clone()
     }
 }
 
@@ -660,9 +659,10 @@ mod tests {
             max_supported_mode: ModeVersion::v0(),
             partition_prefix: "test".into(),
             participants: Set::default(),
+            directory: Unit,
             blocks_per_epoch: NZU64!(1),
         };
 
-        let _ = Engine::<_, MinPk, _, _, _, _>::new((), config);
+        let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
     }
 }

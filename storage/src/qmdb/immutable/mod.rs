@@ -80,8 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, build_snapshot_from_log, metrics::Metrics, operation::Key,
-        single_operation_root,
+        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
+        operation::Key, single_operation_root,
     },
     translator::Translator,
 };
@@ -90,6 +90,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use commonware_runtime::Handle;
 use core::num::{NonZeroU64, NonZeroUsize};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
@@ -163,7 +164,7 @@ pub struct Immutable<
     C::Item: EncodeShared,
 {
     /// Authenticated journal of operations.
-    pub(crate) journal: authenticated::Journal<F, E, C, H, S>,
+    journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
     pub(crate) root: H::Digest,
@@ -268,10 +269,7 @@ where
 
             (last_commit_loc, inactivity_floor_loc)
         };
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(*last_commit_loc + 1)),
-            inactivity_floor_loc,
-        );
+        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -473,8 +471,7 @@ where
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
-                .await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
 
         Ok(self
             .journal
@@ -541,7 +538,8 @@ where
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
-    /// [`Immutable::sync`].
+    /// [`Immutable::sync`] completes, or until the handle returned by a subsequent
+    /// [`Immutable::start_sync`] completes.
     #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -614,7 +612,7 @@ where
 
         self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
-        let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
+        let inactive_peaks = F::inactive_peaks(size, rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
         self.update_metrics();
 
@@ -651,6 +649,24 @@ where
         Ok(self)
     }
 
+    /// Begin durably persisting the journal state published by prior [`Immutable::apply_batch`]
+    /// calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle. A failed data sync also
+    /// fails the next durability operation. A failed recovery-watermark sync is not observed by
+    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
+    /// [Self::sync].
+    #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.metrics.start_sync_calls.inc();
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        Ok((self, handle))
+    }
+
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
     #[tracing::instrument(name = "qmdb.immutable.db.commit", level = "info", skip_all)]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
@@ -666,11 +682,15 @@ where
         Ok(self.journal.destroy().await?)
     }
 
+    /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
+    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
+        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root)
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V, S> {
-        let journal_size = *self.last_commit_loc + 1;
-        batch::UnmerkleizedBatch::new(self, journal_size)
+        batch::UnmerkleizedBatch::new(self, self.commitment())
     }
 
     /// Check that `batch` can be applied to the database in its current state, without
@@ -684,7 +704,7 @@ where
     ) -> Result<(), Error<F>> {
         batch
             .bounds
-            .validate_apply_to(*self.last_commit_loc + 1, self.inactivity_floor_loc)
+            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -713,9 +733,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the
-    /// journal, but does not durably commit it. Call [`Immutable::commit`] or
-    /// [`Immutable::sync`] to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal,
+    /// but does not durably commit it. Call [`Immutable::commit`] or [`Immutable::sync`], or await
+    /// the handle returned by [`Immutable::start_sync`], to guarantee durability.
     #[tracing::instrument(name = "qmdb.immutable.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -724,8 +744,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let db_size = *self.last_commit_loc + 1;
-        let start_loc = Location::new(db_size);
+        let db_size = self.last_commit_loc + 1;
 
         // Apply journal.
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
@@ -736,7 +755,11 @@ where
         // `seen` is only consulted when at least one ancestor diff will be applied, so it is
         // skipped entirely otherwise.
         let bounds = self.journal.bounds();
-        let track_shadow = batch.bounds.ancestors.iter().any(|a| a.end > db_size);
+        let track_shadow = batch
+            .bounds
+            .ancestors
+            .iter()
+            .any(|a| a.state.size > db_size);
         let seen_cap = if track_shadow {
             batch.diff.len()
                 + batch
@@ -744,7 +767,7 @@ where
                     .ancestors
                     .iter()
                     .zip(&batch.ancestor_diffs)
-                    .filter(|(a, _)| a.end > db_size)
+                    .filter(|(a, _)| a.state.size > db_size)
                     .map(|(_, d)| d.len())
                     .sum::<usize>()
         } else {
@@ -759,7 +782,7 @@ where
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].end <= db_size {
+            if batch.bounds.ancestors[i].state.size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
@@ -771,15 +794,47 @@ where
         }
 
         // Update state.
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.root = batch.root;
-        let range = start_loc..Location::new(batch.bounds.total_size);
+        self.root = batch.root();
+        let range = db_size..batch.bounds.tip.size;
         self.update_metrics();
         self.metrics
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> crate::qmdb::sync::Source for Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator + Send + Sync,
+    T::Key: Send + Sync,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, K, V>;
+    type Error = Error<F>;
+
+    async fn serve(
+        &self,
+        request: crate::qmdb::sync::Request<F>,
+    ) -> Result<
+        (
+            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
+            crate::qmdb::sync::FeedbackTx,
+        ),
+        Self::Error,
+    > {
+        self.journal.serve(request).await
     }
 }
 
@@ -1030,7 +1085,7 @@ pub(super) mod test {
         let root_before = db.root();
         let bounds_before = db.bounds();
 
-        let prune_loc = Location::new(*bounds_before.end - 5);
+        let prune_loc = bounds_before.end - 5;
         let db = db.prune(prune_loc).await.unwrap();
 
         assert_eq!(db.root(), root_before);
@@ -1654,7 +1709,7 @@ pub(super) mod test {
 
             // Floor must be >= last_commit_loc for prune to succeed.
             // With 16 sets, commit is at current end + 16.
-            let floor = Location::new(*db.bounds().end + 16);
+            let floor = db.bounds().end + 16;
             (db, _) = commit_sets_with_floor(
                 db,
                 (0u64..16).map(|i| {
@@ -2353,7 +2408,7 @@ pub(super) mod test {
 
         // Apply the second -- should fail because the DB was modified.
         let result = db.apply_batch(batch_b).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        assert!(matches!(result, Err(Error::StaleBatch)));
 
         // The rejection mutated nothing: reopening recovers the committed state.
         let db = open_db(context.child("reopen")).await;
@@ -2381,31 +2436,50 @@ pub(super) mod test {
         let key2 = Sha256::hash(&[&[2]]);
         let key3 = Sha256::hash(&[&[3]]);
 
-        // Parent batch.
-        let parent_m = db
+        let common_parent = db
+            .new_batch()
+            .set(Sha256::hash(&[&[10]]), Sha256::fill(10u8))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let sibling_a = common_parent
+            .new_batch::<Sha256>()
+            .set(Sha256::hash(&[&[11]]), Sha256::fill(11u8))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let sibling_b = common_parent
+            .new_batch::<Sha256>()
+            .set(Sha256::hash(&[&[12]]), Sha256::fill(12u8))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(sibling_a).await.unwrap();
+        assert!(matches!(
+            db.validate_batch(&sibling_b),
+            Err(Error::StaleBatch)
+        ));
+
+        // Build equal-size sibling parents, then extend only one sibling.
+        let parent_a = db
             .new_batch()
             .set(key1, Sha256::fill(1u8))
             .merkleize(&db, None, Location::new(0))
             .await;
-
-        // Fork two children from the same parent.
-        let child_a = parent_m
-            .new_batch::<Sha256>()
+        let parent_b = db
+            .new_batch()
             .set(key2, Sha256::fill(2u8))
             .merkleize(&db, None, Location::new(0))
             .await;
-        let child_b = parent_m
+        let child_b = parent_b
             .new_batch::<Sha256>()
             .set(key3, Sha256::fill(3u8))
             .merkleize(&db, None, Location::new(0))
             .await;
 
-        // Apply child A.
-        let (db, _) = db.apply_batch(child_a).await.unwrap();
-
-        // Child B is stale.
-        let result = db.apply_batch(child_b).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        let (db, _) = db.apply_batch(parent_a).await.unwrap();
+        assert!(matches!(
+            db.validate_batch(&child_b),
+            Err(Error::StaleBatch)
+        ));
+        db.destroy().await.unwrap();
     }
 
     #[boxed]
@@ -2449,6 +2523,51 @@ pub(super) mod test {
 
         // Apply only A, then apply C directly (B uncommitted).
         let (db, _) = db.apply_batch(a).await.unwrap();
+        let (db, _) = db.apply_batch(c).await.unwrap();
+
+        assert_eq!(db.root(), expected_root);
+        assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn test_immutable_delayed_merkleize_after_ancestor_apply<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let key1 = Sha256::hash(&[&[1]]);
+        let key2 = Sha256::hash(&[&[2]]);
+        let key3 = Sha256::hash(&[&[3]]);
+        let v1 = Sha256::fill(1u8);
+        let v2 = Sha256::fill(2u8);
+        let v3 = Sha256::fill(3u8);
+
+        let a = db
+            .new_batch()
+            .set(key1, v1)
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let b = a
+            .new_batch::<Sha256>()
+            .set(key2, v2)
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let c = b.new_batch::<Sha256>().set(key3, v3);
+
+        let (db, _) = db.apply_batch(a).await.unwrap();
+        let c = c.merkleize(&db, None, Location::new(0)).await;
+        let expected_root = c.root();
         let (db, _) = db.apply_batch(c).await.unwrap();
 
         assert_eq!(db.root(), expected_root);
@@ -2581,7 +2700,7 @@ pub(super) mod test {
 
         // Parent is stale.
         let result = db.apply_batch(parent_m).await;
-        assert!(matches!(result, Err(Error::StaleBatch { .. })));
+        assert!(matches!(result, Err(Error::StaleBatch)));
     }
 
     /// to_batch() creates an owned snapshot whose root matches the committed DB.
@@ -3333,7 +3452,7 @@ pub(super) mod test {
             bounds.start <= commit_loc,
             "prune must not advance bounds.start past the floor"
         );
-        assert_eq!(bounds.end, Location::new(*commit_loc + 1));
+        assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.
         assert_eq!(db.last_commit_loc, commit_loc);
@@ -3344,7 +3463,7 @@ pub(super) mod test {
         // Persist, then verify pruning one past the floor is rejected — the floor is
         // the hard ceiling.
         let db = db.sync().await.unwrap();
-        let Err(err) = db.prune(Location::new(*commit_loc + 1)).await else {
+        let Err(err) = db.prune(commit_loc + 1).await else {
             panic!("expected prune to fail");
         };
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)

@@ -82,7 +82,7 @@ struct FuzzInput {
     /// Number of peers to create in the network.
     ///
     /// Must be in the range [MIN_PEERS, MAX_PEERS].
-    num_peers: u8,
+    num_peers: usize,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -93,7 +93,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         for _ in 0..num_operations {
             operations.push(u.arbitrary()?);
         }
-        let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)? as u8;
+        let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)?;
         Ok(FuzzInput {
             seed,
             operations,
@@ -111,6 +111,7 @@ fn fuzz(input: FuzzInput) {
 
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
+        max_peers_per_set: NZUsize!(num_peers),
         disconnect_on_block: false,
         tracked_peer_sets: NZUsize!(1),
     };

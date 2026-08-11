@@ -1,5 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    network::{Directory, Manager},
     reshare::{
         Actor, EpochInfoResponse, Message,
         actor::Mode,
@@ -22,7 +23,7 @@ use commonware_cryptography::{
     certificate::Scheme,
 };
 use commonware_macros::{select, select_loop};
-use commonware_p2p::{Blocker, Manager};
+use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Handle, Metrics, Spawner, Storage as RuntimeStorage, signal,
@@ -46,26 +47,26 @@ use tracing::{Instrument as _, debug, info, info_span, warn};
 /// The exact effective dealer-log view used for one verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
-struct ArtifactWaiter<V: BlsVariant, C: Signer> {
+struct ArtifactWaiter<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     logs: PendingLogs<V, C::PublicKey>,
-    responses: Vec<oneshot::Sender<EpochInfoResponse<V, C>>>,
+    responses: Vec<oneshot::Sender<EpochInfoResponse<V, C, D>>>,
 }
 
 /// Ancestry-specific requests waiting for artifact verification.
 ///
 /// Requests for the same effective log view share one queue entry and one CPU
 /// verification.
-struct ArtifactWaiters<V: BlsVariant, C: Signer> {
-    inner: Vec<ArtifactWaiter<V, C>>,
+struct ArtifactWaiters<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
+    inner: Vec<ArtifactWaiter<V, C, D>>,
 }
 
-impl<V: BlsVariant, C: Signer> Default for ArtifactWaiters<V, C> {
+impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> Default for ArtifactWaiters<V, C, D> {
     fn default() -> Self {
         Self { inner: Vec::new() }
     }
 }
 
-impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
+impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> ArtifactWaiters<V, C, D> {
     /// Queues a response for an exact effective log view.
     ///
     /// Requests for an existing view are coalesced so they share one
@@ -73,7 +74,7 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
     fn push(
         &mut self,
         logs: PendingLogs<V, C::PublicKey>,
-        response: oneshot::Sender<EpochInfoResponse<V, C>>,
+        response: oneshot::Sender<EpochInfoResponse<V, C, D>>,
     ) {
         if let Some(waiter) = self.inner.iter_mut().find(|waiter| waiter.logs == logs) {
             waiter.responses.push(response);
@@ -98,7 +99,7 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
     fn take(
         &mut self,
         logs: &PendingLogs<V, C::PublicKey>,
-    ) -> Vec<oneshot::Sender<EpochInfoResponse<V, C>>> {
+    ) -> Vec<oneshot::Sender<EpochInfoResponse<V, C, D>>> {
         let Some(index) = self.inner.iter().position(|waiter| waiter.logs == *logs) else {
             return Vec::new();
         };
@@ -124,8 +125,8 @@ impl<V: BlsVariant, C: Signer> ArtifactWaiters<V, C> {
 /// This value is phase-local. It becomes durable only after the same
 /// [`EpochInfo`] appears in a finalized boundary block.
 #[derive(Clone)]
-struct Artifact<V: BlsVariant, C: Signer> {
-    info: EpochInfo<V, C::PublicKey>,
+struct Artifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
+    info: EpochInfo<V, C::PublicKey, D>,
     share: Option<Share>,
 }
 
@@ -246,17 +247,17 @@ impl<V: BlsVariant, C: Signer> Drop for Verification<V, C> {
 /// The cache avoids repeating participant-policy and secret-store lookups for
 /// competing boundary-block requests. It is scoped to one inclusion phase,
 /// never acts as recovery state, and may contain `None` for failed one-shot DKG.
-struct CachedArtifact<V: BlsVariant, C: Signer> {
+struct CachedArtifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     logs: PendingLogs<V, C::PublicKey>,
-    artifact: Option<Artifact<V, C>>,
+    artifact: Option<Artifact<V, C, D>>,
 }
 
-struct ArtifactCache<V: BlsVariant, C: Signer> {
+struct ArtifactCache<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     next_players: Option<Set<C::PublicKey>>,
-    artifact: Option<CachedArtifact<V, C>>,
+    artifact: Option<CachedArtifact<V, C, D>>,
 }
 
-impl<V: BlsVariant, C: Signer> Default for ArtifactCache<V, C> {
+impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> Default for ArtifactCache<V, C, D> {
     fn default() -> Self {
         Self {
             next_players: None,
@@ -378,7 +379,7 @@ async fn pending_logs<B, V, C>(
     scan: PendingLogScan<'_, V, C::PublicKey>,
     mut ancestry: crate::dkg::reshare::mailbox::ErasedAncestry<B>,
     mut shutdown: signal::Signal,
-    response: &mut oneshot::Sender<EpochInfoResponse<V, C>>,
+    response: &mut oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 ) -> Option<PendingLogs<V, C::PublicKey>>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -435,9 +436,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -467,7 +468,7 @@ where
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
     ) -> ControlFlow<()> {
         self.metrics.set_phase(Phase::Inclusion);
@@ -763,10 +764,10 @@ where
     pub(super) async fn observe_dealer_log(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: Option<&mut Dealer<V, C>>,
-        payload: Option<Payload<V, C>>,
+        payload: Option<Payload<V, C, B::Directory>>,
     ) {
         let Some(Payload::DealerLog(log)) = payload else {
             return;
@@ -814,7 +815,7 @@ where
         verification: &mut Verification<V, C>,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &Store<E, SS, V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
         log_map: PendingLogs<V, C::PublicKey>,
     ) {
         if !verification.retarget(log_map) {
@@ -836,7 +837,7 @@ where
         verification: &mut Verification<V, C>,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &Store<E, SS, V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
         let log_map = verification.target.clone();
         let task = self.verification_task(epoch, info, store, &log_map);
@@ -863,7 +864,7 @@ where
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        store: &Store<E, SS, V, C::PublicKey>,
+        store: &Store<E, SS, V, C::PublicKey, B::Directory>,
         log_map: &PendingLogs<V, C::PublicKey>,
     ) -> VerificationTask<V, C, T> {
         let current = store.current();
@@ -911,11 +912,11 @@ where
     async fn serve_waiters(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         log_map: PendingLogs<V, C::PublicKey>,
         ceremony: Option<&Ceremony<V, C>>,
-        waiters: &mut ArtifactWaiters<V, C>,
-        artifacts: &mut ArtifactCache<V, C>,
+        waiters: &mut ArtifactWaiters<V, C, B::Directory>,
+        artifacts: &mut ArtifactCache<V, C, B::Directory>,
     ) {
         let responses = waiters.take(&log_map);
         if responses.is_empty() {
@@ -933,19 +934,20 @@ where
 
     /// Assembles final epoch information from an already verified ceremony.
     ///
-    /// Participant policy and retained-share storage are consulted here, while
-    /// building or finalizing the boundary block, rather than by speculative
-    /// verification. Results are cached only for the exact effective log set.
-    /// A failed reshare carries the prior output and retained local share into a
-    /// failure artifact; a failed one-shot DKG produces no artifact.
+    /// Participant policy, transport directory, and retained-share storage are
+    /// consulted here, while building or finalizing the boundary block, rather
+    /// than by speculative verification. Results are cached only for the exact
+    /// effective log set. A failed reshare carries the prior output and retained
+    /// local share into a failure artifact; a failed one-shot DKG produces no
+    /// artifact.
     async fn artifact(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         log_map: PendingLogs<V, C::PublicKey>,
         ceremony: Option<&Ceremony<V, C>>,
-        artifacts: &mut ArtifactCache<V, C>,
-    ) -> Option<Artifact<V, C>> {
+        artifacts: &mut ArtifactCache<V, C, B::Directory>,
+    ) -> Option<Artifact<V, C, B::Directory>> {
         if let Some(cached) = artifacts
             .artifact
             .as_ref()
@@ -965,13 +967,14 @@ where
             "inclusion must have current epoch or DKG participants"
         );
 
-        let future_players = if current.is_some() {
+        let next_players = if current.is_some() {
             match &mut artifacts.next_players {
                 Some(players) => players.clone(),
                 None => {
-                    // The provider contract requires this set to remain stable
-                    // for the epoch, so reuse one lookup across competing final
-                    // block proposals and verification attempts.
+                    // The provider contract requires this value to remain
+                    // stable for the epoch, so reuse one lookup across
+                    // competing final block proposals and verification
+                    // attempts.
                     let players = self
                         .participants_provider
                         .participants(epoch.next().next())
@@ -990,28 +993,67 @@ where
         };
 
         let artifact = match (ceremony, current) {
-            (Some(ceremony), Some(current)) => Some(Artifact {
-                info: EpochInfo {
-                    outcome: EpochOutcome::Success,
-                    epoch: epoch.next(),
-                    output: ceremony.output.clone(),
-                    players: current.next_players,
-                    next_players: future_players,
-                },
-                share: ceremony.share.clone(),
-            }),
+            (Some(ceremony), Some(current)) => {
+                let next_epoch = epoch.next();
+                let requested = Set::from_iter_dedup(
+                    ceremony
+                        .output
+                        .players()
+                        .iter()
+                        .chain(current.next_players.iter())
+                        .chain(next_players.iter())
+                        .cloned(),
+                );
+                let directory = self
+                    .participants_provider
+                    .directory(next_epoch, requested.clone())
+                    .await;
+                assert!(
+                    directory.matches(&requested),
+                    "participants provider returned directory that does not exactly match requested peers"
+                );
+                Some(Artifact {
+                    info: EpochInfo {
+                        outcome: EpochOutcome::Success,
+                        epoch: next_epoch,
+                        output: ceremony.output.clone(),
+                        players: current.next_players,
+                        next_players,
+                        directory,
+                    },
+                    share: ceremony.share.clone(),
+                })
+            }
             (Some(ceremony), None) => {
                 let share = ceremony
                     .share
                     .clone()
                     .expect("DKG participant must receive a share");
+                let players = dkg_participants.expect("DKG mode must provide participants");
+                let requested = Set::from_iter_dedup(
+                    ceremony
+                        .output
+                        .players()
+                        .iter()
+                        .chain(players.iter())
+                        .chain(next_players.iter())
+                        .cloned(),
+                );
+                let directory = self
+                    .dkg_directory()
+                    .expect("DKG mode must provide directory");
+                assert!(
+                    directory.matches(&requested),
+                    "configured DKG directory does not exactly match participants"
+                );
                 Some(Artifact {
                     info: EpochInfo {
                         outcome: EpochOutcome::Success,
                         epoch,
                         output: ceremony.output.clone(),
-                        players: dkg_participants.expect("DKG mode must provide participants"),
-                        next_players: future_players,
+                        players,
+                        next_players,
+                        directory,
                     },
                     share: Some(share),
                 })
@@ -1023,13 +1065,31 @@ where
                 } else {
                     None
                 };
+                let requested = Set::from_iter_dedup(
+                    current
+                        .output
+                        .players()
+                        .iter()
+                        .chain(current.next_players.iter())
+                        .chain(next_players.iter())
+                        .cloned(),
+                );
+                let directory = self
+                    .participants_provider
+                    .directory(epoch.next(), requested.clone())
+                    .await;
+                assert!(
+                    directory.matches(&requested),
+                    "participants provider returned directory that does not exactly match requested peers"
+                );
                 Some(Artifact {
                     info: EpochInfo {
                         outcome: EpochOutcome::Failure,
                         epoch: epoch.next(),
                         output: current.output,
                         players: current.next_players,
-                        next_players: future_players,
+                        next_players,
+                        directory,
                     },
                     share,
                 })
@@ -1049,7 +1109,10 @@ where
     /// A failed one-shot DKG legitimately produces no boundary artifact. A
     /// continuous reshare must always carry an artifact, including one that
     /// records ceremony failure, so local absence is unavailable there.
-    fn artifact_response(&self, artifact: Option<&Artifact<V, C>>) -> EpochInfoResponse<V, C> {
+    fn artifact_response(
+        &self,
+        artifact: Option<&Artifact<V, C, B::Directory>>,
+    ) -> EpochInfoResponse<V, C, B::Directory> {
         match artifact {
             Some(artifact) => {
                 EpochInfoResponse::Available(Some(Payload::EpochInfo(artifact.info.clone())))
@@ -1068,9 +1131,9 @@ where
     async fn handle_finalized_epoch_info(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
-        artifact: Option<&Artifact<V, C>>,
-        payload: Option<Payload<V, C>>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        artifact: Option<&Artifact<V, C, B::Directory>>,
+        payload: Option<Payload<V, C, B::Directory>>,
     ) {
         let dkg = matches!(self.mode, Mode::Dkg { .. });
         if dkg && payload.is_none() {
@@ -1153,8 +1216,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, acknowledgement::Exact,
-        channel::oneshot, ordered::Set, test_rng,
+        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+        ordered::Set, sequence::Unit, test_rng,
     };
     use futures::{FutureExt, stream};
     use std::{marker::PhantomData, sync::Arc, time::Duration};
@@ -1162,6 +1225,7 @@ mod tests {
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
 
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
+    type TestWaiters = ArtifactWaiters<TestBlsVariant, PrivateKey, Unit>;
     struct DropNotifier(Option<oneshot::Sender<()>>);
 
     impl Drop for DropNotifier {
@@ -1277,10 +1341,8 @@ mod tests {
             let mut player = store
                 .create_player::<PrivateKey, N3f1>(Epoch::zero(), signer.clone(), info.clone())
                 .expect("player");
-            let (recipient, public, private) = dealer
-                .shares_to_distribute()
-                .next()
-                .expect("self dealing");
+            let (recipient, public, private) =
+                dealer.shares_to_distribute().next().expect("self dealing");
             assert_eq!(recipient, public_key);
             let Verdict::Valid(ack) = player
                 .handle(
@@ -1316,6 +1378,7 @@ mod tests {
                 context.child("network"),
                 NetworkConfig {
                     max_size: 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -1346,6 +1409,7 @@ mod tests {
                 },
                 DkgConfig {
                     participants: participants.clone(),
+                    directory: Unit,
                     completion: Box::new(|_| {}),
                 },
             );
@@ -1401,7 +1465,9 @@ mod tests {
             assert_eq!(artifact.players, participants);
             assert!(artifact.next_players.is_empty());
 
-            ack_waiter.await.expect("final block should be acknowledged");
+            ack_waiter
+                .await
+                .expect("final block should be acknowledged");
             let (result, store) = inclusion.await.expect("inclusion should finish");
             assert!(result.is_continue());
             assert!(store.current().is_none());
@@ -1641,7 +1707,7 @@ mod tests {
             verification.start(task);
 
             let (response_tx, response_rx) = oneshot::channel();
-            let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+            let mut waiters = TestWaiters::default();
             waiters.push(canceled.clone(), response_tx);
             assert!(verification.retarget(canceled));
             drop(response_rx);
@@ -1665,7 +1731,7 @@ mod tests {
     fn retargeting_preserves_ancestry_waiter() {
         let logs = dealer_logs(0);
         let (response_tx, response_rx) = oneshot::channel();
-        let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+        let mut waiters = TestWaiters::default();
         waiters.push(logs.clone(), response_tx);
 
         let selected = waiters.next_target(|| dealer_logs(1));
@@ -1682,7 +1748,7 @@ mod tests {
         let second = dealer_logs(1);
         let (first_tx, first_rx) = oneshot::channel();
         let (second_tx, mut second_rx) = oneshot::channel();
-        let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+        let mut waiters = TestWaiters::default();
         waiters.push(first.clone(), first_tx);
         waiters.push(second.clone(), second_tx);
 
@@ -1706,7 +1772,7 @@ mod tests {
         let logs = dealer_logs(0);
         let (first_tx, _first_rx) = oneshot::channel();
         let (second_tx, _second_rx) = oneshot::channel();
-        let mut waiters = ArtifactWaiters::<TestBlsVariant, PrivateKey>::default();
+        let mut waiters = TestWaiters::default();
 
         waiters.push(logs.clone(), first_tx);
         waiters.push(logs.clone(), second_tx);

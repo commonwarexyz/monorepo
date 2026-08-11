@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn in_progress_sync_requires_compatible_floor() {
+    fn in_progress_sync_persists_newer_resume_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
@@ -263,9 +263,9 @@ mod tests {
             assert!(plan.requires_state_sync_floor());
             assert!(plan.should_state_sync(false));
             let metadata = plan.sync_metadata.begin_sync(stored).await;
-            metadata
-                .begin_sync(finalization(&fixture.schemes, 9, 9))
-                .await;
+            let newer = finalization(&fixture.schemes, 9, 9);
+            let metadata = metadata.begin_sync(newer.clone()).await;
+            assert_eq!(metadata.in_progress_floor(), Some(&newer));
         });
     }
 

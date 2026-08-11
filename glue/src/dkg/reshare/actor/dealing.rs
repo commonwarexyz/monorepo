@@ -1,5 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    network::Manager,
     reshare::{
         Actor, EpochInfoResponse, Message as MailboxMessage,
         metrics::Phase,
@@ -19,7 +20,7 @@ use commonware_cryptography::{
     certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Manager, Message as NetworkMessage, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, Message as NetworkMessage, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
@@ -35,9 +36,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -54,7 +55,7 @@ where
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
         mut player: Option<&mut Player<V, C>>,
         (mut sender, mut receiver): (SE, RE),
@@ -159,7 +160,7 @@ where
     async fn handle_message<SE>(
         &mut self,
         epoch: Epoch,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         dealer: Option<&mut Dealer<V, C>>,
         player: Option<&mut Player<V, C>>,
         sender: &mut SE,
@@ -237,7 +238,7 @@ where
 
     async fn send_dealings<SE>(
         public_key: &C::PublicKey,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: &mut Dealer<V, C>,
         mut player: Option<&mut Player<V, C>>,
@@ -285,9 +286,7 @@ mod tests {
     };
     use commonware_actor::Feedback;
     use commonware_consensus::{Reporter, marshal};
-    use commonware_cryptography::{
-        bls12381::primitives::sharing::Mode, ed25519,
-    };
+    use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
     use commonware_p2p::{
         Receiver,
         simulated::{Config as NetworkConfig, Network},
@@ -342,6 +341,7 @@ mod tests {
                 context.child("network"),
                 NetworkConfig {
                     max_size: 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },

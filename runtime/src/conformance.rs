@@ -39,7 +39,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{StorageConformance, StorageWorkload};
-    use crate::{Blob as _, Storage as _};
+    use crate::{Blob as _, Storage as _, WriteOptions};
     use commonware_conformance::Conformance as _;
     use futures::executor::block_on;
 
@@ -52,7 +52,8 @@ mod tests {
             let (blob, _) = context
                 .open("storage-conformance", &seed.to_be_bytes())
                 .await?;
-            blob.write_at(0, vec![seed as u8, 1, 2, 3]).await?;
+            blob.write_at(0, vec![seed as u8, 1, 2, 3], WriteOptions::default())
+                .await?;
             blob.sync().await
         }
     }
@@ -66,7 +67,8 @@ mod tests {
             let (blob, _) = context
                 .open("storage-conformance", &seed.to_be_bytes())
                 .await?;
-            blob.write_at(0, vec![seed as u8, 4, 5, 6]).await?;
+            blob.write_at(0, vec![seed as u8, 4, 5, 6], WriteOptions::default())
+                .await?;
             blob.sync().await
         }
     }

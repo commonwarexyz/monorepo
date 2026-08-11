@@ -22,13 +22,13 @@
 //!
 //! ```rust,ignore
 //! // Initialize with storage
-//! let (actor, mailbox, last_height) = Actor::<S, Standard<B>>::init(
+//! let (actor, mailbox, floor) = Actor::<S, Standard<B>>::init(
 //!     context,
 //!     finalizations_archive,
 //!     blocks_archive,
 //!     config,
 //! ).await;
-//! // `last_height` is `None` until the application acknowledges a block.
+//! // `floor.height()` is `None` until the application acknowledges a block.
 //!
 //! // Start with application and buffer
 //! actor.start(application, buffer, resolver);
@@ -50,6 +50,7 @@ pub(crate) mod cache;
 mod delivery;
 pub(crate) mod durability;
 mod floor;
+pub use floor::Floor;
 mod stream;
 
 mod mailbox;
@@ -57,4 +58,4 @@ pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
 mod subscriptions;
 mod variant;
-pub use variant::{Buffer, Variant};
+pub use variant::{Buffer, Retirement, Variant};

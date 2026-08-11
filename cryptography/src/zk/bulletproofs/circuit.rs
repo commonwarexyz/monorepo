@@ -49,7 +49,7 @@
 //! ```rust
 //! # use commonware_cryptography::{
 //! #     bls12381::primitives::group::{G1, Scalar},
-//! #     transcript::Transcript,
+//! #     transcript::{Transcript, Version},
 //! #     zk::bulletproofs::{
 //! #         circuit::{prove, verify, Circuit, Setup, SparseMatrix, Witness},
 //! #         ipa,
@@ -96,7 +96,7 @@
 //! .expect("witness lengths should match");
 //! let claim = witness.claim(&setup);
 //!
-//! let mut prover_transcript = Transcript::new(b"circuit-example");
+//! let mut prover_transcript = Transcript::new(b"circuit-example", Version::V1);
 //! prover_transcript.commit(b"context".as_slice());
 //! let proof = prove(
 //!     &mut prover_rng,
@@ -110,7 +110,7 @@
 //! .expect("witness should satisfy the claim and circuit");
 //!
 //! let mut verifier_rng = test_rng();
-//! let mut verifier_transcript = Transcript::new(b"circuit-example");
+//! let mut verifier_transcript = Transcript::new(b"circuit-example", Version::V1);
 //! verifier_transcript.commit(b"context".as_slice());
 //! let valid = setup
 //!     .eval(
@@ -237,13 +237,15 @@ impl<F: Ring> Mul<&[F]> for &SparseMatrix<F> {
 
 impl<F: Write> Write for SparseMatrix<F> {
     fn write(&self, buf: &mut impl BufMut) {
+        self.width.write(buf);
+        self.height.write(buf);
         self.weights.write(buf);
     }
 }
 
 impl<F: EncodeSize> EncodeSize for SparseMatrix<F> {
     fn encode_size(&self) -> usize {
-        self.weights.encode_size()
+        self.width.encode_size() + self.height.encode_size() + self.weights.encode_size()
     }
 }
 
@@ -257,6 +259,7 @@ pub struct Circuit<F> {
 impl<F: Write> Write for Circuit<F> {
     fn write(&self, buf: &mut impl BufMut) {
         self.committed_vars.write(buf);
+        self.internal_vars.write(buf);
         self.weights.write(buf);
     }
 }
@@ -269,7 +272,9 @@ impl<F: Encode> Circuit<F> {
 
 impl<F: EncodeSize> EncodeSize for Circuit<F> {
     fn encode_size(&self) -> usize {
-        self.committed_vars.encode_size() + self.weights.encode_size()
+        self.committed_vars.encode_size()
+            + self.internal_vars.encode_size()
+            + self.weights.encode_size()
     }
 }
 
@@ -1871,6 +1876,7 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
+    use crate::transcript::Version;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::{
         algebra::{Additive, Ring},
@@ -2012,7 +2018,7 @@ pub mod fuzz {
         witness: &Witness<F>,
     ) -> bool {
         let mut rng = test_rng();
-        let mut prover_transcript = Transcript::new(NAMESPACE);
+        let mut prover_transcript = Transcript::new(NAMESPACE, Version::V1);
         let Some(proof) = super::prove(
             &mut rng,
             &mut prover_transcript,
@@ -2024,7 +2030,7 @@ pub mod fuzz {
         ) else {
             return false;
         };
-        let mut verifier_transcript = Transcript::new(NAMESPACE);
+        let mut verifier_transcript = Transcript::new(NAMESPACE, Version::V1);
         setup
             .eval(
                 |vs| {
@@ -2111,7 +2117,10 @@ pub mod fuzz {
 #[cfg(test)]
 mod test {
     use super::{Circuit, Setup, SparseMatrix, Witness, fuzz, prove, verify};
-    use crate::{transcript::Transcript, zk::circuit as zk};
+    use crate::{
+        transcript::{Transcript, Version},
+        zk::circuit as zk,
+    };
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
@@ -2120,6 +2129,72 @@ mod test {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+
+    #[test]
+    fn test_sparse_matrix_encoding_binds_dimensions() {
+        let matrix = SparseMatrix::<F>::default();
+        let mut wider = SparseMatrix::<F>::default();
+        wider.pad(1, 0);
+        let mut taller = SparseMatrix::<F>::default();
+        taller.pad(0, 1);
+
+        assert_eq!(matrix.weights, wider.weights);
+        assert_eq!(matrix.weights, taller.weights);
+        assert_ne!(matrix.encode(), wider.encode());
+        assert_ne!(matrix.encode(), taller.encode());
+        assert_ne!(wider.encode(), taller.encode());
+    }
+
+    #[test]
+    fn test_distinct_valid_circuits_encode_differently() {
+        let mut no_internal_vars = SparseMatrix::<F>::default();
+        no_internal_vars.pad(1, 0);
+        let no_internal_vars =
+            Circuit::new(0, no_internal_vars).expect("width 1 is a valid circuit layout");
+
+        let mut one_internal_var = SparseMatrix::<F>::default();
+        one_internal_var.pad(4, 0);
+        let one_internal_var =
+            Circuit::new(0, one_internal_var).expect("width 4 is a valid circuit layout");
+
+        assert_eq!(no_internal_vars.internal_vars(), 0);
+        assert_eq!(one_internal_var.internal_vars(), 1);
+        assert!(no_internal_vars.is_satisfied(&[], &[], &[]));
+        assert!(!one_internal_var.is_satisfied(&[], &[], &[]));
+        assert!(one_internal_var.is_satisfied(&[], &[F::zero()], &[F::zero()]));
+        assert_ne!(no_internal_vars.encode(), one_internal_var.encode());
+    }
+
+    #[test]
+    fn test_converted_circuits_bind_internal_vars() {
+        let (one_internal_var, _) = zk::build::<F>(|ctx| {
+            let a = zk::Var::witness(ctx, |_| F::zero());
+            let b = zk::Var::witness(ctx, |_| F::zero());
+            let product = a * &b;
+            product.assert_eq(&product);
+            Vec::new()
+        });
+        let one_internal_var = super::zkc_to_circuit(one_internal_var, &[]);
+
+        let (two_internal_vars, _) = zk::build::<F>(|ctx| {
+            let w0 = zk::Var::witness(ctx, |_| F::zero());
+            let w1 = zk::Var::witness(ctx, |_| F::zero());
+            let w2 = zk::Var::witness(ctx, |_| F::zero());
+            w1.assert_eq(&w1);
+            w0.assert_eq(&w0);
+            w2.assert_eq(&w2);
+            Vec::new()
+        });
+        let two_internal_vars = super::zkc_to_circuit(two_internal_vars, &[]);
+
+        assert_eq!(one_internal_var.internal_vars(), 1);
+        assert_eq!(two_internal_vars.internal_vars(), 2);
+        assert_eq!(
+            one_internal_var.weights.encode(),
+            two_internal_vars.weights.encode()
+        );
+        assert_ne!(one_internal_var.encode(), two_internal_vars.encode());
+    }
 
     #[test]
     fn test_zkc_conversion_preserves_satisfaction_minifuzz() {
@@ -2290,7 +2365,7 @@ mod test {
         claim.commitments.push(G::generator() * &F::from(9u8));
 
         let mut rng = test_rng();
-        let mut prover_transcript = Transcript::new(b"verify-rejects-over-long-claim");
+        let mut prover_transcript = Transcript::new(b"verify-rejects-over-long-claim", Version::V1);
         let proof = prove(
             &mut rng,
             &mut prover_transcript,
@@ -2302,7 +2377,8 @@ mod test {
         )
         .expect("prove still produces a proof against the malformed claim");
 
-        let mut verifier_transcript = Transcript::new(b"verify-rejects-over-long-claim");
+        let mut verifier_transcript =
+            Transcript::new(b"verify-rejects-over-long-claim", Version::V1);
         let verified = setup.eval(
             |vs| {
                 verify(

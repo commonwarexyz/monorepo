@@ -13,24 +13,27 @@ use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Controls whether and how the engine proactively forwards certified blocks
-/// when entering the next view.
+/// Controls whether and how the engine proactively forwards blocks when
+/// entering the next view.
 ///
-/// Forwarding is a best-effort liveness aid: when enabled, the batcher
-/// broadcasts only after we locally certify a proposal and enter the next
-/// view, avoiding sends for proposals that never pass certification.
+/// Forwarding is a best-effort liveness aid. When enabled, the batcher
+/// broadcasts on entering the next view for a proposal that is finalized, or
+/// notarized without a failed certification. Targets are chosen from votes observed
+/// locally, so a certificate signer whose vote never reached us still counts
+/// as silent.
 #[derive(Debug, Clone, Copy)]
 pub enum ForwardingPolicy {
-    /// Do nothing when a certified proposal becomes eligible for forwarding.
+    /// Do nothing when a proposal becomes eligible for forwarding.
     Disabled,
-    /// Forward the block to all participants that did not vote for the proposal.
+    /// Forward the block to all participants whose matching vote was not
+    /// observed locally.
     ///
     /// To only send to the leader of the newly entered view, see [ForwardingPolicy::SilentLeader].
     SilentVoters,
-    /// Forward the block to the leader of the newly entered view if they did not
-    /// vote for the proposal.
+    /// Forward the block to the leader of the newly entered view if the
+    /// leader's matching vote was not observed locally.
     ///
-    /// To forward to all participants that did not vote for the proposal, see [ForwardingPolicy::SilentVoters].
+    /// To forward to all such participants, see [ForwardingPolicy::SilentVoters].
     SilentLeader,
 }
 
@@ -109,6 +112,10 @@ where
     /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
+    ///
+    /// Simplex compares complete signed votes when checking duplicates and
+    /// conflicts. Signing the same subject more than once for the same participant
+    /// must therefore produce the same signature encoding.
     pub scheme: S,
 
     /// Leader election configuration.
@@ -138,7 +145,19 @@ where
     /// verified (see [`crate::simplex::types::Activity`]). Consider wrapping with
     /// [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter
     /// and verify activities based on scheme attributability.
+    ///
+    /// Locally constructed votes are exported only after their journal entries are
+    /// durable. Network votes are not persisted, so an equivocating sender may have
+    /// different votes exported before and after a restart.
     pub reporter: F,
+
+    /// Track individual votes after certification.
+    ///
+    /// By default, full vote evidence is released when the corresponding certificate
+    /// is constructed or received, making later conflict reporting and peer blocking
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage.
+    pub track_historical_votes: bool,
 
     /// Strategy for parallel operations.
     pub strategy: T,
@@ -192,11 +211,7 @@ where
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Number of concurrent requests to make at once.
-    pub fetch_concurrent: NonZeroUsize,
-
-    /// Policy for proactively forwarding certified blocks when entering the
-    /// next view.
+    /// Policy for proactively forwarding blocks when entering the next view.
     pub forwarding: ForwardingPolicy,
 }
 
