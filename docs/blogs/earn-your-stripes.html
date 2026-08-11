@@ -101,33 +101,34 @@ Jo</a> and <a href="https://x.com/_patrickogrady">Patrick
 O’Grady</a></div>
                         <div class="date">August 10th, 2026</div>
         </div>
-        <p><a href="/blogs/coding">Deliver Us in Pieces</a> introduced
-        <code>marshal::coding</code>: a leader erasure-encodes a block
-        and sends one shard to each validator. Validators can check that
-        shard and vote on the commitment without waiting for the whole
-        payload.</p>
+        <p>When one leader pushes a full block to every validator, its
+        egress bounds throughput while everyone else’s bandwidth sits
+        idle. <a href="/blogs/coding">Deliver Us in Pieces</a> showed
+        how erasure coding puts that idle bandwidth to work. In
+        <code>marshal::coding</code>, the leader sends each validator
+        one shard. Validators relay them and vote on the commitment
+        before anyone reconstructs the whole payload.</p>
         <p>The expensive transforms still sit on the critical path. The
         leader must finish encoding before it can disperse the block. At
         <code>certify</code>, each validator must reconstruct the full
         block before full application verification can begin. On the
         original recovery path, it also re-encoded the recovered
         originals to verify the commitment. Reed-Solomon recovery was
-        the most expensive part, and until recently, it was stuck on a
-        single core.</p>
+        the most expensive step, and until recently it ran on one
+        core.</p>
         <h2 id="where-strategy-fell-short">Where <code>Strategy</code>
-        fell short</h2>
-        <p>Decode already accepted a <code>Strategy</code> for
-        parallelism, and it helped: hashing the missing shards used to
-        rebuild the Merkle root spread across cores. The recovery itself
-        did not. It stayed a single synchronous
+        Fell Short</h2>
+        <p>Decode already accepted a <code>Strategy</code>, but it used
+        the worker pool only to hash missing shards for the Merkle root.
+        Reed-Solomon recovery remained one synchronous
         <code>decoder.decode()</code> call.
         <code>reed-solomon-simd</code> selects a SIMD backend on
-        supported CPUs, but a single encode or decode call does not
-        spawn worker threads. So even at <code>conc=8</code>, the costly
-        part still ran on one core.</p>
+        supported CPUs, but one encode or decode call does not spawn
+        worker threads. Even at <code>conc=8</code>, the costly part
+        still ran on one core.</p>
         <p>Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show
         where recovery stops scaling. The all-original case does no
-        recovery; the full-recovery case reconstructs every
+        recovery. The full-recovery case reconstructs every
         original:</p>
         <style>
           .cw-rs-chart {
@@ -154,11 +155,12 @@ O’Grady</a></div>
             </tbody>
           </table>
         </noscript>
-        <p>From 1 to 16 workers the all-original end-to-end latency
-        dropped from 34.96 ms to 7.90 ms, but full recovery remained at
-        25.94 ms. The 16 to 18 ms separation is only a proxy for
-        recovery because the two cases hash different missing shards,
-        but concurrency was not reaching the full-width decoder.</p>
+        <p>From 1 to 16 workers, all-original end-to-end latency dropped
+        from 34.96 ms to 7.90 ms. Full recovery improved through 8
+        workers, then flattened near 26 ms. The 16 to 18 ms separation
+        is only a proxy for recovery because the two cases hash
+        different missing shards. Even so, concurrency was not reaching
+        the full-width decoder.</p>
         <h2 id="from-one-decoder-to-many">From One Decoder to Many</h2>
         <p>Reed-Solomon encoding represents the block as
         <code>k + m</code> equal-length shards, with <code>k</code>
@@ -201,7 +203,7 @@ O’Grady</a></div>
         <div class="image-caption">
         <p>Figure 1: Recovering missing original shard <code>D1</code>
         used to run as one full-width Reed-Solomon job. After striping,
-        each aligned range becomes its own job; <code>Strategy</code>
+        each aligned range becomes its own job. <code>Strategy</code>
         runs them in parallel, then the recovered ranges concatenate
         into the same full-width <code>D1</code>.</p>
         </div>
@@ -210,8 +212,9 @@ O’Grady</a></div>
         (<code>reed-solomon-simd</code>) sees the layout it expects. The
         output is the same as one full-width decode, just scheduled
         across several disjoint ranges.</p>
-        <h2 id="results">Results</h2>
-        <p>The same worst-case decode, before and after striping:</p>
+        <h2 id="recovery-scales">Recovery Scales</h2>
+        <p>We reran the same worst-case decode before and after
+        striping:</p>
         <div id="earn-your-stripes-chart-striping" class="cw-rs-chart" role="img" aria-label="Line chart of worst-case decode latency before and after striping. With 1, 8, and 16 workers, latency changes from 51.19 to 51.79 milliseconds, 26.85 to 10.22 milliseconds, and 25.94 to 7.67 milliseconds. The latter two improvements are 2.63 and 3.38 times."></div>
         <noscript>
           <table>
@@ -230,8 +233,8 @@ O’Grady</a></div>
         10.22 ms, a 2.63x speedup. At <code>conc=16</code>, it drops to
         7.67 ms, a 3.38x speedup. The recovery tail that used to ignore
         concurrency is now the part that shrinks the most.</p>
-        <h2 id="vendoring-and-further-optimizations">Vendoring and
-        Further Optimizations</h2>
+        <h2 id="removing-the-second-transform">Removing the Second
+        Transform</h2>
         <p>Striping made recovery parallel, but the verification path
         still ran Reed-Solomon twice. After it decoded missing
         originals, it re-encoded every recovery shard, compared any
@@ -245,14 +248,14 @@ O’Grady</a></div>
         <code>reed-solomon-simd</code></a>, Patrick noticed that the
         second pass was unnecessary whenever an original shard was
         missing. The decoder had already computed the missing recovery
-        positions but exposed only missing originals, so we extended it
-        to reveal both.</p>
+        positions but returned only missing originals. We extended it to
+        reveal both.</p>
         <p>The recovery path now feeds exactly <code>k</code> shards to
         the decoder. If more were received, surplus recovery shards are
         forgotten and reconstructed too. One decode returns every
-        missing original and recovery position, and rebuilding the
-        Merkle root still binds the complete codeword to the commitment.
-        We skip the encode, not the verification.</p>
+        missing original and recovery position. Rebuilding the Merkle
+        root still binds the complete codeword to the commitment. We
+        skip the encode, not the verification.</p>
         <p>The block itself only needs the missing originals. Missing
         recovery positions matter here because decode also verifies the
         commitment: rebuilding the BMT root requires a digest at every
@@ -303,25 +306,26 @@ O’Grady</a></div>
             </tbody>
           </table>
         </noscript>
-        <p>The one-worker row is an end-to-end baseline-to-final
-        comparison; it does not isolate either optimization on its own.
-        The final patch also checks that striped and full-width
-        operations produce the same codeword, that revealed recovery
-        shards match encoder output, and that tampered originals,
-        recoveries, padding, and surplus shards are rejected.</p>
-        <h2 id="llm-in-a-research-loop">LLM in a Research Loop</h2>
-        <p>QED’s bot—our AI research agent—found this optimization by
+        <p>The one-worker row is an end-to-end comparison of the
+        baseline and final implementations, so it does not isolate
+        either optimization. The final patch also checks that striped
+        and full-width operations produce the same codeword, that
+        revealed recovery shards match encoder output, and that tampered
+        originals, recoveries, padding, and surplus shards are
+        rejected.</p>
+        <h2 id="an-ai-research-loop">An AI Research Loop</h2>
+        <p>QED’s bot, our AI research agent, found this optimization by
         reading the coding stack and noticing that hashing the missing
         shards in decode was parallelized, but Reed-Solomon recovery was
-        not. Then it tested the hypothesis that recovery could be split
-        into independent stripes and run in parallel.</p>
-        <p>The loop used here looks a lot like our security audit agent.
-        It keeps scanning the code, gathers evidence from the repo,
-        forms hypotheses, and verifies them with tests and benchmarks.
-        Whether a finding is useful depends on repository context. A
-        finding may be a known issue or an intentional design choice, so
-        the lessons from continuous auditing Commonware helped a lot to
-        find a valid optimization.</p>
+        not. It then tested whether recovery could be split into
+        independent stripes and run in parallel.</p>
+        <p>The loop resembles the one used by our security audit agent.
+        It scans the code, gathers repository evidence, forms
+        hypotheses, and verifies them with tests and benchmarks. Whether
+        a finding is useful depends on repository context, since the
+        same pattern may be a known issue or an intentional design
+        choice. Lessons from continuously auditing Commonware helped the
+        bot identify a valid optimization.</p>
         <h2 id="next-steps">Next Steps</h2>
         <p>We found similar sequential bottlenecks elsewhere in the
         coding stack. The NTTs under ZODA are next, and that work is

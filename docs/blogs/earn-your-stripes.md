@@ -12,15 +12,15 @@ url: "https://commonware.xyz/blogs/earn-your-stripes"
 image: "https://commonware.xyz/imgs/reed-solomon-stripes.png"
 ---
 
-[Deliver Us in Pieces](/blogs/coding) introduced `marshal::coding`: a leader erasure-encodes a block and sends one shard to each validator. Validators can check that shard and vote on the commitment without waiting for the whole payload.
+When one leader pushes a full block to every validator, its egress bounds throughput while everyone else's bandwidth sits idle. [Deliver Us in Pieces](/blogs/coding) showed how erasure coding puts that idle bandwidth to work. In `marshal::coding`, the leader sends each validator one shard. Validators relay them and vote on the commitment before anyone reconstructs the whole payload.
 
-The expensive transforms still sit on the critical path. The leader must finish encoding before it can disperse the block. At `certify`, each validator must reconstruct the full block before full application verification can begin. On the original recovery path, it also re-encoded the recovered originals to verify the commitment. Reed-Solomon recovery was the most expensive part, and until recently, it was stuck on a single core.
+The expensive transforms still sit on the critical path. The leader must finish encoding before it can disperse the block. At `certify`, each validator must reconstruct the full block before full application verification can begin. On the original recovery path, it also re-encoded the recovered originals to verify the commitment. Reed-Solomon recovery was the most expensive step, and until recently it ran on one core.
 
-## Where `Strategy` fell short
+## Where `Strategy` Fell Short
 
-Decode already accepted a `Strategy` for parallelism, and it helped: hashing the missing shards used to rebuild the Merkle root spread across cores. The recovery itself did not. It stayed a single synchronous `decoder.decode()` call. `reed-solomon-simd` selects a SIMD backend on supported CPUs, but a single encode or decode call does not spawn worker threads. So even at `conc=8`, the costly part still ran on one core.
+Decode already accepted a `Strategy`, but it used the worker pool only to hash missing shards for the Merkle root. Reed-Solomon recovery remained one synchronous `decoder.decode()` call. `reed-solomon-simd` selects a SIMD backend on supported CPUs, but one encode or decode call does not spawn worker threads. Even at `conc=8`, the costly part still ran on one core.
 
-Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show where recovery stops scaling. The all-original case does no recovery; the full-recovery case reconstructs every original:
+Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show where recovery stops scaling. The all-original case does no recovery. The full-recovery case reconstructs every original:
 
 ```{=html}
 <style>
@@ -50,7 +50,7 @@ Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show where recovery stop
 </noscript>
 ```
 
-From 1 to 16 workers the all-original end-to-end latency dropped from 34.96 ms to 7.90 ms, but full recovery remained at 25.94 ms. The 16 to 18 ms separation is only a proxy for recovery because the two cases hash different missing shards, but concurrency was not reaching the full-width decoder.
+From 1 to 16 workers, all-original end-to-end latency dropped from 34.96 ms to 7.90 ms. Full recovery improved through 8 workers, then flattened near 26 ms. The 16 to 18 ms separation is only a proxy for recovery because the two cases hash different missing shards. Even so, concurrency was not reaching the full-width decoder.
 
 ## From One Decoder to Many
 
@@ -87,14 +87,14 @@ To recover one 16-bit symbol inside a missing shard, the decoder only needs the 
 ```
 
 ::: {.image-caption}
-Figure 1: Recovering missing original shard `D1` used to run as one full-width Reed-Solomon job. After striping, each aligned range becomes its own job; `Strategy` runs them in parallel, then the recovered ranges concatenate into the same full-width `D1`.
+Figure 1: Recovering missing original shard `D1` used to run as one full-width Reed-Solomon job. After striping, each aligned range becomes its own job. `Strategy` runs them in parallel, then the recovered ranges concatenate into the same full-width `D1`.
 :::
 
 Stripe cuts land on 64-byte shard-chunk boundaries (`SHARD_CHUNK_BYTES`) so the vendored codec (`reed-solomon-simd`) sees the layout it expects. The output is the same as one full-width decode, just scheduled across several disjoint ranges.
 
-## Results
+## Recovery Scales
 
-The same worst-case decode, before and after striping:
+We reran the same worst-case decode before and after striping:
 
 ```{=html}
 <div id="earn-your-stripes-chart-striping" class="cw-rs-chart" role="img" aria-label="Line chart of worst-case decode latency before and after striping. With 1, 8, and 16 workers, latency changes from 51.19 to 51.79 milliseconds, 26.85 to 10.22 milliseconds, and 25.94 to 7.67 milliseconds. The latter two improvements are 2.63 and 3.38 times."></div>
@@ -112,13 +112,13 @@ The same worst-case decode, before and after striping:
 
 At `conc=1`, one stripe follows the original full-width decode, so no parallel speedup is expected. At `conc=8`, recovery finally rides the same cores as everything else, and worst-case decode drops from 26.85 ms to 10.22 ms, a 2.63x speedup. At `conc=16`, it drops to 7.67 ms, a 3.38x speedup. The recovery tail that used to ignore concurrency is now the part that shrinks the most.
 
-## Vendoring and Further Optimizations
+## Removing the Second Transform
 
 Striping made recovery parallel, but the verification path still ran Reed-Solomon twice. After it decoded missing originals, it re-encoded every recovery shard, compared any provided recoveries with that output, and rebuilt the Merkle root over the complete codeword. As explained in [Deliver Us in Pieces](/blogs/coding), checking a shard against the commitment does not by itself show that all committed shards form one valid Reed-Solomon codeword.
 
-After we [vendored `reed-solomon-simd`](https://github.com/commonwarexyz/monorepo/pull/4092), Patrick noticed that the second pass was unnecessary whenever an original shard was missing. The decoder had already computed the missing recovery positions but exposed only missing originals, so we extended it to reveal both.
+After we [vendored `reed-solomon-simd`](https://github.com/commonwarexyz/monorepo/pull/4092), Patrick noticed that the second pass was unnecessary whenever an original shard was missing. The decoder had already computed the missing recovery positions but returned only missing originals. We extended it to reveal both.
 
-The recovery path now feeds exactly `k` shards to the decoder. If more were received, surplus recovery shards are forgotten and reconstructed too. One decode returns every missing original and recovery position, and rebuilding the Merkle root still binds the complete codeword to the commitment. We skip the encode, not the verification.
+The recovery path now feeds exactly `k` shards to the decoder. If more were received, surplus recovery shards are forgotten and reconstructed too. One decode returns every missing original and recovery position. Rebuilding the Merkle root still binds the complete codeword to the commitment. We skip the encode, not the verification.
 
 The block itself only needs the missing originals. Missing recovery positions matter here because decode also verifies the commitment: rebuilding the BMT root requires a digest at every shard position.
 
@@ -167,13 +167,13 @@ The final [pull request](https://github.com/commonwarexyz/monorepo/pull/4091) co
 </noscript>
 ```
 
-The one-worker row is an end-to-end baseline-to-final comparison; it does not isolate either optimization on its own. The final patch also checks that striped and full-width operations produce the same codeword, that revealed recovery shards match encoder output, and that tampered originals, recoveries, padding, and surplus shards are rejected.
+The one-worker row is an end-to-end comparison of the baseline and final implementations, so it does not isolate either optimization. The final patch also checks that striped and full-width operations produce the same codeword, that revealed recovery shards match encoder output, and that tampered originals, recoveries, padding, and surplus shards are rejected.
 
-## LLM in a Research Loop
+## An AI Research Loop
 
-QED's bot—our AI research agent—found this optimization by reading the coding stack and noticing that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. Then it tested the hypothesis that recovery could be split into independent stripes and run in parallel.
+QED's bot, our AI research agent, found this optimization by reading the coding stack and noticing that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. It then tested whether recovery could be split into independent stripes and run in parallel.
 
-The loop used here looks a lot like our security audit agent. It keeps scanning the code, gathers evidence from the repo, forms hypotheses, and verifies them with tests and benchmarks. Whether a finding is useful depends on repository context. A finding may be a known issue or an intentional design choice, so the lessons from continuous auditing Commonware helped a lot to find a valid optimization.
+The loop resembles the one used by our security audit agent. It scans the code, gathers repository evidence, forms hypotheses, and verifies them with tests and benchmarks. Whether a finding is useful depends on repository context, since the same pattern may be a known issue or an intentional design choice. Lessons from continuously auditing Commonware helped the bot identify a valid optimization.
 
 ## Next Steps
 
