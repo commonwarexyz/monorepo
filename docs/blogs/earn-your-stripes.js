@@ -295,12 +295,6 @@ function buildStripingFigure(mount) {
       PALE_BLUE,
     );
   }
-  addText(jobLayer, 382, 336, 'non-final cuts · 64-byte aligned', {
-    'font-size': 11,
-    fill: GRAY,
-    'text-anchor': 'middle',
-  });
-
   const afterRows = [];
   for (let job = 0; job < 3; job++) {
     const start = gridX + job * (jobWidth + jobGap);
