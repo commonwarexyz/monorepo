@@ -1336,6 +1336,8 @@ mod tests {
     // N=4 -> CHUNK_SIZE_BITS = 32
     const N: usize = 4;
     type Bm = BitMap<N>;
+    type GraftedBatch =
+        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Rayon>>;
     type Location = mmr::Location;
 
     fn make_bitmap(bits: &[bool]) -> Bm {
@@ -1349,10 +1351,7 @@ mod tests {
     fn grafted_chain(
         strategy: &Rayon,
         mem: &Arc<Mem<mmb::Family, <Sha256 as Hasher>::Digest>>,
-    ) -> (
-        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Rayon>>,
-        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Rayon>>,
-    ) {
+    ) -> (GraftedBatch, GraftedBatch) {
         let hasher = grafting::hasher::<mmb::Family, Sha256>(grafting::height::<1>());
         let a = mem
             .new_batch_with_strategy(strategy.clone())
