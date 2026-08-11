@@ -548,13 +548,48 @@ function buildStripingFigure(mount) {
     return { line, start };
   });
 
-  const equalityLabel = addText(layer, DESIGN_W / 2, 526, 'same full-width D1', {
-    'font-size': 11,
+  const equality = svgEl('g', { opacity: 0 });
+  equality.appendChild(svgEl('path', {
+    d: 'M 700 116 H 752 V 499 H 700',
+    fill: 'none',
+    stroke: GREEN,
+    'stroke-width': 3,
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+  }));
+  [116, 499].forEach(y => {
+    equality.appendChild(svgEl('circle', {
+      cx: 700,
+      cy: y,
+      r: 3.5,
+      fill: GREEN,
+    }));
+  });
+  equality.appendChild(svgEl('circle', {
+    cx: 752,
+    cy: 238,
+    r: 14,
+    fill: PALE_GREEN,
+    stroke: GREEN,
+    'stroke-width': 2,
+  }));
+  addText(equality, 752, 245, '=', {
+    'font-size': 21,
     'font-weight': 700,
     fill: GREEN,
     'text-anchor': 'middle',
-    opacity: 0,
   });
+  addPill(
+    equality,
+    DESIGN_W / 2 - 105,
+    449,
+    210,
+    'same D1 as BEFORE',
+    GREEN,
+    PALE_GREEN,
+    13,
+  );
+  layer.appendChild(equality);
 
   const legendItems = [
     [patterns.checked, RED, 'none', 'checked'],
@@ -607,7 +642,7 @@ function buildStripingFigure(mount) {
       );
     });
     const equal = ease(range(time, 5.75, 6.05));
-    equalityLabel.setAttribute('opacity', equal);
+    equality.setAttribute('opacity', equal);
   }
 
   render(0);

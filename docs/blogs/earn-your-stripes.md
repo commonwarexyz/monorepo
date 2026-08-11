@@ -4,7 +4,7 @@ description: "Striping Reed-Solomon recovery across cores and avoiding a separat
 date: "August 10th, 2026"
 published-time: "2026-08-10T00:00:00Z"
 modified-time: "2026-08-10T00:00:00Z"
-author: "Sunghyeon Jo"
+author: "Sunghyeon Jo (QED)"
 author_twitter: "https://x.com/kaizero_ainta"
 author2: "Patrick O'Grady"
 author2_twitter: "https://x.com/_patrickogrady"
