@@ -12,9 +12,9 @@ image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 
 New blocks no longer have to wait for network round trips.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they let Simplex produce new blocks without waiting for network round trips.
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once.
 
-In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms, while the median time from proposal to finalization was 300ms. At that cadence, about 60 newer blocks could be in flight while the first finalized.
+In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms. For an external observer, median finality was 300ms from the leader's block timestamp to delivery through the indexer and WebSocket. At that cadence, about 60 newer blocks could be in flight while the first finalized.
 
 ```{=html}
 <style>
@@ -28,11 +28,11 @@ In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread a
   }
 
   .simplex-loop-validation {
-    aspect-ratio: 1024 / 330;
+    aspect-ratio: 1024 / 380;
   }
 
   .simplex-loop-recovery {
-    aspect-ratio: 1024 / 300;
+    aspect-ratio: 1024 / 320;
   }
 </style>
 <noscript>
