@@ -109,13 +109,13 @@ The term boundary is also a leader handoff, so optimistic work stops there. The 
 Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
 
 ```{=html}
-<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.">
-  <noscript>View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.</noscript>
+<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues offscreen.">
+  <noscript>View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 4: When v3 times out, later proposals are discarded and the rest of the term is skipped. In the next term, v9 builds on v2.
+Figure 4: When v3 times out, later proposals are discarded and the rest of the term is skipped. In the next term, v9 builds on v2 and the pipeline resumes.
 :::
 
 ## Where the Pipeline Fits

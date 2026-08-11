@@ -513,15 +513,19 @@ function buildRecovery(mount) {
   const x0 = 135;
   const gap = 90;
   const views = Array.from({ length: 8 }, (_, index) => x0 + index * gap);
-  const nextView = 900;
+  const nextView = 875;
+  const continuationView = 965;
 
   addText(svg, 20, 32, 'A timeout ends the optimistic pipeline', {
     'font-size': 18,
     'font-weight': 700,
   });
   addText(svg, 450, 66, 'term 1', { 'text-anchor': 'middle', fill: GRAY });
-  addText(svg, nextView, 66, 'term 2', { 'text-anchor': 'middle', fill: GRAY });
-  addLine(svg, 95, y, 940, y, { stroke: LIGHT, 'stroke-width': 3 });
+  addText(svg, (nextView + continuationView) / 2, 66, 'term 2', {
+    'text-anchor': 'middle',
+    fill: GRAY,
+  });
+  addLine(svg, 95, y, 1010, y, { stroke: LIGHT, 'stroke-width': 3 });
   addLine(svg, 825, 48, 825, 205, {
     stroke: BLUE,
     'stroke-dasharray': '7 7',
@@ -693,8 +697,8 @@ function buildRecovery(mount) {
     nextView - 20,
     y + 19,
     ARROW,
-    0.81,
-    0.06,
+    0.80,
+    0.05,
     { strokeWidth: 1.8, headSize: 7 },
   ));
 
@@ -703,15 +707,54 @@ function buildRecovery(mount) {
     fill: GRAY,
     opacity: 0,
   });
-  animated.push(addStep(nextLabel, 0.87));
-  addState(nextView, RED, 0, 0.88);
-  addState(nextView, GRAY, 1, 0.93);
-  addState(nextView, GREEN, 2, 0.98);
+  animated.push(addStep(nextLabel, 0.85));
+  addState(nextView, RED, 0, 0.86);
+  addState(nextView, GRAY, 1, 0.90);
+  addState(nextView, GREEN, 2, 0.94);
+
+  animated.push(addArrow(
+    svg,
+    nextView + 19,
+    y,
+    continuationView - 19,
+    y,
+    ARROW,
+    0.88,
+    0.025,
+    { strokeWidth: 1.6, headSize: 6.5 },
+  ));
+  const continuationLabel = addText(svg, continuationView, 100, 'v10', {
+    'text-anchor': 'middle',
+    fill: GRAY,
+    opacity: 0,
+  });
+  animated.push(addStep(continuationLabel, 0.90));
+  addState(continuationView, RED, 0, 0.91);
+  addState(continuationView, GRAY, 1, 0.95);
+  addState(continuationView, GREEN, 2, 0.99);
+  animated.push(addArrow(
+    svg,
+    continuationView + 19,
+    y,
+    WIDTH - 10,
+    y,
+    ARROW,
+    0.93,
+    0.05,
+    { strokeWidth: 1.6, headSize: 6.5 },
+  ));
 
   return animated;
 }
 
-function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS, staticProgress = 1) {
+function run(
+  mount,
+  builder,
+  loopMs = LOOP_MS,
+  startHoldMs = HOLD_MS,
+  endHoldMs = startHoldMs,
+  staticProgress = 1,
+) {
   const description = mount.getAttribute('aria-label');
   const animated = builder(mount);
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -728,7 +771,7 @@ function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS, staticProgress 
     mount.setAttribute('aria-label', `Animated figure. ${description} Activate to pause or resume.`);
   };
   const progressAt = elapsed =>
-    Math.max(0, Math.min(1, (elapsed - holdMs) / (loopMs - holdMs * 2)));
+    Math.max(0, Math.min(1, (elapsed - startHoldMs) / (loopMs - startHoldMs - endHoldMs)));
 
   const frozen = new URLSearchParams(window.location.search).get('freeze');
   if (frozen !== null) {
@@ -812,12 +855,12 @@ style.textContent = `
 document.head.appendChild(style);
 
 const figures = [
-  ['simplex-fig-cadence', buildCadence, 4600, 300, 0.4],
-  ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS, 1],
-  ['simplex-fig-validation', buildValidation, LOOP_MS, HOLD_MS, 1],
-  ['simplex-fig-recovery', buildRecovery, LOOP_MS, HOLD_MS, 1],
+  ['simplex-fig-cadence', buildCadence, 4600, 300, 300, 0.4],
+  ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS, HOLD_MS, 1],
+  ['simplex-fig-validation', buildValidation, 8500, HOLD_MS, 1800, 1],
+  ['simplex-fig-recovery', buildRecovery, 8500, HOLD_MS, 1800, 1],
 ];
-for (const [id, builder, loopMs, holdMs, staticProgress] of figures) {
+for (const [id, builder, loopMs, startHoldMs, endHoldMs, staticProgress] of figures) {
   const mount = document.getElementById(id);
-  if (mount) run(mount, builder, loopMs, holdMs, staticProgress);
+  if (mount) run(mount, builder, loopMs, startHoldMs, endHoldMs, staticProgress);
 }
