@@ -444,6 +444,9 @@ where
         return Some(PendingLogs::new());
     }
 
+    // Walk backward from the boundary parent through every inclusion block not
+    // already reflected in durable storage. The expected height and digest
+    // prove that all yielded blocks belong to one contiguous chain.
     let mut expected_digest = parent;
     let mut allow_final = true;
     let mut blocks = Vec::new();
@@ -470,6 +473,8 @@ where
             continue;
         }
 
+        // The pending window is valid only as a height-by-height digest chain.
+        // Rejecting its first mismatch prevents omitted or substituted logs.
         allow_final = false;
         if height != expected_height || block.digest() != expected_digest {
             warn!(
@@ -491,6 +496,8 @@ where
             .expect("pending dealer-log ancestry must remain above genesis");
     }
 
+    // Authenticate the proven segment in forward chain order so each dealer's
+    // earliest valid log wins, matching durable storage's first-log rule.
     let mut logs = BTreeMap::new();
     for block in blocks.into_iter().rev() {
         let height = block.height();
@@ -907,6 +914,10 @@ where
         async {
             let epoch = scan.epoch;
             let info = scan.info;
+
+            // The request remains ancestry-bound until its complete unfinalized
+            // segment is available. An incomplete or canceled scan cannot
+            // produce a reusable log view.
             let Some(pending) = pending_logs(
                 scan,
                 request.parent,
@@ -920,12 +931,17 @@ where
                 return;
             };
 
+            // Finalized logs are authoritative. Pending ancestry may fill only
+            // a dealer slot that durable storage has not already claimed.
             let mut logs = store.logs(epoch);
             for (dealer, log) in pending {
                 logs.entry(dealer).or_insert(log);
             }
             let logs = Arc::new(logs);
 
+            // Reuse is keyed by the exact effective log view. An assembled
+            // artifact can answer immediately; a verified ceremony still needs
+            // phase-local participant and directory assembly.
             if let Some(cached) = work.artifacts.get(logs.as_ref()) {
                 let artifact = cached.artifact.clone();
                 let _ = request
@@ -943,6 +959,8 @@ where
                 return;
             }
 
+            // A cache miss transfers the response to the sole active waiter.
+            // Sharing the log view tags the waiter and task with the same input.
             assert!(work.waiter.is_none(), "materialized waiter already active");
             work.waiter = Some(ArtifactWaiter {
                 logs: logs.clone(),
