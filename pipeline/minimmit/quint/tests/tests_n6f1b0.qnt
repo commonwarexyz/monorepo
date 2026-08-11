@@ -494,7 +494,11 @@ module tests {
             .expect(all_invariants)
     }
 
-    run happyPathWithNotarizationCertificatesTest = {
+    // The strict base protocol: certificate handling never casts a notarize vote (minimmit.md 8.4).
+    // A replica that has not seen the proposal, on receiving a valid notarization certificate,
+    // stores it and enters the next view -- but it does NOT emit notarize(proposal, sig_of(id)),
+    // and leaves its notarized / ghost_sent_votes state for that view untouched.
+    run certificateReceiptDoesNotVoteTest = {
         val proposal = {
             block: "val_b0",
             view: 0,
@@ -502,375 +506,36 @@ module tests {
             block_parent: GENESIS_BLOCK,
             sig: sig_of("n0")
         }
+        // a real M = 3 notarization, backed by the votes of n0, n1, n2 below
+        val notarization_0 = notarization(proposal, Set("n0", "n1", "n2"), sig_of("n0"))
 
-        val n4_vote = notarize(proposal, sig_of("n4"))
-
-        val n5_vote = notarize(proposal, sig_of("n5"))
-
-        val cert_n0n1n2 = notarization(
-            proposal,
-            Set("n0", "n1", "n2"),
-            sig_of("n0")
-        )
-
-
-        initWithLeader(Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
-            .expect(cert_kind(cert_n0n1n2) == NotarizationKind)
-            // Leader n0 proposes in view 0
+        initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n5"))
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
-            .then( all {
-                assert(replica_state.get("n0").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-            .expect(all_invariants)
-            // replicas n0-n4, but not n5 process the proposal and vote for it (n0 already did!)
             .then(on_proposal("n1", proposal))
-            .then( all {
-                assert(replica_state.get("n1").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
             .then(on_proposal("n2", proposal))
-            .then( all {
-                assert(replica_state.get("n2").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-            .then(on_proposal("n3", proposal))
-            .then( all {
-                assert(replica_state.get("n3").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-
-
-            .expect(all_invariants)
-
-            // All replicas collect votes and notarize the block
-            .then(replica_receives_notarize_vote("n0", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n3"))
-
-            .then(replica_receives_notarize_vote("n1", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n3"))
-
-            .then(replica_receives_notarize_vote("n2", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n3"))
-
-
-            .then(replica_receives_notarize_vote("n3", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n3"))
-
-            .then(all{
-                assert(not(sent_vote.contains(n4_vote))),
-                assert(store_vote.get("n4").filter(v => and {
-                    vote_view(v) == 0,
-                    vote_kind(v) == NotarizeKind,
-                    vote_proposal(v).option_has(p => p.block == "val_b0"),
-                }).size() == 0),
-                assert(store_certificate.get("n4").size() == 0),
-                unchanged_all
-            })
-            .then(replica_receives_certificate("n4", cert_n0n1n2))
-            // since n4 did not vote for the block it must send it's vote now
-            .then(all{
-                assert(store_certificate.get("n4").size() == 1),
-                assert(sent_vote.contains(n4_vote)),
-                unchanged_all
-            })
-
-
-            .then(replica_receives_notarize_vote("n5", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n5", proposal, "n1"))
-            .then(all{
-                assert(not(sent_vote.contains(n5_vote))),
-                assert(store_vote.get("n5").filter(v => and {
-                    vote_view(v) == 0,
-                    vote_kind(v) == NotarizeKind,
-                    vote_proposal(v).option_has(p => p.block == "val_b0"),
-                }).size() == 2),
-                assert(store_certificate.get("n5").size() == 0),
-                assert(not(is_view_notarized(0, store_certificate.get("n5")))),
-                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 0),
-                assert(replica_state.get("n5").notarized.get(0) == None),
-                assert(not(replica_state.get("n5").has_notarized())),
+            // n5 has not seen the proposal and has cast no vote in view 0
+            .then(all {
                 assert(replica_state.get("n5").view == 0),
-                unchanged_all
+                assert(replica_state.get("n5").notarized.get(0) == None),
+                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 0),
+                assert(not(sent_vote.contains(notarize(proposal, sig_of("n5"))))),
+                unchanged_all,
             })
-            .then(replica_receives_notarize_vote("n5", proposal, "n2"))
-            // n5 has votes and M-quorum.
-            // since n5 did not vote for the block it must send its vote now and add M-notarization (certificate)
-            .then(all{
-                assert(store_certificate.get("n5").size() == 1),
-                assert(sent_vote.contains(n5_vote)),
-                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
-                assert(replica_state.get("n5").notarized.get(0).option_has(p => p.block == "val_b0")),
-                assert(replica_state.get("n5").view == 1),
-                unchanged_all
-            })
-            // n5 receives another vote. It should be in new view now, so no votes for previous view or new certificates.
-            .then(replica_receives_notarize_vote("n5", proposal, "n3"))
-            .then(all{
+            // n5 receives a valid notarization certificate for view 0
+            .then(on_certificate("n5", notarization_0))
+            .then(all {
+                // it stores the certificate and enters view 1 ...
                 assert(store_certificate.get("n5").size() == 1),
                 assert(is_view_notarized(0, store_certificate.get("n5"))),
-                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
-                assert(replica_state.get("n5").ghost_sent_votes.get(1).length() == 0),
-                unchanged_all
-            })
-            .then(replica_receives_notarize_vote("n5", proposal, "n4"))
-            .then(all{
-                assert(store_certificate.get("n5").size() == 2),
-                assert(is_proposal_finalized_votes(proposal, store_vote.get("n5"))),
-                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
-                unchanged_all
-            })
-
-            .then(replica_receives_notarize_vote("n0", proposal, "n4"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n4"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n4"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n4"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n4"))
-            .then(replica_receives_notarize_vote("n5", proposal, "n4"))
-
-            .then(replica_receives_notarize_vote("n0", proposal, "n5"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n5"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n5"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n5"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n5"))
-            .then(replica_receives_notarize_vote("n5", proposal, "n5"))
-
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n0")).size()==6)
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n1")).size()==6)
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n2")).size()==6)
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n3")).size()==6)
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n4")).size()==2)
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n5")).size()==6)
-
-            .then(replica_receives_notarize_vote("n4", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n3"))
-            .expect(select_votes(0, NotarizeKind, store_vote.get("n4")).size()==6)
-
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n0")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n1")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n2")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n3")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n4")))
-            .expect(is_proposal_finalized_votes(proposal, store_vote.get("n5")))
-
-            .expect(store_certificate.get("n0").size() == 2)
-            .expect(store_certificate.get("n1").size() == 2)
-            .expect(store_certificate.get("n2").size() == 2)
-            .expect(store_certificate.get("n3").size() == 2)
-            .expect(store_certificate.get("n4").size() == 2)
-            .expect(store_certificate.get("n5").size() == 2)
-
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n1")))
-            .expect(is_view_notarized(0, store_certificate.get("n2")))
-            .expect(is_view_notarized(0, store_certificate.get("n3")))
-            .expect(is_view_notarized(0, store_certificate.get("n4")))
-            .expect(is_view_notarized(0, store_certificate.get("n5")))
-            .expect(all_invariants)
-
-            .then(all {
-                assert(replica_state.get("n0").last_finalized == 0),
-                assert(replica_state.get("n1").last_finalized == 0),
-                assert(replica_state.get("n2").last_finalized == 0),
-                assert(replica_state.get("n3").last_finalized == 0),
-                assert(replica_state.get("n4").last_finalized == 0),
-                assert(replica_state.get("n5").last_finalized == 0),
-                unchanged_all,
-            })
-
-            .then(all {
-                assert(replica_state.get("n0").view == 1),
-                assert(replica_state.get("n1").view == 1),
-                assert(replica_state.get("n2").view == 1),
-                assert(replica_state.get("n3").view == 1),
-                assert(replica_state.get("n4").view == 1),
                 assert(replica_state.get("n5").view == 1),
+                // ... but it casts NO notarize vote and leaves its view-0 vote state untouched
+                assert(not(sent_vote.contains(notarize(proposal, sig_of("n5"))))),
+                assert(replica_state.get("n5").notarized.get(0) == None),
+                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 0),
+                assert(all_invariants),
                 unchanged_all,
-            })
-
-            .then(all {
-                assert(ghost_committed_blocks.get("n0") == [proposal]),
-                assert(ghost_committed_blocks.get("n1") == [proposal]),
-                assert(ghost_committed_blocks.get("n2") == [proposal]),
-                assert(ghost_committed_blocks.get("n3") == [proposal]),
-                assert(ghost_committed_blocks.get("n4") == [proposal]),
-                assert(ghost_committed_blocks.get("n5") == [proposal]),
-                unchanged_all,
-            })
-
-    }
-
-    run happyPathWithFinalizationTest = {
-        val proposal = {
-            block: "val_b0",
-            view: 0,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
-            sig: sig_of("n0")
-        }
-
-        val n5_vote = notarize(proposal, sig_of("n5"))
-
-        val notarization_n0n1n2 = notarization(
-            proposal,
-            Set("n0", "n1", "n2"),
-            sig_of("n0")
-        )
-
-        val finalization_n0n1n2n3n4 = notarization(
-            proposal,
-            Set("n0", "n1", "n2", "n3", "n4"),
-            sig_of("n0")
-        )
-
-
-        initWithLeader(Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4"))
-            .expect(cert_kind(notarization_n0n1n2) == NotarizationKind)
-            // Leader n0 proposes in view 0
-            .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
-            .then( all {
-                assert(replica_state.get("n0").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
             })
             .expect(all_invariants)
-            // replicas n0-n4, but not n5 process the proposal and vote for it (n0 already did!)
-            .then(on_proposal("n1", proposal))
-            .then( all {
-                assert(replica_state.get("n1").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-            .then(on_proposal("n2", proposal))
-            .then( all {
-                assert(replica_state.get("n2").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-            .then(on_proposal("n3", proposal))
-            .then( all {
-                assert(replica_state.get("n3").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-            .then(on_proposal("n4", proposal))
-            .then( all {
-                assert(replica_state.get("n4").notarized.get(0).option_has(p => p.block == "val_b0")),
-                unchanged_all
-            })
-            .expect(cert_kind(finalization_n0n1n2n3n4) == FinalizationKind)
-            .expect(all_invariants)
-
-            // All replicas collect votes and notarize the block
-            .then(replica_receives_notarize_vote("n0", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n3"))
-            .then(replica_receives_notarize_vote("n0", proposal, "n4"))
-
-            .then(replica_receives_notarize_vote("n1", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n3"))
-            .then(replica_receives_notarize_vote("n1", proposal, "n4"))
-
-            .then(replica_receives_notarize_vote("n2", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n3"))
-            .then(replica_receives_notarize_vote("n2", proposal, "n4"))
-
-            .then(replica_receives_notarize_vote("n3", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n3"))
-            .then(replica_receives_notarize_vote("n3", proposal, "n4"))
-
-            .then(replica_receives_notarize_vote("n4", proposal, "n0"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n1"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n2"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n3"))
-            .then(replica_receives_notarize_vote("n4", proposal, "n4"))
-
-            .then(all{
-                assert(not(sent_vote.contains(n5_vote))),
-                assert(store_vote.get("n5").filter(v => and {
-                    vote_view(v) == 0,
-                    vote_kind(v) == NotarizeKind,
-                    vote_proposal(v).option_has(p => p.block == "val_b0"),
-                }).size() == 0),
-                assert(store_certificate.get("n5").size() == 0),
-                unchanged_all
-            })
-            .then(replica_receives_certificate("n5", notarization_n0n1n2))
-
-            // since n4 did not vote for the block it must send it's vote now
-            .then(all{
-                assert(store_certificate.get("n5").size() == 1),
-                assert(sent_vote.contains(n5_vote)),
-                unchanged_all
-            })
-
-            .then(replica_receives_certificate("n5", finalization_n0n1n2n3n4))
-            .then(all{
-                assert(store_certificate.get("n5").size() == 2),
-                assert(sent_vote.contains(n5_vote)),
-                assert(replica_state.get("n5").ghost_sent_votes.get(0).length() == 1),
-                assert(replica_state.get("n5").notarized.get(0).option_has(p => p.block == "val_b0")),
-                assert(replica_state.get("n5").view == 1),
-                unchanged_all
-            })
-
-            .expect(store_certificate.get("n0").size() == 2)
-            .expect(store_certificate.get("n1").size() == 2)
-            .expect(store_certificate.get("n2").size() == 2)
-            .expect(store_certificate.get("n3").size() == 2)
-            .expect(store_certificate.get("n4").size() == 2)
-            .expect(store_certificate.get("n5").size() == 2)
-
-            .expect(is_view_notarized(0, store_certificate.get("n0")))
-            .expect(is_view_notarized(0, store_certificate.get("n1")))
-            .expect(is_view_notarized(0, store_certificate.get("n2")))
-            .expect(is_view_notarized(0, store_certificate.get("n3")))
-            .expect(is_view_notarized(0, store_certificate.get("n4")))
-            .expect(is_view_notarized(0, store_certificate.get("n5")))
-            .expect(all_invariants)
-
-            .then(all {
-                assert(replica_state.get("n0").last_finalized == 0),
-                assert(replica_state.get("n1").last_finalized == 0),
-                assert(replica_state.get("n2").last_finalized == 0),
-                assert(replica_state.get("n3").last_finalized == 0),
-                assert(replica_state.get("n4").last_finalized == 0),
-                assert(replica_state.get("n5").last_finalized == 0),
-                unchanged_all,
-            })
-
-            .then(all {
-                assert(replica_state.get("n0").view == 1),
-                assert(replica_state.get("n1").view == 1),
-                assert(replica_state.get("n2").view == 1),
-                assert(replica_state.get("n3").view == 1),
-                assert(replica_state.get("n4").view == 1),
-                assert(replica_state.get("n5").view == 1),
-                unchanged_all,
-            })
-
-            .then(all {
-                assert(ghost_committed_blocks.get("n0") == [proposal]),
-                assert(ghost_committed_blocks.get("n1") == [proposal]),
-                assert(ghost_committed_blocks.get("n2") == [proposal]),
-                assert(ghost_committed_blocks.get("n3") == [proposal]),
-                assert(ghost_committed_blocks.get("n4") == [proposal]),
-                assert(ghost_committed_blocks.get("n5") == [proposal]),
-                unchanged_all,
-            })
     }
 
     // Two blocks happy path test - commits blocks in views 1 and 2

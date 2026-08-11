@@ -65,8 +65,8 @@ module tests {
                 assert(forged_finalization_b1.in(store_certificate.get("n1"))),
                 assert(certificates_are_valid_inv),
                 // the certificates are well-shaped but their signatures are not backed:
-                // only n0 and n1 ever voted, and only because `_process_certificate` made
-                // them notarize the certificate's own proposal on accepting the forgery
+                // no replica ever cast a notarize vote for these proposals, so the claimed
+                // n0..n4 signatures have no corresponding votes
                 assert(not(certificates_are_backed)),
                 assert(not(validity)),
                 // n0 finalized val_b0 and n1 finalized val_b1 in the same view 0: two correct
@@ -338,13 +338,16 @@ module tests {
 
         initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n0"))
             // === view 0 ===
-            // n0 proposes, n1 and n2 notarize it: an M = 3 quorum, below the finalization quorum L.
+            // All of n0-n4 notarize val_b0 by receiving the proposal, but n3 and n4 then observe
+            // only the sub-quorum {n0, n1, n2} (M = 3, below the finalization quorum L).
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .then(on_proposal("n1", proposal_from_n0))
             .then(on_proposal("n2", proposal_from_n0))
+            .then(on_proposal("n3", proposal_from_n0))
+            .then(on_proposal("n4", proposal_from_n0))
 
-            // n3 and n4 only ever see that sub-quorum. They assemble a notarization,
-            // vote for it themselves, and enter view 1 without finalizing anything.
+            // n3 and n4 assemble a notarization from that sub-quorum and enter view 1 without
+            // finalizing anything.
             .then(replica_receives_notarize_votes("n3", proposal_from_n0, Set("n0", "n1", "n2")))
             .then(replica_receives_notarize_votes("n4", proposal_from_n0, Set("n0", "n1", "n2")))
             .then(all {
@@ -367,12 +370,13 @@ module tests {
             .then(replica_receives_notarize_votes("n2", proposal_from_n0, Set("n0", "n1", "n2")))
 
             // === view 1 ===
-            // n1 proposes on top of the view-0 notarization, and all of n0-n4 notarize.
+            // n1 proposes on top of the view-0 notarization, and all of n0-n4 notarize by
+            // receiving the proposal. n0 holds finalization(val_b0, 0), so `valid_parent` passes.
             .then(proposer_step("n1", "val_b1", "val_b0", 0))
+            .then(on_proposal("n0", proposal_from_n1))
+            .then(on_proposal("n2", proposal_from_n1))
             .then(on_proposal("n3", proposal_from_n1))
             .then(on_proposal("n4", proposal_from_n1))
-            .then(replica_receives_notarize_votes("n0", proposal_from_n1, Set("n1", "n3", "n4")))
-            .then(on_proposal("n2", proposal_from_n1))
 
             // n3 sees all L = 5 votes for view 1 and finalizes it. It also holds
             // notarization(val_b0, 0), so ancestor finalization commits both val_b0 and val_b1.
@@ -532,12 +536,21 @@ module tests {
             block_parent: "val_b0",
             sig: sig_of("n0")
         }
+        // rungs of the nullification ladder (walkers n0, n1 + byzantine n5)
+        pure val nullification_1 = nullification(1, Set("n0", "n1", "n5"), "n0")
+        pure val nullification_2 = nullification(2, Set("n0", "n1", "n5"), "n0")
+        pure val nullification_3 = nullification(3, Set("n0", "n1", "n5"), "n0")
+        pure val nullification_4 = nullification(4, Set("n0", "n1", "n5"), "n0")
+        pure val nullification_5 = nullification(5, Set("n0", "n1", "n5"), "n0")
+        pure val nullification_6 = nullification(6, Set("n0", "n1", "n5"), "n0")
         // assembled by n0 on the last rung of the nullification ladder
         pure val nullification_7 = nullification(
             7,
             Set("n0", "n1", "n5"),
             "n0"
         )
+        // the view-0 notarization for val_b0, assembled from the sub-quorum {n0, n1, n2}
+        pure val notarization_0 = notarization(proposal_from_n0, Set("n0", "n1", "n2"), "n0")
         // assembled and broadcast by n4 when it finalizes view 0, after view 8
         pure val finalization_0 = notarization(
             proposal_from_n0,
@@ -583,9 +596,25 @@ module tests {
             .then(proposer_step("n0", "val_b1", "val_b0", 0))
             .then(on_proposal("n1", proposal_at_top_view))
             .then(inject_vote(notarize(proposal_at_top_view, sig_of("n5"))))
-            // n2 and n3 vote for the block on seeing notarization(val_b1, 8)
-            .then(replica_receives_notarize_votes("n2", proposal_at_top_view, Set("n0", "n1", "n5")))
-            .then(replica_receives_notarize_votes("n3", proposal_at_top_view, Set("n0", "n1", "n5")))
+            // n2 and n3 receive the full proof chain for val_b1's parent -- notarization(val_b0, 0)
+            // and the nullifications for views 1..7 -- so `valid_parent` holds and they can notarize
+            // val_b1 through the proposal path (n4 is deliberately left without it below).
+            .then(on_certificate("n2", notarization_0))
+            .then(on_certificate("n2", nullification_1))
+            .then(on_certificate("n2", nullification_2))
+            .then(on_certificate("n2", nullification_3))
+            .then(on_certificate("n2", nullification_4))
+            .then(on_certificate("n2", nullification_5))
+            .then(on_certificate("n2", nullification_6))
+            .then(on_certificate("n3", notarization_0))
+            .then(on_certificate("n3", nullification_1))
+            .then(on_certificate("n3", nullification_2))
+            .then(on_certificate("n3", nullification_3))
+            .then(on_certificate("n3", nullification_4))
+            .then(on_certificate("n3", nullification_5))
+            .then(on_certificate("n3", nullification_6))
+            .then(on_proposal("n2", proposal_at_top_view))
+            .then(on_proposal("n3", proposal_at_top_view))
 
             // n4 sees all L = 5 votes and finalizes view 8. It cannot enter view 9 (outside
             // VIEWS), but `last_finalized` still advances to 8.

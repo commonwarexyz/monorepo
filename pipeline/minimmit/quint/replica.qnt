@@ -129,15 +129,6 @@ module replica {
         votes.filter(v => vote_kind(v) == kind and vote_view(v) == view)
     }
 
-    // The vote a replica casts on adopting a certificate's proposal. The None branch is
-    // unreachable: `should_send_notarize_vote` only fires for a notarization or finalization.
-    pure def cert_notarize_vote(id: ReplicaId, c: Certificate): Vote = {
-        match cert_proposal(c) {
-            | Some(p) => notarize(p, sig_of(id))
-            | None => nullify(cert_view(c), sig_of(id))
-        }
-    }
-
     // Has a replica notarized a proposal in the current view?
     def has_notarized(r: ReplicaState): bool = {
         r.notarized.get(r.view) != None
@@ -772,28 +763,6 @@ module replica {
             store_certificate.get(id).union(Set(cert))
         else
             store_certificate.get(id)
-        val view = cert_view(cert)
-        val proposal = cert_proposal(cert)
-        // EXTENSION (not in the base minimmit.md path). Section 8.2 casts a notarize vote only on
-        // receiving the leader's *proposal*; section 8.4's certificate handling only stores,
-        // rebroadcasts, and enters the view -- it does not vote. Here, a replica still in view v
-        // that has not notarized or nullified adopts a certified proposal it observes (via a
-        // NotarizationKind/FinalizationKind certificate) and votes for it. This is a liveness aid
-        // in the spirit of the section 10 extensions ("attach recent proof(v) messages to a
-        // proposal so replicas unaware of recent proofs can still notarize"): a replica that
-        // learned the certificate but missed the proposal can still contribute to finalizing it.
-        // It is safe because it only ever fires for a proposal already backed by >= M real votes
-        // (the certificate threshold, enforced below), so it cannot manufacture support for a
-        // proposal from nothing; and it preserves the one-notarize-per-view latch and the
-        // not-nullified guard. To model the strict base protocol instead, drop this branch.
-        val should_send_notarize_vote = and {
-            self.view == view,
-            not(self.has_notarized()),
-            not(self.nullified),
-            cert_kind(cert) == NotarizationKind or cert_kind(cert) == FinalizationKind,
-            is_new_cert
-        }
-
         all {
             cert_signatures(cert).size() >= M,
 
@@ -813,22 +782,11 @@ module replica {
             else
                 ghost_committed_blocks,
 
-            val new_self = enter_new_view(self, cert)
-
-            if (should_send_notarize_vote)
-                all {
-                    sent_vote' = sent_vote.union(Set(cert_notarize_vote(id, cert))),
-                    replica_state' = replica_state.set(id, {
-                        ...new_self,
-                        notarized: self.notarized.put(view, proposal),
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(proposal))
-                    }),
-                }
-            else
-                all {
-                    sent_vote' = sent_vote,
-                    replica_state' = replica_state.set(id, new_self),
-                },
+            // Certificate handling only stores the proof, rebroadcasts it, and enters the next
+            // view; it does not cast a notarize vote (minimmit.md 8.4). A notarize vote is emitted
+            // solely on the proposal path (minimmit.md 8.2, see `on_proposal`).
+            sent_vote' = sent_vote,
+            replica_state' = replica_state.set(id, enter_new_view(self, cert)),
         }
     }
 

@@ -95,13 +95,7 @@ The model is faithful to [minimmit.md](../minimmit.md) except for the following 
   as every skipped view is nullified. A block is committed once it carries a notarization and some
   descendant carries a finalization.
 
-- **Certificate-receipt notarize vote (extension, not in the base spec).** `_process_certificate`
-  lets a replica that is still in view `v`, has not yet notarized or nullified, and observes a
-  notarization/finalization certificate for `v` adopt that certified proposal and cast a
-  `notarize` vote for it. The base protocol's notarize path (§8.2) is proposal-driven, and
-  certificate receipt (§8.4) only stores, rebroadcasts, and enters the next view — it does not
-  vote. This is a liveness aid (a replica that learned the certificate but missed the proposal can
-  still help finalize it) in the spirit of the §10 extensions. It is safe because it only fires for
-  a proposal already backed by ≥ `M` real votes and preserves the one-notarize-per-view latch and
-  the not-nullified guard. Removing the `should_send_notarize_vote` branch in `_process_certificate`
-  recovers the strict base protocol.
+- **Notarize votes are proposal-driven only (base spec §8.2).** A replica casts a `notarize(c, v)`
+  vote solely on receiving the leader's proposal (`on_proposal`). Certificate handling
+  (`_process_certificate`, §8.4/§8.5) only stores the proof, rebroadcasts it, and enters the next
+  view — it never casts a notarize vote.
