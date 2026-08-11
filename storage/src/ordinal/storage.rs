@@ -4,7 +4,7 @@ use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, Error as RError, WriteOptions,
+    Blob, Buf, BufMut, Error as RError, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -80,7 +80,7 @@ where
 }
 
 /// The store's state, boxed so the public [Ordinal] handle stays pointer-sized.
-struct Inner<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
+struct Inner<E: Context, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -104,7 +104,7 @@ struct Inner<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
+impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     /// See [Ordinal::init].
     async fn init(
         context: E,
@@ -459,9 +459,9 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 ///
 /// Mutating functions consume the store and return it only on success: an error (or a dropped
 /// future) destroys the handle.
-pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>>(Box<Inner<E, V>>);
+pub struct Ordinal<E: Context, V: CodecFixed<Cfg = ()>>(Box<Inner<E, V>>);
 
-impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> std::fmt::Debug for Ordinal<E, V> {
+impl<E: Context, V: CodecFixed<Cfg = ()>> std::fmt::Debug for Ordinal<E, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ordinal")
             .field("first_index", &self.0.intervals.first_index())
@@ -470,7 +470,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> std::fmt::Debug for Ord
     }
 }
 
-impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
     /// records should be considered available).
     ///

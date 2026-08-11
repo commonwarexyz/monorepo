@@ -338,11 +338,10 @@ use crate::{
             operation::{Operation, Update},
         },
         bitmap::Shared,
-        operation::Committable,
     },
     translator::Translator,
 };
-use commonware_codec::{CodecShared, FixedSize};
+use commonware_codec::{Codec, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -419,13 +418,13 @@ pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
 where
     F: merkle::Graftable,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
     T: Translator,
     I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
