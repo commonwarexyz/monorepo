@@ -7,16 +7,19 @@ use commonware_actor::{
     Feedback,
     mailbox::{Policy, Sender as ActorSender},
 };
-use commonware_consensus::{Reporter, marshal::Update, types::Height};
+use commonware_consensus::{
+    Reporter,
+    marshal::{
+        Update,
+        ancestry::{Ancestry, BoxedAncestry},
+    },
+    types::Height,
+};
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
-use futures::Stream;
-use std::{collections::VecDeque, pin::Pin, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 use tracing::{Span, error, info_span};
-
-/// Type-erased block ancestry stream sent through the actor mailbox.
-pub(crate) type ErasedAncestry<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Response to a final-block epoch artifact request.
 #[derive(Clone, PartialEq, Eq)]
@@ -144,7 +147,7 @@ where
     /// A request for the final block's speculative [`EpochInfo`](crate::dkg::types::EpochInfo).
     EpochInfo {
         span: Span,
-        ancestry: ErasedAncestry<B>,
+        ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     },
 
@@ -246,9 +249,15 @@ where
     }
 
     /// Request the final block's next-epoch artifact.
+    ///
+    /// The ancestry head must be either the final block being verified or the
+    /// parent of the final block being proposed. It must then yield a contiguous
+    /// parent chain through every inclusion block not yet finalized by the
+    /// reshare actor. During inclusion, a missing head, unexpected height, gap,
+    /// or truncated chain is unavailable.
     pub async fn epoch_info(
         &mut self,
-        ancestry: impl Stream<Item = Arc<B>> + Send + 'static,
+        ancestry: impl Ancestry<B>,
     ) -> EpochInfoResponse<V, C, B::Directory> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.epoch_info");
@@ -256,7 +265,7 @@ where
             .sender
             .enqueue(Message::EpochInfo {
                 span,
-                ancestry: Box::pin(ancestry),
+                ancestry: BoxedAncestry::new(ancestry),
                 response: response_tx,
             })
             .accepted()

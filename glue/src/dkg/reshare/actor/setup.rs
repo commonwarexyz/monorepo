@@ -64,6 +64,11 @@ where
     Participate(Box<PreparedEpoch<V, C>>),
 }
 
+/// State sync carries epoch metadata, but not dealer logs skipped before its floor.
+fn state_sync_skips_inclusion_prefix(state_sync_epoch: Option<Epoch>, phase: EpochPhase) -> bool {
+    state_sync_epoch.is_some() && phase == EpochPhase::Late
+}
+
 fn startup_height(
     epocher: &FixedEpocher,
     current_epoch: Option<Epoch>,
@@ -128,6 +133,9 @@ where
 
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
+        if state_sync_skips_inclusion_prefix(state_sync_epoch, bounds.phase()) {
+            return Some(Setup::Follow);
+        }
         let info = match current.or(state_sync_info) {
             Some(info) => info,
             None => {
@@ -282,8 +290,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::startup_height;
-    use commonware_consensus::types::{Epoch, Epocher as _, FixedEpocher};
+    use super::{startup_height, state_sync_skips_inclusion_prefix};
+    use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher};
     use commonware_utils::NZU64;
 
     #[test]
@@ -295,5 +303,22 @@ mod tests {
             startup_height(&epocher, Some(epoch), Some(epoch), None),
             epocher.first(epoch).expect("test epoch")
         );
+    }
+
+    #[test]
+    fn late_state_sync_floor_skips_inclusion_prefix() {
+        let epocher = FixedEpocher::new(NZU64!(64));
+        let epoch = Epoch::new(3);
+        let midpoint = epocher.midpoint(epoch).expect("test epoch");
+        let late_floor = midpoint.next();
+        let late_phase = epocher.containing(late_floor).expect("test floor").phase();
+
+        assert_eq!(late_phase, EpochPhase::Late);
+        assert!(state_sync_skips_inclusion_prefix(Some(epoch), late_phase));
+        assert!(!state_sync_skips_inclusion_prefix(
+            Some(epoch),
+            EpochPhase::Midpoint
+        ));
+        assert!(!state_sync_skips_inclusion_prefix(None, late_phase));
     }
 }

@@ -101,8 +101,9 @@
 //! # Follower Mode
 //!
 //! The actor follows instead of participating when setup cannot read the boundary
-//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height. This can occur during
-//! state-sync handoff because marshal may not retain the preceding boundary block.
+//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height, or
+//! when a state-sync floor skips part of the inclusion window. In either
+//! case the actor lacks the public history needed to reconstruct the ceremony.
 //!
 //! ```text
 //! processed height + 1 = H
