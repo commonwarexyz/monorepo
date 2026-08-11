@@ -253,8 +253,9 @@ where
     /// The ancestry head must be either the final block being verified or the
     /// parent of the final block being proposed. It must then yield a contiguous
     /// parent chain through every inclusion block not yet finalized by the
-    /// reshare actor. During inclusion, a missing head, unexpected height, gap,
-    /// or truncated chain is unavailable.
+    /// reshare actor and remain attached to any prefix finalized before lazy
+    /// acquisition. During inclusion, a missing head, unexpected height, gap,
+    /// detached fork, or truncated chain is unavailable.
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Ancestry<B>,

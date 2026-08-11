@@ -308,11 +308,22 @@ where
     }
 }
 
-struct PendingLogScan<'a, V: BlsVariant, P> {
+/// Latest finalized block whose reporter effects are reflected in [`Store`].
+///
+/// A recovered state-sync predecessor may be pruned before its floor is
+/// redispatched, so its digest can be unavailable. Blocks observed by this
+/// actor always carry the anchor needed to revalidate queued ancestries.
+#[derive(Clone, Copy)]
+struct FinalizedTip<D> {
+    height: Height,
+    digest: Option<D>,
+}
+
+struct PendingLogScan<'a, V: BlsVariant, P, D> {
     epoch: Epoch,
     info: &'a Info<V, P>,
     epocher: FixedEpocher,
-    finalized_tip: Option<Height>,
+    finalized_tip: Option<FinalizedTip<D>>,
     final_height: Height,
 }
 
@@ -418,7 +429,7 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
 /// This module therefore builds final artifacts from a temporary overlay of
 /// finalized logs plus valid pending ancestry logs.
 async fn pending_logs<B, V, C>(
-    scan: PendingLogScan<'_, V, C::PublicKey>,
+    scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
     parent: B::Digest,
     mut ancestry: ErasedAncestry<B>,
     mut shutdown: signal::Signal,
@@ -435,65 +446,77 @@ where
         .expect("epocher must know epoch midpoint");
     let first_pending = scan
         .finalized_tip
-        .filter(|tip| *tip >= midpoint)
-        .map_or(midpoint, Height::next);
+        .filter(|tip| tip.height >= midpoint)
+        .map_or(midpoint, |tip| tip.height.next());
+    let anchor = scan
+        .finalized_tip
+        .filter(|tip| tip.height.next() == first_pending)
+        .and_then(|tip| tip.digest);
     let Some(mut expected_height) = scan.final_height.previous() else {
         return Some(PendingLogs::new());
     };
-    if first_pending > expected_height {
-        return Some(PendingLogs::new());
-    }
 
     // Walk backward from the boundary parent through every inclusion block not
-    // already reflected in durable storage. The expected height and digest
-    // prove that all yielded blocks belong to one contiguous chain.
+    // already reflected in durable storage. The expected height, digest, and
+    // finalized anchor prove that the pending and durable segments form one
+    // contiguous chain.
     let mut expected_digest = parent;
-    let mut allow_final = true;
     let mut blocks = Vec::new();
-    loop {
-        let block = select! {
-            _ = &mut shutdown => return None,
-            _ = response.closed() => return None,
-            block = ancestry.next() => block,
-        };
-        let Some(block) = block else {
-            warn!(
-                epoch = ?scan.epoch,
-                ?expected_height,
-                "epoch info ancestry ended before covering pending dealer logs"
-            );
-            return None;
-        };
-        let height = block.height();
+    if first_pending <= expected_height {
+        let mut allow_final = true;
+        loop {
+            let block = select! {
+                _ = &mut shutdown => return None,
+                _ = response.closed() => return None,
+                block = ancestry.next() => block,
+            };
+            let Some(block) = block else {
+                warn!(
+                    epoch = ?scan.epoch,
+                    ?expected_height,
+                    "epoch info ancestry ended before covering pending dealer logs"
+                );
+                return None;
+            };
+            let height = block.height();
 
-        // Verification includes the final block itself, while proposal starts
-        // at its parent. Both forms must commit to the same parent chain.
-        if allow_final && height == scan.final_height && block.parent() == expected_digest {
+            // Verification includes the final block itself, while proposal starts
+            // at its parent. Both forms must commit to the same parent chain.
+            if allow_final && height == scan.final_height && block.parent() == expected_digest {
+                allow_final = false;
+                continue;
+            }
+
+            // The pending window is valid only as a height-by-height digest chain.
+            // Rejecting its first mismatch prevents omitted or substituted logs.
             allow_final = false;
-            continue;
-        }
+            if height != expected_height || block.digest() != expected_digest {
+                warn!(
+                    epoch = ?scan.epoch,
+                    ?height,
+                    ?expected_height,
+                    "epoch info ancestry is not contiguous"
+                );
+                return None;
+            }
 
-        // The pending window is valid only as a height-by-height digest chain.
-        // Rejecting its first mismatch prevents omitted or substituted logs.
-        allow_final = false;
-        if height != expected_height || block.digest() != expected_digest {
-            warn!(
-                epoch = ?scan.epoch,
-                ?height,
-                ?expected_height,
-                "epoch info ancestry is not contiguous"
-            );
-            return None;
+            expected_digest = block.parent();
+            blocks.push(block);
+            if height == first_pending {
+                break;
+            }
+            expected_height = height
+                .previous()
+                .expect("pending dealer-log ancestry must remain above genesis");
         }
+    }
 
-        expected_digest = block.parent();
-        blocks.push(block);
-        if height == first_pending {
-            break;
-        }
-        expected_height = height
-            .previous()
-            .expect("pending dealer-log ancestry must remain above genesis");
+    if anchor.is_some_and(|digest| digest != expected_digest) {
+        warn!(
+            epoch = ?scan.epoch,
+            "epoch info ancestry is detached from finalized prefix"
+        );
+        return None;
     }
 
     // Authenticate the proven segment in forward chain order so each dealer's
@@ -565,7 +588,14 @@ where
         // to blocks not yet reflected in storage. Queued ancestries remain lazy
         // until the sole verifier is free.
         let mut served_at: Option<Height> = None;
-        let mut finalized_tip = self.marshal.get_processed_height().await;
+        let mut finalized_tip =
+            self.marshal
+                .get_processed_height()
+                .await
+                .map(|height| FinalizedTip {
+                    height,
+                    digest: None,
+                });
         let mut work = ArtifactWork::default();
         select_loop! {
             self.context,
@@ -786,7 +816,10 @@ where
                             .await;
                         }
 
-                        finalized_tip = Some(block.height());
+                        finalized_tip = Some(FinalizedTip {
+                            height: block.height(),
+                            digest: Some(block.digest()),
+                        });
 
                         // Re-offer our dealer log if finalization reached the height
                         // we served it into without the log landing on-chain. When
@@ -822,7 +855,7 @@ where
         &mut self,
         epoch: Epoch,
         info: &Info<V, C::PublicKey>,
-        finalized_tip: Option<Height>,
+        finalized_tip: Option<FinalizedTip<B::Digest>>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         work: &mut ArtifactWork<B, V, C>,
     ) {
@@ -899,7 +932,7 @@ where
     /// Materializes and starts verification for one lazy ancestry request.
     async fn start_artifact_request(
         &mut self,
-        scan: PendingLogScan<'_, V, C::PublicKey>,
+        scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut request: ArtifactRequest<B, V, C>,
         work: &mut ArtifactWork<B, V, C>,
@@ -1448,7 +1481,7 @@ mod tests {
 
     fn scan(
         info: &Info<TestBlsVariant, PublicKey>,
-    ) -> PendingLogScan<'_, TestBlsVariant, PublicKey> {
+    ) -> PendingLogScan<'_, TestBlsVariant, PublicKey, mocks::TestDigest> {
         PendingLogScan {
             epoch: Epoch::zero(),
             info,
@@ -1620,9 +1653,15 @@ mod tests {
             );
 
             let genesis = mocks::genesis_block(public_key);
-            let losing_block = TestBlock::new::<Sha256>(
+            let common_parent = TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
+                Height::new(1),
+                1,
+            );
+            let losing_block = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                common_parent.digest(),
                 Height::new(2),
                 2,
             )
@@ -1632,7 +1671,7 @@ mod tests {
             );
             let canonical_block = TestBlock::new::<Sha256>(
                 genesis.context().clone(),
-                genesis.digest(),
+                common_parent.digest(),
                 Height::new(2),
                 3,
             );
@@ -1810,9 +1849,15 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let block_five = TestBlock::new::<Sha256>(
+            let block_four = TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
+                Height::new(4),
+                4,
+            );
+            let block_five = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                block_four.digest(),
                 Height::new(5),
                 5,
             );
@@ -1847,9 +1892,15 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let block_five = TestBlock::new::<Sha256>(
+            let block_four = TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
+                Height::new(4),
+                4,
+            );
+            let block_five = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                block_four.digest(),
                 Height::new(5),
                 5,
             );
@@ -1868,7 +1919,10 @@ mod tests {
                 epoch: Epoch::zero(),
                 info: &info,
                 epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(Height::new(4)),
+                finalized_tip: Some(FinalizedTip {
+                    height: Height::new(4),
+                    digest: Some(block_four.digest()),
+                }),
                 final_height: Height::new(7),
             };
 
@@ -1876,6 +1930,59 @@ mod tests {
                 pending_logs(scan, parent, ancestry, context.stopped(), &mut response_tx,)
                     .now_or_never()
                     .is_some_and(|logs| logs.is_some_and(|logs| logs.is_empty()))
+            );
+        });
+    }
+
+    #[test]
+    fn pending_logs_rejects_view_detached_by_finalization() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let info = info();
+            let genesis = mocks::genesis_block(signers()[0].public_key());
+            let canonical_four = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(4),
+                4,
+            );
+            let losing_four = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(4),
+                5,
+            );
+            assert_ne!(canonical_four.digest(), losing_four.digest());
+            let block_five = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                losing_four.digest(),
+                Height::new(5),
+                6,
+            );
+            let block_six = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                block_five.digest(),
+                Height::new(6),
+                7,
+            );
+            let parent = block_six.digest();
+            let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
+            let (mut response_tx, _response_rx) = oneshot::channel::<TestResponse>();
+            let scan = PendingLogScan {
+                epoch: Epoch::zero(),
+                info: &info,
+                epocher: FixedEpocher::new(NZU64!(8)),
+                finalized_tip: Some(FinalizedTip {
+                    height: Height::new(4),
+                    digest: Some(canonical_four.digest()),
+                }),
+                final_height: Height::new(7),
+            };
+
+            assert!(
+                pending_logs(scan, parent, ancestry, context.stopped(), &mut response_tx,)
+                    .await
+                    .is_none()
             );
         });
     }

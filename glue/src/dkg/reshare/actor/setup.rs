@@ -1,6 +1,6 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
-    network::Manager,
+    network::{Directory, Manager},
     reshare::{
         Actor,
         metrics::Phase,
@@ -64,9 +64,30 @@ where
     Participate(Box<PreparedEpoch<V, C>>),
 }
 
+/// State-sync epoch metadata paired with the block height of its certified floor.
+pub(super) struct StateSyncStart<V, P, D>
+where
+    V: BlsVariant,
+    P: PublicKey,
+    D: Directory<P>,
+{
+    pub(super) info: EpochInfo<V, P, D>,
+    pub(super) floor: Height,
+}
+
 /// State sync carries epoch metadata, but not dealer logs skipped before its floor.
-fn state_sync_skips_inclusion_prefix(state_sync_epoch: Option<Epoch>, phase: EpochPhase) -> bool {
-    state_sync_epoch.is_some() && phase == EpochPhase::Late
+fn state_sync_skips_inclusion_prefix(
+    epocher: &FixedEpocher,
+    state_sync_floor: Option<Height>,
+) -> bool {
+    let Some(floor) = state_sync_floor else {
+        return false;
+    };
+    epocher
+        .containing(floor)
+        .expect("epocher must know state sync floor")
+        .phase()
+        == EpochPhase::Late
 }
 
 fn startup_height(
@@ -114,11 +135,12 @@ where
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         current_epoch: Option<Epoch>,
-        state_sync_info: Option<EpochInfo<V, C::PublicKey, B::Directory>>,
+        state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
-        let state_sync_epoch = state_sync_info.as_ref().map(|info| info.epoch);
+        let state_sync_epoch = state_sync.as_ref().map(|start| start.info.epoch);
+        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let processed = if state_sync_epoch.is_some() || current_epoch.is_none() {
             self.marshal.get_processed_height().await
         } else {
@@ -133,10 +155,8 @@ where
 
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
-        if state_sync_skips_inclusion_prefix(state_sync_epoch, bounds.phase()) {
-            return Some(Setup::Follow);
-        }
-        let info = match current.or(state_sync_info) {
+        let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
+        let info = match current.or_else(|| state_sync.map(|start| start.info)) {
             Some(info) => info,
             None => {
                 let Some(info) = self.boundary_epoch_info(epoch).await else {
@@ -170,6 +190,10 @@ where
             self.register_epoch(&info, share.clone()).await;
         }
         store.prune(epoch.previous().unwrap_or(epoch)).await;
+
+        if follow {
+            return Some(Setup::Follow);
+        }
 
         Some(Setup::Participate(Box::new(self.prepare_epoch(
             store,
@@ -314,11 +338,27 @@ mod tests {
         let late_phase = epocher.containing(late_floor).expect("test floor").phase();
 
         assert_eq!(late_phase, EpochPhase::Late);
-        assert!(state_sync_skips_inclusion_prefix(Some(epoch), late_phase));
-        assert!(!state_sync_skips_inclusion_prefix(
-            Some(epoch),
-            EpochPhase::Midpoint
+        assert!(state_sync_skips_inclusion_prefix(
+            &epocher,
+            Some(late_floor)
         ));
-        assert!(!state_sync_skips_inclusion_prefix(None, late_phase));
+        assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(midpoint)));
+        assert!(!state_sync_skips_inclusion_prefix(&epocher, None));
+    }
+
+    #[test]
+    fn late_restart_after_midpoint_state_sync_floor_keeps_inclusion_prefix() {
+        let epocher = FixedEpocher::new(NZU64!(64));
+        let epoch = Epoch::new(3);
+        let floor = epocher.midpoint(epoch).expect("test epoch");
+        let restart = floor.next();
+
+        assert_eq!(
+            epocher.containing(floor).expect("test floor").phase(),
+            EpochPhase::Midpoint
+        );
+        let restart_phase = epocher.containing(restart).expect("test restart").phase();
+        assert_eq!(restart_phase, EpochPhase::Late);
+        assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(floor)));
     }
 }
