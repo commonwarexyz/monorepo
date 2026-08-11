@@ -12,7 +12,7 @@ image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 
 Network latency does not have to set the pace of new blocks.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two options that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader lets one proposer lead many views in a row, reducing the overhead of leader handoff. Optimistic Validation lets that leader keep proposing, and validators keep voting, without waiting for the previous view's notarization. Together, they take network round trips out of the critical path for producing new blocks.
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they take network round trips out of the critical path for producing new blocks.
 
 In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 blocks per second. The pipeline kept new views moving while earlier blocks finalized.
 
@@ -48,7 +48,7 @@ In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50
 Figure 1: Each square represents one 5ms target interval. Alto sustained 200 successful blocks per second.
 :::
 
-## From One View to the Next
+## Two Waits Between Views
 
 A *view* is one opportunity for a leader to propose a block. Validators verify the proposal and vote. Once a quorum votes for the same proposal, it is *notarized*.
 
@@ -56,7 +56,7 @@ Traditionally, two network hops separate consecutive views: the next leader must
 
 ## Wait One: The Proposer Handoff
 
-Traditionally, rotating leadership assigns each view to a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
+With rotating leadership, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
 Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term, reducing proposer handoffs from once per view to once per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives.
 
@@ -70,7 +70,7 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 Figure 2: Round-robin rotates the proposer every view while Stable Leader changes it once per term.
 :::
 
-## Wait Two: Forming the Parent Notarization
+## Wait Two: The Parent Notarization
 
 Without Optimistic Validation, the stable leader waits for view `v` to be notarized before proposing view `v+1`. Other validators also wait for that notarization before voting to notarize `v+1`. This leaves a network round between consecutive views, so network latency still paces each view.
 
@@ -112,14 +112,16 @@ We measured finality separately, from the leader-stamped proposal time until an 
 
 More views per second put more load on execution, storage, proposal verification, and network bandwidth. The pipeline does not reduce finalization latency itself. It still improves the user experience: new transactions wait half a view on average for the next proposal.
 
-Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation. A leader can still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
+Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation.
+
+A leader can still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
 ## The Next Block
 
-Every view gives applications another opportunity to order new data. Alto began a new view every 5ms at the median. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
+Each 5ms view gives applications another opportunity to order new data. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
 
 This pipeline helps one ordering leader move quickly. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
 
-Stable Leader and Optimistic Validation are now part of Simplex and will ship in the next `commonware-consensus` release.
+Stable Leader and Optimistic Validation will be available in the next `commonware-consensus` release.

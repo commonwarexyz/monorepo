@@ -98,14 +98,14 @@ Chou</a></div>
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> and <a
         href="https://github.com/commonwarexyz/monorepo/pull/3416">Optimistic
-        Validation</a>, two options that pipeline <a
+        Validation</a>, two features that pipeline <a
         href="https://eprint.iacr.org/2023/463">Simplex</a> views.
-        Stable Leader lets one proposer lead many views in a row,
-        reducing the overhead of leader handoff. Optimistic Validation
-        lets that leader keep proposing, and validators keep voting,
-        without waiting for the previous view’s notarization. Together,
-        they take network round trips out of the critical path for
-        producing new blocks.</p>
+        Stable Leader keeps one proposer for many views in a row,
+        reducing handoff overhead. Optimistic Validation lets that
+        leader keep proposing and validators keep voting without waiting
+        for the previous view’s notarization. Together, they take
+        network round trips out of the critical path for producing new
+        blocks.</p>
         <p>In a globally distributed <a
         href="https://alto.commonware.xyz">Alto</a> deployment with 50
         validators, this combination sustained about 200 blocks per
@@ -140,8 +140,7 @@ Chou</a></div>
         <p>Figure 1: Each square represents one 5ms target interval.
         Alto sustained 200 successful blocks per second.</p>
         </div>
-        <h2 id="from-one-view-to-the-next">From One View to the
-        Next</h2>
+        <h2 id="two-waits-between-views">Two Waits Between Views</h2>
         <p>A <em>view</em> is one opportunity for a leader to propose a
         block. Validators verify the proposal and vote. Once a quorum
         votes for the same proposal, it is <em>notarized</em>.</p>
@@ -152,11 +151,11 @@ Chou</a></div>
         path.</p>
         <h2 id="wait-one-the-proposer-handoff">Wait One: The Proposer
         Handoff</h2>
-        <p>Traditionally, rotating leadership assigns each view to a new
-        proposer. The next proposer must first receive the previous
-        proposal. Even then, the next proposer cannot safely build until
-        a notarization forms: a Byzantine leader may have sent
-        conflicting proposals.</p>
+        <p>With rotating leadership, each view has a new proposer. The
+        next proposer must first receive the previous proposal. Even
+        then, the next proposer cannot safely build until a notarization
+        forms: a Byzantine leader may have sent conflicting
+        proposals.</p>
         <p>Stable Leader groups consecutive views into a <em>term</em>.
         One leader proposes throughout the term, reducing proposer
         handoffs from once per view to once per term. Within the term,
@@ -169,8 +168,8 @@ Chou</a></div>
         <p>Figure 2: Round-robin rotates the proposer every view while
         Stable Leader changes it once per term.</p>
         </div>
-        <h2 id="wait-two-forming-the-parent-notarization">Wait Two:
-        Forming the Parent Notarization</h2>
+        <h2 id="wait-two-the-parent-notarization">Wait Two: The Parent
+        Notarization</h2>
         <p>Without Optimistic Validation, the stable leader waits for
         view <code>v</code> to be notarized before proposing view
         <code>v+1</code>. Other validators also wait for that
@@ -251,7 +250,8 @@ Chou</a></div>
         rest of the term and rotates to the next leader. For an offline
         leader, a term of <code>L</code> views reduces timeout overhead
         per successful block to about <code>1/L</code> of per-view
-        rotation. A leader can still finalize blocks while selectively
+        rotation.</p>
+        <p>A leader can still finalize blocks while selectively
         censoring transactions. That behavior can be difficult to detect
         when the leader otherwise performs well.</p>
         <p>This pipeline fits networks with reliable connectivity and
@@ -259,17 +259,15 @@ Chou</a></div>
         prioritize proposer rotation as a censorship defense may prefer
         shorter terms.</p>
         <h2 id="the-next-block">The Next Block</h2>
-        <p>Every view gives applications another opportunity to order
-        new data. Alto began a new view every 5ms at the median. That
-        finer schedule can help orderbooks, batchers, and games respond
-        to new input sooner.</p>
+        <p>Each 5ms view gives applications another opportunity to order
+        new data. That finer schedule can help orderbooks, batchers, and
+        games respond to new input sooner.</p>
         <p>This pipeline helps one ordering leader move quickly. <a
         href="/blogs/multimmit">Multimmit</a> addresses a complementary
         bottleneck by separating parallel transaction production from
         the single ordering leader.</p>
-        <p>Stable Leader and Optimistic Validation are now part of
-        Simplex and will ship in the next
-        <code>commonware-consensus</code> release.</p>
+        <p>Stable Leader and Optimistic Validation will be available in
+        the next <code>commonware-consensus</code> release.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
