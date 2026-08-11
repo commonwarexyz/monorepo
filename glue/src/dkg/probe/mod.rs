@@ -17,13 +17,13 @@
 //! tracks identical contents if it later enters that epoch, so the registrations never
 //! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
 //! dealers: the epoch's active committee of share holders and certificate signers.
-//! Addressable deployments seed the snapshot's transport
-//! [`Directory`] alongside this weak-subjectivity checkpoint
-//! through [`Bootstrap::directory`]. The actor activates the snapshot only when its first
-//! subscriber appears. If activation fails, the actor shuts down before sending a request and
-//! drops all pending subscribers. The discovered [`Artifact`] carries the target epoch's own
-//! directory in its [`EpochInfo`], so the joining node needs no out-of-band address source for
-//! the epoch it syncs into.
+//!
+//! Addressable deployments seed the snapshot's transport [`Directory`] alongside this
+//! weak-subjectivity checkpoint through [`Bootstrap::directory`]. The actor activates the
+//! snapshot only when its first subscriber appears. If activation fails, the actor shuts down
+//! before sending a request and drops all pending subscribers. The discovered [`Artifact`]
+//! carries the target epoch's own directory in its [`EpochInfo`], so the joining node needs no
+//! out-of-band address source for the epoch it syncs into.
 //!
 //! # Trust Model
 //!
