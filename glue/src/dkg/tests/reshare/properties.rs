@@ -299,7 +299,10 @@ impl Property<ed25519::PublicKey, ValidatorState> for EpochInfoContinuity {
 async fn boundary_info(
     states: &[&ValidatorState],
     height: Height,
-) -> Result<crate::dkg::types::EpochInfo<MinPk, ed25519::PublicKey>, String> {
+) -> Result<
+    crate::dkg::types::EpochInfo<MinPk, ed25519::PublicKey, super::harness::TestDirectory>,
+    String,
+> {
     for state in states {
         let Some(block) = state.marshal.get_block(height).await else {
             continue;

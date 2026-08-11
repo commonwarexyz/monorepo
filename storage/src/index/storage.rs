@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_types)]
 //! Shared structures and functionality for [crate::index] types.
 
 use crate::index::Cursor as CursorTrait;

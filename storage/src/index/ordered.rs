@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_types)]
 //! Implementation of [Ordered] that uses an ordered map internally to map translated keys to
 //! arbitrary values. Beyond the standard [Unordered] implementation, this variant adds the
 //! capability to retrieve values associated with both next and previous translated keys of a given
