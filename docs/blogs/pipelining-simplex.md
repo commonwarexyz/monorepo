@@ -106,13 +106,13 @@ We ran Alto with 50 validators spread evenly across ten AWS regions. With Stable
 
 The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
 
-We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At that cadence, about 60 later views could start while the original block finalized.
+We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At that cadence, about 60 more blocks could be proposed while the first block finalized.
 
 ## Where the Pipeline Fits
 
-These features remove two specific bottlenecks: leader handoffs and waits for parent notarization. They do not speed up application checks, execution, storage, proposal verification, or data dissemination. If one of those stages is slower, improve it first.
+More views per second put more load on execution, storage, proposal verification, and network bandwidth. The pipeline does not reduce finalization latency itself. It still improves the user experience: new transactions wait half a view on average for the next proposal.
 
-Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. If a leader stays offline, validators can nullify its first stalled view and skip the rest of its term. For a term of `L` views, this reduces that leader's timeout overhead per successful block to about `1/L` of per-view rotation. If a leader keeps views moving without finalizing blocks, a term-wide timeout lets validators rotate. These timeout rules cannot remove a leader that finalizes blocks while selectively censoring transactions.
+Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation. A leader can still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
 
 The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Rotating leaders may fit networks where leaders frequently fail or proposer rotation is an important censorship defense.
 
