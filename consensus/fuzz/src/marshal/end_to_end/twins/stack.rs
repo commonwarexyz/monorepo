@@ -11,7 +11,11 @@ use super::{
     },
     B, Ctx, PublicKeyOf, SchemeOf,
 };
-use crate::{NetworkChannels, simplex::Simplex};
+use crate::{
+    NetworkChannels,
+    network::{WedgeChannel, WedgeNode, WedgeReceiver},
+    simplex::Simplex,
+};
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -361,6 +365,7 @@ pub(crate) async fn setup_network<P: Simplex>(
             max_size: 1024 * 1024,
             // The Twins scenario owns connectivity; protocol-level blocking
             // must not rewrite its topology.
+            max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
         },
@@ -394,6 +399,7 @@ pub(crate) async fn setup_validator<P: Simplex>(
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
     genesis: B<P>,
     max_pending_acks: NonZeroUsize,
+    wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
 ) -> Validator<P> {
     let application = Application::<B<P>>::manual_ack();
     let acknowledger = application.clone();
@@ -420,7 +426,15 @@ pub(crate) async fn setup_validator<P: Simplex>(
         strategy: Sequential,
     };
     let control = oracle.control(validator.clone());
-    let backfill = control.register(1, TEST_QUOTA).await.unwrap();
+    let (backfill_sender, backfill_receiver) = control.register(1, TEST_QUOTA).await.unwrap();
+    let backfill = (
+        backfill_sender,
+        WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
+            backfill_receiver,
+            wedge.clone(),
+            WedgeChannel::MarshalBackfill,
+        ),
+    );
     let resolver = resolver::init(
         context.child("resolver"),
         resolver::Config {
@@ -448,8 +462,15 @@ pub(crate) async fn setup_validator<P: Simplex>(
             peer_provider: oracle.manager(),
         },
     );
-    let network = control.register(2, TEST_QUOTA).await.unwrap();
-    broadcast_engine.start(network);
+    let (broadcast_sender, broadcast_receiver) = control.register(2, TEST_QUOTA).await.unwrap();
+    broadcast_engine.start((
+        broadcast_sender,
+        WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
+            broadcast_receiver,
+            wedge,
+            WedgeChannel::MarshalBroadcast,
+        ),
+    ));
 
     let finalizations_by_height = immutable::Archive::init(
         context.child("finalizations_by_height"),
@@ -603,12 +624,12 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
             skip_timeout: Duration::from_secs(11),
-            fetch_concurrent: NZUsize!(1),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
             forwarding,
+            track_historical_votes: false,
         },
     );
     engine.start(vote, certificate, resolver);

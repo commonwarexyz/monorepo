@@ -66,6 +66,7 @@ Available fuzz targets (standard mode):
 - `simplex_ed25519`
 - `simplex_secp256r1`
 - `simplex_id`
+- `simplex_id_audit_notarize_omission`
 - `simplex_cert_mock`
 - `simplex_bls12381_multisig_minpk`
 - `simplex_bls12381_threshold_minsig`
@@ -105,28 +106,31 @@ cargo fuzz run simplex_ed25519 fuzz/artifacts/simplex_ed25519/<crash_file>
 
 ## Marshal Fuzzing
 
-The standard-wrapper targets exercise proposal, verification, certification,
-broadcast, and application-result transitions using structured libFuzzer input:
+The marshal end-to-end targets exercise proposal, verification, certification,
+broadcast, and application-result transitions through real Simplex stacks:
 
 ```bash
-cargo fuzz run marshal_actor_standard_inline_cert_mock
-cargo fuzz run marshal_actor_standard_deferred_cert_mock
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_disrupter
+cargo fuzz run marshal_e2e_coding_cert_mock_disrupter
 cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
 cargo fuzz run marshal_e2e_coding_app_cert_mock_twins
 cargo fuzz run marshal_e2e_coding_app_id_twins
 cargo fuzz run marshal_e2e_coding_id_disrupter
 cargo fuzz run marshal_e2e_standard_deferred_id_twins_split_header
 cargo fuzz run marshal_e2e_standard_inline_id_twins_split_header
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_poison
+cargo fuzz run marshal_e2e_standard_deferred_cert_mock_scenarios
 ```
 
-The inline and deferred targets include split-header equivocation in their
-action space. The multi-node targets are Byzantine Twins mutators over the
-end-to-end standard and coding stacks. The general Standard Twins target
-shares one corpus across the Basic and Faulty applications with both Inline
-and Deferred wrappers. The Coding Twins targets share the application axis but
-use Coding's Marshaled adapter directly; Deferred and Inline do not apply. Both
-the Coding Twins and coding disrupter paths run under `SimplexId`, whose
-certificate verifier checks the signer-set size and quorum rather than
+The disrupter targets check post-prefix liveness over the standard deferred and
+coding marshal stacks. The Twins targets are Byzantine mutators over the
+end-to-end standard and coding stacks, and the split-header variants include
+proposal-header equivocation in their action space. The general Standard Twins
+target shares one corpus across the Basic and Faulty applications with both
+Inline and Deferred wrappers. The Coding Twins targets share the application
+axis but use Coding's Marshaled adapter directly; Deferred and Inline do not
+apply. Both the Coding Twins and coding disrupter paths run under `SimplexId`,
+whose certificate verifier checks the signer-set size and quorum rather than
 accepting the lightweight certificate-mock oracle.
 Three honest validators each run
 `Simplex -> Inline|Deferred|Marshaled -> Marshal -> Application`; the

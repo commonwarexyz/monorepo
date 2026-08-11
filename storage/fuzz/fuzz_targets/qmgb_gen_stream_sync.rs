@@ -152,10 +152,10 @@ fn keyless_config(name: &str, pooler: &impl BufferPooler) -> KeylessConfig<(), S
     }
 }
 
-fn sync_sizes(input: &FuzzInput) -> (u64, usize, usize) {
+fn sync_sizes(input: &FuzzInput) -> (u64, u64, usize) {
     (
         u64::from(input.fetch_batch_size) + 1,
-        usize::from(input.apply_batch_size) + 1,
+        u64::from(input.apply_batch_size) + 1,
         usize::from(input.max_outstanding) + 1,
     )
 }
@@ -213,11 +213,11 @@ fn fuzz_any<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
-                        apply_batch_size: apply,
+                        apply_batch_size: NZU64!(apply),
                         db_config: any_config(
                             &format!("qmgb-sync-any-dest-{family}-{syncs}"),
                             &context,
@@ -301,11 +301,11 @@ fn fuzz_current<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
-                        apply_batch_size: apply,
+                        apply_batch_size: NZU64!(apply),
                         db_config: current_config(
                             &format!("qmgb-sync-current-dest-{family}-{syncs}"),
                             &context,
@@ -390,11 +390,11 @@ fn fuzz_immutable<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
-                        apply_batch_size: apply,
+                        apply_batch_size: NZU64!(apply),
                         db_config: immutable_config(
                             &format!("qmgb-sync-immutable-dest-{family}-{syncs}"),
                             &context,
@@ -472,11 +472,11 @@ fn fuzz_keyless<F: Graftable>(input: &FuzzInput, family: &str) {
                         context: context
                             .child("destination")
                             .with_attribute("instance", syncs),
-                        resolver: source_arc.clone(),
+                        source: source_arc.clone(),
                         target,
                         max_outstanding_requests: outstanding,
                         fetch_batch_size: NZU64!(fetch),
-                        apply_batch_size: apply,
+                        apply_batch_size: NZU64!(apply),
                         db_config: keyless_config(
                             &format!("qmgb-sync-keyless-dest-{family}-{syncs}"),
                             &context,

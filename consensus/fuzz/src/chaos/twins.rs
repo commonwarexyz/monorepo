@@ -346,7 +346,6 @@ where
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
             skip_timeout: Duration::from_secs(11),
-            fetch_concurrent: input.fetch_concurrent,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(
@@ -356,6 +355,7 @@ where
             ),
             strategy: Sequential,
             forwarding: input.forwarding,
+            track_historical_votes: false,
         };
         Engine::new(primary_context.child("engine"), engine_cfg).start(
             (vote_sender_primary, vote_receiver_primary),
@@ -404,7 +404,6 @@ where
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
             skip_timeout: Duration::from_secs(11),
-            fetch_concurrent: input.fetch_concurrent,
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(
@@ -414,6 +413,7 @@ where
             ),
             strategy: Sequential,
             forwarding: input.forwarding,
+            track_historical_votes: false,
         };
         Engine::new(secondary_context.child("engine"), engine_cfg).start(
             (vote_sender_secondary, vote_receiver_secondary),
@@ -459,7 +459,6 @@ where
         Duration::from_secs(1),
         Duration::from_millis(1_500),
         input.mailbox_size,
-        input.fetch_concurrent,
         input.forwarding,
         partition,
         pending,

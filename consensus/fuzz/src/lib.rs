@@ -32,7 +32,10 @@ pub mod types;
 pub mod utils;
 use crate::{
     disrupter::Disrupter,
-    network::ByzantineFirstReceiver,
+    network::{
+        ByzantineFirstReceiver, FinalizationOmissionChannel, FinalizationOmissionReceiver,
+        NotarizeOmissionReceiver,
+    },
     simplex_audit::{RecordingAutomaton, RecordingReporter, summaries},
     simplex_node::NodeFuzzInput,
     strategy::{
@@ -84,7 +87,10 @@ use std::{
     fmt,
     num::{NonZeroU16, NonZeroUsize},
     panic,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tracing::{Dispatch, Level, dispatcher};
@@ -120,7 +126,6 @@ pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
-const DEFAULT_FETCH_CONCURRENT: NonZeroUsize = NZUsize!(1);
 
 fn fuzz_runtime_timeout(required_containers: u64) -> Duration {
     let work = u32::try_from(required_containers).unwrap_or(u32::MAX);
@@ -146,17 +151,6 @@ pub(crate) fn fuzz_mailbox_size(
         50..=74 => NZUsize!(1),
         75..=89 => NZUsize!(2),
         90..=96 => NZUsize!(4),
-        _ => NZUsize!(8),
-    })
-}
-
-pub(crate) fn fuzz_fetch_concurrent(
-    u: &mut arbitrary::Unstructured<'_>,
-) -> arbitrary::Result<NonZeroUsize> {
-    Ok(match u.int_in_range(0..=99)? {
-        0..=49 => DEFAULT_FETCH_CONCURRENT,
-        50..=74 => NZUsize!(2),
-        75..=89 => NZUsize!(4),
         _ => NZUsize!(8),
     })
 }
@@ -356,7 +350,6 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("strategy", &input.strategy)
             .field("messaging_faults", &input.messaging_faults)
             .field("mailbox_size", &input.mailbox_size)
-            .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("reporting", &input.reporting)
@@ -374,7 +367,6 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
             .field("events", &input.events)
             .field("term_length", &input.term_length)
             .field("mailbox_size", &input.mailbox_size)
-            .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("reporting", &input.reporting)
@@ -418,8 +410,6 @@ pub struct FuzzInput {
     pub messaging_faults: Vec<(View, u8)>,
     /// Per-iteration mailbox capacity threaded into every honest engine.
     pub mailbox_size: NonZeroUsize,
-    /// Per-iteration resolver fetch concurrency threaded into every honest engine.
-    pub fetch_concurrent: NonZeroUsize,
     /// Per-iteration forwarding policy threaded into every engine the harness
     /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
     /// `batcher::forward_targets` instead of pinning to `Disabled`.
@@ -515,7 +505,6 @@ impl Arbitrary<'_> for FuzzInput {
         let reporting = ReporterWiring::arbitrary(u)?;
 
         let mailbox_size = fuzz_mailbox_size(u)?;
-        let fetch_concurrent = fuzz_fetch_concurrent(u)?;
 
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
@@ -535,7 +524,6 @@ impl Arbitrary<'_> for FuzzInput {
             strategy,
             messaging_faults: Vec::new(),
             mailbox_size,
-            fetch_concurrent,
             forwarding,
             certify,
             reporting,
@@ -613,6 +601,7 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
         context.child("network"),
         NetworkConfig {
             max_size: 1024 * 1024,
+            max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
         },
@@ -969,7 +958,6 @@ pub(crate) fn spawn_honest_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -998,7 +986,6 @@ where
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         pending,
         recovered,
@@ -1034,7 +1021,6 @@ fn spawn_audited_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -1075,7 +1061,6 @@ where
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         partition,
         pending,
@@ -1112,7 +1097,6 @@ pub(crate) fn build_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -1143,7 +1127,6 @@ where
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         partition,
         pending,
@@ -1273,7 +1256,6 @@ pub(crate) fn build_validator_with_reporter<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     partition: String,
     pending: (PendingSender, PendingReceiver),
@@ -1344,12 +1326,12 @@ where
         fetch_timeout: Duration::from_secs(1),
         view_retention: Delta::new(10),
         skip_timeout: Duration::from_secs(11),
-        fetch_concurrent,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding,
+        track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     let engine_handle = engine.start(
@@ -1384,7 +1366,6 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
     certify: CertifyChoice,
@@ -1428,7 +1409,6 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
@@ -1980,7 +1960,6 @@ fn run_standard_once<P: simplex::Simplex>(
                     Duration::from_secs(1),
                     Duration::from_secs(2),
                     input.mailbox_size,
-                    input.fetch_concurrent,
                     input.forwarding,
                     pending,
                     recovered,
@@ -2093,7 +2072,31 @@ fn run_standard_once<P: simplex::Simplex>(
 /// This path exists only for the dedicated Standard audit fuzz targets. The
 /// shared [`run_standard_once`] path continues to use the consensus mock
 /// reporter and application automaton directly.
-fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool, bool) {
+#[derive(Clone)]
+struct NotarizeOmission {
+    victim: usize,
+    omitted_notarizes: Arc<AtomicUsize>,
+    omitted_finalizations: Arc<AtomicUsize>,
+}
+
+impl NotarizeOmission {
+    fn new(victim: usize) -> Self {
+        Self {
+            victim,
+            omitted_notarizes: Arc::new(AtomicUsize::new(0)),
+            omitted_finalizations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+fn run_audited_standard_once<P: simplex::Simplex>(input: FuzzInput) -> (bool, bool) {
+    run_audited_standard_once_with::<P>(input, None)
+}
+
+fn run_audited_standard_once_with<P: simplex::Simplex>(
+    mut input: FuzzInput,
+    notarize_omission: Option<NotarizeOmission>,
+) -> (bool, bool) {
     let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
     let executor = deterministic::Runner::new(cfg);
 
@@ -2149,7 +2152,6 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
                     Duration::from_secs(1),
                     Duration::from_secs(2),
                     input.mailbox_size,
-                    input.fetch_concurrent,
                     input.forwarding,
                     pending,
                     recovered,
@@ -2164,29 +2166,72 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
 
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
-            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            let reporter = spawn_audited_validator::<P, _, _, _, _, _, _, _>(
-                ctx,
-                &oracle,
-                &participants,
-                schemes[i].clone(),
-                validator.clone(),
-                P::elector(term_length),
-                relay.clone(),
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                input.mailbox_size,
-                input.fetch_concurrent,
-                input.forwarding,
-                pending,
-                recovered,
-                resolver,
-                input.certify,
-                input.reporting,
-            );
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
+            let reporter = if let Some(omission) = &notarize_omission
+                && omission.victim == i
+            {
+                let (sender, receiver) = pending;
+                let receiver = NotarizeOmissionReceiver::<P::Scheme, Sha256Digest, _>::new(
+                    receiver,
+                    omission.omitted_notarizes.clone(),
+                );
+                let (certificate_sender, certificate_receiver) = recovered;
+                let certificate_receiver =
+                    FinalizationOmissionReceiver::<P::Scheme, Sha256Digest, _>::new(
+                        certificate_receiver,
+                        schemes[i].clone(),
+                        FinalizationOmissionChannel::Certificate,
+                        omission.omitted_finalizations.clone(),
+                    );
+                let (resolver_sender, resolver_receiver) = resolver;
+                let resolver_receiver =
+                    FinalizationOmissionReceiver::<P::Scheme, Sha256Digest, _>::new(
+                        resolver_receiver,
+                        schemes[i].clone(),
+                        FinalizationOmissionChannel::Resolver,
+                        omission.omitted_finalizations.clone(),
+                    );
+                spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator.clone(),
+                    P::elector(term_length),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.forwarding,
+                    (sender, receiver),
+                    (certificate_sender, certificate_receiver),
+                    (resolver_sender, resolver_receiver),
+                    input.certify,
+                    input.reporting,
+                )
+            } else {
+                spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                    ctx,
+                    &oracle,
+                    &participants,
+                    schemes[i].clone(),
+                    validator.clone(),
+                    P::elector(term_length),
+                    relay.clone(),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    input.mailbox_size,
+                    input.forwarding,
+                    pending,
+                    recovered,
+                    resolver,
+                    input.certify,
+                    input.reporting,
+                )
+            };
             reporters.push((validator, reporter));
         }
 
@@ -2203,7 +2248,13 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
 
         if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
+            let omitted_validator = notarize_omission
+                .as_ref()
+                .map(|omission| &participants[omission.victim]);
             for (validator, reporter) in reporters.iter_mut() {
+                if omitted_validator == Some(validator) {
+                    continue;
+                }
                 let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(
@@ -2226,6 +2277,12 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             return (false, false);
         }
 
+        let omitted_reporter = notarize_omission.as_ref().and_then(|omission| {
+            let victim = &participants[omission.victim];
+            reporters
+                .iter()
+                .position(|(validator, _)| validator == victim)
+        });
         let reporter_only: Vec<_> = reporters
             .into_iter()
             .map(|(_, reporter)| reporter)
@@ -2259,6 +2316,9 @@ fn run_audited_standard_once<P: simplex::Simplex>(mut input: FuzzInput) -> (bool
             &summary_reporters,
         );
         invariants::check::<P>(term_length, reporter_only.as_slice());
+        if let Some(index) = omitted_reporter {
+            invariants::check_notarization_unlocks_finalize_quorum(&reporter_only[index]);
+        }
         (true, rejected_certification_observed)
     })
 }
@@ -2363,7 +2423,6 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 Duration::from_secs(1),
                 Duration::from_secs(2),
                 input.mailbox_size,
-                input.fetch_concurrent,
                 input.forwarding,
                 channels,
                 input.certify,
@@ -2938,12 +2997,12 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: Delta::new(10),
                 skip_timeout: Duration::from_secs(11),
-                fetch_concurrent: self.input.fetch_concurrent,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forwarding: self.input.forwarding,
+                track_historical_votes: false,
             },
         );
         engine.start(vote, certificate, resolver);
@@ -3183,7 +3242,6 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     Duration::from_secs(1),
                     Duration::from_millis(1_500),
                     self.input.mailbox_size,
-                    self.input.fetch_concurrent,
                     self.input.forwarding,
                     pending,
                     recovered,
@@ -3203,7 +3261,6 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     Duration::from_secs(1),
                     Duration::from_millis(1_500),
                     self.input.mailbox_size,
-                    self.input.fetch_concurrent,
                     self.input.forwarding,
                     pending,
                     recovered,
@@ -3415,7 +3472,6 @@ where
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
     let mailbox_size = input.mailbox_size;
-    let fetch_concurrent = input.fetch_concurrent;
     let forwarding = input.forwarding;
     let certify = input.certify;
     let reporting = input.reporting;
@@ -3438,7 +3494,6 @@ where
                 schemes,
                 term_length,
                 mailbox_size,
-                fetch_concurrent,
                 forwarding,
                 certify,
                 reporting,
@@ -3876,6 +3931,46 @@ pub fn fuzz_audit<P: simplex::Simplex>(mut input: FuzzInput) {
     }
 }
 
+/// Fuzz the audited Standard harness with four correct nodes while one selected
+/// node omits every notarize vote and finalization certificate received from
+/// the network.
+///
+/// The selected victim is derived from the first raw input byte. All
+/// non-notarize votes remain connected, as do notarization and nullification
+/// certificates on both the certificate and resolver channels.
+pub fn fuzz_audit_notarize_omission<P: simplex::Simplex>(mut input: FuzzInput) {
+    input.configuration = N4F0C4;
+    input.partition = Partition::Connected;
+    input.degraded_network = false;
+    input.required_containers = input.required_containers.max(4);
+    input.term_length = TermLength::ONE;
+    input.certify = CertifyChoice::Always;
+    input.reporting = ReporterWiring::Solo;
+
+    let victim = usize::from(input.raw_bytes.first().copied().unwrap_or_default())
+        % usize::try_from(input.configuration.n).expect("node count exceeds usize");
+    let omission = NotarizeOmission::new(victim);
+    let omitted_notarizes = omission.omitted_notarizes.clone();
+    let omitted_finalizations = omission.omitted_finalizations.clone();
+
+    print_fuzz_input::<P>(Mode::Standard, &input);
+    let raw_bytes = input.raw_bytes.clone();
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        run_audited_standard_once_with::<P>(input, Some(omission))
+    }));
+    match run_result {
+        Ok(_) => assert!(
+            omitted_notarizes.load(Ordering::Relaxed) > 0
+                && omitted_finalizations.load(Ordering::Relaxed) > 0,
+            "omission model did not omit both notarize votes and finalization certificates"
+        ),
+        Err(payload) => {
+            println!("Panicked with raw_bytes: {:?}", raw_bytes);
+            panic::resume_unwind(payload);
+        }
+    }
+}
+
 /// Fuzz a Twins harness while recording append-only activity and automaton
 /// history for correct engines. Compromised twin halves retain the ordinary
 /// summary Reporter and participate only in signer-filtered vote checks.
@@ -3929,7 +4024,6 @@ mod tests {
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
             mailbox_size: DEFAULT_MAILBOX_SIZE,
-            fetch_concurrent: DEFAULT_FETCH_CONCURRENT,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
             reporting: ReporterWiring::Solo,

@@ -8,7 +8,14 @@
 //!   consensus. The liveness targets use a Byzantine `Disrupter`; the standard
 //!   Twins mutator splits one compromised identity between a full engine and a
 //!   `Disrupter`.
+//!   The poison target additionally answers one certificate backfill request of
+//!   one honest node with a notarization whose block no node holds.
+//!   The scenario target replays a templated pre-GST program the fuzzer
+//!   extends, heals the network at a rigid GST boundary, and requires every
+//!   correct node to finalize past the height it held there.
 //!   Targets: `marshal_e2e_standard_deferred_cert_mock_disrupter`,
+//!   `marshal_e2e_standard_deferred_cert_mock_poison`,
+//!   `marshal_e2e_standard_deferred_cert_mock_scenarios`,
 //!   `marshal_e2e_coding_cert_mock_disrupter`,
 //!   `marshal_e2e_coding_id_disrupter`,
 //!   `marshal_e2e_standard_app_cert_mock_twins`,
@@ -16,9 +23,6 @@
 //!   `marshal_e2e_coding_app_id_twins`,
 //!   `marshal_e2e_standard_deferred_id_twins_split_header`,
 //!   `marshal_e2e_standard_inline_id_twins_split_header`.
-//! - [`runner`]: drives the standard inline and deferred block paths, including
-//!   split-header equivocation. Targets: `marshal_actor_standard_inline_cert_mock`,
-//!   `marshal_actor_standard_deferred_cert_mock`.
 //! - [`store`]: drives the marshal block/certificate store directly. Target:
 //!   `marshal_actor_standard_store_cert_mock`.
 //!
@@ -31,16 +35,14 @@
 //!     consensus orderings.
 
 pub mod end_to_end;
-pub mod runner;
 pub mod store;
 
 pub use end_to_end::{
-    MarshalDisrupterInput, MarshalTwinsInput, fuzz_marshal_coding_disrupter,
-    fuzz_marshal_coding_twins, fuzz_marshal_standard_deferred_id_twins_split_header,
-    fuzz_marshal_standard_disrupter, fuzz_marshal_standard_inline_id_twins_split_header,
+    DropRule, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
+    PreGstAction, Role, ScenarioTemplate, fuzz_marshal_coding_disrupter,
+    fuzz_marshal_coding_twins, fuzz_marshal_standard_certificate_poison,
+    fuzz_marshal_standard_deferred_id_twins_split_header, fuzz_marshal_standard_disrupter,
+    fuzz_marshal_standard_inline_id_twins_split_header, fuzz_marshal_standard_scenarios,
     fuzz_marshal_standard_twins,
-};
-pub use runner::{
-    MarshalActorStandardInput, fuzz_marshal_actor_deferred, fuzz_marshal_actor_inline,
 };
 pub use store::{MarshalActorStoreInput, fuzz_marshal_actor_store};

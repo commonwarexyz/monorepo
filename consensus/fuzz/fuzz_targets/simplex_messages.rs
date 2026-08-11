@@ -369,7 +369,7 @@ where
         return;
     };
 
-    let mut tracker = VoteTracker::new(schemes.len());
+    let mut tracker = VoteTracker::new(schemes.len(), false);
     let signer = notarize.signer();
     assert!(!tracker.has_notarize(signer));
     assert!(!tracker.has_finalize(signer));

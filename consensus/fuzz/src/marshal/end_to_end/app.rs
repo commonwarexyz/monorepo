@@ -657,14 +657,14 @@ mod tests {
         Round::new(Epoch::zero(), View::new(view))
     }
 
-    fn reporter() -> DeliveryReporter<()> {
+    fn reporter() -> DeliveryReporter<u8> {
         DeliveryReporter::new(0, SinkApplication::default(), None, "test".into())
     }
 
     #[test]
     fn matching_tip_and_delivery_are_allowed() {
         let mut reporter = reporter();
-        let block = Arc::new(Block::new::<Sha256>((), digest(0), Height::new(1), 1));
+        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
         reporter.report(Update::Tip(round(1), Height::new(1), block.digest()));
         let (ack, _waiter) = Exact::handle();
         reporter.report(Update::Block(block, ack));
@@ -698,7 +698,7 @@ mod tests {
     fn tip_and_delivery_must_agree() {
         let mut reporter = reporter();
         reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));
-        let block = Arc::new(Block::new::<Sha256>((), digest(0), Height::new(1), 1));
+        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
         let (ack, _waiter) = Exact::handle();
         reporter.report(Update::Block(block, ack));
     }
@@ -707,7 +707,7 @@ mod tests {
     #[should_panic(expected = "tip disagrees with delivery")]
     fn delivered_block_and_later_tip_must_agree() {
         let mut reporter = reporter();
-        let block = Arc::new(Block::new::<Sha256>((), digest(0), Height::new(1), 1));
+        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
         let (ack, _waiter) = Exact::handle();
         reporter.report(Update::Block(block, ack));
         reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));

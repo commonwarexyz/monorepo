@@ -5,7 +5,7 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_BACKLOG, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
+        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -15,9 +15,9 @@ use commonware_glue::dkg::{
     bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
-use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{Quota, Strategizer, Supervisor as _, tokio};
-use commonware_utils::{NZU32, NZUsize};
+use commonware_p2p::authenticated::{self, discovery};
+use commonware_runtime::{Strategizer, Supervisor as _, tokio};
+use commonware_utils::NZUsize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -41,44 +41,29 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     network.validate().expect("invalid network config");
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
+    let bootstrappers = network.bootstrappers(&local);
+    let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
         node.signing_key.clone(),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
-        network.bootstrappers(&local),
+        bootstrappers,
+        max_peers_per_set,
         MAX_MESSAGE_SIZE,
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
-    let vote = p2p.register(
-        VOTE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let certificate = p2p.register(
-        CERTIFICATE_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let resolver = p2p.register(
-        RESOLVER_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let backfill = p2p.register(
-        BACKFILL_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let broadcast = p2p.register(
-        BROADCAST_CHANNEL,
-        Quota::per_second(NZU32!(128)),
-        MESSAGE_BACKLOG,
-    );
-    let dkg = p2p.register(DKG_CHANNEL, Quota::per_second(NZU32!(128)), MESSAGE_BACKLOG);
+    // Channel rates are enforced independently per peer. The network derives each shared inbound
+    // mailbox capacity from the retained-peer bound and quota burst size.
+    let vote = p2p.register(VOTE_CHANNEL, MESSAGE_RATE);
+    let certificate = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE);
+    let resolver = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE);
+    let backfill = p2p.register(BACKFILL_CHANNEL, MESSAGE_RATE);
+    let broadcast = p2p.register(BROADCAST_CHANNEL, MESSAGE_RATE);
+    let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
 
     let strategy = context.strategy(NZUsize!(2));
     let store = FileSecretStore::load(args.node_dir.join("secrets.json"))

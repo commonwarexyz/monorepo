@@ -92,7 +92,7 @@ async fn commit_pending<F: MerkleFamily>(
     }
     let merkleized = batch.merkleize(&db, metadata).await.unwrap();
     assert_eq!(
-        merkleized.bounds().base_size,
+        *merkleized.bounds().base.size,
         *db.bounds().end,
         "batch should start at the current database tip",
     );
@@ -251,7 +251,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         let batch = db.to_batch();
                         assert_eq!(batch.root(), db.root(), "base batch root differed from DB");
                         assert_eq!(
-                            batch.bounds().total_size,
+                            *batch.bounds().tip.size,
                             *db.bounds().end,
                             "base batch size differed from DB",
                         );

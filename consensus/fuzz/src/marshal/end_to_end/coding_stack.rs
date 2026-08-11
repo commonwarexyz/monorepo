@@ -343,12 +343,12 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
             fetch_timeout: Duration::from_secs(1),
             view_retention: Delta::new(10),
             skip_timeout: Duration::from_secs(11),
-            fetch_concurrent: NZUsize!(1),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
             forwarding,
+            track_historical_votes: false,
         },
     );
     engine.start(vote, certificate, resolver);

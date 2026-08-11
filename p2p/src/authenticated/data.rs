@@ -47,7 +47,7 @@ pub(crate) const DATA_PREFIX: u8 = 0;
 /// - 1: Frame discriminant
 /// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub(crate) const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
+pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
 
 /// Pre-encoded data ready for transmission.
 ///

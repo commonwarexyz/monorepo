@@ -12,9 +12,10 @@
 
 use super::{
     app::{ApplicationChoice, BlockContextRegistry},
+    scenario::{SETTLE, ScenarioOutcome},
     twins::stack::MarshalChoice,
 };
-use crate::simplex::Simplex;
+use crate::{network::CertificatePoison, simplex::Simplex};
 use commonware_consensus::{
     Block,
     marshal::mocks::{application::Application, block::Block as MockBlock},
@@ -320,6 +321,30 @@ impl<P: Simplex, C: Copy, D: ConsensusParentDigest> HeaderMismatchInvariant<P, C
     }
 }
 
+/// Invariant: a certificate backfill answer the requester cannot act on must
+/// not retire the fetch.
+///
+/// A node that accepts a notarization whose block never arrives still needs a
+/// certificate for that view: until it has one it can neither vote on nor build
+/// a later proposal, so the view must be fetched again. Called once that node
+/// has stopped delivering blocks, so the absence of any answer matched to a
+/// fresh request for the view is evidence that the fetch was retired by an
+/// answer which resolved nothing.
+pub(super) fn check_certificate_backfill_retry<P: commonware_cryptography::PublicKey>(
+    poison: &CertificatePoison<P>,
+    progress: &str,
+) {
+    let Some(view) = poison.view() else {
+        return;
+    };
+    assert!(
+        poison.retries_answered() > 0,
+        "marshal certificate backfill starved: a response for view {view} carried a notarization \
+         that can never certify, no later request for that view was ever answered, and the node \
+         stopped delivering blocks;{progress}"
+    );
+}
+
 /// Run block-ordering and agreement invariants.
 pub(super) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
     honest_apps: &[(usize, AuditedApplication<D, P>)],
@@ -529,13 +554,92 @@ fn agreement<B: Block<Digest = Sha256Digest>>(
     }
 }
 
+/// The phase discipline a scenario must keep for its liveness verdict to mean
+/// anything.
+///
+/// GST must leave every directed link up, after it no correct node's message
+/// may be withheld, and no answer to the victim's certificate backfill may be
+/// withheld at any point: a byzantine answer has to win by delivery order, not
+/// by the harness silencing the alternatives.
+pub(super) fn check_scenario_phases(outcome: &ScenarioOutcome) {
+    assert!(
+        outcome.unhealed_links.is_empty(),
+        "GST must heal every link, still down={:?}",
+        outcome.unhealed_links
+    );
+    assert_eq!(
+        outcome.honest_drops_post_gst, 0,
+        "post-GST honest-message drops must be zero, ledger={:?}",
+        outcome.ledger
+    );
+    assert_eq!(
+        outcome.resolver_drops, 0,
+        "certificate-backfill answers must never be withheld, ledger={:?}",
+        outcome.ledger
+    );
+}
+
+/// Post-GST liveness, measured from each correct node's height at GST.
+///
+/// With one byzantine node out of four, quorum three, and every link healed,
+/// every correct node must deliver one more finalized block than it held at
+/// GST. A run that finalized before GST and stalled afterwards therefore fails
+/// here even though its heights are nonzero. A node already at the single-epoch
+/// boundary this harness can deliver is only required to hold its height.
+/// Returns the stall diagnostic when the window closes short.
+pub(super) fn scenario_progress(outcome: &ScenarioOutcome) -> Result<(), String> {
+    let stalled: Vec<String> = outcome
+        .baselines
+        .iter()
+        .filter_map(|(label, baseline)| {
+            let target = ScenarioOutcome::target(*baseline);
+            let current = outcome.height(label);
+            (current < target).then(|| {
+                format!("{label}{{baseline={baseline} target={target} current={current}}}")
+            })
+        })
+        .collect();
+    if stalled.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "no post-GST progress within {SETTLE:?}: template={} actions={} forwarding={:?} \
+         byzantine_policy={:?} stalled={stalled:?} heights={:?} baselines={:?} \
+         honest_drops(pre/post)={}/{} byzantine_withholds={} attack_payload={:?} \
+         victim_attack_view_requests={} observations={}",
+        outcome.template.as_str(),
+        outcome.actions,
+        outcome.forwarding,
+        outcome.byzantine_policy,
+        outcome.heights,
+        outcome.baselines,
+        outcome.honest_drops_pre_gst,
+        outcome.honest_drops_post_gst,
+        outcome.byzantine_withholds,
+        outcome.attack_payload,
+        outcome.requests.len(),
+        outcome.events.len()
+    ))
+}
+
+/// Panicking form of [`scenario_progress`]: the crash oracle of the scenario
+/// target.
+pub(super) fn check_scenario_progress(outcome: &ScenarioOutcome) {
+    if let Err(diagnostic) = scenario_progress(outcome) {
+        panic!("marshal scenario: {diagnostic}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{SimplexId, id_mock};
     use commonware_consensus::{
         Reporter as _,
-        marshal::{Update, mocks::block::Block as MockBlock},
+        marshal::{
+            Update,
+            mocks::block::{Block as MockBlock, EmptyBlock},
+        },
         types::{Epoch, View},
     };
     use commonware_cryptography::Sha256;
@@ -676,10 +780,10 @@ mod tests {
 
     #[test]
     fn pending_ack_boundary_below_window_is_vacuous() {
-        type TestBlock = MockBlock<Sha256Digest, ()>;
+        type TestBlock = EmptyBlock<Sha256>;
 
         let mut application = Application::<TestBlock>::manual_ack();
-        let block = TestBlock::new::<Sha256>((), digest(0), Height::zero(), 0);
+        let block = TestBlock::new(digest(0), Height::zero(), 0);
         let (ack, _waiter) = Exact::handle();
         application.report(Update::Block(Arc::new(block), ack));
 
@@ -689,10 +793,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "max_pending_acks backpressure violated")]
     fn pending_ack_at_window_boundary_is_rejected() {
-        type TestBlock = MockBlock<Sha256Digest, ()>;
+        type TestBlock = EmptyBlock<Sha256>;
 
         let mut application = Application::<TestBlock>::manual_ack();
-        let block = TestBlock::new::<Sha256>((), digest(0), Height::zero(), 0);
+        let block = TestBlock::new(digest(0), Height::zero(), 0);
         let (ack, _waiter) = Exact::handle();
         application.report(Update::Block(Arc::new(block), ack));
 
@@ -702,10 +806,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "max_pending_acks backpressure violated")]
     fn pending_ack_deep_window_is_reachable() {
-        type TestBlock = MockBlock<Sha256Digest, ()>;
+        type TestBlock = EmptyBlock<Sha256>;
 
         let mut application = Application::<TestBlock>::manual_ack();
-        let block = TestBlock::new::<Sha256>((), digest(0), Height::zero(), 0);
+        let block = TestBlock::new(digest(0), Height::zero(), 0);
         let (ack, _waiter) = Exact::handle();
         application.report(Update::Block(Arc::new(block), ack));
 

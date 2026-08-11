@@ -9,7 +9,7 @@ use commonware_cryptography::{
     sha256::Sha256,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{Faults, Participant, modulo, test_rng};
+use commonware_utils::{Participant, modulo, test_rng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
@@ -149,10 +149,11 @@ where
     S: CertificateScheme,
 {
     type Subject<'a, D: Digest> = S::Subject<'a, D>;
+    type Faults = S::Faults;
     type PublicKey = S::PublicKey;
     type Certificate = S::Certificate;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -162,10 +163,9 @@ where
     where
         R: rand_core::CryptoRng,
         D: Digest,
-        M: Faults,
     {
         self.inner
-            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
+            .verify_certificate(rng, subject, certificate, strategy)
     }
 
     fn is_batchable() -> bool {
@@ -266,7 +266,7 @@ where
         )
     }
 
-    fn assemble<I, M>(
+    fn assemble<I>(
         &self,
         attestations: I,
         strategy: &impl commonware_parallel::Strategy,
@@ -274,9 +274,8 @@ where
     where
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
-        M: Faults,
     {
-        self.inner.assemble::<_, M>(
+        self.inner.assemble(
             attestations.into_iter().map(|attestation| Attestation {
                 signer: attestation.signer,
                 signature: attestation.signature,

@@ -10,7 +10,6 @@ use commonware_cryptography::{
         Ack, Context, RecvCipher, SendCipher, Syn, SynAck, dial_end, dial_start, listen_end,
         listen_start,
     },
-    transcript::Transcript,
 };
 use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
@@ -138,9 +137,8 @@ fn fuzz_handshake(input: &FuzzInput) {
 
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
-    let base_transcript = Transcript::new(b"handshake_fuzz");
     let dial_ctx = Context::new(
-        &base_transcript,
+        b"handshake_fuzz",
         current_time,
         range.clone(),
         dial_secret.clone(),
@@ -149,7 +147,7 @@ fn fuzz_handshake(input: &FuzzInput) {
     let (dial_state, syn) = dial_start(&mut dial_rng, dial_ctx);
 
     let listen_ctx = Context::new(
-        &base_transcript,
+        b"handshake_fuzz",
         current_time,
         range.clone(),
         listen_secret.clone(),
@@ -215,9 +213,8 @@ fn fuzz_listen_with_random_syn(input: &FuzzInput) {
 
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
-    let base_transcript = Transcript::new(b"handshake_fuzz");
     let ctx = Context::new(
-        &base_transcript,
+        b"handshake_fuzz",
         current_time,
         range,
         listen_secret,
@@ -252,9 +249,8 @@ fn fuzz_dial_with_random_synack(input: &FuzzInput) {
 
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
-    let base_transcript = Transcript::new(b"handshake_fuzz");
     let ctx = Context::new(
-        &base_transcript,
+        b"handshake_fuzz",
         current_time,
         range.clone(),
         dial_secret.clone(),
@@ -296,9 +292,8 @@ fn fuzz_listen_with_random_ack(input: &FuzzInput) {
 
     let current_time = choose_time(&range, span, input.time_offset, input.out_of_range);
 
-    let base_transcript = Transcript::new(b"handshake_fuzz");
     let dial_ctx = Context::new(
-        &base_transcript,
+        b"handshake_fuzz",
         current_time,
         range.clone(),
         dial_secret.clone(),
@@ -307,7 +302,7 @@ fn fuzz_listen_with_random_ack(input: &FuzzInput) {
     let (_dial_state, syn) = dial_start(&mut dial_rng, dial_ctx);
 
     let listen_ctx = Context::new(
-        &base_transcript,
+        b"handshake_fuzz",
         current_time,
         range.clone(),
         listen_secret.clone(),

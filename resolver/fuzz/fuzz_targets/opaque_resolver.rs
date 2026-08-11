@@ -217,12 +217,13 @@ impl Consumer for GatedConsumer {
     type Key = u8;
     type Value = Bytes;
     type Subscriber = u16;
+    type Outcome = bool;
 
     fn deliver(
         &mut self,
         delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Self::Outcome> {
         assert_eq!(value, key_value(delivery.key), "delivered unexpected bytes");
         let (tx, rx) = oneshot::channel();
         self.pending.lock().push_back(tx);

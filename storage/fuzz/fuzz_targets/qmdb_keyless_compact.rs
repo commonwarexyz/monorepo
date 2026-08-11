@@ -12,7 +12,7 @@ use commonware_storage::{
     qmdb::{
         Error,
         keyless::variable::{CompactConfig, CompactDb},
-        sync::compact as compact_sync,
+        sync,
     },
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
@@ -275,9 +275,9 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                     match expect_err {
                         None => {
-                            assert_eq!(merkleized.bounds().base_size, db.size().as_u64());
+                            assert_eq!(merkleized.bounds().base.size, db.size());
                             assert_eq!(
-                                merkleized.bounds().total_size,
+                                merkleized.bounds().tip.size.as_u64(),
                                 db.size().as_u64() + pending_count + 1
                             );
                             assert_eq!(merkleized.bounds().inactivity_floor, floor);
@@ -341,7 +341,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     (db, _) = db.apply_batch(batch_a).expect("Commit should not fail");
                     expected_metadata = None;
                     assert!(
-                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch { .. })),
+                        matches!(db.validate_batch(&batch_b), Err(Error::StaleBatch)),
                         "second batch from the same state must be stale"
                     );
                 }
@@ -483,15 +483,15 @@ fn fuzz_family<F: Family, S: Strategy>(
                 Operation::Target => {
                     let target = db.target();
                     let expected = synced.last().unwrap();
-                    assert_eq!(target.leaf_count.as_u64(), expected.size);
+                    assert_eq!(target.size.as_u64(), expected.size);
                     assert_eq!(target.root, expected.root);
                 }
 
                 Operation::ToBatch => {
                     let batch = db.to_batch();
                     assert_eq!(batch.root(), db.root());
-                    assert_eq!(batch.bounds().base_size, db.size().as_u64());
-                    assert_eq!(batch.bounds().total_size, db.size().as_u64());
+                    assert_eq!(batch.bounds().base.size, db.size());
+                    assert_eq!(batch.bounds().tip.size, db.size());
                     assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
                 }
 
@@ -514,14 +514,18 @@ fn fuzz_family<F: Family, S: Strategy>(
         let target = db.target();
         let source = Arc::new(db);
         let client_cfg = test_config(&format!("{suffix}-client"), &context, strategy.clone());
-        let client: Db<F, S> = compact_sync::sync(compact_sync::Config {
+        let client: Db<F, S> = sync::sync(sync::engine::Config {
             context: context.child("client"),
-            resolver: source.clone(),
-            target: target.clone(),
+            source: source.clone(),
+            target: sync::Target::try_from(&target).expect("compact target should be valid"),
+            max_outstanding_requests: 1,
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1024),
             db_config: client_cfg.clone(),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
+            max_retained_roots: 1,
         })
         .await
         .expect("Compact sync should not fail");

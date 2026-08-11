@@ -1,7 +1,9 @@
 //! Codec implementation for [`Vec<T>`].
 //!
-//! For portability and consistency between architectures,
-//! the length of the vector must fit within a [u32].
+//! Vector lengths are restricted to a [u32] so their wire representation is consistent across
+//! architectures, but allocation limits remain target-dependent. On a 32-bit target, a [`Vec<T>`]
+//! with non-zero-sized `T` cannot allocate more than `isize::MAX` bytes. Callers should use
+//! [`RangeCfg`] to choose a decoded length limit that works on all supported targets.
 
 use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 #[cfg(not(feature = "std"))]
@@ -135,7 +137,11 @@ mod tests {
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            Vec::<u8>::decode_range(malicious_buf.freeze(), ..),
+            Vec::<u8>::decode_range(malicious_buf.clone().freeze(), ..),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            Vec::<u16>::decode_range(malicious_buf.freeze(), ..),
             Err(Error::EndOfBuffer)
         ));
     }
