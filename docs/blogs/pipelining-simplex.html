@@ -178,11 +178,10 @@ Chou</a></div>
         leaves a network round between consecutive views, so network
         latency still paces each view.</p>
         <p>With Optimistic Validation, the leader can start
-        <code>v+1</code> after it builds and votes for <code>v</code>. A
-        validator that checked and voted for <code>v</code> can also
-        check and vote on <code>v+1</code> when the proposal arrives.
-        Neither needs to receive the notarization for <code>v</code>
-        first.</p>
+        <code>v+1</code> immediately after it builds and votes for
+        <code>v</code>. A validator that voted for <code>v</code> can
+        also vote on <code>v+1</code> when the proposal arrives. Neither
+        needs to receive the notarization for <code>v</code> first.</p>
         <p>The proposal and votes for <code>v+1</code> can overlap the
         network round that forms the notarization for <code>v</code>.
         The same rule can carry the pipeline across several views within

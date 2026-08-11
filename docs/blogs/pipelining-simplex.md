@@ -74,7 +74,7 @@ Figure 2: Round-robin rotates the proposer every view while Stable Leader change
 
 Without Optimistic Validation, the stable leader waits for view `v` to be notarized before proposing view `v+1`. Other validators also wait for that notarization before voting to notarize `v+1`. This leaves a network round between consecutive views, so network latency still paces each view.
 
-With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
+With Optimistic Validation, the leader can start `v+1` immediately after it builds and votes for `v`. A validator that voted for `v` can also vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
 
 The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v`. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
 
