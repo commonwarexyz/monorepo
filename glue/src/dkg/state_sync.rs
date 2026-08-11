@@ -8,7 +8,7 @@
 
 use crate::dkg::{network::Directory, types::EpochInfo};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, Write};
 use commonware_consensus::{
     Epochable as _,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -34,11 +34,11 @@ use std::{fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
 const STATE_SYNC_SUFFIX: &str = "_dkg_state_sync";
-type EpochInfoCodecConfig<Dir> = (NonZeroU32, ModeVersion, <Dir as Read>::Cfg);
+type EpochInfoCodecConfig = (NonZeroU32, ModeVersion);
 
 /// Storage settings for a DKG state-sync recovery plan.
 #[derive(Clone, Debug)]
-pub struct Config<C = ()> {
+pub struct Config {
     /// Stable node-wide partition prefix.
     pub partition_prefix: String,
 
@@ -47,14 +47,6 @@ pub struct Config<C = ()> {
 
     /// Maximum sharing mode version accepted in persisted epoch information.
     pub max_supported_mode: ModeVersion,
-
-    /// Codec configuration for persisted transport directories.
-    ///
-    /// Collection limits MUST accept the union of dealers, players, and next
-    /// players, which may contain up to three times
-    /// [`Self::max_participants`] distinct entries, and reject larger
-    /// directories.
-    pub directory_codec_config: C,
 }
 
 /// Public material needed to start DKG actors in a state-synced epoch.
@@ -166,7 +158,7 @@ where
     V: Variant,
     Dir: Directory<S::PublicKey>,
 {
-    type Cfg = (EpochInfoCodecConfig<Dir>, <S::Certificate as Read>::Cfg);
+    type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(
         reader: &mut impl Buf,
@@ -226,7 +218,7 @@ where
     Pending {
         candidate: Option<StateSync<S, D, V, Dir>>,
         partition: String,
-        codec_config: EpochInfoCodecConfig<Dir>,
+        codec_config: EpochInfoCodecConfig,
     },
     Resolved(Option<StateSync<S, D, V, Dir>>),
 }
@@ -288,24 +280,21 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if storage cannot be loaded or synchronized, or if provided or
-    /// persisted material has mismatched artifact and floor epochs.
+    /// Panics if storage cannot be loaded or synchronized, if provided or
+    /// persisted material has mismatched artifact and floor epochs, or if
+    /// provided material violates the configured codec limits.
     pub async fn init<E: Context>(
         context: E,
-        config: Config<Dir::Cfg>,
+        config: Config,
         provided: Option<StateSync<S, D, V, Dir>>,
     ) -> Self {
+        let codec_config = (config.max_participants, config.max_supported_mode);
         if let Some(provided) = &provided {
-            assert_epoch(provided);
+            assert_provided(provided, codec_config);
         }
         let partition = format!("{}{STATE_SYNC_SUFFIX}", config.partition_prefix);
-        let codec_config = (
-            config.max_participants,
-            config.max_supported_mode,
-            config.directory_codec_config,
-        );
         let mut store =
-            open_store::<E, S, D, V, Dir>(context, partition.clone(), codec_config.clone()).await;
+            open_store::<E, S, D, V, Dir>(context, partition.clone(), codec_config).await;
         if let Some(provided) = provided {
             store.put(STATE_SYNC_KEY, provided);
             store = store
@@ -347,7 +336,7 @@ where
                 candidate,
                 partition,
                 codec_config,
-            } => (candidate.clone(), partition.clone(), codec_config.clone()),
+            } => (candidate.clone(), partition.clone(), *codec_config),
         };
 
         let Some(candidate) = candidate else {
@@ -373,7 +362,7 @@ where
 async fn open_store<E, S, D, V, Dir>(
     context: E,
     partition: String,
-    epoch_info_codec_config: EpochInfoCodecConfig<Dir>,
+    epoch_info_codec_config: EpochInfoCodecConfig,
 ) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V, Dir>>
 where
     E: Context,
@@ -396,6 +385,23 @@ where
     .expect("failed to load DKG state sync metadata")
 }
 
+fn assert_provided<S, D, V, Dir>(
+    state_sync: &StateSync<S, D, V, Dir>,
+    codec_config: EpochInfoCodecConfig,
+) where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    assert_epoch(state_sync);
+    StateSync::<S, D, V, Dir>::decode_cfg(
+        state_sync.encode(),
+        &(codec_config, S::certificate_codec_config_unbounded()),
+    )
+    .expect("provided state sync material must satisfy codec config");
+}
+
 fn assert_epoch<S, D, V, Dir>(state_sync: &StateSync<S, D, V, Dir>)
 where
     S: Scheme<D>,
@@ -412,18 +418,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::{tests::mocks, types::EpochOutcome};
+    use crate::dkg::{network::Addresses, tests::mocks, types::EpochOutcome};
     use commonware_consensus::{
         simplex::types::{Finalize, Proposal},
         types::{Round, View},
     };
     use commonware_cryptography::{
-        Hasher as _, Sha256,
+        Hasher as _, Sha256, Signer as _,
         bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+        ed25519,
     };
+    use commonware_p2p::Address;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU32, TestRng, ordered::Set};
+    use std::net::SocketAddr;
 
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
@@ -468,7 +477,6 @@ mod tests {
             partition_prefix: partition.into(),
             max_participants: NZU32!(16),
             max_supported_mode: crate::dkg::tests::max_supported_mode(),
-            directory_codec_config: (),
         }
     }
 
@@ -595,6 +603,69 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "provided state sync material must satisfy codec config")]
+    fn oversized_provided_material_panics_at_init() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let provided = state_sync(&mut context, Epoch::new(2));
+            let mut config = config("oversized-provided");
+            config.max_participants = NZU32!(3);
+            let _ = TestPlan::init(context.child("init"), config, Some(provided)).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "provided state sync material must satisfy codec config")]
+    fn invalid_addressed_directory_panics_at_init() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let StateSync { info, floor } = state_sync(&mut context, Epoch::new(2));
+            let peers = info
+                .participants()
+                .tracked_peers()
+                .union()
+                .into_iter()
+                .chain([ed25519::PrivateKey::from_seed(10_000).public_key()]);
+            let directory = peers
+                .enumerate()
+                .map(|(index, peer)| {
+                    let socket = SocketAddr::from(([127, 0, 0, 1], index as u16 + 1));
+                    (peer, Address::Symmetric(socket))
+                })
+                .collect::<Addresses<_>>();
+            let EpochInfo {
+                outcome,
+                epoch,
+                output,
+                players,
+                next_players,
+                ..
+            } = info;
+            let invalid = StateSync {
+                info: EpochInfo {
+                    outcome,
+                    epoch,
+                    output,
+                    players,
+                    next_players,
+                    directory,
+                },
+                floor,
+            };
+
+            let _ = Plan::<
+                mocks::TestScheme,
+                mocks::TestDigest,
+                mocks::TestBlsVariant,
+                Addresses<mocks::TestPublicKey>,
+            >::init(
+                context.child("init"),
+                config("invalid-directory"),
+                Some(invalid),
+            )
+            .await;
+        });
+    }
+
+    #[test]
     fn disabled_resolves_none_without_storage() {
         deterministic::Runner::default().start(|context| async move {
             let plan = TestPlan::disabled();
@@ -606,10 +677,11 @@ mod tests {
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
-    use crate::dkg::tests::mocks;
+    use crate::dkg::{network::Addresses, tests::mocks};
     use commonware_codec::conformance::CodecConformance;
 
     commonware_conformance::conformance_tests! {
         CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
+        CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
     }
 }

@@ -14,6 +14,10 @@ hash = "a010d31585e96972a513d2b373c813e078cc240957060c900f605b02e0228f68"
 n_cases = 65536
 hash = "9e5d122980ec0436a7d77de1342381879d52fa796eaedfd8eba08117420ab691"
 
+["commonware_glue::dkg::state_sync::conformance::CodecConformance<StateSync<mocks::TestScheme,mocks::TestDigest,mocks\n::TestBlsVariant,Addresses<mocks::TestPublicKey>>>"]
+n_cases = 8192
+hash = "251d04ab167e3d8d125bfcd92cd03ae8f217749092db978f8fcf456c716bcea1"
+
 ["commonware_glue::dkg::state_sync::conformance::CodecConformance<StateSync<mocks::TestScheme,mocks::TestDigest,mocks\n::TestBlsVariant>>"]
 n_cases = 8192
 hash = "8e81b9a90b0dafe971299866e8447b522ca1d59091aeb2c3242f5ef11f7ac496"

@@ -9,8 +9,7 @@ use crate::dkg::{
 use bytes::{Buf, BufMut};
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Codec, Decode, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
-    varint::UInt,
+    Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_consensus::{
     Automaton, Block, CertifiableAutomaton, Heightable, Relay, Reporter,
@@ -73,20 +72,6 @@ pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVaria
 #[error("peer set unavailable")]
 pub(crate) struct TrackFailed;
 
-trait TestDirectory<P: CryptoPublicKey>: DkgDirectory<P> {
-    fn codec_config(max_participants: NonZeroU32) -> Self::Cfg;
-}
-
-impl<P: CryptoPublicKey> TestDirectory<P> for Unit {
-    fn codec_config(_: NonZeroU32) -> Self::Cfg {}
-}
-
-impl<P: CryptoPublicKey> TestDirectory<P> for Addresses<P> {
-    fn codec_config(max_participants: NonZeroU32) -> Self::Cfg {
-        RangeCfg::new(0..=(max_participants.get() as usize).saturating_mul(3))
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct FailingManager<M>(pub(crate) M);
 
@@ -111,7 +96,7 @@ impl<M: Provider> DkgManager for FailingManager<M> {
         _epoch: Epoch,
         _peers: TrackedPeers<Self::PublicKey>,
         _directory: &Self::Directory,
-    ) -> Result<Feedback, Self::Error> {
+    ) -> Result<(), Self::Error> {
         Err(TrackFailed)
     }
 }
@@ -160,7 +145,7 @@ where
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
         directory: &Self::Directory,
-    ) -> Result<Feedback, Self::Error> {
+    ) -> Result<(), Self::Error> {
         self.tracked
             .lock()
             .push((epoch, peers.clone(), directory.clone()));
@@ -278,14 +263,13 @@ impl EncodedPayload {
     where
         V: Variant,
         S: Signer,
-        Dir: TestDirectory<S::PublicKey>,
+        Dir: DkgDirectory<S::PublicKey>,
     {
         Payload::decode_cfg(
             self.bytes.as_slice(),
             &(
                 self.max_participants,
                 crate::dkg::tests::max_supported_mode(),
-                Dir::codec_config(self.max_participants),
             ),
         )
         .ok()
@@ -471,7 +455,7 @@ impl<D, C, Dir> ReshareBlock for MockBlock<D, C, Dir>
 where
     D: Digest,
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
-    Dir: TestDirectory<TestPublicKey>,
+    Dir: DkgDirectory<TestPublicKey>,
 {
     type Variant = TestBlsVariant;
     type Signer = TestSigner;

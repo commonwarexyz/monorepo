@@ -20,7 +20,6 @@
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
 use bytes::Buf;
-use commonware_actor::Feedback;
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
@@ -50,12 +49,17 @@ use thiserror::Error;
 pub trait Directory<P: PublicKey>:
     Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Read + Write + EncodeSize
 {
+    /// Derives codec configuration for a directory containing exactly `peers`.
+    fn codec_config(peers: &Set<P>) -> Self::Cfg;
+
     /// Returns whether the directory contains exactly `peers`.
     fn matches(&self, peers: &Set<P>) -> bool;
 }
 
 /// Key-only directory for transports that dial by public key alone.
 impl<P: PublicKey> Directory<P> for Unit {
+    fn codec_config(_: &Set<P>) -> Self::Cfg {}
+
     fn matches(&self, _: &Set<P>) -> bool {
         true
     }
@@ -104,9 +108,8 @@ impl<P: PublicKey> EncodeSize for Addresses<P> {
 impl<P: PublicKey> Read for Addresses<P> {
     /// Number of address entries accepted by the decoder.
     ///
-    /// When decoding an [`EpochInfo`](crate::dkg::types::EpochInfo), this bound
-    /// must accept the union of its dealers, players, and next players and
-    /// reject larger directories.
+    /// An [`EpochInfo`](crate::dkg::types::EpochInfo) derives an exact bound
+    /// from the union of its dealers, players, and next players.
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -115,8 +118,12 @@ impl<P: PublicKey> Read for Addresses<P> {
 }
 
 impl<P: PublicKey> Directory<P> for Addresses<P> {
+    fn codec_config(peers: &Set<P>) -> Self::Cfg {
+        RangeCfg::exact(peers.len())
+    }
+
     fn matches(&self, peers: &Set<P>) -> bool {
-        self.0.len() == peers.len() && peers.iter().all(|peer| self.0.get_value(peer).is_some())
+        self.0.keys() == peers
     }
 }
 
@@ -141,16 +148,12 @@ pub trait Manager: Provider {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Activates `peers` for `epoch` using the epoch's `directory`.
-    ///
-    /// The returned [`Feedback`] is exposed for callers that need it. DKG
-    /// actors preserve the key-only manager's fire-and-forget contract and do
-    /// not interpret it.
     fn track(
         &mut self,
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
         directory: &Self::Directory,
-    ) -> Result<Feedback, Self::Error>;
+    ) -> Result<(), Self::Error>;
 }
 
 impl<M: P2pManager> Manager for M {
@@ -162,8 +165,9 @@ impl<M: P2pManager> Manager for M {
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
         _directory: &Self::Directory,
-    ) -> Result<Feedback, Self::Error> {
-        Ok(P2pManager::track(self, epoch.get(), peers))
+    ) -> Result<(), Self::Error> {
+        let _ = P2pManager::track(self, epoch.get(), peers);
+        Ok(())
     }
 }
 
@@ -224,12 +228,13 @@ where
         epoch: Epoch,
         peers: TrackedPeers<Self::PublicKey>,
         directory: &Self::Directory,
-    ) -> Result<Feedback, Self::Error> {
+    ) -> Result<(), Self::Error> {
         let primary = resolve(&peers.primary, directory)?;
         let secondary = resolve(&peers.secondary, directory)?;
         let peers = AddressableTrackedPeers::new(primary, secondary);
 
-        Ok(self.manager.track(epoch.get(), peers))
+        let _ = self.manager.track(epoch.get(), peers);
+        Ok(())
     }
 }
 
@@ -253,6 +258,7 @@ fn resolve<P: PublicKey>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_actor::Feedback;
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -358,16 +364,14 @@ mod tests {
     }
 
     #[test]
-    fn key_only_feedback_is_preserved() {
+    fn key_only_manager_tracks_peers() {
         let (peers, _) = peers();
-        for feedback in [Feedback::Ok, Feedback::Backoff, Feedback::Closed] {
-            let mut manager = TestManager::new(feedback);
-            assert_eq!(
-                Manager::track(&mut manager, Epoch::new(7), peers.clone(), &Unit),
-                Ok(feedback)
-            );
-            assert_eq!(manager.tracked.lock()[0], (7, peers.clone()));
-        }
+        let mut manager = TestManager::new(Feedback::Closed);
+        assert_eq!(
+            Manager::track(&mut manager, Epoch::new(7), peers.clone(), &Unit),
+            Ok(())
+        );
+        assert_eq!(manager.tracked.lock()[0], (7, peers));
     }
 
     #[test]
@@ -400,20 +404,22 @@ mod tests {
     #[test]
     fn addressable_mapping_preserves_roles() {
         let (peers, keys) = peers();
-        let directory = Addresses::from_iter([
-            (keys[0].clone(), address(1)),
-            (keys[1].clone(), address(2)),
-            (keys[2].clone(), address(3)),
-        ]);
+        let directory = |offset: u16| {
+            Addresses::from_iter([
+                (keys[0].clone(), address(offset + 1)),
+                (keys[1].clone(), address(offset + 2)),
+                (keys[2].clone(), address(offset + 3)),
+            ])
+        };
         let inner = TestManager::new(Feedback::Ok);
         let tracked = inner.addressable.clone();
         let mut manager = AddressableManager::new(AddressableTestManager(inner));
 
-        let feedback =
-            Manager::track(&mut manager, Epoch::new(9), peers.clone(), &directory).unwrap();
-        assert_eq!(feedback, Feedback::Ok);
+        Manager::track(&mut manager, Epoch::new(9), peers.clone(), &directory(0)).unwrap();
+        Manager::track(&mut manager, Epoch::new(10), peers.clone(), &directory(10)).unwrap();
 
         let tracked = tracked.lock();
+        assert_eq!(tracked.len(), 2);
         assert_eq!(tracked[0].0, 9);
         assert_eq!(tracked[0].1.primary.keys(), &peers.primary);
         assert_eq!(tracked[0].1.secondary.keys(), &peers.secondary);
@@ -427,6 +433,19 @@ mod tests {
             tracked[0].1.secondary.get_value(&keys[2]),
             Some(&address(3))
         );
+        assert_eq!(tracked[1].0, 10);
+        assert_eq!(tracked[1].1.primary.keys(), &peers.primary);
+        assert_eq!(tracked[1].1.secondary.keys(), &peers.secondary);
+        assert_eq!(tracked[1].1.primary.get_value(&keys[0]), Some(&address(11)));
+        assert_eq!(tracked[1].1.primary.get_value(&keys[1]), Some(&address(12)));
+        assert_eq!(
+            tracked[1].1.secondary.get_value(&keys[1]),
+            Some(&address(12))
+        );
+        assert_eq!(
+            tracked[1].1.secondary.get_value(&keys[2]),
+            Some(&address(13))
+        );
     }
 
     #[test]
@@ -438,53 +457,10 @@ mod tests {
         let mut manager = AddressableManager::new(AddressableTestManager(inner));
         let directory = Addresses::from_iter([(keys[0].clone(), address(1))]);
         assert_eq!(
-            Manager::track(&mut manager, Epoch::new(1), peers.clone(), &directory),
+            Manager::track(&mut manager, Epoch::new(1), peers, &directory),
             Err(MissingAddress(keys[1].clone()))
         );
         assert!(tracked.lock().is_empty());
-
-        let directory = peers
-            .clone()
-            .union()
-            .into_iter()
-            .enumerate()
-            .map(|(index, peer)| (peer, address(index as u16 + 1)))
-            .collect::<Addresses<_>>();
-        let mut manager =
-            AddressableManager::new(AddressableTestManager(TestManager::new(Feedback::Closed)));
-        let feedback = Manager::track(&mut manager, Epoch::new(1), peers, &directory).unwrap();
-        assert_eq!(feedback, Feedback::Closed);
-    }
-
-    #[test]
-    fn consecutive_epochs_use_their_directories() {
-        let (peers, _) = peers();
-        let directory_for = |port: u16| {
-            peers
-                .clone()
-                .union()
-                .into_iter()
-                .map(|peer| (peer, address(port)))
-                .collect::<Addresses<_>>()
-        };
-
-        let inner = TestManager::new(Feedback::Ok);
-        let tracked = inner.addressable.clone();
-        let mut manager = AddressableManager::new(AddressableTestManager(inner));
-
-        for (epoch, port) in [(4, 4), (4, 4), (5, 5)] {
-            Manager::track(
-                &mut manager,
-                Epoch::new(epoch),
-                peers.clone(),
-                &directory_for(port),
-            )
-            .unwrap();
-        }
-
-        let tracked = tracked.lock();
-        assert_eq!(tracked[0].1.primary.values(), tracked[1].1.primary.values());
-        assert_ne!(tracked[1].1.primary.values(), tracked[2].1.primary.values());
     }
 
     #[test_traced]

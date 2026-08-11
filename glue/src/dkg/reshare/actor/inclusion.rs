@@ -59,14 +59,6 @@ struct CachedArtifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     artifact: Option<Artifact<V, C, D>>,
 }
 
-// Provider-supplied participants for the next epoch's artifact. The provider
-// contract requires this value to remain stable for the epoch, so one lookup
-// is reused across competing final block proposals and verification attempts.
-#[derive(Clone)]
-struct Lookahead<P: PublicKey> {
-    next_players: Set<P>,
-}
-
 struct PendingLogScan<'a, V: BlsVariant, P> {
     epoch: Epoch,
     info: &'a Info<V, P>,
@@ -484,7 +476,7 @@ where
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         pending_logs: Option<&PendingLogs<V, C::PublicKey>>,
-        lookahead: &mut Option<Lookahead<C::PublicKey>>,
+        lookahead: &mut Option<Set<C::PublicKey>>,
         artifact_cache: &mut Option<CachedArtifact<V, C, B::Directory>>,
     ) -> Option<Artifact<V, C, B::Directory>> {
         let current = store.current();
@@ -553,9 +545,9 @@ where
             }
         };
 
-        let future = if current.is_some() {
+        let next_players = if current.is_some() {
             match lookahead {
-                Some(future) => future.clone(),
+                Some(next_players) => next_players.clone(),
                 None => {
                     // The provider contract requires this value to remain
                     // stable for the epoch, so reuse one lookup across
@@ -570,17 +562,14 @@ where
                         self.max_participants,
                         self.blocks_per_epoch,
                     );
-                    let future = Lookahead { next_players };
-                    *lookahead = Some(future.clone());
-                    future
+                    *lookahead = Some(next_players.clone());
+                    next_players
                 }
             }
         } else {
             // DKG mode: the one-shot artifact names no next committee and
             // uses the ceremony's configured directory.
-            Lookahead {
-                next_players: Set::default(),
-            }
+            Set::default()
         };
 
         // The next epoch's dealers depend on the ceremony outcome (this
@@ -595,7 +584,7 @@ where
                             .players()
                             .iter()
                             .chain(current.next_players.iter())
-                            .chain(future.next_players.iter())
+                            .chain(next_players.iter())
                             .cloned(),
                     );
                     let directory = self
@@ -612,7 +601,7 @@ where
                             epoch: next_epoch,
                             output,
                             players: current.next_players,
-                            next_players: future.next_players,
+                            next_players,
                             directory,
                         },
                         share,
@@ -628,7 +617,7 @@ where
                             .players()
                             .iter()
                             .chain(players.iter())
-                            .chain(future.next_players.iter())
+                            .chain(next_players.iter())
                             .cloned(),
                     );
                     let directory = self
@@ -644,7 +633,7 @@ where
                             epoch,
                             output,
                             players,
-                            next_players: future.next_players,
+                            next_players,
                             directory,
                         },
                         share: Some(share),
@@ -670,7 +659,7 @@ where
                         .players()
                         .iter()
                         .chain(current.next_players.iter())
-                        .chain(future.next_players.iter())
+                        .chain(next_players.iter())
                         .cloned(),
                 );
                 let directory = self
@@ -687,7 +676,7 @@ where
                         epoch: epoch.next(),
                         output: current.output,
                         players: current.next_players,
-                        next_players: future.next_players,
+                        next_players,
                         directory,
                     },
                     share,
