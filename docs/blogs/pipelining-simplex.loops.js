@@ -394,18 +394,31 @@ function buildValidation(mount) {
   addCadenceArrows(sequentialCount, sequentialGap, topY, 0.05, 0.15);
   addCadenceArrows(optimisticCount, optimisticGap, bottomY, 0.05, 0.05);
 
-  const addNetworkRounds = (x, y, proposedAt) => {
+  const addNetworkRounds = (x, y, proposedAt, linksNextProposal) => {
     animated.push(addArrow(
       svg,
       x + 4,
       y + 17,
-      x + networkHop - 9,
+      x + networkHop,
       y + 45,
       ARROW,
       proposedAt + 0.01,
       0.13,
       { strokeWidth: 1.4, headSize: 6, opacity: 0.8 },
     ));
+    if (linksNextProposal) {
+      animated.push(addArrow(
+        svg,
+        x + networkHop,
+        y + 39,
+        x + networkHop,
+        y + 17,
+        ARROW,
+        proposedAt + 0.14,
+        0.01,
+        { strokeWidth: 1.4, headSize: 6, opacity: 0.8 },
+      ));
+    }
     animated.push(addArrow(
       svg,
       x + networkHop + 9,
@@ -467,7 +480,7 @@ function buildValidation(mount) {
 
   for (let index = 0; index < sequentialCount; index++) {
     const proposedAt = 0.05 + index * 0.15;
-    addNetworkRounds(x0 + index * sequentialGap, topY, proposedAt);
+    addNetworkRounds(x0 + index * sequentialGap, topY, proposedAt, true);
     addBlock(
       x0 + index * sequentialGap,
       topY,
@@ -480,7 +493,7 @@ function buildValidation(mount) {
 
   for (let index = 0; index < optimisticCount; index++) {
     const proposedAt = 0.05 + index * 0.05;
-    addNetworkRounds(x0 + index * optimisticGap, bottomY, proposedAt);
+    addNetworkRounds(x0 + index * optimisticGap, bottomY, proposedAt, false);
     addBlock(
       x0 + index * optimisticGap,
       bottomY,

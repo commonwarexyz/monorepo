@@ -93,7 +93,7 @@ The child can therefore be proposed and voted on while the parent's notarization
 ```
 
 ::: {.image-caption}
-Figure 3: Diagonal arrows show the network messages for notarization and finalization. Stable Leader spaces views one hop apart; Optimistic Validation starts three in the same interval.
+Figure 3: Arrows show the network messages for notarization and finalization. Stable Leader spaces views one hop apart; Optimistic Validation starts three in the same interval.
 :::
 
 ## How Optimism Stays Safe
