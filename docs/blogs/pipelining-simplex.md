@@ -133,26 +133,18 @@ Start with the stage that limits your view rate. Alto's settings are an example,
 | Waiting for parent notarizations | Add Optimistic Validation | More speculative CPU and memory |
 | Application checks, execution, storage, proposal checks, or dissemination capacity | Improve that stage first | A deeper window will fill |
 
-Neither feature makes a slower application, storage layer, or network process more work per second.
-
-Longer terms amortize more handoffs, but give one leader more consecutive proposals. Networks that rely on proposer rotation for censorship resistance should use shorter terms. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence.
-
-If a leader stops making progress, validators vote to skip the rest of the term. A term-wide stall timeout also covers a leader that keeps views moving without finalizing blocks. These controls do not remove a leader that finalizes blocks while selectively censoring transactions.
+Longer terms amortize more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Validators can skip a stalled term. A term-wide timeout covers a leader that keeps views moving without finalizing blocks. Neither control removes a leader that finalizes blocks while selectively censoring transactions.
 
 The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. A rotating leader or smaller lookahead may fit better when validators are heterogeneous or leaders frequently fail.
 
-Stable leadership keeps the leader on the transaction data path for the whole term. Networks that need concurrent dissemination from many producers can combine this pipeline with another design. [Multimmit](/blogs/multimmit) describes one such approach.
+Stable leadership keeps one leader on the transaction data path for the whole term. Networks with many concurrent producers can pair this pipeline with [Multimmit](/blogs/multimmit).
 
-Choose enough lookahead to cover how far local proposals and votes may run ahead of notarizations at your target view rate. A larger window helps only when notarizations catch up before the window fills. It also costs CPU and memory. Choose the term length based on how long one leader should retain proposal authority.
-
-Stable terms currently use the round-robin elector. Every validator must use the same term length, while each validator can choose its own optimistic lookahead. The configuration API is [available on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/elector.rs#L282-L291) and will appear on docs.rs with the next release. [Alto](https://github.com/commonwarexyz/alto) provides a complete blockchain integration.
+Stable terms currently use round-robin election. Every validator must use the same term length.
 
 ## The Next Ordering Opportunity
 
-A shorter block interval reduces the wait for the next ordering opportunity after data reaches the proposer. An order-book update, batch reference, or game action that misses one proposal gets another opportunity after one block interval.
-
-At Alto's measured cadence, that interval was 5ms at the median. Stable Leader and Optimistic Validation let Simplex overlap more work without changing its fault threshold or finalization rule.
+An orderbook update, batch reference, or game action that misses one proposal gets another opportunity after one block interval.
 
 For builders who have already made dissemination and execution fast, the ordering clock can become the next visible limit. Each network can tune that clock around its own latency, capacity, and proposer-rotation requirements.
 
-If that is your bottleneck, explore the [Simplex source documentation on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs), study the complete [Alto integration](https://github.com/commonwarexyz/alto), or ask an integration question in [Commonware Q&A](https://github.com/commonwarexyz/monorepo/discussions/categories/q-a).
+Stable Leader and Optimistic Validation are [available on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs). [Alto](https://github.com/commonwarexyz/alto) shows the complete integration. In our global deployment, that ordering clock ticked every 5ms at the median.
