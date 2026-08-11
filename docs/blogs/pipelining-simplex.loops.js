@@ -151,12 +151,13 @@ function buildCadence(mount) {
 function buildLeaders(mount) {
   const svg = makeSvg(mount, 430);
   const animated = [];
-  addText(svg, 20, 35, 'Round-robin leaders', { 'font-size': 18, 'font-weight': 700 });
-  addText(svg, 20, 232, 'Stable leaders (4-view terms)', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 35, 'Round-robin (2 hops per view)', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 232, 'Stable Leader (1 hop within each 4-view term)', { 'font-size': 18, 'font-weight': 700 });
 
-  const x0 = 160;
-  const gap = 74;
-  const viewCount = 12;
+  const x0 = 150;
+  const hop = 60;
+  const rotatingViewCount = 7;
+  const stableViewCount = 12;
   const termLength = 4;
   const leaders = ['L1', 'L2', 'L3'];
   const rotatingY = { L1: 82, L2: 132, L3: 182 };
@@ -170,9 +171,16 @@ function buildLeaders(mount) {
     addLine(svg, 122, y, 995, y, { stroke: LIGHT });
   }
 
-  const rotatingOwners = Array.from({ length: viewCount }, (_, index) => leaders[index % leaders.length]);
+  const addTwoHops = (x1, y1, x2, y2, color, delay) => {
+    const midX = (x1 + x2) / 2;
+    const midY = (y1 + y2) / 2;
+    animated.push(addArrow(svg, x1, y1, midX - 4, midY, color, delay, 0.035));
+    animated.push(addArrow(svg, midX + 4, midY, x2, y2, color, delay + 0.04, 0.035));
+  };
+
+  const rotatingOwners = Array.from({ length: rotatingViewCount }, (_, index) => leaders[index % leaders.length]);
   rotatingOwners.forEach((owner, index) => {
-    const x = x0 + index * gap;
+    const x = x0 + index * hop * 2;
     addText(svg, x, 57, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY, 'font-size': 14 });
     const block = svgEl('rect', {
       x: x - 11,
@@ -184,24 +192,27 @@ function buildLeaders(mount) {
       opacity: 0,
     });
     svg.appendChild(block);
-    animated.push(addReveal(block, 0.06 + index * 0.06));
+    animated.push(addReveal(block, 0.06 + index * 0.1));
     if (index < rotatingOwners.length - 1) {
-      animated.push(addArrow(
-        svg,
+      addTwoHops(
         x + 13,
         rotatingY[owner],
-        x + gap - 13,
+        x + hop * 2 - 13,
         rotatingY[rotatingOwners[index + 1]],
         GRAY,
-        0.09 + index * 0.06,
-        0.05,
-      ));
+        0.09 + index * 0.1,
+      );
     }
   });
 
-  const stableOwners = Array.from({ length: viewCount }, (_, index) => leaders[Math.floor(index / termLength)]);
+  const stableOwners = Array.from({ length: stableViewCount }, (_, index) => leaders[Math.floor(index / termLength)]);
+  const stableX = [x0];
+  for (let index = 1; index < stableViewCount; index++) {
+    const handoff = index % termLength === 0;
+    stableX.push(stableX[index - 1] + hop * (handoff ? 2 : 1));
+  }
   stableOwners.forEach((owner, index) => {
-    const x = x0 + index * gap;
+    const x = stableX[index];
     addText(svg, x, 257, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY, 'font-size': 14 });
     const block = svgEl('rect', {
       x: x - 11,
@@ -217,21 +228,34 @@ function buildLeaders(mount) {
     if (index < stableOwners.length - 1) {
       const nextOwner = stableOwners[index + 1];
       const handoff = nextOwner !== owner;
-      animated.push(addArrow(
-        svg,
-        x + 13,
-        stableY[owner],
-        x + gap - 13,
-        stableY[nextOwner],
-        handoff ? BLUE : RED,
-        0.09 + index * 0.06,
-        0.05,
-      ));
+      if (handoff) {
+        addTwoHops(
+          x + 13,
+          stableY[owner],
+          stableX[index + 1] - 13,
+          stableY[nextOwner],
+          BLUE,
+          0.09 + index * 0.06,
+        );
+      } else {
+        animated.push(addArrow(
+          svg,
+          x + 13,
+          stableY[owner],
+          stableX[index + 1] - 13,
+          stableY[nextOwner],
+          RED,
+          0.09 + index * 0.06,
+          0.05,
+        ));
+      }
     }
   });
 
   for (let term = 0; term < leaders.length; term++) {
-    const center = x0 + (term * termLength + (termLength - 1) / 2) * gap;
+    const start = term * termLength;
+    const end = start + termLength - 1;
+    const center = (stableX[start] + stableX[end]) / 2;
     addText(svg, center, 420, `term ${term + 1}`, {
       'text-anchor': 'middle',
       fill: GRAY,
@@ -240,7 +264,7 @@ function buildLeaders(mount) {
   }
 
   [termLength, termLength * 2].forEach((boundaryView, index) => {
-    const x = x0 + (boundaryView - 0.5) * gap;
+    const x = (stableX[boundaryView - 1] + stableX[boundaryView]) / 2;
     const boundary = addLine(svg, x, 246, x, 402, {
       stroke: BLUE,
       'stroke-dasharray': '7 7',
@@ -257,7 +281,7 @@ function buildValidation(mount) {
   const animated = [];
   const x0 = 190;
   const sequentialGap = 186;
-  const optimisticGap = 92;
+  const optimisticGap = 62;
   const parentSpan = sequentialGap;
   const finalizationSpan = sequentialGap;
 
@@ -291,23 +315,23 @@ function buildValidation(mount) {
     animated.push(addReveal(finalized, 0.33 + index * 0.17));
   }
 
-  for (let index = 0; index < 9; index++) {
+  for (let index = 0; index < 13; index++) {
     const x = x0 + index * optimisticGap;
     const block = svgEl('rect', { x: x - 14, y: 255, width: 28, height: 28, rx: 3, fill: RED, opacity: 0 });
     svg.appendChild(block);
-    animated.push(addReveal(block, 0.06 + index * 0.075));
+    animated.push(addReveal(block, 0.06 + index * 0.045));
     addText(svg, x, 247, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
-    if (index < 8) animated.push(addArrow(svg, x + 16, 269, x + optimisticGap - 16, 269, RED, 0.09 + index * 0.075, 0.05));
+    if (index < 12) animated.push(addArrow(svg, x + 16, 269, x + optimisticGap - 16, 269, RED, 0.09 + index * 0.045, 0.04));
     const notarizedX = x + parentSpan;
     const notarized = svgEl('circle', { cx: notarizedX, cy: 322, r: 8, fill: BLUE, opacity: 0 });
     svg.appendChild(notarized);
-    animated.push(addReveal(notarized, 0.22 + index * 0.075));
-    animated.push(addArrow(svg, x, 285, notarizedX - 9, 322, BLUE, 0.1 + index * 0.075, 0.11));
+    animated.push(addReveal(notarized, 0.22 + index * 0.045));
+    animated.push(addArrow(svg, x, 285, notarizedX - 9, 322, BLUE, 0.1 + index * 0.045, 0.11));
     const finalizedX = notarizedX + finalizationSpan;
     const finalized = svgEl('circle', { cx: finalizedX, cy: 375, r: 8, fill: BLUE, opacity: 0 });
     svg.appendChild(finalized);
-    animated.push(addArrow(svg, notarizedX + 9, 322, finalizedX - 9, 375, BLUE, 0.23 + index * 0.075, 0.11));
-    animated.push(addReveal(finalized, 0.34 + index * 0.075));
+    animated.push(addArrow(svg, notarizedX + 9, 322, finalizedX - 9, 375, BLUE, 0.23 + index * 0.045, 0.11));
+    animated.push(addReveal(finalized, 0.34 + index * 0.045));
   }
   return animated;
 }
