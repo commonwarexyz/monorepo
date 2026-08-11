@@ -1,6 +1,6 @@
 ---
 title: "Simplex, Pipelined"
-description: "In a 50-validator Alto deployment, Stable Leader and Optimistic Validation sustained about 200 successful views per second at 5ms median block spacing."
+description: "In a 50-validator Alto deployment, Stable Leader and Optimistic Validation sustained about 200 blocks per second, with a median of 5ms between blocks."
 date: "August 10th, 2026"
 published-time: "2026-08-10T00:00:00Z"
 modified-time: "2026-08-10T00:00:00Z"
@@ -10,11 +10,11 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-Finality tells you when a block is settled. Block spacing tells you how soon the next one can start.
+Network latency does not have to set the pace of new blocks.
 
-Today, we're introducing Stable Leader and Optimistic Validation, two options that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader removes the handoff between consecutive proposers. Optimistic Validation lets the leader propose a child, and validators vote for it, without first receiving the parent's notarization.
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two options that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader lets one proposer lead many views in a row, reducing the overhead of leader handoff. Optimistic Validation lets that leader keep proposing, and validators keep voting, without waiting for the previous view's notarization. Together, they take network round trips out of the critical path for producing new blocks.
 
-In a global [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 successful views per second. Every successful view finalized one block, and the median block spacing was 5ms.
+In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 blocks per second.
 
 ```{=html}
 <style>
@@ -38,29 +38,29 @@ In a global [Alto](https://alto.commonware.xyz) deployment with 50 validators, t
     }
   </style>
 </noscript>
-<div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="Animated 20 by 10 grid showing 200 view intervals in one second. The grid fills at a rate of one red square per 5ms interval. After a pause, the squares return to gray from left to right and the cycle repeats.">
-  <noscript>At a 5ms target, 200 view intervals fit into one second. This figure shows them as a 20 by 10 grid of red squares.</noscript>
+<div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="Animated 20 by 10 grid showing 200 blocks in one second. The grid fills at a rate of one red square per 5ms interval. After a pause, the squares return to gray from left to right and the cycle repeats.">
+  <noscript>At 5ms between blocks, 200 blocks fit into one second. This figure shows them as a 20 by 10 grid of red squares.</noscript>
 </div>
 <script type="module" src="pipelining-simplex.loops.js"></script>
 ```
 
 ::: {.image-caption}
-Figure 1: Each square represents one 5ms target interval. A 20 by 10 grid fills in one second. Alto sustained about 200 successful views per second.
+Figure 1: Each square is one block. At 5ms between blocks, the grid fills in one second.
 :::
 
-The pipeline keeps new views moving while earlier blocks finish. Once data reaches the leader, it gets another ordering opportunity after one block interval.
+The pipeline keeps new views moving while earlier blocks finalize.
 
-A *view* is one opportunity for a leader to propose a block. Validators check and vote on the proposal. Enough votes notarize the proposal. The application then certifies it before validators can finalize the block.
+## From One View to the Next
 
-These steps remain ordered for each block, but different blocks can be at different steps. Two waits otherwise limit how quickly new views notarize: a proposer handoff and waiting for the parent to be certified.
+A *view* is one opportunity for a leader to propose a block. Validators verify the proposal and vote. Once a quorum votes for the same proposal, it is *notarized*.
 
-[Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) removes the first wait. [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416) removes the second wait from the path to the next proposal and votes.
+Traditionally, two network waits separate consecutive views. The next leader must receive the previous proposal. Then votes must cross the network to form its notarization. Stable Leader and Optimistic Validation remove these waits in turn.
 
 ## Wait One: The Proposer Handoff
 
-Round-robin assigns each view to a new leader. The next leader may be in another region and receive the prior proposal or certificate later than other validators. The chain waits for that leader to catch up and propose.
+Traditionally, rotating leadership assigns each view to a new proposer. The next proposer must first receive the previous proposal. It still cannot safely build: the previous leader may have sent other validators a different block, so the next proposer must wait for a notarization showing which block won a quorum.
 
-Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. After the leader sees a block notarized, the same leader already has the block and ancestry needed for the next proposal. Election still runs at the term boundary.
+Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. Because that leader built the previous block, it already knows the block and its ancestry before a single network message arrives. There is no handoff before the next proposal. Election still runs at the term boundary.
 
 ```{=html}
 <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="Animated comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
@@ -72,15 +72,15 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 Figure 2: With a term length of four, round-robin changes the proposer every view while Stable Leader changes it once per term. The timeline shows three complete terms.
 :::
 
-Stable leadership removes the proposer handoff. Starting the next view can still wait for parent notarization and certification.
+Stable leadership removes the proposer handoff. Without Optimistic Validation, the next view still waits for the parent notarization and the application check that follows.
 
-## Wait Two: Waiting for the Parent
+## Wait Two: Forming the Parent Notarization
 
-Without Optimistic Validation, the stable leader waits for the notarization of view `v` before proposing view `v+1`. Other validators wait for `v` to be certified before checking and voting on the child. Together, those waits put notarization and certification latency between successful views.
+Without Optimistic Validation, the stable leader waits for view `v` to be notarized and pass its application check before proposing view `v+1`. Forming the notarization requires votes to cross the network. The child must then cross the network before other validators can vote. Even without a leader handoff, network latency paces each view.
 
-With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` or wait for its certification first.
+With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` or wait for its application check first.
 
-The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the certification that follows. The same rule can carry the pipeline across several views within the stable-leader term.
+The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the application check that follows. The same rule can carry the pipeline across several views within the stable-leader term. New proposals can now arrive faster than a network round trip, limited by local work and network capacity rather than latency alone.
 
 The optimization changes when the next proposal and notarize votes can begin. It does not change the finalization rule.
 
@@ -98,19 +98,21 @@ Figure 3: Optimistic Validation pipelines new views (red) over the formation of 
 
 `Optimistic` describes when a participant starts the next view. It does not weaken the evidence required for finalization.
 
-A participant works ahead only after it has voted for the parent, or when it holds usable quorum proof. The same rule applies to every optimistic ancestor. A validator only certifies a child or votes to finalize it after the parent is certified. If an ancestor fails to notarize or certify, optimistic votes above it become inert. Validators then abandon that part of the term through the normal timeout path.
+Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish checks such as confirming that enough erasure-coded data is available.
 
-The lookahead stops at the term boundary. The first view of a new term must start from ancestry that has passed the application check.
+A participant works ahead only after it has voted for the parent, or when it holds usable quorum proof. The same rule applies to every optimistic ancestor. A validator still waits for the parent to be certified before certifying a child or voting to finalize it. If an ancestor fails to notarize or certify, optimistic votes above it become inert. Validators then abandon that part of the term through the normal timeout path.
+
+The lookahead stops at the term boundary. The first view of a new term must start from certified ancestry.
 
 The lookahead is local policy. A value of zero disables Optimistic Validation. Validators can choose different values without affecting safety. A larger value uses more CPU and memory on work that may later be discarded. A smaller value can limit the pipeline when notarizations fall behind.
 
 ## What We Measured
 
-We ran Alto with 50 validators spread evenly across ten AWS regions. With Stable Leader and Optimistic Validation enabled, the network sustained about 200 successful views per second. Each successful view finalized one block, so the median view and block spacing were both 5ms.
+We ran Alto with 50 validators spread evenly across ten AWS regions. With Stable Leader and Optimistic Validation enabled, the network sustained about 200 blocks per second. The median time between blocks was 5ms.
 
 The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
 
-We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At 5ms per view, that is enough time to start about 60 new views.
+We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At that cadence, the network could start about 60 views during the median finalization time.
 
 ## Choose the Pipeline
 
@@ -119,7 +121,7 @@ Start with the stage that limits your view rate. Alto's settings are an example,
 | Limiting stage | Configuration | Main cost |
 |---|---|---|
 | Proposer handoff | Stable Leader without Optimistic Validation | Longer proposer authority |
-| Waiting for parent notarizations | Add Optimistic Validation | More speculative CPU and memory |
+| Waiting for parent notarization or application checks | Add Optimistic Validation | More speculative CPU and memory |
 | Application checks, execution, storage, proposal checks, or dissemination capacity | Improve that stage first | A deeper window will fill |
 
 Longer terms amortize more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Validators can skip a stalled term. A term-wide timeout covers a leader that keeps views moving without finalizing blocks. Neither control removes a leader that finalizes blocks while selectively censoring transactions.
@@ -132,7 +134,7 @@ Stable terms currently use round-robin election. Every validator must use the sa
 
 ## The Next Ordering Opportunity
 
-An orderbook update, batch reference, or game action that misses one proposal gets another opportunity after one block interval.
+An orderbook update, batch reference, or game action that misses one proposal can be included in the next. In Alto, the median wait between those opportunities was 5ms.
 
 For builders who have already made dissemination and execution fast, the ordering clock can become the next visible limit. Each network can tune that clock around its own latency, capacity, and proposer-rotation requirements.
 
