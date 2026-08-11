@@ -6,6 +6,7 @@ const RED = '#d9251c';
 const BLUE = '#1f1fd1';
 const GREEN = '#18864b';
 const GRAY = '#8a8a8a';
+const MUTED = '#b8b8b8';
 const LIGHT = '#e6e6e6';
 const LOOP_MS = 7600;
 const HOLD_MS = 900;
@@ -44,18 +45,28 @@ const addLine = (parent, x1, y1, x2, y2, attrs = {}) => {
   return el;
 };
 
-const addArrow = (parent, x1, y1, x2, y2, color, delay, duration = 0.1) => {
+const addArrow = (
+  parent,
+  x1,
+  y1,
+  x2,
+  y2,
+  color,
+  delay,
+  duration = 0.1,
+  { strokeWidth = 2.5, headSize = 9 } = {},
+) => {
   const group = svgEl('g');
   const line = addLine(group, x1, y1, x2, y2, {
     stroke: color,
-    'stroke-width': 2.5,
+    'stroke-width': strokeWidth,
     'stroke-linecap': 'round',
   });
   const length = Math.hypot(x2 - x1, y2 - y1);
   line.setAttribute('stroke-dasharray', length);
   line.setAttribute('stroke-dashoffset', length);
   const angle = Math.atan2(y2 - y1, x2 - x1);
-  const size = 9;
+  const size = headSize;
   const points = [
     [x2, y2],
     [x2 - size * Math.cos(angle - 0.5), y2 - size * Math.sin(angle - 0.5)],
@@ -290,6 +301,34 @@ function buildValidation(mount) {
   addText(svg, 20, 185, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
   [topY, bottomY].forEach(y => addLine(svg, 145, y, 976, y, { stroke: LIGHT, 'stroke-width': 3 }));
 
+  const addStep = (el, delay) => ({
+    set(progress) {
+      el.setAttribute('opacity', progress >= delay ? 1 : 0);
+    },
+  });
+
+  const addCadenceArrows = (count, gap, y, firstProposalAt, proposalStep) => {
+    for (let index = 0; index < count - 1; index++) {
+      const x = x0 + index * gap;
+      animated.push(addArrow(
+        svg,
+        x + 17,
+        y,
+        x + gap - 17,
+        y,
+        MUTED,
+        firstProposalAt + index * proposalStep + 0.025,
+        0.025,
+        { strokeWidth: 1.4, headSize: 5 },
+      ));
+    }
+  };
+
+  const sequentialCount = 5;
+  const optimisticCount = 13;
+  addCadenceArrows(sequentialCount, sequentialGap, topY, 0.06, 0.17);
+  addCadenceArrows(optimisticCount, optimisticGap, bottomY, 0.06, 0.045);
+
   const addBlock = (x, y, label, proposedAt, notarizedAt, finalizedAt) => {
     addText(svg, x, y - 27, label, { 'text-anchor': 'middle', fill: GRAY });
     const rectAttrs = {
@@ -302,12 +341,12 @@ function buildValidation(mount) {
     };
     const proposed = svgEl('rect', { ...rectAttrs, fill: RED });
     svg.appendChild(proposed);
-    animated.push(addReveal(proposed, proposedAt, 0.04));
+    animated.push(addStep(proposed, proposedAt));
 
     if (notarizedAt !== null) {
       const notarized = svgEl('rect', { ...rectAttrs, fill: GRAY });
       svg.appendChild(notarized);
-      animated.push(addReveal(notarized, notarizedAt, 0.04));
+      animated.push(addStep(notarized, notarizedAt));
       const check = addText(svg, x, y + 6, '\u2713', {
         'font-family': 'sans-serif',
         'font-size': 18,
@@ -316,13 +355,13 @@ function buildValidation(mount) {
         fill: 'white',
         opacity: 0,
       });
-      animated.push(addReveal(check, notarizedAt, 0.04));
+      animated.push(addStep(check, notarizedAt));
     }
 
     if (finalizedAt !== null) {
       const finalized = svgEl('rect', { ...rectAttrs, fill: GREEN });
       svg.appendChild(finalized);
-      animated.push(addReveal(finalized, finalizedAt, 0.04));
+      animated.push(addStep(finalized, finalizedAt));
       const checks = addText(svg, x, y + 5, '\u2713\u2713', {
         'font-family': 'sans-serif',
         'font-size': 12,
@@ -332,11 +371,10 @@ function buildValidation(mount) {
         fill: 'white',
         opacity: 0,
       });
-      animated.push(addReveal(checks, finalizedAt, 0.04));
+      animated.push(addStep(checks, finalizedAt));
     }
   };
 
-  const sequentialCount = 5;
   for (let index = 0; index < sequentialCount; index++) {
     const proposedAt = 0.06 + index * 0.17;
     addBlock(
@@ -349,7 +387,6 @@ function buildValidation(mount) {
     );
   }
 
-  const optimisticCount = 13;
   for (let index = 0; index < optimisticCount; index++) {
     const proposedAt = 0.06 + index * 0.045;
     addBlock(
