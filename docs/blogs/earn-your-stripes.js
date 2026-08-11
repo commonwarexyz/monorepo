@@ -469,8 +469,8 @@ function buildStripingFigure(mount) {
   const gridY = 318;
   const jobGap = 14;
   const jobWidth = gridWidth / 3;
-  const afterLabels = ['D0', 'D2', 'R0', 'D1'];
-  const afterStates = [true, true, true, false];
+  const afterLabels = ['D0', 'D1', 'D2', 'R0'];
+  const afterStates = [true, false, true, true];
 
   const jobLayer = svgEl('g', { opacity: 0 });
   layer.appendChild(jobLayer);
@@ -499,8 +499,8 @@ function buildStripingFigure(mount) {
   for (let job = 0; job < 3; job++) {
     const start = gridX + job * (jobWidth + jobGap);
     afterLabels.forEach((label, row) => {
-      const rowLayer = row === 3 ? svgEl('g') : layer;
-      if (row === 3) layer.appendChild(rowLayer);
+      const rowLayer = row === 1 ? svgEl('g') : jobLayer;
+      if (row === 1) jobLayer.appendChild(rowLayer);
       afterRows.push(makeShardRow(
         rowLayer,
         patterns,
@@ -511,7 +511,7 @@ function buildStripingFigure(mount) {
         afterStates[row],
         { segmentCount: 4, showLabel: job === 0 },
       ));
-      if (row === 3) {
+      if (row === 1) {
         const stripeLabel = addText(
           rowLayer,
           start + jobWidth / 2,
@@ -603,7 +603,7 @@ function buildStripingFigure(mount) {
     recoveredStripes.forEach(stripe => {
       stripe.group.setAttribute(
         'transform',
-        `translate(${stripe.dx * assembly} ${92 * assembly})`,
+        `translate(${stripe.dx * assembly} ${144 * assembly})`,
       );
     });
     const equal = ease(range(time, 5.75, 6.05));

@@ -10,13 +10,14 @@ author2: "Patrick O'Grady"
 author2_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/earn-your-stripes"
 image: "https://commonware.xyz/imgs/reed-solomon-stripes.png"
+katex: true
 ---
 
 When one leader pushes a full block to every validator, its egress bounds throughput while everyone else's bandwidth sits idle. [Deliver Us in Pieces](/blogs/coding) showed how erasure coding puts that idle bandwidth to work. In `marshal::coding`, the leader sends each validator one shard. Validators relay them and vote on the commitment before anyone reconstructs the whole payload.
 
 The expensive transforms still sit on the critical path. The leader must finish encoding before it can disperse the block. At `certify`, each validator must reconstruct the full block before full application verification can begin. On the original recovery path, it also re-encoded the recovered originals to verify the commitment. Reed-Solomon recovery was the most expensive step, and until recently it ran on one core.
 
-## Where `Strategy` Fell Short
+## Parallel Hashing, Serial Recovery
 
 Decode already accepted a `Strategy`, but it used the worker pool only to hash missing shards for the Merkle root. Reed-Solomon recovery remained one synchronous `decoder.decode()` call. `reed-solomon-simd` selects a SIMD backend on supported CPUs, but one encode or decode call does not spawn worker threads. Even at `conc=8`, the costly part still ran on one core.
 
@@ -54,9 +55,25 @@ From 1 to 16 workers, all-original end-to-end latency dropped from 34.96 ms to 7
 
 ## From One Decoder to Many
 
-Reed-Solomon encoding represents the block as `k + m` equal-length shards, with `k` original shards and `m` recovery shards. When original shards are missing, any `k` shards can recover the original block. Before this change, recovery handed the full shard width to one Reed-Solomon decoder.
+Reed-Solomon encoding represents the block as $k + m$ equal-length shards, with $k$ original shards and $m$ recovery shards. When original shards are missing, any $k$ shards can recover the original block. Before this change, recovery handed the full shard width to one Reed-Solomon decoder.
 
 To recover one 16-bit symbol inside a missing shard, the decoder only needs the corresponding symbol column from the available shards. We turn that into parallel work by cutting the shard width into contiguous byte ranges, or stripes. Each stripe covers the same range across all shards, runs as its own Reed-Solomon job, and is scheduled through `Strategy`.
+
+Let $a_i$ be the codeword index of supplied shard $S_i$, for $i = 1, \ldots, k$, and write $A = (a_1, \ldots, a_k)$. All supplied shards have the same even byte length. Split them into $p$ stripes at identical boundaries. Every non-final boundary is aligned to `SHARD_CHUNK_BYTES` (64 bytes), so the original partial tail, if any, remains wholly in the final stripe. For every stripe $t$, the decoder receives the indexed slices $(a_i, S_i^{(t)})$, preserving each shard's original codeword index:
+
+$$
+S_i = S_i^{(0)} \mathbin\Vert S_i^{(1)} \mathbin\Vert \cdots \mathbin\Vert S_i^{(p-1)}.
+$$
+
+Reed-Solomon recovery works independently at each symbol position. Stripe $t$ therefore recovers only stripe $t$ of the missing shard $D_1$:
+
+$$
+D_1^{(t)} = \operatorname{recover}_{D_1,A}\!\left(S_1^{(t)}, \ldots, S_k^{(t)}\right),
+\qquad
+D_1 = D_1^{(0)} \mathbin\Vert \cdots \mathbin\Vert D_1^{(p-1)}.
+$$
+
+No stripe reads or writes another stripe. `Strategy` can schedule the $p$ decoder calls in parallel, and concatenating their outputs produces the same $D_1$ as one full-width call.
 
 ```{=html}
 <style>
@@ -90,7 +107,7 @@ To recover one 16-bit symbol inside a missing shard, the decoder only needs the 
 Figure 1: Recovering missing original shard `D1` used to run as one full-width Reed-Solomon job. After striping, each aligned range becomes its own job. `Strategy` runs them in parallel, then the recovered ranges concatenate into the same full-width `D1`.
 :::
 
-Stripe cuts land on 64-byte shard-chunk boundaries (`SHARD_CHUNK_BYTES`) so the vendored codec (`reed-solomon-simd`) sees the layout it expects. The output is the same as one full-width decode, just scheduled across several disjoint ranges.
+The alignment is specific to the vendored codec rather than Reed-Solomon itself. `reed-solomon-simd` packs work into 64-byte shard chunks, and cutting through one would change how a sub-instance packs and pads its tail. Aligned cuts produce the same output as one full-width decode, just scheduled across several disjoint ranges.
 
 ## Recovery Scales
 
@@ -116,9 +133,44 @@ At `conc=1`, one stripe follows the original full-width decode, so no parallel s
 
 Striping made recovery parallel, but the verification path still ran Reed-Solomon twice. After it decoded missing originals, it re-encoded every recovery shard, compared any provided recoveries with that output, and rebuilt the Merkle root over the complete codeword. As explained in [Deliver Us in Pieces](/blogs/coding), checking a shard against the commitment does not by itself show that all committed shards form one valid Reed-Solomon codeword.
 
-After we [vendored `reed-solomon-simd`](https://github.com/commonwarexyz/monorepo/pull/4092), Patrick noticed that the second pass was unnecessary whenever an original shard was missing. The decoder had already computed the missing recovery positions but returned only missing originals. We extended it to reveal both.
+Once we [vendored `reed-solomon-simd`](https://github.com/commonwarexyz/monorepo/pull/4092), we could extend the decoder to reveal missing recovery positions and remove the second pass whenever an original shard was missing. The expensive decode transform had already evaluated those positions, but the existing API returned only missing originals.
 
-The recovery path now feeds exactly `k` shards to the decoder. If more were received, surplus recovery shards are forgotten and reconstructed too. One decode returns every missing original and recovery position. Rebuilding the Merkle root still binds the complete codeword to the commitment. We skip the encode, not the verification.
+Write the systematic generator matrix as
+
+$$
+G = \begin{bmatrix} I_k \\ P \end{bmatrix},
+\qquad
+C = GX,
+$$
+
+where $X$ contains the $k$ original shards, $P$ generates the recovery shards, and $C$ is the complete codeword. In Figure 2, take the ordered row lists $A = (D_0, D_2, R_0)$ and $M = (D_1, R_1)$. Let $G_A$ and $G_M$ select rows of $G$ in those orders. Any $k$ codeword rows determine $X$, so one decode determines both missing rows:
+
+$$
+\begin{bmatrix} D_1 \\ R_1 \end{bmatrix}
+= G_M G_A^{-1}
+\begin{bmatrix} D_0 \\ D_2 \\ R_0 \end{bmatrix}.
+$$
+
+The old API returned only $D_1$. Verification then rebuilt the original vector and ran the encoder:
+
+$$
+\begin{bmatrix} R_0 \\ R_1 \end{bmatrix}
+= P
+\begin{bmatrix} D_0 \\ D_1 \\ D_2 \end{bmatrix},
+$$
+
+That re-encode repeated the expensive codeword transform to materialize canonical $R_1$. The decode had already evaluated the $R_1$ position. Decode-reveal applies the remaining unscale and final-chunk undo, then returns canonical $R_1$ alongside $D_1$. This is much faster than re-encoding because it finishes the existing decode output instead of running another full Reed-Solomon transform.
+
+The recovery path now feeds exactly $k$ shards to the decoder. If more were received, surplus recovery shards are forgotten and reconstructed too. Let $\rho$ be the committed root. The acceptance condition is unchanged:
+
+$$
+\operatorname{BMT}\!\left(H(C_0), \ldots, H(C_{k+m-1})\right)
+\stackrel{?}{=} \rho.
+$$
+
+Checked positions reuse their verified digests, while reconstructed positions are hashed before the tree is rebuilt. We skip the encode, not the verification.
+
+When the supplied set contains all $k$ original shards, no inverse decode runs and there are no hidden recovery rows to reveal. That path still computes $R = PX$.
 
 The block itself only needs the missing originals. Missing recovery positions matter here because decode also verifies the commitment: rebuilding the BMT root requires a digest at every shard position.
 

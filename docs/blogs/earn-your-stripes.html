@@ -48,6 +48,14 @@ cores." />
         <meta property="twitter:creator" content="https://x.com/kaizero_ainta" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
 
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
@@ -116,8 +124,8 @@ O’Grady</a></div>
         originals to verify the commitment. Reed-Solomon recovery was
         the most expensive step, and until recently it ran on one
         core.</p>
-        <h2 id="where-strategy-fell-short">Where <code>Strategy</code>
-        Fell Short</h2>
+        <h2 id="parallel-hashing-serial-recovery">Parallel Hashing,
+        Serial Recovery</h2>
         <p>Decode already accepted a <code>Strategy</code>, but it used
         the worker pool only to hash missing shards for the Merkle root.
         Reed-Solomon recovery remained one synchronous
@@ -162,12 +170,14 @@ O’Grady</a></div>
         different missing shards. Even so, concurrency was not reaching
         the full-width decoder.</p>
         <h2 id="from-one-decoder-to-many">From One Decoder to Many</h2>
-        <p>Reed-Solomon encoding represents the block as
-        <code>k + m</code> equal-length shards, with <code>k</code>
-        original shards and <code>m</code> recovery shards. When
-        original shards are missing, any <code>k</code> shards can
-        recover the original block. Before this change, recovery handed
-        the full shard width to one Reed-Solomon decoder.</p>
+        <p>Reed-Solomon encoding represents the block as <span
+        class="math inline">k + m</span> equal-length shards, with <span
+        class="math inline">k</span> original shards and <span
+        class="math inline">m</span> recovery shards. When original
+        shards are missing, any <span class="math inline">k</span>
+        shards can recover the original block. Before this change,
+        recovery handed the full shard width to one Reed-Solomon
+        decoder.</p>
         <p>To recover one 16-bit symbol inside a missing shard, the
         decoder only needs the corresponding symbol column from the
         available shards. We turn that into parallel work by cutting the
@@ -175,6 +185,38 @@ O’Grady</a></div>
         covers the same range across all shards, runs as its own
         Reed-Solomon job, and is scheduled through
         <code>Strategy</code>.</p>
+        <p>Let <span class="math inline">a_i</span> be the codeword
+        index of supplied shard <span class="math inline">S_i</span>,
+        for <span class="math inline">i = 1, \ldots, k</span>, and write
+        <span class="math inline">A = (a_1, \ldots, a_k)</span>. All
+        supplied shards have the same even byte length. Split them into
+        <span class="math inline">p</span> stripes at identical
+        boundaries. Every non-final boundary is aligned to
+        <code>SHARD_CHUNK_BYTES</code> (64 bytes), so the original
+        partial tail, if any, remains wholly in the final stripe. For
+        every stripe <span class="math inline">t</span>, the decoder
+        receives the indexed slices <span class="math inline">(a_i,
+        S_i^{(t)})</span>, preserving each shard’s original codeword
+        index:</p>
+        <p><span class="math display">
+        S_i = S_i^{(0)} \mathbin\Vert S_i^{(1)} \mathbin\Vert \cdots
+        \mathbin\Vert S_i^{(p-1)}.
+        </span></p>
+        <p>Reed-Solomon recovery works independently at each symbol
+        position. Stripe <span class="math inline">t</span> therefore
+        recovers only stripe <span class="math inline">t</span> of the
+        missing shard <span class="math inline">D_1</span>:</p>
+        <p><span class="math display">
+        D_1^{(t)} = \operatorname{recover}_{D_1,A}\!\left(S_1^{(t)},
+        \ldots, S_k^{(t)}\right),
+        \qquad
+        D_1 = D_1^{(0)} \mathbin\Vert \cdots \mathbin\Vert D_1^{(p-1)}.
+        </span></p>
+        <p>No stripe reads or writes another stripe.
+        <code>Strategy</code> can schedule the <span
+        class="math inline">p</span> decoder calls in parallel, and
+        concatenating their outputs produces the same <span
+        class="math inline">D_1</span> as one full-width call.</p>
         <style>
           .cw-rs-figure {
             aspect-ratio: 800 / 570;
@@ -207,11 +249,12 @@ O’Grady</a></div>
         runs them in parallel, then the recovered ranges concatenate
         into the same full-width <code>D1</code>.</p>
         </div>
-        <p>Stripe cuts land on 64-byte shard-chunk boundaries
-        (<code>SHARD_CHUNK_BYTES</code>) so the vendored codec
-        (<code>reed-solomon-simd</code>) sees the layout it expects. The
-        output is the same as one full-width decode, just scheduled
-        across several disjoint ranges.</p>
+        <p>The alignment is specific to the vendored codec rather than
+        Reed-Solomon itself. <code>reed-solomon-simd</code> packs work
+        into 64-byte shard chunks, and cutting through one would change
+        how a sub-instance packs and pads its tail. Aligned cuts produce
+        the same output as one full-width decode, just scheduled across
+        several disjoint ranges.</p>
         <h2 id="recovery-scales">Recovery Scales</h2>
         <p>We reran the same worst-case decode before and after
         striping:</p>
@@ -243,19 +286,69 @@ O’Grady</a></div>
         href="/blogs/coding">Deliver Us in Pieces</a>, checking a shard
         against the commitment does not by itself show that all
         committed shards form one valid Reed-Solomon codeword.</p>
-        <p>After we <a
+        <p>Once we <a
         href="https://github.com/commonwarexyz/monorepo/pull/4092">vendored
-        <code>reed-solomon-simd</code></a>, Patrick noticed that the
-        second pass was unnecessary whenever an original shard was
-        missing. The decoder had already computed the missing recovery
-        positions but returned only missing originals. We extended it to
-        reveal both.</p>
-        <p>The recovery path now feeds exactly <code>k</code> shards to
-        the decoder. If more were received, surplus recovery shards are
-        forgotten and reconstructed too. One decode returns every
-        missing original and recovery position. Rebuilding the Merkle
-        root still binds the complete codeword to the commitment. We
-        skip the encode, not the verification.</p>
+        <code>reed-solomon-simd</code></a>, we could extend the decoder
+        to reveal missing recovery positions and remove the second pass
+        whenever an original shard was missing. The expensive decode
+        transform had already evaluated those positions, but the
+        existing API returned only missing originals.</p>
+        <p>Write the systematic generator matrix as</p>
+        <p><span class="math display">
+        G = \begin{bmatrix} I_k \\ P \end{bmatrix},
+        \qquad
+        C = GX,
+        </span></p>
+        <p>where <span class="math inline">X</span> contains the <span
+        class="math inline">k</span> original shards, <span
+        class="math inline">P</span> generates the recovery shards, and
+        <span class="math inline">C</span> is the complete codeword. In
+        Figure 2, take the ordered row lists <span class="math inline">A
+        = (D_0, D_2, R_0)</span> and <span class="math inline">M = (D_1,
+        R_1)</span>. Let <span class="math inline">G_A</span> and <span
+        class="math inline">G_M</span> select rows of <span
+        class="math inline">G</span> in those orders. Any <span
+        class="math inline">k</span> codeword rows determine <span
+        class="math inline">X</span>, so one decode determines both
+        missing rows:</p>
+        <p><span class="math display">
+        \begin{bmatrix} D_1 \\ R_1 \end{bmatrix}
+        = G_M G_A^{-1}
+        \begin{bmatrix} D_0 \\ D_2 \\ R_0 \end{bmatrix}.
+        </span></p>
+        <p>The old API returned only <span
+        class="math inline">D_1</span>. Verification then rebuilt the
+        original vector and ran the encoder:</p>
+        <p><span class="math display">
+        \begin{bmatrix} R_0 \\ R_1 \end{bmatrix}
+        = P
+        \begin{bmatrix} D_0 \\ D_1 \\ D_2 \end{bmatrix},
+        </span></p>
+        <p>That re-encode repeated the expensive codeword transform to
+        materialize canonical <span class="math inline">R_1</span>. The
+        decode had already evaluated the <span
+        class="math inline">R_1</span> position. Decode-reveal applies
+        the remaining unscale and final-chunk undo, then returns
+        canonical <span class="math inline">R_1</span> alongside <span
+        class="math inline">D_1</span>. This is much faster than
+        re-encoding because it finishes the existing decode output
+        instead of running another full Reed-Solomon transform.</p>
+        <p>The recovery path now feeds exactly <span
+        class="math inline">k</span> shards to the decoder. If more were
+        received, surplus recovery shards are forgotten and
+        reconstructed too. Let <span class="math inline">\rho</span> be
+        the committed root. The acceptance condition is unchanged:</p>
+        <p><span class="math display">
+        \operatorname{BMT}\!\left(H(C_0), \ldots, H(C_{k+m-1})\right)
+        \stackrel{?}{=} \rho.
+        </span></p>
+        <p>Checked positions reuse their verified digests, while
+        reconstructed positions are hashed before the tree is rebuilt.
+        We skip the encode, not the verification.</p>
+        <p>When the supplied set contains all <span
+        class="math inline">k</span> original shards, no inverse decode
+        runs and there are no hidden recovery rows to reveal. That path
+        still computes <span class="math inline">R = PX</span>.</p>
         <p>The block itself only needs the missing originals. Missing
         recovery positions matter here because decode also verifies the
         commitment: rebuilding the BMT root requires a digest at every
