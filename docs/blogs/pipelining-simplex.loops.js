@@ -152,83 +152,103 @@ function buildLeaders(mount) {
   const svg = makeSvg(mount, 430);
   const animated = [];
   addText(svg, 20, 35, 'Round-robin leaders', { 'font-size': 18, 'font-weight': 700 });
-  addText(svg, 20, 244, 'Stable leader', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 232, 'Stable leaders (4-view terms)', { 'font-size': 18, 'font-weight': 700 });
 
-  const x0 = 190;
-  const gap = 132;
-  const rotatingY = { L1: 88, L2: 139, L3: 190 };
-  const stableY = { L1: 294, L2: 365 };
+  const x0 = 160;
+  const gap = 74;
+  const viewCount = 12;
+  const termLength = 4;
+  const leaders = ['L1', 'L2', 'L3'];
+  const rotatingY = { L1: 82, L2: 132, L3: 182 };
+  const stableY = { L1: 282, L2: 332, L3: 382 };
   for (const [leader, y] of Object.entries(rotatingY)) {
     addText(svg, 105, y + 5, leader, { 'text-anchor': 'end', 'font-weight': 700 });
-    addLine(svg, 122, y, 975, y, { stroke: LIGHT });
+    addLine(svg, 122, y, 995, y, { stroke: LIGHT });
   }
   for (const [leader, y] of Object.entries(stableY)) {
     addText(svg, 105, y + 5, leader, { 'text-anchor': 'end', 'font-weight': 700 });
-    addLine(svg, 122, y, 975, y, { stroke: LIGHT });
+    addLine(svg, 122, y, 995, y, { stroke: LIGHT });
   }
 
-  const owners = ['L1', 'L2', 'L3', 'L1', 'L2', 'L3'];
-  owners.forEach((owner, index) => {
+  const rotatingOwners = Array.from({ length: viewCount }, (_, index) => leaders[index % leaders.length]);
+  rotatingOwners.forEach((owner, index) => {
     const x = x0 + index * gap;
-    addText(svg, x, 62, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
+    addText(svg, x, 57, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY, 'font-size': 14 });
     const block = svgEl('rect', {
-      x: x - 13,
-      y: rotatingY[owner] - 13,
-      width: 26,
-      height: 26,
+      x: x - 11,
+      y: rotatingY[owner] - 11,
+      width: 22,
+      height: 22,
       rx: 3,
       fill: RED,
       opacity: 0,
     });
     svg.appendChild(block);
-    animated.push(addReveal(block, 0.08 + index * 0.12));
-    if (index < owners.length - 1) {
+    animated.push(addReveal(block, 0.06 + index * 0.06));
+    if (index < rotatingOwners.length - 1) {
       animated.push(addArrow(
         svg,
-        x + 15,
+        x + 13,
         rotatingY[owner],
-        x + gap - 15,
-        rotatingY[owners[index + 1]],
+        x + gap - 13,
+        rotatingY[rotatingOwners[index + 1]],
         GRAY,
-        0.13 + index * 0.12,
-        0.09,
+        0.09 + index * 0.06,
+        0.05,
       ));
     }
   });
 
-  owners.forEach((_, index) => {
+  const stableOwners = Array.from({ length: viewCount }, (_, index) => leaders[Math.floor(index / termLength)]);
+  stableOwners.forEach((owner, index) => {
     const x = x0 + index * gap;
-    addText(svg, x, 270, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
+    addText(svg, x, 257, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY, 'font-size': 14 });
     const block = svgEl('rect', {
-      x: x - 13,
-      y: stableY.L1 - 13,
-      width: 26,
-      height: 26,
+      x: x - 11,
+      y: stableY[owner] - 11,
+      width: 22,
+      height: 22,
       rx: 3,
       fill: RED,
       opacity: 0,
     });
     svg.appendChild(block);
-    animated.push(addReveal(block, 0.08 + index * 0.12));
-    if (index < owners.length - 1) {
-      animated.push(addArrow(svg, x + 15, stableY.L1, x + gap - 15, stableY.L1, RED, 0.13 + index * 0.12, 0.09));
+    animated.push(addReveal(block, 0.06 + index * 0.06));
+    if (index < stableOwners.length - 1) {
+      const nextOwner = stableOwners[index + 1];
+      const handoff = nextOwner !== owner;
+      animated.push(addArrow(
+        svg,
+        x + 13,
+        stableY[owner],
+        x + gap - 13,
+        stableY[nextOwner],
+        handoff ? BLUE : RED,
+        0.09 + index * 0.06,
+        0.05,
+      ));
     }
   });
 
-  const boundary = addLine(svg, 935, 257, 935, 389, {
-    stroke: BLUE,
-    'stroke-dasharray': '7 7',
-    'stroke-width': 2,
-    opacity: 0,
+  for (let term = 0; term < leaders.length; term++) {
+    const center = x0 + (term * termLength + (termLength - 1) / 2) * gap;
+    addText(svg, center, 420, `term ${term + 1}`, {
+      'text-anchor': 'middle',
+      fill: GRAY,
+      'font-size': 14,
+    });
+  }
+
+  [termLength, termLength * 2].forEach((boundaryView, index) => {
+    const x = x0 + (boundaryView - 0.5) * gap;
+    const boundary = addLine(svg, x, 246, x, 402, {
+      stroke: BLUE,
+      'stroke-dasharray': '7 7',
+      'stroke-width': 2,
+      opacity: 0,
+    });
+    animated.push(addReveal(boundary, 0.27 + index * termLength * 0.06));
   });
-  animated.push(addReveal(boundary, 0.82));
-  const boundaryLabel = addText(svg, 935, 414, 'term boundary', {
-    'text-anchor': 'middle',
-    fill: BLUE,
-    opacity: 0,
-  });
-  animated.push(addReveal(boundaryLabel, 0.82));
-  animated.push(addArrow(svg, 920, stableY.L1, 950, stableY.L2, BLUE, 0.84, 0.08));
   return animated;
 }
 

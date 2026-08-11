@@ -63,13 +63,13 @@ Round-robin assigns each view to a new leader. The next leader may be in another
 Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. After the leader sees a block notarized, the same leader already has the block and ancestry needed for the next proposal. Election still runs at the term boundary.
 
 ```{=html}
-<div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="Animated comparison of round-robin and stable leaders across six views. With round-robin rotation, responsibility moves among three leaders and every view crosses a proposer handoff. With a stable leader, one leader proposes all six views in the term, then leadership changes once at the term boundary.">
-  <noscript>In this round-robin example, responsibility moves among three leaders across six views. With a stable leader, one leader proposes all six views and leadership changes once at the term boundary.</noscript>
+<div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="Animated comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
+  <noscript>Across 12 views, round-robin changes leaders every view. With a term length of four, each stable leader proposes four consecutive views. The timeline shows three complete terms and two term boundaries.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 2: Round-robin rotation changes the proposer every view. A stable leader extends its own chain and pays the handoff cost once per term.
+Figure 2: With a term length of four, round-robin changes the proposer every view while Stable Leader changes it once per term. The timeline shows three complete terms.
 :::
 
 Stable leadership removes the proposer handoff. The next proposal and votes can still wait for the parent notarization.
