@@ -1,3 +1,7 @@
+["commonware_glue::dkg::network::conformance::CodecConformance<Addresses<ed25519::PublicKey>>"]
+n_cases = 65536
+hash = "4aff4b0fed288c9009e3a533f285ca61cafdfe51e09d7e31c8edfa42f238c8b2"
+
 ["commonware_glue::dkg::probe::wire::tests::CodecConformance<Message<mocks::TestScheme,mocks::TestMarshalVariant\n>>"]
 n_cases = 65536
 hash = "25b40acccaee5721b05da99dc25b4f74a4c775a359582433b2feb4d53b9a7457"
@@ -10,9 +14,17 @@ hash = "a010d31585e96972a513d2b373c813e078cc240957060c900f605b02e0228f68"
 n_cases = 65536
 hash = "9e5d122980ec0436a7d77de1342381879d52fa796eaedfd8eba08117420ab691"
 
+["commonware_glue::dkg::state_sync::conformance::CodecConformance<StateSync<mocks::TestScheme,mocks::TestDigest,mocks\n::TestBlsVariant,Addresses<mocks::TestPublicKey>>>"]
+n_cases = 8192
+hash = "251d04ab167e3d8d125bfcd92cd03ae8f217749092db978f8fcf456c716bcea1"
+
 ["commonware_glue::dkg::state_sync::conformance::CodecConformance<StateSync<mocks::TestScheme,mocks::TestDigest,mocks\n::TestBlsVariant>>"]
 n_cases = 8192
 hash = "8e81b9a90b0dafe971299866e8447b522ca1d59091aeb2c3242f5ef11f7ac496"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<EpochInfo<MinSig,ed25519::PublicKey,Addresses<\ned25519::PublicKey>>>"]
+n_cases = 8192
+hash = "5ed2bad8df43506bb7de223ff488b5a29e5c752abfc7aa1e6bb52f064d1269da"
 
 ["commonware_glue::dkg::types::conformance::CodecConformance<EpochInfo<MinSig,ed25519::PublicKey>>"]
 n_cases = 8192
@@ -29,6 +41,10 @@ hash = "c928d571587fc43b99ebab969720228ce11becca411dc36908c979fe07ab359e"
 ["commonware_glue::dkg::types::conformance::CodecConformance<Participants<ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "240c5ef5d2a29ad2f22678bbe5f8360ae0ab628b68e792573a16dcd0d0f09c4d"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<Payload<MinSig,ed25519::PrivateKey,Addresses<\ned25519::PublicKey>>>"]
+n_cases = 8192
+hash = "bf578ec5eef98628bccee30a763d3d4da47c0d8e2a4f1f29ac13b0ec8dd75706"
 
 ["commonware_glue::dkg::types::conformance::CodecConformance<Payload<MinSig,ed25519::PrivateKey>>"]
 n_cases = 8192
