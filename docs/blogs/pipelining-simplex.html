@@ -205,16 +205,17 @@ Chou</a></div>
         finish any checks required before commit, such as confirming
         data availability or validating application-specific block and
         transaction rules.</p>
-        <p>For every ancestor in the term, a participant must have
-        either voted for it or obtained usable quorum proof. A validator
-        still waits for the parent to be certified before certifying the
-        child. Once the child is certified, the validator broadcasts its
-        finalize vote. It can certify later views without waiting for
-        the child to finalize, so certification and finalization
-        continue in parallel. If an ancestor fails to notarize or
-        certify, optimistic votes later in the term become inert.
-        Validators then abandon the rest of the term through Simplex’s
-        normal nullification path.</p>
+        <p>A participant only votes optimistically when every earlier
+        proposal in the term is consistent with the chain it has already
+        supported. A validator still waits for the parent to be
+        certified before certifying the child. Once the child is
+        certified, the validator broadcasts its finalize vote. It can
+        certify later views without waiting for the child to finalize,
+        so certification and finalization continue in parallel. If any
+        proposal fails to notarize or certify, optimistic votes later in
+        the term become inert. Validators can then vote to abandon the
+        rest of the term through Simplex’s normal nullification
+        path.</p>
         <p>The term boundary is also a leader handoff, so optimistic
         work stops there. The first view of a new term must start from
         certified ancestry.</p>
