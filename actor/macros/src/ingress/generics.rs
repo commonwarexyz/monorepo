@@ -1,4 +1,5 @@
-use super::input::{Field, Item, ItemKind};
+use super::input::{Field, Item, ItemKind, canonical_ident};
+use proc_macro2::{TokenStream, TokenTree};
 use std::collections::BTreeSet;
 use syn::{GenericParam, Generics, Result, Type, visit::Visit};
 
@@ -19,13 +20,14 @@ impl GenericSet {
         for param in &generics.params {
             match param {
                 GenericParam::Type(param) => {
-                    set.type_params.insert(param.ident.to_string());
+                    set.type_params.insert(canonical_ident(&param.ident));
                 }
                 GenericParam::Lifetime(param) => {
-                    set.lifetime_params.insert(param.lifetime.ident.to_string());
+                    set.lifetime_params
+                        .insert(canonical_ident(&param.lifetime.ident));
                 }
                 GenericParam::Const(param) => {
-                    set.const_params.insert(param.ident.to_string());
+                    set.const_params.insert(canonical_ident(&param.ident));
                 }
             }
         }
@@ -46,11 +48,13 @@ impl GenericSet {
 
     fn contains(&self, param: &GenericParam) -> bool {
         match param {
-            GenericParam::Type(param) => self.type_params.contains(&param.ident.to_string()),
+            GenericParam::Type(param) => self.type_params.contains(&canonical_ident(&param.ident)),
             GenericParam::Lifetime(param) => self
                 .lifetime_params
-                .contains(&param.lifetime.ident.to_string()),
-            GenericParam::Const(param) => self.const_params.contains(&param.ident.to_string()),
+                .contains(&canonical_ident(&param.lifetime.ident)),
+            GenericParam::Const(param) => {
+                self.const_params.contains(&canonical_ident(&param.ident))
+            }
         }
     }
 
@@ -83,9 +87,16 @@ impl<'a> TypeGenericUseCollector<'a> {
 }
 
 impl Visit<'_> for TypeGenericUseCollector<'_> {
+    fn visit_type_macro(&mut self, node: &syn::TypeMacro) {
+        self.found.merge(collect_usage_from_tokens(
+            node.mac.tokens.clone(),
+            self.declared,
+        ));
+    }
+
     fn visit_type_path(&mut self, node: &syn::TypePath) {
         if node.qself.is_none() && !node.path.segments.is_empty() {
-            let ident = node.path.segments[0].ident.to_string();
+            let ident = canonical_ident(&node.path.segments[0].ident);
             if self.declared.type_params.contains(&ident) {
                 self.found.type_params.insert(ident);
             } else if node.path.segments.len() == 1 && self.declared.const_params.contains(&ident) {
@@ -97,7 +108,7 @@ impl Visit<'_> for TypeGenericUseCollector<'_> {
     }
 
     fn visit_lifetime(&mut self, node: &syn::Lifetime) {
-        let ident = node.ident.to_string();
+        let ident = canonical_ident(&node.ident);
         if self.declared.lifetime_params.contains(&ident) {
             self.found.lifetime_params.insert(ident);
         }
@@ -107,7 +118,7 @@ impl Visit<'_> for TypeGenericUseCollector<'_> {
 
     fn visit_expr_path(&mut self, node: &syn::ExprPath) {
         if node.qself.is_none() && node.path.segments.len() == 1 {
-            let ident = node.path.segments[0].ident.to_string();
+            let ident = canonical_ident(&node.path.segments[0].ident);
             if self.declared.const_params.contains(&ident) {
                 self.found.const_params.insert(ident);
             }
@@ -115,6 +126,53 @@ impl Visit<'_> for TypeGenericUseCollector<'_> {
 
         syn::visit::visit_expr_path(self, node);
     }
+}
+
+fn collect_usage_from_tokens(tokens: TokenStream, declared: &GenericSet) -> GenericSet {
+    let mut found = GenericSet::default();
+    let mut lifetime = false;
+    let mut colons = 0u8;
+
+    for token in tokens {
+        match token {
+            TokenTree::Group(group) => {
+                found.merge(collect_usage_from_tokens(group.stream(), declared));
+                lifetime = false;
+                colons = 0;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '\'' => {
+                lifetime = true;
+                colons = 0;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == ':' => {
+                colons = colons.saturating_add(1);
+                lifetime = false;
+            }
+            TokenTree::Ident(ident) => {
+                let name = canonical_ident(&ident);
+                if lifetime {
+                    if declared.lifetime_params.contains(&name) {
+                        found.lifetime_params.insert(name);
+                    }
+                } else if colons < 2 {
+                    if declared.type_params.contains(&name) {
+                        found.type_params.insert(name.clone());
+                    }
+                    if declared.const_params.contains(&name) {
+                        found.const_params.insert(name);
+                    }
+                }
+                lifetime = false;
+                colons = 0;
+            }
+            _ => {
+                lifetime = false;
+                colons = 0;
+            }
+        }
+    }
+
+    found
 }
 
 fn collect_usage_from_type(ty: &Type, declared: &GenericSet) -> GenericSet {

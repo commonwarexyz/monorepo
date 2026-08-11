@@ -7,10 +7,7 @@ use crate::{
     ingress::{Envelope, IntoEnvelope},
 };
 use commonware_macros::select;
-use commonware_runtime::{
-    ContextCell, Error as RuntimeError, Handle, Metrics as RuntimeMetrics, Spawner,
-    signal::{Signal, Signaler},
-};
+use commonware_runtime::{ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, signal::Signal};
 use commonware_utils::channel::mpsc;
 use crossbeam_queue::ArrayQueue;
 use futures_util::{StreamExt, future::FutureExt, stream::FuturesUnordered, task::AtomicWaker};
@@ -20,7 +17,7 @@ use std::{
     pin::pin,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::TryRecvError,
     },
     task::Poll,
@@ -36,14 +33,12 @@ enum Stop {
     Shutdown,
     #[error("actor requested stop")]
     Actor,
-    #[error(transparent)]
-    Read(ReadStop),
-    #[error(transparent)]
-    Write(WriteStop),
-    #[error(transparent)]
-    Worker(WorkerStop),
-    #[error(transparent)]
-    Dispatch(DispatchStop),
+    #[error("fatal read detected")]
+    Read,
+    #[error("fatal write detected")]
+    Write,
+    #[error("read worker stopped")]
+    Worker,
 }
 
 impl Stop {
@@ -51,42 +46,16 @@ impl Stop {
         match self {
             Self::Shutdown => metrics::StopReason::Shutdown,
             Self::Actor => metrics::StopReason::Actor,
-            Self::Read(_) => metrics::StopReason::Read,
-            Self::Write(_) => metrics::StopReason::Write,
-            Self::Worker(_) => metrics::StopReason::Worker,
-            Self::Dispatch(_) => metrics::StopReason::Dispatch,
+            Self::Read => metrics::StopReason::Read,
+            Self::Write => metrics::StopReason::Write,
+            Self::Worker => metrics::StopReason::Worker,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ThisError)]
-enum ReadStop {
-    #[error("fatal read detected")]
+enum WorkerExit {
     Fatal,
-    #[error("read failure channel closed")]
-    FailureChannelClosed,
-    #[error("read workers exhausted")]
-    WorkersExhausted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ThisError)]
-enum WriteStop {
-    #[error("fatal write detected")]
-    Fatal,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ThisError)]
-enum WorkerStop {
-    #[error("read worker stopped")]
     Stopped,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ThisError)]
-enum DispatchStop {
-    #[error("read dispatched without available worker")]
-    ReadWithoutWorker,
-    #[error("read worker unavailable")]
-    ReadWorkerUnavailable,
 }
 
 struct ReadJob<E, A>
@@ -109,6 +78,8 @@ struct ReadShared {
     idle: ArrayQueue<usize>,
     /// Reads dispatched but not yet completed.
     inflight: AtomicUsize,
+    /// Set before a read worker publishes a fatal exit.
+    fatal: AtomicBool,
     /// Woken when `inflight` reaches zero (write fence).
     drained: AtomicWaker,
     /// Woken when a worker becomes idle (capacity wait).
@@ -123,9 +94,7 @@ where
 {
     workers: Vec<mpsc::Sender<ReadJob<E, A>>>,
     shared: Arc<ReadShared>,
-    failures: mpsc::Receiver<A::Error>,
-    handles: FuturesUnordered<Handle<()>>,
-    shutdown: Option<Signaler>,
+    handles: FuturesUnordered<Handle<WorkerExit>>,
     metrics: metrics::Metrics,
 }
 
@@ -136,11 +105,10 @@ where
 {
     fn new(context: &E, max_inflight: NonZeroUsize, metrics: metrics::Metrics) -> Self {
         let max_inflight = max_inflight.get();
-        let (failure_sender, failures) = mpsc::channel(max_inflight);
-        let (signaler, signal) = Signaler::new();
         let shared = Arc::new(ReadShared {
             idle: ArrayQueue::new(max_inflight),
             inflight: AtomicUsize::new(0),
+            fatal: AtomicBool::new(false),
             drained: AtomicWaker::new(),
             capacity: AtomicWaker::new(),
         });
@@ -151,35 +119,26 @@ where
 
         for worker in 0..max_inflight {
             let (sender, receiver) = mpsc::channel(1);
-            let failures = failure_sender.clone();
-            let signal = signal.clone();
             let worker_shared = shared.clone();
             let metrics = metrics.clone();
             let handle = context
                 .child("read_worker")
                 .with_attribute("worker", worker)
                 .spawn(move |context| {
-                    Self::run_worker(
-                        worker,
-                        context,
-                        receiver,
-                        worker_shared,
-                        failures,
-                        metrics,
-                        signal,
-                    )
+                    Self::run_worker(worker, context, receiver, worker_shared, metrics)
                 });
             workers.push(sender);
-            let _ = shared.idle.push(worker);
+            shared
+                .idle
+                .push(worker)
+                .expect("read pool has one idle slot per worker");
             handles.push(handle);
         }
 
         Self {
             workers,
             shared,
-            failures,
             handles,
-            shutdown: Some(signaler),
             metrics,
         }
     }
@@ -192,23 +151,25 @@ where
         self.shared.idle.is_empty()
     }
 
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+    fn fatal(&self) -> bool {
+        self.shared.fatal.load(Ordering::Acquire)
     }
 
-    fn dispatch(&mut self, job: ReadJob<E, A>) -> Result<(), DispatchStop> {
-        let Some(worker) = self.shared.idle.pop() else {
-            return Err(DispatchStop::ReadWithoutWorker);
-        };
+    fn dispatch(&mut self, job: ReadJob<E, A>) {
+        let worker = self
+            .shared
+            .idle
+            .pop()
+            .expect("read dispatch requires an idle worker");
 
         // Count the read before handing it off so a completing worker can
         // never observe an in-flight read that was not yet counted.
-        let inflight = self.shared.inflight.fetch_add(1, Ordering::AcqRel) + 1;
-        self.metrics.set_inflight_reads(inflight);
-        if self.workers[worker].try_send(job).is_err() {
-            return Err(DispatchStop::ReadWorkerUnavailable);
-        }
-        Ok(())
+        self.shared.inflight.fetch_add(1, Ordering::AcqRel);
+        self.metrics.inflight_reads.inc();
+        assert!(
+            self.workers[worker].try_send(job).is_ok(),
+            "idle read worker must accept one job"
+        );
     }
 
     /// Await a fatal read failure or an unexpected worker stop.
@@ -216,21 +177,26 @@ where
     /// Successful completions retire on the worker and never resolve this
     /// future.
     async fn failed(&mut self) -> Stop {
-        select! {
-            err = self.failures.recv() => {
-                let Some(err) = err else {
-                    return Stop::Read(ReadStop::FailureChannelClosed);
-                };
-                error!(%err, "actor failed");
-                Stop::Read(ReadStop::Fatal)
-            },
-            result = self.handles.next() => {
-                let Some(result) = result else {
-                    return Stop::Read(ReadStop::WorkersExhausted);
-                };
+        if self.fatal() {
+            return Stop::Read;
+        }
+        let result = self
+            .handles
+            .next()
+            .await
+            .expect("non-empty read pool retains worker handles");
+        match result {
+            Ok(WorkerExit::Fatal) => Stop::Read,
+            Ok(WorkerExit::Stopped) => {
                 self.metrics.read_worker_stops.inc();
-                Self::worker_stopped(result)
-            },
+                error!("read worker exited");
+                Stop::Worker
+            }
+            Err(err) => {
+                self.metrics.read_worker_stops.inc();
+                error!(?err, "read worker failed");
+                Stop::Worker
+            }
         }
     }
 
@@ -282,12 +248,11 @@ where
 
     async fn shutdown(&mut self) {
         self.workers.clear();
-        let shutdown = self.shutdown.take().map(|signaler| signaler.signal(0));
+        for handle in self.handles.iter() {
+            handle.abort();
+        }
         while let Some(result) = self.handles.next().await {
             let _ = result;
-        }
-        if let Some(shutdown) = shutdown {
-            let _ = shutdown.await;
         }
         self.shared.inflight.store(0, Ordering::Release);
         self.metrics.set_inflight_reads(0);
@@ -298,56 +263,37 @@ where
         context: E,
         mut receiver: mpsc::Receiver<ReadJob<E, A>>,
         shared: Arc<ReadShared>,
-        failures: mpsc::Sender<A::Error>,
         metrics: metrics::Metrics,
-        mut shutdown: Signal,
-    ) {
+    ) -> WorkerExit {
         loop {
-            let job = select! {
-                _ = &mut shutdown => return,
-                job = receiver.recv() => {
-                    let Some(job) = job else {
-                        return;
-                    };
-                    job
-                },
+            let Some(job) = receiver.recv().await else {
+                return WorkerExit::Stopped;
             };
 
-            let read = A::on_read_only(context.child("read"), job.snapshot, job.message)
+            let result = A::on_read_only(context.child("read"), job.snapshot, job.message)
                 .instrument(job.process);
-            let read = pin!(read);
-            let result = select! {
-                _ = &mut shutdown => return,
-                result = read => result,
-            };
+            let result = result.await;
 
-            // Publish any failure before retiring so a fence that observes
-            // zero in-flight reads also observes the failure.
+            metrics.reads.inc();
             if let Err(err) = result {
                 metrics.read_failures.inc();
-                if failures.try_send(err).is_err() {
-                    return;
-                }
+                shared.fatal.store(true, Ordering::Release);
+                error!(%err, "actor failed");
+                return WorkerExit::Fatal;
             }
-            metrics.reads.inc();
-            if shared.idle.push(worker).is_err() {
-                return;
-            }
-            let remaining = shared.inflight.fetch_sub(1, Ordering::AcqRel) - 1;
-            metrics.set_inflight_reads(remaining);
+            shared
+                .idle
+                .push(worker)
+                .expect("read worker owns exactly one idle token");
+            let previous = shared.inflight.fetch_sub(1, Ordering::AcqRel);
+            assert!(previous > 0, "read retirement requires an in-flight job");
+            let remaining = previous - 1;
+            metrics.inflight_reads.dec();
             if remaining == 0 {
                 shared.drained.wake();
             }
             shared.capacity.wake();
         }
-    }
-
-    fn worker_stopped(result: Result<(), RuntimeError>) -> Stop {
-        match result {
-            Ok(()) => error!("read worker exited"),
-            Err(err) => error!(?err, "read worker failed"),
-        }
-        Stop::Worker(WorkerStop::Stopped)
     }
 }
 
@@ -369,8 +315,8 @@ struct Batch {
 /// to completion before a read-write handler runs; under
 /// [`FenceMode::Snapshot`], read-write handlers run immediately.
 ///
-/// Shutdown is prompt: in-flight read-only handlers are aborted before
-/// [`Actor::on_shutdown`] runs.
+/// After a stop condition is observed, in-flight read-only handlers are
+/// aborted and joined before [`Actor::on_shutdown`] runs.
 pub struct Service<E, A, R>
 where
     E: Spawner,
@@ -383,7 +329,6 @@ where
     pub(super) shutdown: Signal,
     pub(super) max_inflight_reads: NonZeroUsize,
     pub(super) fence_mode: FenceMode,
-    pub(super) cached_snapshot: Option<A::Snapshot>,
     pub(super) metrics: metrics::Metrics,
 }
 
@@ -409,7 +354,6 @@ where
             shutdown,
             max_inflight_reads,
             fence_mode,
-            cached_snapshot: None,
             metrics,
         }
     }
@@ -423,11 +367,7 @@ where
 {
     /// Spawn the control loop, passing `args` data to [`Actor::on_startup`].
     pub fn start_with(mut self, args: A::Args) -> Handle<()> {
-        let context = self.context.take();
-        context.spawn(move |context| async move {
-            self.context.restore(context);
-            self.enter(args).await
-        })
+        commonware_runtime::spawn_cell!(self.context, self.enter(args))
     }
 
     /// Run the actor loop until shutdown, fatal handler failure, or [`Event::Stop`].
@@ -444,6 +384,12 @@ where
         );
 
         loop {
+            if let Some(reason) = self.ready_stop(&mut reads) {
+                self.shutdown_gracefully(&mut args, &mut reads, reason)
+                    .await;
+                return;
+            }
+
             self.actor
                 .preprocess(self.context.as_present_mut(), &mut args)
                 .await;
@@ -471,39 +417,56 @@ where
                     event = next => NextEvent::Actor(event),
                 }
             };
-            // Every `&mut` actor hook since the last dispatch (preprocess,
-            // postprocess, next_event) has run by this point, and no read
-            // dispatches before it in an iteration.
-            self.cached_snapshot = None;
-            match event {
+            let event = match event {
                 NextEvent::Stop(reason) => {
                     self.shutdown_gracefully(&mut args, &mut reads, reason)
                         .await;
                     return;
                 }
-                NextEvent::Actor(Event::Continue) => continue,
-                NextEvent::Actor(Event::Stop) => {
+                NextEvent::Actor(event) => event,
+            };
+            if let Some(reason) = self.ready_stop(&mut reads) {
+                drop(event);
+                self.shutdown_gracefully(&mut args, &mut reads, reason)
+                    .await;
+                return;
+            }
+
+            match event {
+                Event::Continue => continue,
+                Event::Stop => {
                     self.shutdown_gracefully(&mut args, &mut reads, Stop::Actor)
                         .await;
                     return;
                 }
-                NextEvent::Actor(Event::Ingress { lane, message }) => {
+                Event::Ingress { lane, message } => {
+                    let mut cached_snapshot = None;
                     self.metrics.record_lane_message(lane.index());
-                    if self.dispatch_ingress(&mut args, &mut reads, message).await {
+                    if self
+                        .dispatch_ingress(&mut args, &mut reads, &mut cached_snapshot, message)
+                        .await
+                    {
                         self.metrics.observe_lane_batch(1);
                         return;
                     }
-                    let batch = self.drain_lane_batch(&mut args, &mut reads, lane).await;
+                    let batch = self
+                        .drain_lane_batch(&mut args, &mut reads, &mut cached_snapshot, lane)
+                        .await;
                     self.metrics.observe_lane_batch(batch.messages);
                     if batch.stopped {
                         return;
                     }
                 }
-                NextEvent::Actor(Event::External(message)) => {
+                Event::External(message) => {
                     if self
                         .handle_read_write(&mut args, &mut reads, None, message)
                         .await
                     {
+                        return;
+                    }
+                    if let Some(reason) = self.ready_stop(&mut reads) {
+                        self.shutdown_gracefully(&mut args, &mut reads, reason)
+                            .await;
                         return;
                     }
                 }
@@ -515,12 +478,11 @@ where
         }
     }
 
-    /// Close mailboxes, abort in-flight read-only handlers, run
-    /// [`Actor::on_shutdown`], and exit promptly.
+    /// Close mailboxes, abort and join in-flight read-only handlers, then run
+    /// [`Actor::on_shutdown`].
     ///
-    /// Reads abort before the hook runs so no handler can respond with
-    /// pre-shutdown state after the hook mutates the actor. Pending askers
-    /// observe a cancelled response.
+    /// Read worker tasks stop before the hook runs. Their supervised
+    /// descendants are signaled to abort but are not joined here.
     async fn shutdown_gracefully(
         &mut self,
         args: &mut A::Args,
@@ -544,7 +506,7 @@ where
         args: &mut A::Args,
         reads: &mut ReadPool<E, A>,
     ) -> bool {
-        debug_assert!(!reads.is_empty(), "wait requires in-flight reads");
+        assert!(reads.len() > 0, "capacity wait requires an in-flight read");
         self.metrics.read_capacity_waits.inc();
 
         if let Some(reason) = reads.capacity_or_stop(&mut self.shutdown).await {
@@ -561,9 +523,6 @@ where
         args: &mut A::Args,
         reads: &mut ReadPool<E, A>,
     ) -> bool {
-        if reads.is_empty() {
-            return false;
-        }
         if let Some(reason) = reads.drained_or_stop(&mut self.shutdown).await {
             self.shutdown_gracefully(args, reads, reason).await;
             return true;
@@ -576,21 +535,18 @@ where
         &mut self,
         args: &mut A::Args,
         reads: &mut ReadPool<E, A>,
+        cached_snapshot: &mut Option<A::Snapshot>,
         message: A::Ingress,
     ) -> bool {
         let (span, envelope) = message.into_envelope();
         match envelope {
             Envelope::ReadOnly(message) => {
                 let process = debug_span!(parent: &span, "actor.process");
-                if let Err(reason) = self.handle_read_only(args, reads, process, message) {
-                    error!(%reason, "read dispatch failed");
-                    self.shutdown_gracefully(args, reads, Stop::Dispatch(reason))
-                        .await;
-                    return true;
-                }
+                self.handle_read_only(args, reads, cached_snapshot, process, message);
                 false
             }
             Envelope::ReadWrite(message) => {
+                *cached_snapshot = None;
                 self.handle_read_write(args, reads, Some(span), message)
                     .await
             }
@@ -606,19 +562,18 @@ where
         &mut self,
         args: &mut A::Args,
         reads: &mut ReadPool<E, A>,
+        cached_snapshot: &mut Option<A::Snapshot>,
         lane: Lane,
     ) -> Batch {
         let mut remaining = self.actor.max_lane_batch(args).get().saturating_sub(1);
         let mut messages = 1;
+        if self.stop_batch_if_ready(args, reads, cached_snapshot).await {
+            return Batch {
+                messages,
+                stopped: true,
+            };
+        }
         while remaining > 0 {
-            if (&mut self.shutdown).now_or_never().is_some() {
-                self.shutdown_gracefully(args, reads, Stop::Shutdown).await;
-                return Batch {
-                    messages,
-                    stopped: true,
-                };
-            }
-
             if reads.is_full() {
                 return Batch {
                     messages,
@@ -633,9 +588,27 @@ where
                 .map(|receiver| receiver.try_recv());
             match next {
                 Some(Ok(message)) => {
+                    if let Some(reason) = self.ready_stop(reads) {
+                        drop(message);
+                        *cached_snapshot = None;
+                        self.shutdown_gracefully(args, reads, reason).await;
+                        return Batch {
+                            messages,
+                            stopped: true,
+                        };
+                    }
                     self.metrics.record_lane_message(lane.index());
                     messages += 1;
-                    if self.dispatch_ingress(args, reads, message).await {
+                    if self
+                        .dispatch_ingress(args, reads, cached_snapshot, message)
+                        .await
+                    {
+                        return Batch {
+                            messages,
+                            stopped: true,
+                        };
+                    }
+                    if self.stop_batch_if_ready(args, reads, cached_snapshot).await {
                         return Batch {
                             messages,
                             stopped: true,
@@ -657,6 +630,29 @@ where
         }
     }
 
+    /// Stop a lane batch when a terminal source is ready at an admission boundary.
+    async fn stop_batch_if_ready(
+        &mut self,
+        args: &mut A::Args,
+        reads: &mut ReadPool<E, A>,
+        cached_snapshot: &mut Option<A::Snapshot>,
+    ) -> bool {
+        let Some(reason) = self.ready_stop(reads) else {
+            return false;
+        };
+        *cached_snapshot = None;
+        self.shutdown_gracefully(args, reads, reason).await;
+        true
+    }
+
+    fn ready_stop(&mut self, reads: &mut ReadPool<E, A>) -> Option<Stop> {
+        if reads.fatal() {
+            Some(Stop::Read)
+        } else {
+            reads.stop_or_shutdown(&mut self.shutdown).now_or_never()
+        }
+    }
+
     /// Dispatch a read-only handler to an idle worker using the current actor snapshot.
     ///
     /// Consecutive read-only dispatches clone one cached snapshot instead of
@@ -665,19 +661,19 @@ where
         &mut self,
         args: &A::Args,
         reads: &mut ReadPool<E, A>,
+        cached_snapshot: &mut Option<A::Snapshot>,
         process: Span,
         message: <A::Ingress as IntoEnvelope>::ReadOnlyMessage,
-    ) -> Result<(), DispatchStop> {
+    ) {
         let actor = &self.actor;
-        let snapshot = self
-            .cached_snapshot
+        let snapshot = cached_snapshot
             .get_or_insert_with(|| actor.snapshot(args))
             .clone();
         reads.dispatch(ReadJob {
             snapshot,
             message,
             process,
-        })
+        });
     }
 
     /// Fence behind in-flight reads per [`FenceMode`], then run one
@@ -709,13 +705,11 @@ where
             .on_read_write(self.context.as_present_mut(), args, message)
             .instrument(process)
             .await;
-        self.cached_snapshot = None;
         self.metrics.writes.inc();
         if let Err(err) = result {
             self.metrics.write_failures.inc();
             error!(%err, "actor failed");
-            self.shutdown_gracefully(args, reads, Stop::Write(WriteStop::Fatal))
-                .await;
+            self.shutdown_gracefully(args, reads, Stop::Write).await;
             return true;
         }
 
@@ -732,18 +726,5 @@ where
     /// Spawn the control loop for actors whose [`Actor::Args`] is `()`.
     pub fn start(self) -> Handle<()> {
         self.start_with(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_failure_channel_closed_records_read_stop() {
-        assert_eq!(
-            Stop::Read(ReadStop::FailureChannelClosed).reason(),
-            metrics::StopReason::Read
-        );
     }
 }

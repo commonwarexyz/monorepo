@@ -4,8 +4,22 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
 use proc_macro::TokenStream;
 
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
 mod ingress;
 
 /// Defines ingress enums, a queue policy, and a typed mailbox API for one actor.
@@ -41,6 +55,11 @@ mod ingress;
 /// formatting bounds. Field doc comments are emitted on the generated message
 /// enum fields.
 ///
+/// Conditional attributes (`#[cfg]` and `#[cfg_attr]`) are not supported on
+/// individual ingress items, fields, or generic parameters because they can
+/// change the generated enum and method shapes independently. Apply the
+/// condition to the entire `ingress!` invocation instead.
+///
 /// # Item semantics
 ///
 /// - `tell`: fire-and-forget, routed to the read-write enum. The generated
@@ -70,6 +89,12 @@ mod ingress;
 /// Item visibility controls mailbox method visibility. `pub` items generate
 /// public methods; items without `pub` generate private methods that can be
 /// called from the declaring module. `internal` items do not generate methods.
+/// Item names become unsuffixed snake-case methods (`GetValue` becomes
+/// `get_value`), and request items additionally generate
+/// `enqueue_get_value`. Legal Rust keywords are emitted as raw identifiers,
+/// such as `Type` becoming `r#type`. The macro rejects names that cannot form
+/// a Rust method identifier and rejects every collision after snake-case and
+/// `enqueue_` normalization.
 ///
 /// # Generated code shape
 ///
@@ -138,6 +163,11 @@ mod ingress;
 /// no item is a compile error. Likewise, a parameter's bounds may only
 /// reference other parameters that the same branch retains.
 ///
+/// Generic parameters used inside a type macro must appear as unqualified
+/// identifier tokens in that macro invocation. Those identifiers determine
+/// which parameters the generated branch enum retains; a matching identifier
+/// after `::` is treated as part of a separate path.
+///
 /// # Queue policies
 ///
 /// By default the macro implements `mailbox::Policy` for the top-level
@@ -181,7 +211,12 @@ mod ingress;
 /// # Reserved names
 ///
 /// Field names `response`, `span`, and any name beginning with
-/// `__commonware_actor` are reserved for generated code.
+/// `__commonware_actor` are reserved for generated code. Const generic
+/// bindings beginning with `__commonware_actor` are reserved as well. Raw
+/// spellings of those names are subject to the same reservation. A field name
+/// must also differ from every const generic parameter. Item names must use
+/// UpperCamelCase and must not normalize to the fixed mailbox methods `clone`
+/// or `from`.
 ///
 /// # Examples
 ///
@@ -216,6 +251,13 @@ mod ingress;
 ///     pub tell Sample { value: u64 };
 /// }
 /// ```
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
 #[proc_macro]
 pub fn ingress(input: TokenStream) -> TokenStream {
     ingress::expand(input)

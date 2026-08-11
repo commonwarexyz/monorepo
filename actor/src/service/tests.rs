@@ -250,6 +250,7 @@ impl<E: Spawner> Actor<E> for UnreliableHookActor {
 
 struct StopBatchActor {
     processed: Arc<Mutex<Vec<u64>>>,
+    postprocess: Arc<AtomicUsize>,
 }
 
 impl<E: Spawner> Actor<E> for StopBatchActor {
@@ -263,6 +264,10 @@ impl<E: Spawner> Actor<E> for StopBatchActor {
 
     fn max_lane_batch(&self, _args: &Self::Args) -> NonZeroUsize {
         NZUsize!(8)
+    }
+
+    async fn postprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.postprocess.fetch_add(1, Ordering::SeqCst);
     }
 
     async fn on_read_write(
@@ -311,6 +316,46 @@ impl<E: Spawner> Actor<E> for StopSingleActor {
         if value == 1 {
             let _ = context.child("stop").stop(0, None).now_or_never();
         }
+        Ok(())
+    }
+}
+
+struct ExternalStopActor {
+    postprocess: Arc<AtomicUsize>,
+}
+
+impl<E: Spawner> Actor<E> for ExternalStopActor {
+    type Mailbox = HookMailbox;
+    type Ingress = HookMailboxMessage;
+    type Error = Infallible;
+    type Snapshot = ();
+    type Args = mpsc::Receiver<HookMailboxReadWriteMessage>;
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    async fn next_event<R>(
+        &mut self,
+        _context: &mut E,
+        args: &mut Self::Args,
+        _lanes: LaneSet<'_, Self::Ingress, R>,
+    ) -> Event<Self::Ingress, HookMailboxReadWriteMessage>
+    where
+        R: LaneReceiver<Self::Ingress>,
+    {
+        args.recv().await.map_or(Event::Stop, Event::External)
+    }
+
+    async fn postprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.postprocess.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn on_read_write(
+        &mut self,
+        context: &mut E,
+        _args: &mut Self::Args,
+        _message: HookMailboxReadWriteMessage,
+    ) -> Result<(), Self::Error> {
+        let _ = context.child("stop").stop(0, None).now_or_never();
         Ok(())
     }
 }
@@ -414,6 +459,10 @@ ingress! {
     FailMailbox,
 
     pub ask read_write Halt -> ();
+    pub ask read_write Gate {
+        release: commonware_utils::channel::oneshot::Receiver<()>,
+    } -> ();
+    pub ask read_write After -> ();
     pub ask Snap -> u64;
     pub ask Crash -> u64;
     pub ask Hang {
@@ -425,6 +474,9 @@ ingress! {
 struct FailingActor {
     shutdown: Arc<AtomicBool>,
     hanging: Arc<AtomicUsize>,
+    after: Arc<AtomicBool>,
+    gate_entered: Arc<AtomicBool>,
+    postprocess: Arc<AtomicUsize>,
 }
 
 impl FailingActor {
@@ -432,6 +484,9 @@ impl FailingActor {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             hanging: Arc::new(AtomicUsize::new(0)),
+            after: Arc::new(AtomicBool::new(false)),
+            gate_entered: Arc::new(AtomicBool::new(false)),
+            postprocess: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -445,6 +500,14 @@ impl<E: Spawner> Actor<E> for FailingActor {
 
     fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {
         self.hanging.clone()
+    }
+
+    fn max_lane_batch(&self, _args: &Self::Args) -> NonZeroUsize {
+        NZUsize!(3)
+    }
+
+    async fn postprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.postprocess.fetch_add(1, Ordering::SeqCst);
     }
 
     async fn on_shutdown(&mut self, _context: &mut E, _args: &mut Self::Args) {
@@ -476,7 +539,68 @@ impl<E: Spawner> Actor<E> for FailingActor {
     ) -> Result<(), Self::Error> {
         match message {
             FailMailboxReadWriteMessage::Halt { .. } => Err("write failed"),
+            FailMailboxReadWriteMessage::Gate { release, response } => {
+                self.gate_entered.store(true, Ordering::SeqCst);
+                let _ = release.await;
+                let _ = response.send(());
+                Ok(())
+            }
+            FailMailboxReadWriteMessage::After { response } => {
+                self.after.store(true, Ordering::SeqCst);
+                let _ = response.send(());
+                Ok(())
+            }
         }
+    }
+}
+
+ingress! {
+    TerminalMailbox,
+    pub ask FailAfter {
+        release: commonware_utils::channel::oneshot::Receiver<()>,
+    } -> ();
+}
+
+struct TerminalActor {
+    preprocess: Arc<AtomicUsize>,
+    postprocess_started: Arc<AtomicBool>,
+    postprocess_release: Option<oneshot::Receiver<()>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl<E: Spawner> Actor<E> for TerminalActor {
+    type Mailbox = TerminalMailbox;
+    type Ingress = TerminalMailboxMessage;
+    type Error = &'static str;
+    type Snapshot = ();
+    type Args = ();
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    async fn preprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.preprocess.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn postprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.postprocess_started.store(true, Ordering::SeqCst);
+        if let Some(release) = self.postprocess_release.take() {
+            let _ = release.await;
+        }
+    }
+
+    async fn on_shutdown(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    async fn on_read_only(
+        _context: E,
+        _snapshot: Self::Snapshot,
+        message: TerminalMailboxReadOnlyMessage,
+    ) -> Result<(), Self::Error> {
+        let TerminalMailboxReadOnlyMessage::FailAfter { release, response } = message;
+        let _ = release.await;
+        drop(response);
+        Err("read failed")
     }
 }
 
@@ -488,15 +612,9 @@ fn routes_read_write_ask_and_read_only_ask() {
             Builder::new(CounterActor { value: 0 }).build(context.child("counter"));
         let handle = service.start();
 
-        assert_eq!(mailbox.seed_internal(10), Feedback::Ok);
-        assert_eq!(
-            mailbox
-                .bump_and_get_internal(5)
-                .await
-                .expect("bump response"),
-            15
-        );
-        assert_eq!(mailbox.get_internal().await.expect("get response"), 15);
+        assert_eq!(mailbox.seed(10), Feedback::Ok);
+        assert_eq!(mailbox.bump_and_get(5).await.expect("bump response"), 15);
+        assert_eq!(mailbox.get().await.expect("get response"), 15);
 
         drop(mailbox);
         handle.await.expect("service stopped cleanly");
@@ -511,8 +629,8 @@ fn unreliable_service_routes_messages() {
             .build_unreliable(context.child("unreliable"));
         let handle = service.start();
 
-        assert_eq!(mailbox.hit_internal(), Unreliable::new(Feedback::Ok));
-        assert_eq!(mailbox.count_internal().await.expect("count response"), 1);
+        assert_eq!(mailbox.hit(), Unreliable::new(Feedback::Ok));
+        assert_eq!(mailbox.count().await.expect("count response"), 1);
 
         drop(mailbox);
         handle.await.expect("service stopped cleanly");
@@ -527,14 +645,8 @@ fn service_metrics_track_activity() {
             Builder::new(CounterActor { value: 0 }).build(context.child("metrics"));
         let handle = service.start();
 
-        assert_eq!(mailbox.get_internal().await.expect("get response"), 0);
-        assert_eq!(
-            mailbox
-                .bump_and_get_internal(1)
-                .await
-                .expect("bump response"),
-            1
-        );
+        assert_eq!(mailbox.get().await.expect("get response"), 0);
+        assert_eq!(mailbox.bump_and_get(1).await.expect("bump response"), 1);
 
         let buffer = context.encode();
         assert!(buffer.contains("metrics_reads_total 1"), "{buffer}");
@@ -558,13 +670,7 @@ fn start_with_seeds_args() {
         let (mailbox, service) = Builder::new(ArgsActor { value: 0 }).build(context.child("args"));
         let handle = service.start_with(41);
 
-        assert_eq!(
-            mailbox
-                .bump_and_get_internal(1)
-                .await
-                .expect("bump response"),
-            42
-        );
+        assert_eq!(mailbox.bump_and_get(1).await.expect("bump response"), 42);
 
         drop(mailbox);
         handle.await.expect("service stopped cleanly");
@@ -584,10 +690,10 @@ fn spans_follow_messages_across_the_mailbox() {
             let caller = tracing::info_span!("test.actor.caller");
             {
                 let _guard = caller.enter();
-                assert_eq!(mailbox.seed_internal(11), Feedback::Ok);
+                assert_eq!(mailbox.seed(11), Feedback::Ok);
             }
             let bumped = mailbox
-                .bump_and_get_internal(1)
+                .bump_and_get(1)
                 .instrument(caller.clone())
                 .await
                 .expect("bump response");
@@ -637,7 +743,7 @@ fn external_events_route_and_exhaustion_stops_actor() {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert_eq!(*processed.lock(), vec![7, 8]);
-            assert_eq!(mailbox.fence_internal().await.expect("fence response"), 2);
+            assert_eq!(mailbox.fence().await.expect("fence response"), 2);
 
             // Closing the p2p source only disables that arm. The actor stops
             // after the mailbox lane also closes.
@@ -665,7 +771,7 @@ fn actor_select_can_sandwich_lane_between_external_sources() {
 
         // Every source is ready when the actor starts. The actor's select
         // places `pre` before lanes and p2p after lanes.
-        assert_eq!(mailbox.note_internal(2), Feedback::Ok);
+        assert_eq!(mailbox.note(2), Feedback::Ok);
         external.send(3).await.expect("send external");
         let handle = service.start_with(receiver);
 
@@ -692,7 +798,7 @@ fn lane_close_can_keep_serving_external_sources() {
 
         // Drain and close the mailbox lane before the loop starts: the
         // actor disables the lane and keeps serving external events.
-        assert_eq!(mailbox.note_internal(1), Feedback::Ok);
+        assert_eq!(mailbox.note(1), Feedback::Ok);
         drop(mailbox);
         let handle = service.start_with(receiver);
 
@@ -725,7 +831,7 @@ fn p2p_close_can_be_omitted_while_timeout_and_lane_continue() {
         // Closing p2p should only remove that arm. Timeout and lanes still
         // produce events.
         drop(external);
-        assert_eq!(mailbox.note_internal(2), Feedback::Ok);
+        assert_eq!(mailbox.note(2), Feedback::Ok);
         let handle = service.start_with(receiver);
 
         while processed.lock().len() < 2 {
@@ -746,12 +852,120 @@ fn fatal_write_stops_actor() {
     runner.start(|context| async move {
         let actor = FailingActor::new();
         let shutdown = actor.shutdown.clone();
+        let postprocess = actor.postprocess.clone();
         let (mailbox, service) = Builder::new(actor).build(context.child("fatal_write"));
         let handle = service.start();
 
-        assert_eq!(mailbox.halt_internal().await.unwrap_err(), Cancelled);
+        assert_eq!(mailbox.halt().await.unwrap_err(), Cancelled);
         handle.await.expect("service stopped cleanly");
         assert!(shutdown.load(Ordering::SeqCst));
+        assert_eq!(postprocess.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn fatal_read_interrupts_later_batch_ingress() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(10));
+    runner.start(|context| async move {
+        let actor = FailingActor::new();
+        let shutdown = actor.shutdown.clone();
+        let after_processed = actor.after.clone();
+        let postprocess = actor.postprocess.clone();
+        let (mailbox, service) = Builder::new(actor)
+            .with_fence_mode(FenceMode::Snapshot)
+            .build(context.child("fatal_batch"));
+
+        let (fail_feedback, failed) = mailbox.enqueue_snap();
+        let (release, wait) = oneshot::channel();
+        let (gate_feedback, gate) = mailbox.enqueue_gate(wait);
+        let (after_feedback, after) = mailbox.enqueue_after();
+        assert!(fail_feedback.accepted());
+        assert!(gate_feedback.accepted());
+        assert!(after_feedback.accepted());
+
+        let handle = service.start();
+        assert!(failed.await.is_err());
+        release.send(()).expect("release gate");
+        gate.await.expect("gate response");
+
+        handle.await.expect("service stopped cleanly");
+        assert!(after.await.is_err());
+        assert!(!after_processed.load(Ordering::SeqCst));
+        assert_eq!(postprocess.load(Ordering::SeqCst), 0);
+        assert!(shutdown.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn mutable_handler_runs_to_completion_after_runtime_stop() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(10));
+    runner.start(|context| async move {
+        let actor = FailingActor::new();
+        let gate_entered = actor.gate_entered.clone();
+        let shutdown = actor.shutdown.clone();
+        let (mailbox, service) = Builder::new(actor).build(context.child("cooperative_write"));
+        let handle = service.start();
+
+        let (release, wait) = oneshot::channel();
+        let gate_mailbox = mailbox.clone();
+        let gate = context
+            .child("gate")
+            .spawn(move |_context| async move { gate_mailbox.gate(wait).await });
+        while !gate_entered.load(Ordering::SeqCst) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        assert!(
+            context
+                .child("stop")
+                .stop(0, Some(Duration::from_millis(1)))
+                .await
+                .is_err()
+        );
+        assert!(!shutdown.load(Ordering::SeqCst));
+
+        release.send(()).expect("release gate");
+        assert_eq!(gate.await.expect("gate task joined"), Ok(()));
+        handle.await.expect("service stopped cleanly");
+        assert!(shutdown.load(Ordering::SeqCst));
+        drop(mailbox);
+    });
+}
+
+#[test]
+fn pending_fatal_read_stops_before_next_preprocess() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(10));
+    runner.start(|context| async move {
+        let preprocess = Arc::new(AtomicUsize::new(0));
+        let postprocess_started = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (postprocess_release, postprocess_wait) = oneshot::channel();
+        let actor = TerminalActor {
+            preprocess: preprocess.clone(),
+            postprocess_started: postprocess_started.clone(),
+            postprocess_release: Some(postprocess_wait),
+            shutdown: shutdown.clone(),
+        };
+        let (mailbox, service) = Builder::new(actor).build(context.child("terminal_preprocess"));
+        let handle = service.start();
+
+        let (read_release, read_wait) = oneshot::channel();
+        let (feedback, failed) = mailbox.enqueue_fail_after(read_wait);
+        assert!(feedback.accepted());
+        while !postprocess_started.load(Ordering::SeqCst) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(preprocess.load(Ordering::SeqCst), 1);
+
+        read_release.send(()).expect("release failing read");
+        assert!(failed.await.is_err());
+        context.sleep(Duration::from_millis(1)).await;
+        postprocess_release.send(()).expect("release postprocess");
+
+        handle.await.expect("service stopped cleanly");
+        assert_eq!(preprocess.load(Ordering::SeqCst), 1);
+        assert!(shutdown.load(Ordering::SeqCst));
+        drop(mailbox);
     });
 }
 
@@ -764,7 +978,7 @@ fn fatal_read_stops_actor() {
         let (mailbox, service) = Builder::new(actor).build(context.child("fatal_read"));
         let handle = service.start();
 
-        assert_eq!(mailbox.snap_internal().await.unwrap_err(), Cancelled);
+        assert_eq!(mailbox.snap().await.unwrap_err(), Cancelled);
         handle.await.expect("service stopped cleanly");
         assert!(shutdown.load(Ordering::SeqCst));
     });
@@ -780,7 +994,7 @@ fn panic_read_stops_actor() {
         let (mailbox, service) = Builder::new(actor).build(context.child("panic_read"));
         let handle = service.start();
 
-        assert_eq!(mailbox.crash_internal().await.unwrap_err(), Cancelled);
+        assert_eq!(mailbox.crash().await.unwrap_err(), Cancelled);
         handle.await.expect("service stopped cleanly");
         assert!(shutdown.load(Ordering::SeqCst));
     });
@@ -801,13 +1015,13 @@ fn fatal_read_aborts_blocked_reads() {
         let hang_mailbox = mailbox.clone();
         let hang = context
             .child("hang")
-            .spawn(move |_context| async move { hang_mailbox.hang_internal(wait).await });
+            .spawn(move |_context| async move { hang_mailbox.hang(wait).await });
         while hanging.load(Ordering::SeqCst) < 1 {
             context.sleep(Duration::from_millis(1)).await;
         }
 
         // A fatal read must stop the actor without draining the parked read.
-        assert_eq!(mailbox.snap_internal().await.unwrap_err(), Cancelled);
+        assert_eq!(mailbox.snap().await.unwrap_err(), Cancelled);
         handle.await.expect("service stopped cleanly");
         assert!(shutdown.load(Ordering::SeqCst));
         assert_eq!(hang.await.expect("hang task joined"), Err(Cancelled));
@@ -828,11 +1042,11 @@ fn lane_batch_processes_up_to_cap_with_single_postprocess() {
         // Buffer a full batch before the loop starts: one iteration should
         // drain all four messages and run postprocess once.
         for value in 1..=4 {
-            assert_eq!(mailbox.note_internal(value), Feedback::Ok);
+            assert_eq!(mailbox.note(value), Feedback::Ok);
         }
         let handle = service.start();
 
-        assert_eq!(mailbox.fence_internal().await.expect("fence response"), 4);
+        assert_eq!(mailbox.fence().await.expect("fence response"), 4);
         assert_eq!(*processed.lock(), vec![1, 2, 3, 4]);
         // One postprocess for the batched notes, one for the fence. The
         // fence's postprocess runs after its response is delivered, so wait
@@ -858,13 +1072,13 @@ fn overflow_messages_are_processed_in_order() {
 
         // Only the first message fits the ready queue; the rest ride the
         // generated FIFO overflow policy and must still arrive in order.
-        assert_eq!(mailbox.note_internal(1), Feedback::Ok);
+        assert_eq!(mailbox.note(1), Feedback::Ok);
         for value in 2..=10 {
-            assert_eq!(mailbox.note_internal(value), Feedback::Backoff);
+            assert_eq!(mailbox.note(value), Feedback::Backoff);
         }
         let handle = service.start();
 
-        assert_eq!(mailbox.fence_internal().await.expect("fence response"), 10);
+        assert_eq!(mailbox.fence().await.expect("fence response"), 10);
         assert_eq!(*processed.lock(), (1..=10).collect::<Vec<_>>());
 
         drop(mailbox);
@@ -884,7 +1098,7 @@ fn lane_close_mid_batch_postprocesses_then_shuts_down() {
             Builder::new(actor).build_with_capacity(context.child("close"), NZUsize!(4));
 
         for value in 1..=3 {
-            assert_eq!(mailbox.note_internal(value), Feedback::Ok);
+            assert_eq!(mailbox.note(value), Feedback::Ok);
         }
         drop(mailbox);
         let handle = service.start();
@@ -901,19 +1115,45 @@ fn runtime_stop_interrupts_lane_batch() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let processed = Arc::new(Mutex::new(Vec::new()));
+        let postprocess = Arc::new(AtomicUsize::new(0));
         let actor = StopBatchActor {
             processed: processed.clone(),
+            postprocess: postprocess.clone(),
         };
         let (mailbox, service) =
             Builder::new(actor).build_with_capacity(context.child("stop_batch"), NZUsize!(4));
 
         for value in 1..=4 {
-            assert_eq!(mailbox.note_internal(value), Feedback::Ok);
+            assert_eq!(mailbox.note(value), Feedback::Ok);
         }
 
         let handle = service.start();
         handle.await.expect("service stopped cleanly");
         assert_eq!(*processed.lock(), vec![1]);
+        assert_eq!(postprocess.load(Ordering::SeqCst), 0);
+        drop(mailbox);
+    });
+}
+
+#[test]
+fn runtime_stop_after_external_dispatch_skips_postprocess() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let postprocess = Arc::new(AtomicUsize::new(0));
+        let actor = ExternalStopActor {
+            postprocess: postprocess.clone(),
+        };
+        let (mailbox, service) = Builder::new(actor).build(context.child("stop_external"));
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(HookMailboxReadWriteMessage::Note { value: 1 })
+            .await
+            .expect("send external message");
+
+        let handle = service.start_with(receiver);
+        handle.await.expect("service stopped cleanly");
+        assert_eq!(postprocess.load(Ordering::SeqCst), 0);
+        drop(sender);
         drop(mailbox);
     });
 }
@@ -930,7 +1170,7 @@ fn runtime_stop_interrupts_busy_lane_without_batching() {
             Builder::new(actor).build_with_capacity(context.child("stop_single"), NZUsize!(4));
 
         for value in 1..=4 {
-            assert_eq!(mailbox.note_internal(value), Feedback::Ok);
+            assert_eq!(mailbox.note(value), Feedback::Ok);
         }
 
         let handle = service.start();
@@ -949,7 +1189,7 @@ fn runtime_stop_triggers_graceful_shutdown() {
         let (mailbox, service) = Builder::new(actor).build(context.child("stop"));
         let handle = service.start();
 
-        assert_eq!(mailbox.fence_internal().await.expect("fence response"), 0);
+        assert_eq!(mailbox.fence().await.expect("fence response"), 0);
         context
             .stop(0, None)
             .await
@@ -977,8 +1217,8 @@ fn multi_lane_declaration_order_bias() {
         drop(mailboxes);
 
         // Enqueue on the later lane first: declaration order still wins.
-        assert_eq!(lo.note_internal(2), Feedback::Ok);
-        assert_eq!(hi.note_internal(1), Feedback::Ok);
+        assert_eq!(lo.note(2), Feedback::Ok);
+        assert_eq!(hi.note(1), Feedback::Ok);
         let handle = service.start();
 
         while processed.lock().len() < 2 {
@@ -1087,10 +1327,7 @@ fn read_write_waits_for_inflight_reads() {
         let (release, wait) = oneshot::channel();
         let read_mailbox = mailbox.clone();
         let read = context.child("read").spawn(move |_context| async move {
-            read_mailbox
-                .block_on_internal(wait)
-                .await
-                .expect("read response")
+            read_mailbox.block_on(wait).await.expect("read response")
         });
 
         for _ in 0..10 {
@@ -1101,7 +1338,7 @@ fn read_write_waits_for_inflight_reads() {
         }
         assert_eq!(active_reads.load(Ordering::SeqCst), 1);
 
-        assert_eq!(mailbox.bump_internal(), Feedback::Ok);
+        assert_eq!(mailbox.bump(), Feedback::Ok);
         context.sleep(Duration::from_millis(1)).await;
         assert_eq!(writes.load(Ordering::SeqCst), 0);
         assert_eq!(active_reads.load(Ordering::SeqCst), 1);
@@ -1116,10 +1353,7 @@ fn read_write_waits_for_inflight_reads() {
             context.sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(writes.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            mailbox.get_fenced_internal().await.expect("get response"),
-            8
-        );
+        assert_eq!(mailbox.get_fenced().await.expect("get response"), 8);
 
         drop(mailbox);
         handle.await.expect("service stopped cleanly");
@@ -1146,17 +1380,14 @@ fn snapshot_fence_mode_runs_writes_during_reads() {
         let (release, wait) = oneshot::channel();
         let read_mailbox = mailbox.clone();
         let read = context.child("read").spawn(move |_context| async move {
-            read_mailbox
-                .block_on_internal(wait)
-                .await
-                .expect("read response")
+            read_mailbox.block_on(wait).await.expect("read response")
         });
         while active_reads.load(Ordering::SeqCst) < 1 {
             context.sleep(Duration::from_millis(1)).await;
         }
 
         // The write must complete while the read is still parked.
-        assert_eq!(mailbox.bump_internal(), Feedback::Ok);
+        assert_eq!(mailbox.bump(), Feedback::Ok);
         while writes.load(Ordering::SeqCst) < 1 {
             context.sleep(Duration::from_millis(1)).await;
         }
@@ -1165,10 +1396,7 @@ fn snapshot_fence_mode_runs_writes_during_reads() {
         // The read still responds with the snapshot captured at admission.
         release.send(()).expect("release read");
         assert_eq!(read.await.expect("read task joined"), 7);
-        assert_eq!(
-            mailbox.get_fenced_internal().await.expect("get response"),
-            8
-        );
+        assert_eq!(mailbox.get_fenced().await.expect("get response"), 8);
 
         drop(mailbox);
         handle.await.expect("service stopped cleanly");
@@ -1194,7 +1422,7 @@ fn runtime_stop_aborts_blocked_reads() {
         let read_mailbox = mailbox.clone();
         let read = context
             .child("read")
-            .spawn(move |_context| async move { read_mailbox.block_on_internal(wait).await });
+            .spawn(move |_context| async move { read_mailbox.block_on(wait).await });
         while active_reads.load(Ordering::SeqCst) < 1 {
             context.sleep(Duration::from_millis(1)).await;
         }
@@ -1283,13 +1511,13 @@ fn reads_abort_before_on_shutdown() {
         let read_mailbox = mailbox.clone();
         let read = context
             .child("read")
-            .spawn(move |_context| async move { read_mailbox.park_internal(wait).await });
+            .spawn(move |_context| async move { read_mailbox.park(wait).await });
         while events.lock().is_empty() {
             context.sleep(Duration::from_millis(1)).await;
         }
 
-        // The parked read must be aborted before on_shutdown runs, so the
-        // hook can never race a handler holding a pre-shutdown snapshot.
+        // The parked handler must be aborted before on_shutdown runs, so the
+        // hook cannot race that handler holding a pre-shutdown snapshot.
         context
             .stop(0, None)
             .await
@@ -1361,7 +1589,7 @@ fn shutdown_closes_mailbox_before_on_shutdown() {
             context.sleep(Duration::from_millis(1)).await;
         }
 
-        assert_eq!(mailbox.submit_internal(), Feedback::Closed);
+        assert_eq!(mailbox.submit(), Feedback::Closed);
         release.send(()).expect("release shutdown");
         handle.await.expect("service stopped cleanly");
     });
@@ -1375,21 +1603,36 @@ ingress! {
 }
 
 /// Actor counting how many snapshots the service captures.
+struct CachedSnapshot {
+    value: u64,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for CachedSnapshot {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 struct CachingActor {
     value: u64,
     snapshots: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
 }
 
 impl<E: Spawner> Actor<E> for CachingActor {
     type Mailbox = CachedMailbox;
     type Ingress = CachedMailboxMessage;
     type Error = Infallible;
-    type Snapshot = u64;
+    type Snapshot = Arc<CachedSnapshot>;
     type Args = ();
 
     fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {
         self.snapshots.fetch_add(1, Ordering::SeqCst);
-        self.value
+        Arc::new(CachedSnapshot {
+            value: self.value,
+            drops: self.drops.clone(),
+        })
     }
 
     fn max_lane_batch(&self, _args: &Self::Args) -> NonZeroUsize {
@@ -1402,7 +1645,7 @@ impl<E: Spawner> Actor<E> for CachingActor {
         message: CachedMailboxReadOnlyMessage,
     ) -> Result<(), Self::Error> {
         let CachedMailboxReadOnlyMessage::Peek { response } = message;
-        let _ = response.send(snapshot);
+        let _ = response.send(snapshot.value);
         Ok(())
     }
 
@@ -1426,12 +1669,13 @@ fn consecutive_reads_share_one_snapshot() {
         let actor = CachingActor {
             value: 3,
             snapshots: snapshots.clone(),
+            drops: Arc::new(AtomicUsize::new(0)),
         };
         let (mailbox, service) = Builder::new(actor).build(context.child("cached"));
 
         // Buffer a full batch of reads before the loop starts: one snapshot
         // capture must serve the whole batch.
-        let peeks: Vec<_> = (0..4).map(|_| mailbox.peek_internal()).collect();
+        let peeks: Vec<_> = (0..4).map(|_| mailbox.peek()).collect();
         let handle = service.start();
 
         for peek in peeks {
@@ -1452,19 +1696,47 @@ fn write_invalidates_cached_snapshot() {
         let actor = CachingActor {
             value: 0,
             snapshots: snapshots.clone(),
+            drops: Arc::new(AtomicUsize::new(0)),
         };
         let (mailbox, service) = Builder::new(actor).build(context.child("invalidate"));
 
         // A write between two reads in one batch must split the cache: the
         // second read observes the write, not the first read's snapshot.
-        let before = mailbox.peek_internal();
-        assert_eq!(mailbox.bump_internal(), Feedback::Ok);
-        let after = mailbox.peek_internal();
+        let before = mailbox.peek();
+        assert_eq!(mailbox.bump(), Feedback::Ok);
+        let after = mailbox.peek();
         let handle = service.start();
 
         assert_eq!(before.await.expect("peek response"), 0);
         assert_eq!(after.await.expect("peek response"), 1);
         assert_eq!(snapshots.load(Ordering::SeqCst), 2);
+
+        drop(mailbox);
+        handle.await.expect("service stopped cleanly");
+    });
+}
+
+#[test]
+fn cached_snapshot_is_released_while_service_is_idle() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(10));
+    runner.start(|context| async move {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let actor = CachingActor {
+            value: 3,
+            snapshots: Arc::new(AtomicUsize::new(0)),
+            drops: drops.clone(),
+        };
+        let (mailbox, service) = Builder::new(actor).build(context.child("cache_release"));
+        let handle = service.start();
+
+        assert_eq!(mailbox.peek().await.expect("peek response"), 3);
+        for _ in 0..10 {
+            if drops.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
 
         drop(mailbox);
         handle.await.expect("service stopped cleanly");
@@ -1480,12 +1752,8 @@ fn mixed_workload_state(seed: u64) -> String {
             .build(context.child("determinism"));
         let handle = service.start();
 
-        assert_eq!(mailbox.seed_internal(1), Feedback::Ok);
-        let (a, b, c) = futures::join!(
-            mailbox.get_internal(),
-            mailbox.bump_and_get_internal(2),
-            mailbox.get_internal()
-        );
+        assert_eq!(mailbox.seed(1), Feedback::Ok);
+        let (a, b, c) = futures::join!(mailbox.get(), mailbox.bump_and_get(2), mailbox.get());
         a.expect("get response");
         b.expect("bump response");
         c.expect("get response");

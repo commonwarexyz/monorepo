@@ -10,9 +10,12 @@
 //!
 //! Read-only ingress is dispatched to a pool of pre-spawned read workers,
 //! bounded by [`Builder::with_read_concurrency`]. Each handler receives a
-//! snapshot of actor state captured when its message was admitted, so it
-//! never observes a partially-applied write. Consecutive reads admitted
-//! without an intervening actor mutation share one snapshot capture.
+//! snapshot of actor state captured when its message was admitted.
+//! Consecutive reads admitted without an intervening actor mutation share one
+//! snapshot capture. The snapshot must not alias data mutated by lifecycle
+//! hooks, which can overlap reads under either fence mode. Under
+//! [`FenceMode::Snapshot`], it also must not alias data that a read-write
+//! handler can mutate.
 //!
 //! Read-write ingress runs serially on the control loop itself. While a
 //! write runs, no new ingress of either class is admitted.
@@ -29,29 +32,36 @@
 //!
 //! # Ordering
 //!
-//! Reads never observe writes admitted after them: a snapshot is fixed at
-//! admission. [`FenceMode`] controls the reverse direction, whether a write
-//! waits for reads admitted before it:
+//! Each read receives the snapshot captured at admission. [`FenceMode`]
+//! controls whether a write admitted later waits for that read:
 //!
 //! - [`FenceMode::Linearizable`] (default) drains every in-flight read before
-//!   a write runs. A read admitted before a write always responds before that
-//!   write executes, so no caller can observe a pre-write response arrive
-//!   after the write has been acknowledged. The cost is that one slow read
-//!   stalls the write and all ingress behind it.
+//!   a write runs. A read admitted before a write completes its response and
+//!   handler-owned work before that write executes, so no caller can observe a
+//!   pre-write response arrive after the write has been acknowledged. Read
+//!   handlers must honor the completion contract on
+//!   [`Actor::on_read_only`](crate::Actor::on_read_only). The cost is that one
+//!   slow read stalls the write and all ingress behind it.
 //! - [`FenceMode::Snapshot`] runs writes immediately, concurrently with
 //!   in-flight reads. Reads still respond with the snapshot captured at
-//!   admission, so responses are always self-consistent, but they can be
-//!   stale relative to acknowledged writes.
+//!   admission. With an owned or immutable snapshot, responses remain
+//!   self-consistent but can be stale relative to acknowledged writes.
 //!
-//! Within one lane, messages are processed in enqueue order. Across lanes,
+//! Within one lane, messages are dequeued and admitted in enqueue order.
+//! Concurrent read-only handlers can complete out of order. Across lanes,
 //! selection is declaration-order biased (see [`Builder`]).
 //!
 //! # Shutdown
 //!
-//! Shutdown (runtime stop, [`Event::Stop`], or a fatal handler error) is
-//! prompt: in-flight read-only handlers are aborted before
-//! [`Actor::on_shutdown`](crate::Actor::on_shutdown) runs, and their pending
-//! askers observe [`Cancelled`](crate::ingress::Cancelled).
+//! The control loop observes runtime stop while selecting events, waiting for
+//! read capacity or a read fence, and between admissions in a lane batch.
+//! Mutable actor hooks are cooperative and can delay that observation. After
+//! any stop condition is observed, the service closes its lanes, aborts and
+//! joins in-flight read-only handler tasks, then calls
+//! [`Actor::on_shutdown`](crate::Actor::on_shutdown). Runtime supervision
+//! signals handler descendants to abort but does not join them, so those tasks
+//! must be safe to overlap shutdown. Askers owned by aborted handlers observe
+//! [`Cancelled`](crate::ingress::Cancelled).
 //!
 //! # Event Sources
 //!
@@ -61,7 +71,6 @@
 //! race those sources directly against [`LaneSet::recv`]. Source ordering and
 //! source exhaustion policy live in that hook.
 
-use crate::ingress::IntoEnvelope;
 use commonware_utils::NZUsize;
 use std::num::NonZeroUsize;
 
@@ -86,19 +95,23 @@ pub const DEFAULT_MAILBOX_CAPACITY: NonZeroUsize = NZUsize!(1024);
 
 /// Ordering between read-write handlers and in-flight read-only handlers.
 ///
-/// Read-only handlers always execute on a snapshot captured when the message
-/// was admitted, so they never observe a partially-applied write. The fence
-/// mode controls the reverse direction: whether a read-write handler waits
-/// for read-only handlers that were admitted before it.
+/// Read-only handlers execute on a snapshot captured when the message was
+/// admitted. The fence mode controls the reverse direction: whether a
+/// read-write handler waits for read-only handlers that were admitted before
+/// it. In either mode, snapshots must remain immutable across concurrent
+/// lifecycle hooks such as [`crate::Actor::preprocess`],
+/// [`crate::Actor::postprocess`], and [`crate::Actor::next_event`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FenceMode {
     /// Drain every in-flight read-only handler before each read-write
     /// handler runs.
     ///
-    /// A read admitted before a write always responds before that write
-    /// executes, so no asker can observe a pre-write response arrive after
-    /// the write has been acknowledged. This is the strongest ordering and
-    /// the default. Its cost is that one slow read stalls the write and all
+    /// A read admitted before a write completes its response and
+    /// handler-owned work before that write executes, so no asker can observe
+    /// a pre-write response arrive after the write has been acknowledged.
+    /// Read handlers must honor the completion contract on
+    /// [`crate::Actor::on_read_only`]. This is the strongest ordering and the
+    /// default. Its cost is that one slow read stalls the write and all
     /// ingress behind it.
     #[default]
     Linearizable,
@@ -106,26 +119,19 @@ pub enum FenceMode {
     /// read-only handlers.
     ///
     /// Reads admitted before a write may respond after that write completes,
-    /// using the snapshot captured at admission. Responses are always
-    /// snapshot-consistent but can be stale relative to acknowledged writes.
+    /// using the snapshot captured at admission. With the required owned or
+    /// immutable snapshot, responses remain self-consistent but can be stale
+    /// relative to acknowledged writes.
     ///
-    /// Only use this mode when [`crate::Actor::Snapshot`] is an owned or
-    /// immutable view of actor state. If the snapshot aliases state the
-    /// write mutates (e.g. through a shared lock), a concurrent read can
-    /// observe a partially-applied write.
+    /// In addition to the lifecycle-hook requirement on [`FenceMode`], only
+    /// use this mode when [`crate::Actor::Snapshot`] does not alias state that
+    /// the read-write handler mutates. Otherwise a concurrent read can observe
+    /// a partially-applied write.
     Snapshot,
 }
 
 /// Default maximum number of in-flight read-only handlers.
 pub const DEFAULT_MAX_INFLIGHT_READS: NonZeroUsize = NZUsize!(16);
-
-/// Ingress accepted by the actor service loop.
-///
-/// Builders select whether lanes are backed by [`crate::mailbox::Policy`] or
-/// [`crate::mailbox::UnreliablePolicy`].
-pub trait Ingress: IntoEnvelope {}
-
-impl<I> Ingress for I where I: IntoEnvelope {}
 
 #[cfg(test)]
 mod tests;

@@ -1,9 +1,9 @@
-use super::Ingress;
 use crate::mailbox::{Policy, Receiver, UnreliablePolicy, UnreliableReceiver};
 use std::{
     collections::BTreeMap,
     fmt,
-    future::poll_fn,
+    future::{Future, poll_fn},
+    pin::pin,
     task::{Context, Poll},
 };
 use thiserror::Error;
@@ -22,7 +22,7 @@ where
     I::Overflow: Send,
 {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<I>> {
-        self.poll_recv(cx)
+        pin!(Self::recv(self)).poll(cx)
     }
 
     fn try_recv(&mut self) -> Result<I, std::sync::mpsc::TryRecvError> {
@@ -36,7 +36,7 @@ where
     I::Overflow: Send,
 {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<I>> {
-        self.poll_recv(cx)
+        pin!(Self::recv(self)).poll(cx)
     }
 
     fn try_recv(&mut self) -> Result<I, std::sync::mpsc::TryRecvError> {
@@ -179,14 +179,13 @@ pub enum LaneEvent<I> {
 }
 
 /// Borrowed view over service mailbox lanes.
-pub struct LaneSet<'a, I: Ingress, R> {
+pub struct LaneSet<'a, I, R> {
     pub(super) lanes: &'a mut [Option<R>],
     _ingress: std::marker::PhantomData<I>,
 }
 
 impl<'a, I, R> LaneSet<'a, I, R>
 where
-    I: Ingress,
     R: LaneReceiver<I>,
 {
     pub(super) const fn new(lanes: &'a mut [Option<R>]) -> Self {

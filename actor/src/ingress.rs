@@ -98,10 +98,6 @@ fn tell_span() -> Span {
     span
 }
 
-async fn response<T>(receiver: oneshot::Receiver<T>) -> Result<T, Cancelled> {
-    receiver.await.map_err(|_| Cancelled)
-}
-
 /// Typed reliable mailbox endpoint.
 pub struct Mailbox<I: Policy> {
     sender: mailbox::Sender<I>,
@@ -278,7 +274,9 @@ impl<I: UnreliablePolicy> UnreliableMailbox<I> {
     where
         A: Ask<I>,
     {
-        response(self.subscribe_with_span(message, span)).await
+        self.subscribe_with_span(message, span)
+            .await
+            .map_err(|_| Cancelled)
     }
 
     /// Enqueue a request and return the response receiver to be awaited later.
@@ -317,6 +315,66 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
     use std::{collections::VecDeque, sync::mpsc::TryRecvError};
+
+    mod generated_path_hygiene {
+        #![allow(dead_code)]
+
+        struct Clone;
+        enum Option {}
+        struct Result;
+
+        trait AlternateClone {
+            fn clone(&self);
+        }
+
+        #[allow(unused_macros)]
+        macro_rules! stringify {
+            ($($tokens:tt)*) => {
+                0usize
+            };
+        }
+
+        crate::ingress! {
+            ShadowedMailbox,
+            pub tell Ping;
+            pub ask Get -> u64;
+        }
+
+        impl AlternateClone for crate::ingress::Mailbox<ShadowedMailboxMessage> {
+            fn clone(&self) {}
+        }
+    }
+
+    mod generated_const_binding_hygiene {
+        #![allow(non_upper_case_globals)]
+
+        crate::ingress! {
+            ConstBindingMailbox<const inner: usize>,
+            pub ask GetBinding -> [u8; inner];
+        }
+    }
+
+    macro_rules! identity_ty {
+        ($ty:ty) => {
+            $ty
+        };
+    }
+
+    crate::ingress! {
+        MacroTypeMailbox<T: Send + 'static>,
+        pub tell StoreMacro { value: identity_ty!(T) };
+    }
+
+    crate::ingress! {
+        MacroSplitMailbox<A: Send + 'static, B: Send + 'static>,
+        pub tell StoreMacroSplit { value: identity_ty!(A) };
+        pub ask FetchMacroSplit -> B;
+    }
+
+    crate::ingress! {
+        PushGenericMailbox<__Push: Send + 'static>,
+        pub tell StorePush { value: __Push };
+    }
 
     crate::ingress! {
         GeneratedMailbox,
@@ -555,7 +613,7 @@ mod tests {
                 let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(2));
                 let mailbox = ObservedMailbox::from(Mailbox::new(sender));
 
-                assert_eq!(mailbox.observe_internal("7", "hot", 9), Feedback::Ok);
+                assert_eq!(mailbox.observe("7", "hot", 9), Feedback::Ok);
                 let responder = async move {
                     let (_, first) = receiver.recv().await.unwrap().into_envelope();
                     match first {
@@ -581,7 +639,7 @@ mod tests {
                         _ => panic!("expected lookup"),
                     }
                 };
-                let (looked, ()) = futures::join!(mailbox.lookup_internal("3"), responder);
+                let (looked, ()) = futures::join!(mailbox.lookup("3"), responder);
                 assert_eq!(looked.unwrap(), 4);
             });
         });
@@ -680,7 +738,7 @@ mod tests {
             let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(2));
             let mailbox = GeneratedMailbox::from(Mailbox::new(sender));
 
-            assert_eq!(mailbox.ping_internal(5), Feedback::Ok);
+            assert_eq!(mailbox.ping(5), Feedback::Ok);
             let responder = async move {
                 let (_, first) = receiver.recv().await.unwrap().into_envelope();
                 assert!(matches!(
@@ -709,8 +767,8 @@ mod tests {
                 }
             };
 
-            let (get_feedback, get_pending) = mailbox.enqueue_get_internal();
-            let (set_feedback, set_pending) = mailbox.enqueue_set_internal(9);
+            let (get_feedback, get_pending) = mailbox.enqueue_get();
+            let (set_feedback, set_pending) = mailbox.enqueue_set(9);
             assert_eq!(get_feedback, Feedback::Ok);
             assert!(set_feedback.accepted());
 
@@ -727,7 +785,7 @@ mod tests {
             let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(2));
             let mailbox = TypedMailbox::from(Mailbox::new(sender));
 
-            assert_eq!(mailbox.store_internal("payload".to_string()), Feedback::Ok);
+            assert_eq!(mailbox.store("payload".to_string()), Feedback::Ok);
             let responder = async move {
                 let (_, first) = receiver.recv().await.unwrap().into_envelope();
                 match first {
@@ -746,7 +804,7 @@ mod tests {
                 }
             };
 
-            let (taken, ()) = futures::join!(mailbox.take_internal(), responder);
+            let (taken, ()) = futures::join!(mailbox.take(), responder);
             assert_eq!(taken.unwrap(), "stored");
         });
     }
@@ -759,7 +817,7 @@ mod tests {
             // bare: the annotation names it without generics.
             let (sender, mut receiver) = mailbox::new(context.child("half_generic"), NZUsize!(1));
             let mailbox = HalfGenericMailbox::<u64>::from(Mailbox::new(sender));
-            assert_eq!(mailbox.nudge_internal(), Feedback::Ok);
+            assert_eq!(mailbox.nudge(), Feedback::Ok);
             let (_, event) = receiver.recv().await.unwrap().into_envelope();
             let nudge: HalfGenericMailboxReadWriteMessage = match event {
                 Envelope::ReadWrite(message) => message,
@@ -773,7 +831,7 @@ mod tests {
             // (named without generics) while the read-only enum routes `[u8; N]`.
             let (sender, mut receiver) = mailbox::new(context.child("const"), NZUsize!(2));
             let mailbox = ConstMailbox::<4>::from(Mailbox::new(sender));
-            assert_eq!(mailbox.push_internal(3), Feedback::Ok);
+            assert_eq!(mailbox.push(3), Feedback::Ok);
             let responder = async move {
                 let (_, first) = receiver.recv().await.unwrap().into_envelope();
                 let push: ConstMailboxReadWriteMessage = match first {
@@ -792,7 +850,7 @@ mod tests {
                     _ => panic!("expected get"),
                 }
             };
-            let (got, ()) = futures::join!(mailbox.get_internal(), responder);
+            let (got, ()) = futures::join!(mailbox.get(), responder);
             assert_eq!(got.unwrap(), [7u8; 4]);
         });
     }
@@ -826,8 +884,8 @@ mod tests {
                 }
             };
 
-            let proposed = mailbox.propose_internal();
-            let verified = mailbox.verify_internal();
+            let proposed = mailbox.propose();
+            let verified = mailbox.verify();
             let (proposed, verified, ()) = futures::join!(proposed, verified, responder);
             assert_eq!(proposed.unwrap(), 9);
             assert!(verified.unwrap());
@@ -841,7 +899,7 @@ mod tests {
             let (sender, mut receiver) = mailbox::new(context.child("split"), NZUsize!(2));
             let mailbox = SplitMailbox::<u64, bool>::from(Mailbox::new(sender));
 
-            assert_eq!(mailbox.left_internal(5), Feedback::Ok);
+            assert_eq!(mailbox.left(5), Feedback::Ok);
             let responder = async move {
                 // Each sub-enum keeps exactly the one parameter its branch uses.
                 let (_, first) = receiver.recv().await.unwrap().into_envelope();
@@ -863,7 +921,7 @@ mod tests {
                 }
             };
 
-            let (right, ()) = futures::join!(mailbox.right_internal(), responder);
+            let (right, ()) = futures::join!(mailbox.right(), responder);
             assert!(right.unwrap());
         });
     }
@@ -875,7 +933,7 @@ mod tests {
             let (sender, mut receiver) = mailbox::new(context.child("all_tell"), NZUsize!(1));
             let mailbox = AllTellMailbox::<u64>::from(Mailbox::new(sender));
 
-            assert_eq!(mailbox.store_internal(7), Feedback::Ok);
+            assert_eq!(mailbox.store(7), Feedback::Ok);
             let (_, event) = receiver.recv().await.unwrap().into_envelope();
             match event {
                 Envelope::ReadWrite(AllTellMailboxReadWriteMessage::Store { value }) => {
@@ -894,8 +952,8 @@ mod tests {
             let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = GeneratedMailbox::from(Mailbox::new(sender));
 
-            assert_eq!(mailbox.ping_internal(1), Feedback::Ok);
-            let response = mailbox.watch_internal();
+            assert_eq!(mailbox.ping(1), Feedback::Ok);
+            let response = mailbox.watch();
             drop(response);
 
             let (_, first) = receiver.try_recv().unwrap().into_envelope();
@@ -918,9 +976,9 @@ mod tests {
             let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = CoalescingMailbox::from(Mailbox::new(sender));
 
-            assert_eq!(mailbox.set2_internal(1), Feedback::Ok);
-            assert_eq!(mailbox.set2_internal(2), Feedback::Backoff);
-            assert_eq!(mailbox.set2_internal(3), Feedback::Backoff);
+            assert_eq!(mailbox.set2(1), Feedback::Ok);
+            assert_eq!(mailbox.set2(2), Feedback::Backoff);
+            assert_eq!(mailbox.set2(3), Feedback::Backoff);
 
             let (_, first) = receiver.try_recv().unwrap().into_envelope();
             match first {
@@ -948,8 +1006,8 @@ mod tests {
                 mailbox::new_unreliable(context.child("mailbox"), NZUsize!(1));
             let mailbox = DroppyMailbox::from(UnreliableMailbox::new(sender));
 
-            assert_eq!(mailbox.poke_internal(), Unreliable::new(Feedback::Ok));
-            assert_eq!(mailbox.poke_internal(), Unreliable::Rejected);
+            assert_eq!(mailbox.poke(), Unreliable::new(Feedback::Ok));
+            assert_eq!(mailbox.poke(), Unreliable::Rejected);
         });
     }
 
@@ -961,8 +1019,8 @@ mod tests {
                 mailbox::new_unreliable(context.child("mailbox"), NZUsize!(1));
             let mailbox = LossyMailbox::from(UnreliableMailbox::new(sender));
 
-            assert_eq!(mailbox.pulse_internal(), Unreliable::new(Feedback::Ok));
-            let (feedback, pending) = mailbox.enqueue_fetch_internal();
+            assert_eq!(mailbox.pulse(), Unreliable::new(Feedback::Ok));
+            let (feedback, pending) = mailbox.enqueue_fetch();
             assert_eq!(feedback, Unreliable::Rejected);
             assert!(pending.await.is_err());
         });

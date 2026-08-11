@@ -19,7 +19,6 @@ pub(super) enum StopReason {
     Read,
     Write,
     Worker,
-    Dispatch,
 }
 
 impl fmt::Display for StopReason {
@@ -30,7 +29,6 @@ impl fmt::Display for StopReason {
             Self::Read => "read",
             Self::Write => "write",
             Self::Worker => "worker",
-            Self::Dispatch => "dispatch",
         };
         f.write_str(reason)
     }

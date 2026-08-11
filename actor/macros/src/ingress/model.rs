@@ -3,7 +3,7 @@ use super::{
         GenericSet, collect_read_write_ingress_usage, collect_readonly_ingress_usage,
         filter_generics, retain_const_bound_dependencies, validate_generics,
     },
-    input::{self, Input, ItemKind, SpanRecord},
+    input::{self, Input, ItemKind, SpanRecord, canonical_ident},
 };
 use heck::ToSnakeCase as _;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -33,6 +33,7 @@ impl Ingress {
         } = input;
 
         let names = GeneratedNames::new(mailbox);
+        validate_generic_names(&generics, &names)?;
         let declared = GenericSet::from_generics(&generics);
         let mut read_only_usage = collect_readonly_ingress_usage(&items, &declared);
         let mut read_write_usage = collect_read_write_ingress_usage(&items, &declared);
@@ -52,7 +53,7 @@ impl Ingress {
                     read_write_messages.push(Message::tell(item, fields));
                 }
                 ItemKind::Tell => {
-                    methods.push(Method::lower(item, &fields, &actor, &names, unreliable));
+                    methods.push(Method::lower(item, &fields, &actor, &names, unreliable)?);
                     read_write_messages.push(Message::tell(item, fields));
                 }
                 ItemKind::Request {
@@ -60,7 +61,7 @@ impl Ingress {
                     read_write,
                     ..
                 } => {
-                    methods.push(Method::lower(item, &fields, &actor, &names, unreliable));
+                    methods.push(Method::lower(item, &fields, &actor, &names, unreliable)?);
                     let message = Message::request(item, fields, response.as_ref().clone());
                     if *read_write {
                         read_write_messages.push(message);
@@ -70,6 +71,7 @@ impl Ingress {
                 }
             }
         }
+        validate_method_names(&methods)?;
 
         let read_only = Branch {
             actor: actor.clone(),
@@ -132,6 +134,29 @@ impl GeneratedNames {
             mailbox,
         }
     }
+}
+
+fn validate_generic_names(generics: &Generics, names: &GeneratedNames) -> Result<()> {
+    let generated = [
+        &names.mailbox,
+        &names.ingress,
+        &names.read_only_ingress,
+        &names.read_write_ingress,
+        &names.overflow,
+    ];
+    for param in generics.type_params() {
+        let name = canonical_ident(&param.ident);
+        if generated
+            .iter()
+            .any(|generated| canonical_ident(generated) == name)
+        {
+            return Err(syn::Error::new(
+                param.ident.span(),
+                format!("generic parameter `{name}` conflicts with a generated type"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,6 +252,7 @@ pub(crate) struct Method {
     pub(crate) attrs: Vec<Attribute>,
     pub(crate) public: bool,
     pub(crate) name: Ident,
+    pub(crate) enqueue_name: Option<Ident>,
     pub(crate) variant: Ident,
     pub(crate) fields: Vec<Field>,
     pub(crate) span_name: LitStr,
@@ -241,20 +267,70 @@ impl Method {
         actor: &TokenStream2,
         names: &GeneratedNames,
         unreliable: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let name = input::canonical_ident(&item.name).to_snake_case();
+        let mut method = syn::parse_str::<Ident>(&name)
+            .or_else(|_| syn::parse_str::<Ident>(&format!("r#{name}")))
+            .map_err(|_| {
+                syn::Error::new(
+                    item.name.span(),
+                    format!("generated method name `{name}` is not a valid Rust identifier"),
+                )
+            })?;
+        method.set_span(item.name.span());
+        let enqueue_name = matches!(&item.kind, ItemKind::Request { .. })
+            .then(|| Ident::new(&format!("enqueue_{name}"), item.name.span()));
+
+        Ok(Self {
             actor: actor.clone(),
             ingress: names.ingress.clone(),
             attrs: item.attrs.clone(),
             public: item.public_method,
-            name: format_ident!("{}", item.name.to_string().to_snake_case()),
+            name: method,
+            enqueue_name,
             variant: item.name.clone(),
             fields: fields.to_vec(),
             span_name: span_name(&names.mailbox, &item.name),
             span_fields: lower_span_fields(fields),
             kind: MethodKind::lower(item, names, unreliable),
+        })
+    }
+}
+
+fn canonical_method_name(name: &Ident) -> String {
+    input::canonical_ident(name)
+}
+
+fn validate_method_names(methods: &[Method]) -> Result<()> {
+    let mut seen = std::collections::HashMap::<String, &Ident>::new();
+    for method in methods {
+        for name in std::iter::once(&method.name).chain(method.enqueue_name.iter()) {
+            let name = canonical_method_name(name);
+            if matches!(name.as_str(), "clone" | "from") {
+                return Err(syn::Error::new(
+                    method.variant.span(),
+                    format!(
+                        "generated mailbox method `{name}` conflicts with a fixed wrapper method"
+                    ),
+                ));
+            }
+            if let Some(first) = seen.insert(name.clone(), &method.variant) {
+                let mut error = syn::Error::new(
+                    method.variant.span(),
+                    format!(
+                        "generated mailbox method `{name}` for `{}` conflicts with `{first}`",
+                        method.variant
+                    ),
+                );
+                error.combine(syn::Error::new(
+                    first.span(),
+                    format!("`{first}` first generated mailbox method `{name}` here"),
+                ));
+                return Err(error);
+            }
         }
     }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -356,8 +432,8 @@ fn lower_span_fields(fields: &[Field]) -> Vec<SpanField> {
 /// The compile-time span name for a generated mailbox method:
 /// `actor.<mailbox_snake>.<method_snake>`.
 fn span_name(mailbox: &Ident, item: &Ident) -> LitStr {
-    let mailbox = mailbox.to_string().to_snake_case();
-    let item = item.to_string().to_snake_case();
+    let mailbox = input::canonical_ident(mailbox).to_snake_case();
+    let item = input::canonical_ident(item).to_snake_case();
     LitStr::new(&format!("actor.{mailbox}.{item}"), Span::call_site())
 }
 

@@ -85,9 +85,9 @@ where
 /// - lane polling is declaration-order biased
 /// - actor-defined source ordering lives in [`Actor::next_event`]
 ///
-/// Runtime shutdown and read-only handler completion can cancel and restart
-/// [`Actor::next_event`]. Under sustained load, earlier lanes can starve later
-/// lanes because the first ready lane is always selected.
+/// Runtime shutdown and a fatal read-only handler failure can cancel and
+/// restart [`Actor::next_event`]. Under sustained load, earlier lanes can
+/// starve later lanes because the first ready lane is always selected.
 ///
 /// [`Builder::build`] creates reliable lanes backed by
 /// [`crate::mailbox::Policy`]. [`Builder::build_unreliable`] creates
