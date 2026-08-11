@@ -1057,7 +1057,7 @@ mod tests {
             },
             operation::Committable,
         },
-        utils::{DropMonitor, block_rayon},
+        utils::detached::{DropMonitor, block_strategy},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -3616,7 +3616,7 @@ mod tests {
             let c_batch = b.new_batch::<Sha256>();
             drop(b);
 
-            let release = block_rayon(journal.strategy(), 2);
+            let release = block_strategy(journal.strategy(), 2);
             let (item, clean_drop) = DropMonitor::tracked(create_operation::<mmr::Family>(10));
             let mut merkleize = Box::pin(journal.merkleize(c_batch, vec![item], 0));
             assert!(futures::poll!(merkleize.as_mut()).is_pending());

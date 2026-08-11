@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::mmb,
-        utils::{DropMonitor, block_rayon},
+        utils::detached::{DropMonitor, block_strategy},
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
@@ -132,7 +132,7 @@ mod tests {
             let c_batch = compact::UnmerkleizedBatch::wrap(b.new_batch());
             drop(b);
 
-            let release = block_rayon(merkle.strategy(), 2);
+            let release = block_strategy(merkle.strategy(), 2);
             let (op, clean_drop) = DropMonitor::tracked(10u64);
             let mut merkleize = Box::pin(merkleize_ops::<mmb::Family, Sha256, _, _>(
                 &merkle,

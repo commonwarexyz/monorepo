@@ -1,102 +1,10 @@
 //! Utilities for storage tests and fuzz targets.
 
+#[cfg(test)]
+pub(crate) mod detached;
+
 use commonware_utils::bitmap::BitMap;
 use std::{collections::BTreeMap, num::NonZeroU64};
-#[cfg(test)]
-use {
-    commonware_codec::{Error as CodecError, FixedSize, Read, Write},
-    commonware_parallel::{Rayon, Strategy as _},
-    commonware_runtime::{Buf, BufMut},
-    commonware_utils::sync::Mutex,
-    std::{
-        sync::{Arc, mpsc},
-        thread,
-        time::Duration,
-    },
-};
-
-/// Occupy `workers` Rayon workers until the returned sender is dropped.
-#[cfg(test)]
-pub(crate) fn block_rayon(strategy: &Rayon, workers: usize) -> mpsc::Sender<()> {
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let release_rx = Arc::new(Mutex::new(release_rx));
-    for _ in 0..workers {
-        let started_tx = started_tx.clone();
-        let release_rx = Arc::clone(&release_rx);
-        drop(strategy.spawn(move |_| {
-            started_tx.send(()).unwrap();
-            let _ = release_rx.lock().recv();
-        }));
-    }
-    drop(started_tx);
-    for _ in 0..workers {
-        started_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("strategy worker did not start");
-    }
-    release_tx
-}
-
-/// An item that preserves `T`'s encoding and reports whether its tracked instance unwound.
-#[cfg(test)]
-pub(crate) struct DropMonitor<T> {
-    inner: T,
-    clean_drop: Option<mpsc::Sender<bool>>,
-}
-
-#[cfg(test)]
-impl<T> DropMonitor<T> {
-    /// Create an item that does not report when it is dropped.
-    pub(crate) const fn untracked(inner: T) -> Self {
-        Self {
-            inner,
-            clean_drop: None,
-        }
-    }
-
-    /// Create an item and a receiver that reports whether it was dropped outside an unwind.
-    pub(crate) fn tracked(inner: T) -> (Self, mpsc::Receiver<bool>) {
-        let (clean_drop, receiver) = mpsc::channel();
-        (
-            Self {
-                inner,
-                clean_drop: Some(clean_drop),
-            },
-            receiver,
-        )
-    }
-}
-
-#[cfg(test)]
-impl<T: FixedSize> FixedSize for DropMonitor<T> {
-    const SIZE: usize = T::SIZE;
-}
-
-#[cfg(test)]
-impl<T: Write> Write for DropMonitor<T> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.inner.write(buf);
-    }
-}
-
-#[cfg(test)]
-impl<T: Read> Read for DropMonitor<T> {
-    type Cfg = T::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        T::read_cfg(buf, cfg).map(Self::untracked)
-    }
-}
-
-#[cfg(test)]
-impl<T> Drop for DropMonitor<T> {
-    fn drop(&mut self) {
-        if let Some(clean_drop) = self.clean_drop.take() {
-            let _ = clean_drop.send(!thread::panicking());
-        }
-    }
-}
 
 /// Build ordinal recovery bitmaps from absolute item indices.
 ///

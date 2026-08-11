@@ -1322,7 +1322,7 @@ mod trait_impls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mmb, mmr, utils::block_rayon};
+    use crate::{mmb, mmr, utils::detached::block_strategy};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_parallel::Rayon;
@@ -1377,7 +1377,7 @@ mod tests {
         // Observe the worker result so a missing grandparent fails the test directly.
         let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
-        let release = block_rayon(&strategy, 2);
+        let release = block_strategy(&strategy, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
             &strategy,
             Arc::clone(&b),
@@ -1395,7 +1395,7 @@ mod tests {
         // Drop the waiter while the worker is queued to prove the guard moved with it.
         let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
-        let release = block_rayon(&strategy, 2);
+        let release = block_strategy(&strategy, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
             &strategy,
             Arc::clone(&b),
