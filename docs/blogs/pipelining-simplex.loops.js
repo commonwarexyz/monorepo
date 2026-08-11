@@ -4,6 +4,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const WIDTH = 1024;
 const RED = '#d9251c';
 const BLUE = '#1f1fd1';
+const GREEN = '#18864b';
 const GRAY = '#8a8a8a';
 const LIGHT = '#e6e6e6';
 const LOOP_MS = 7600;
@@ -277,61 +278,88 @@ function buildLeaders(mount) {
 }
 
 function buildValidation(mount) {
-  const svg = makeSvg(mount, 430);
+  const svg = makeSvg(mount, 330);
   const animated = [];
   const x0 = 190;
   const sequentialGap = 186;
   const optimisticGap = 62;
-  const parentSpan = sequentialGap;
-  const finalizationSpan = sequentialGap;
+  const topY = 105;
+  const bottomY = 260;
 
-  addText(svg, 20, 28, 'Stable Leader', { 'font-size': 18, 'font-weight': 700 });
-  addText(svg, 20, 225, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
-  addText(svg, 112, 72, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 125, 'notarize', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 178, 'finalize', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 269, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 322, 'notarize', { 'text-anchor': 'end', 'font-weight': 700 });
-  addText(svg, 112, 375, 'finalize', { 'text-anchor': 'end', 'font-weight': 700 });
-  [72, 125, 178, 269, 322, 375].forEach(y => addLine(svg, 130, y, 976, y, { stroke: LIGHT }));
+  addText(svg, 20, 30, 'Stable Leader', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 185, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
+  [topY, bottomY].forEach(y => addLine(svg, 145, y, 976, y, { stroke: LIGHT, 'stroke-width': 3 }));
 
-  for (let index = 0; index < 5; index++) {
-    const x = x0 + index * sequentialGap;
-    const block = svgEl('rect', { x: x - 14, y: 58, width: 28, height: 28, rx: 3, fill: RED, opacity: 0 });
-    svg.appendChild(block);
-    animated.push(addReveal(block, 0.06 + index * 0.17));
-    addText(svg, x, 50, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
-    const notarizedX = x + parentSpan;
-    const notarized = svgEl('circle', { cx: notarizedX, cy: 125, r: 8, fill: BLUE, opacity: 0 });
-    svg.appendChild(notarized);
-    if (index < 4) animated.push(addArrow(svg, x + 16, 72, x + sequentialGap - 16, 72, RED, 0.1 + index * 0.17, 0.08));
-    animated.push(addArrow(svg, x, 88, notarizedX - 9, 125, BLUE, 0.12 + index * 0.17, 0.1));
-    animated.push(addReveal(notarized, 0.21 + index * 0.17));
-    animated.push(addArrow(svg, notarizedX, 116, notarizedX, 88, BLUE, 0.22 + index * 0.17, 0.04));
-    const finalizedX = notarizedX + finalizationSpan;
-    const finalized = svgEl('circle', { cx: finalizedX, cy: 178, r: 8, fill: BLUE, opacity: 0 });
-    svg.appendChild(finalized);
-    animated.push(addArrow(svg, notarizedX + 9, 125, finalizedX - 9, 178, BLUE, 0.23 + index * 0.17, 0.1));
-    animated.push(addReveal(finalized, 0.33 + index * 0.17));
+  const addBlock = (x, y, label, proposedAt, notarizedAt, finalizedAt) => {
+    addText(svg, x, y - 27, label, { 'text-anchor': 'middle', fill: GRAY });
+    const rectAttrs = {
+      x: x - 15,
+      y: y - 15,
+      width: 30,
+      height: 30,
+      rx: 3,
+      opacity: 0,
+    };
+    const proposed = svgEl('rect', { ...rectAttrs, fill: RED });
+    svg.appendChild(proposed);
+    animated.push(addReveal(proposed, proposedAt, 0.04));
+
+    if (notarizedAt !== null) {
+      const notarized = svgEl('rect', { ...rectAttrs, fill: GRAY });
+      svg.appendChild(notarized);
+      animated.push(addReveal(notarized, notarizedAt, 0.04));
+      const check = addText(svg, x, y + 6, '\u2713', {
+        'font-family': 'sans-serif',
+        'font-size': 18,
+        'font-weight': 700,
+        'text-anchor': 'middle',
+        fill: 'white',
+        opacity: 0,
+      });
+      animated.push(addReveal(check, notarizedAt, 0.04));
+    }
+
+    if (finalizedAt !== null) {
+      const finalized = svgEl('rect', { ...rectAttrs, fill: GREEN });
+      svg.appendChild(finalized);
+      animated.push(addReveal(finalized, finalizedAt, 0.04));
+      const checks = addText(svg, x, y + 5, '\u2713\u2713', {
+        'font-family': 'sans-serif',
+        'font-size': 12,
+        'font-weight': 700,
+        'letter-spacing': -2,
+        'text-anchor': 'middle',
+        fill: 'white',
+        opacity: 0,
+      });
+      animated.push(addReveal(checks, finalizedAt, 0.04));
+    }
+  };
+
+  const sequentialCount = 5;
+  for (let index = 0; index < sequentialCount; index++) {
+    const proposedAt = 0.06 + index * 0.17;
+    addBlock(
+      x0 + index * sequentialGap,
+      topY,
+      `v${index + 1}`,
+      proposedAt,
+      index + 1 < sequentialCount ? proposedAt + 0.17 : null,
+      index + 2 < sequentialCount ? proposedAt + 0.34 : null,
+    );
   }
 
-  for (let index = 0; index < 13; index++) {
-    const x = x0 + index * optimisticGap;
-    const block = svgEl('rect', { x: x - 14, y: 255, width: 28, height: 28, rx: 3, fill: RED, opacity: 0 });
-    svg.appendChild(block);
-    animated.push(addReveal(block, 0.06 + index * 0.045));
-    addText(svg, x, 247, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
-    if (index < 12) animated.push(addArrow(svg, x + 16, 269, x + optimisticGap - 16, 269, RED, 0.09 + index * 0.045, 0.04));
-    const notarizedX = x + parentSpan;
-    const notarized = svgEl('circle', { cx: notarizedX, cy: 322, r: 8, fill: BLUE, opacity: 0 });
-    svg.appendChild(notarized);
-    animated.push(addReveal(notarized, 0.22 + index * 0.045));
-    animated.push(addArrow(svg, x, 285, notarizedX - 9, 322, BLUE, 0.1 + index * 0.045, 0.11));
-    const finalizedX = notarizedX + finalizationSpan;
-    const finalized = svgEl('circle', { cx: finalizedX, cy: 375, r: 8, fill: BLUE, opacity: 0 });
-    svg.appendChild(finalized);
-    animated.push(addArrow(svg, notarizedX + 9, 322, finalizedX - 9, 375, BLUE, 0.23 + index * 0.045, 0.11));
-    animated.push(addReveal(finalized, 0.34 + index * 0.045));
+  const optimisticCount = 13;
+  for (let index = 0; index < optimisticCount; index++) {
+    const proposedAt = 0.06 + index * 0.045;
+    addBlock(
+      x0 + index * optimisticGap,
+      bottomY,
+      `v${index + 1}`,
+      proposedAt,
+      index + 3 < optimisticCount ? proposedAt + 0.135 : null,
+      index + 6 < optimisticCount ? proposedAt + 0.27 : null,
+    );
   }
   return animated;
 }

@@ -122,6 +122,10 @@ Chou</a></div>
             aspect-ratio: 1024 / 400;
           }
 
+          .simplex-loop-validation {
+            aspect-ratio: 1024 / 330;
+          }
+
           .simplex-loop-recovery {
             aspect-ratio: 1024 / 300;
           }
@@ -193,13 +197,14 @@ Chou</a></div>
         Consecutive proposals can begin less than one network round trip
         apart, limited by local work and network capacity rather than
         latency alone.</p>
-        <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, three child views start in that same interval while parent notarizations form. Finalization continues behind new views in both paths.">
-          <noscript>With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, three child views start in that same interval while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
+        <div id="simplex-fig-validation" class="simplex-loop simplex-loop-validation" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.">
+          <noscript>Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 3: Stable Leader spaces views one network hop apart.
         Here, Optimistic Validation starts three views in the same
-        interval.</p>
+        interval. Blocks turn gray when notarized and green when
+        finalized.</p>
         </div>
         <h2 id="how-optimism-stays-safe">How Optimism Stays Safe</h2>
         <p><em>Optimistic</em> means a participant can vote to notarize

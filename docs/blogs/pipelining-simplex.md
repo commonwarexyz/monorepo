@@ -27,6 +27,10 @@ In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread a
     aspect-ratio: 1024 / 400;
   }
 
+  .simplex-loop-validation {
+    aspect-ratio: 1024 / 330;
+  }
+
   .simplex-loop-recovery {
     aspect-ratio: 1024 / 300;
   }
@@ -83,13 +87,13 @@ With Optimistic Validation, validators can vote to notarize the child as soon as
 The child can therefore be proposed and voted on while the parent's notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone.
 
 ```{=html}
-<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, three child views start in that same interval while parent notarizations form. Finalization continues behind new views in both paths.">
-  <noscript>With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, three child views start in that same interval while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
+<div id="simplex-fig-validation" class="simplex-loop simplex-loop-validation" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.">
+  <noscript>Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 3: Stable Leader spaces views one network hop apart. Here, Optimistic Validation starts three views in the same interval.
+Figure 3: Stable Leader spaces views one network hop apart. Here, Optimistic Validation starts three views in the same interval. Blocks turn gray when notarized and green when finalized.
 :::
 
 ## How Optimism Stays Safe
