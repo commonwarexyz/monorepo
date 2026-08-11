@@ -14,7 +14,7 @@ New blocks no longer have to wait for network round trips.
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they let Simplex produce new blocks without waiting for network round trips.
 
-In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The median time between blocks was 5ms, while the median time from proposal to finalization was 300ms. At that cadence, about 60 newer blocks could be in flight while the first finalized.
+In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms, while the median time from proposal to finalization was 300ms. At that cadence, about 60 newer blocks could be in flight while the first finalized.
 
 ```{=html}
 <style>
@@ -100,29 +100,29 @@ Figure 3: Stable Leader spaces views one network hop apart. Here, Optimistic Val
 
 *Optimistic* means a participant can vote to notarize a proposal before it receives notarizations for every ancestor in the term. It does not weaken the evidence required for finalization.
 
-Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish any checks required before commit, such as confirming data availability or validating application-specific block and transaction rules.
+Notarization is not finalization. After a block is notarized, each validator asks its application whether the payload is safe to commit. This decision is called *certification* and happens before the validator votes to finalize the block. Certification lets an application finish any checks required before commit, such as confirming data availability or validating application-specific block and transaction rules.
 
 A participant only votes optimistically when every earlier proposal in the term is consistent with the chain it has already supported. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If any proposal fails to notarize or certify, optimistic votes later in the term become inert. Validators can then vote to abandon the rest of the term through Simplex's normal nullification path.
-
-```{=html}
-<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. A nullification skips to view nine in the next term.">
-  <noscript>View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. A nullification skips to view nine in the next term.</noscript>
-</div>
-```
-
-::: {.image-caption}
-Figure 4: When a view fails, later optimistic work becomes inert. A nullification skips the unproposed views and starts the next term.
-:::
 
 The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry.
 
 Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
 
+```{=html}
+<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.">
+  <noscript>View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 4: When v3 fails, later work becomes inert and unproposed views are skipped. In the next term, v9 builds on v2.
+:::
+
 ## Where the Pipeline Fits
 
-The test used header-only blocks with no transactions or execution, so it measured consensus cadence rather than transaction throughput. Pipelining overlaps network waits, but every validator still performs the verification, execution, and storage required for each block. A higher block rate therefore puts more pressure on validator compute, storage, and network bandwidth. Pipelining does not shorten the time from proposal to finalization, but it does shorten the wait before a transaction can enter the next proposal.
+Pipelining overlaps network waits, but every validator still performs the verification, execution, and storage required for each block. A higher block rate therefore puts more pressure on validator compute, storage, and network bandwidth. Pipelining does not shorten the time from proposal to finalization, but it does shorten the wait before a transaction can enter the next proposal.
 
-Longer terms reduce handoff overhead, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. An offline leader causes one timeout for the entire term, so longer terms spread that overhead across more successful blocks.
+Longer terms reduce handoff overhead but give one leader more consecutive proposals. At Alto's measured cadence, a 10,000-view term lasted roughly 50 seconds. If a leader goes offline, nullifying its first stalled view skips the rest of the term and rotates to the next leader. One timeout therefore covers the offline leader's entire term.
 
 A Byzantine leader could still finalize blocks while selectively censoring transactions. This risk also exists with rotating leaders, but longer terms can increase inclusion delay because the same leader proposes more consecutive blocks. Selective censorship can be difficult to detect when the leader otherwise performs well.
 

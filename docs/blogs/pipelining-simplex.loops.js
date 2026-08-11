@@ -6,6 +6,7 @@ const RED = '#d9251c';
 const BLUE = '#1f1fd1';
 const GREEN = '#18864b';
 const GRAY = '#8a8a8a';
+const ARROW = '#a2a2a2';
 const MUTED = '#b8b8b8';
 const LIGHT = '#e6e6e6';
 const LOOP_MS = 7600;
@@ -316,18 +317,18 @@ function buildValidation(mount) {
         y,
         x + gap - 17,
         y,
-        MUTED,
-        firstProposalAt + index * proposalStep + 0.025,
-        0.025,
-        { strokeWidth: 1.4, headSize: 5 },
+        ARROW,
+        firstProposalAt + index * proposalStep + proposalStep * 0.45,
+        proposalStep * 0.35,
+        { strokeWidth: 1.6, headSize: 6.5 },
       ));
     }
   };
 
   const sequentialCount = 5;
   const optimisticCount = 13;
-  addCadenceArrows(sequentialCount, sequentialGap, topY, 0.06, 0.17);
-  addCadenceArrows(optimisticCount, optimisticGap, bottomY, 0.06, 0.045);
+  addCadenceArrows(sequentialCount, sequentialGap, topY, 0.05, 0.15);
+  addCadenceArrows(optimisticCount, optimisticGap, bottomY, 0.05, 0.05);
 
   const addBlock = (x, y, label, proposedAt, notarizedAt, finalizedAt) => {
     addText(svg, x, y - 27, label, { 'text-anchor': 'middle', fill: GRAY });
@@ -376,26 +377,26 @@ function buildValidation(mount) {
   };
 
   for (let index = 0; index < sequentialCount; index++) {
-    const proposedAt = 0.06 + index * 0.17;
+    const proposedAt = 0.05 + index * 0.15;
     addBlock(
       x0 + index * sequentialGap,
       topY,
       `v${index + 1}`,
       proposedAt,
-      index + 1 < sequentialCount ? proposedAt + 0.17 : null,
-      index + 2 < sequentialCount ? proposedAt + 0.34 : null,
+      proposedAt + 0.15,
+      proposedAt + 0.3,
     );
   }
 
   for (let index = 0; index < optimisticCount; index++) {
-    const proposedAt = 0.06 + index * 0.045;
+    const proposedAt = 0.05 + index * 0.05;
     addBlock(
       x0 + index * optimisticGap,
       bottomY,
       `v${index + 1}`,
       proposedAt,
-      index + 3 < optimisticCount ? proposedAt + 0.135 : null,
-      index + 6 < optimisticCount ? proposedAt + 0.27 : null,
+      proposedAt + 0.15,
+      proposedAt + 0.3,
     );
   }
   return animated;
@@ -423,7 +424,7 @@ function buildRecovery(mount) {
     'stroke-width': 2,
   });
 
-  views.forEach((x, index) => {
+  views.slice(0, 5).forEach((x, index) => {
     addText(svg, x, 100, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
   });
 
@@ -452,14 +453,30 @@ function buildRecovery(mount) {
     animated.push(addStep(mark, delay));
   };
 
-  addState(views[0], RED, 0, 0.06);
+  const proposalTimes = [0.05, 0.15, 0.25, 0.35, 0.45];
+  for (let index = 0; index < proposalTimes.length - 1; index++) {
+    animated.push(addArrow(
+      svg,
+      views[index] + 19,
+      y,
+      views[index + 1] - 19,
+      y,
+      ARROW,
+      proposalTimes[index] + 0.04,
+      0.05,
+      { strokeWidth: 1.6, headSize: 6.5 },
+    ));
+  }
+
+  addState(views[0], RED, 0, proposalTimes[0]);
   addState(views[0], GRAY, 1, 0.13);
-  addState(views[0], GREEN, 2, 0.21);
-  addState(views[1], RED, 0, 0.12);
-  addState(views[1], GRAY, 1, 0.26);
-  addState(views[2], RED, 0, 0.18);
-  addState(views[3], RED, 0, 0.24);
-  addState(views[4], RED, 0, 0.3);
+  addState(views[0], GREEN, 2, 0.22);
+  addState(views[1], RED, 0, proposalTimes[1]);
+  addState(views[1], GRAY, 1, 0.28);
+  addState(views[1], GREEN, 2, 0.78);
+  addState(views[2], RED, 0, proposalTimes[2]);
+  addState(views[3], RED, 0, proposalTimes[3]);
+  addState(views[4], RED, 0, proposalTimes[4]);
 
   const failed = svgEl('rect', {
     x: views[2] - 17,
@@ -471,7 +488,7 @@ function buildRecovery(mount) {
     opacity: 0,
   });
   svg.appendChild(failed);
-  animated.push(addStep(failed, 0.44));
+  animated.push(addStep(failed, 0.55));
 
   const failureMark = svgEl('g', { opacity: 0 });
   addLine(failureMark, views[2] - 10, y - 10, views[2] + 10, y + 10, {
@@ -483,13 +500,13 @@ function buildRecovery(mount) {
     'stroke-width': 3,
   });
   svg.appendChild(failureMark);
-  animated.push(addStep(failureMark, 0.44));
+  animated.push(addStep(failureMark, 0.55));
   const failureLabel = addText(svg, views[2], 177, 'fails', {
     'text-anchor': 'middle',
     fill: RED,
     opacity: 0,
   });
-  animated.push(addStep(failureLabel, 0.44));
+  animated.push(addStep(failureLabel, 0.55));
 
   for (let index = 3; index < 5; index++) {
     const inert = svgEl('rect', {
@@ -502,22 +519,28 @@ function buildRecovery(mount) {
       opacity: 0,
     });
     svg.appendChild(inert);
-    animated.push(addStep(inert, 0.52));
+    animated.push(addStep(inert, 0.63));
     const slash = addLine(svg, views[index] - 10, y + 10, views[index] + 10, y - 10, {
       stroke: RED,
       'stroke-width': 2.5,
       opacity: 0,
     });
-    animated.push(addStep(slash, 0.52));
+    animated.push(addStep(slash, 0.63));
     const label = addText(svg, views[index], 177, 'inert', {
       'text-anchor': 'middle',
       fill: RED,
       opacity: 0,
     });
-    animated.push(addStep(label, 0.52));
+    animated.push(addStep(label, 0.63));
   }
 
   for (let index = 5; index < 8; index++) {
+    const label = addText(svg, views[index], 100, `v${index + 1}`, {
+      'text-anchor': 'middle',
+      fill: GRAY,
+      opacity: 0,
+    });
+    animated.push(addReveal(label, 0.68, 0.03));
     const unproposed = svgEl('rect', {
       x: views[index] - 17,
       y: y - 17,
@@ -528,31 +551,30 @@ function buildRecovery(mount) {
       stroke: MUTED,
       'stroke-dasharray': '4 4',
       'stroke-width': 1.5,
+      opacity: 0,
     });
     svg.appendChild(unproposed);
+    animated.push(addReveal(unproposed, 0.68, 0.03));
   }
-  addText(svg, views[6], 205, 'not proposed', { 'text-anchor': 'middle', fill: GRAY });
+  const unproposedLabel = addText(svg, views[6], 205, 'not proposed', {
+    'text-anchor': 'middle',
+    fill: GRAY,
+    opacity: 0,
+  });
+  animated.push(addReveal(unproposedLabel, 0.68, 0.03));
 
   const skipLabel = addText(svg, 650, 246, 'nullify rest of term', {
     'text-anchor': 'middle',
     fill: BLUE,
     opacity: 0,
   });
-  animated.push(addStep(skipLabel, 0.62));
-  animated.push(addArrow(svg, views[2] + 20, 218, nextView - 20, 150, BLUE, 0.62, 0.18));
+  animated.push(addStep(skipLabel, 0.72));
+  animated.push(addArrow(svg, views[1] + 20, 218, nextView - 20, 150, BLUE, 0.72, 0.14));
 
   addText(svg, nextView, 100, 'v9', { 'text-anchor': 'middle', fill: GRAY });
-  const nextBlock = svgEl('rect', {
-    x: nextView - 17,
-    y: y - 17,
-    width: 34,
-    height: 34,
-    rx: 4,
-    fill: RED,
-    opacity: 0,
-  });
-  svg.appendChild(nextBlock);
-  animated.push(addStep(nextBlock, 0.84));
+  addState(nextView, RED, 0, 0.88);
+  addState(nextView, GRAY, 1, 0.93);
+  addState(nextView, GREEN, 2, 0.98);
 
   return animated;
 }
@@ -661,7 +683,7 @@ const figures = [
   ['simplex-fig-cadence', buildCadence, 4600, 300, 0.4],
   ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS, 1],
   ['simplex-fig-validation', buildValidation, LOOP_MS, HOLD_MS, 1],
-  ['simplex-fig-recovery', buildRecovery, 6200, 700, 1],
+  ['simplex-fig-recovery', buildRecovery, LOOP_MS, HOLD_MS, 1],
 ];
 for (const [id, builder, loopMs, holdMs, staticProgress] of figures) {
   const mount = document.getElementById(id);
