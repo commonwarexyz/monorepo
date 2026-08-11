@@ -106,22 +106,11 @@ The lookahead is local policy. A value of zero disables Optimistic Validation. V
 
 ## What We Measured
 
-Here are the relevant configuration and results for the 50-validator Alto run:
+We ran Alto with 50 validators spread evenly across ten AWS regions. With Stable Leader and Optimistic Validation enabled, the network sustained about 200 successful views per second. Each successful view finalized one block, so the median view and block spacing were both 5ms.
 
-| | |
-|---|---:|
-| Deployment | 50 validators, 5 in each of 10 AWS regions |
-| Instance | `c7gd.4xlarge` |
-| Workload | Header-only blocks, no transactions or execution |
-| Block target | 5ms |
-| Stable term | 10,000 views |
-| Optimistic lookahead | 100 views |
-| Throughput capture | About three minutes of one-second reporting windows |
-| Successful views / finalized blocks | About 200 per second |
-| Median block spacing | 5ms in each reporting window |
-| External-observer finality | p50 300ms / p99 376ms (`n=3,736`) |
+The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
 
-A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. This measurement includes indexer and WebSocket delivery. At 5ms per view, one 300ms observer-latency window spans about 60 view intervals.
+We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At 5ms per view, that is enough time to start about 60 new views.
 
 ## Choose the Pipeline
 
