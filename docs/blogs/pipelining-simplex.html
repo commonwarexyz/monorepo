@@ -196,7 +196,9 @@ Chou</a></div>
         the pipeline across several views within the stable-leader term.
         Consecutive proposals can begin less than one network round trip
         apart, limited by local work and network capacity rather than
-        latency alone.</p>
+        latency alone. These waits for network messages can overlap, but
+        every validator still performs the local verification and
+        application work for each block.</p>
         <div id="simplex-fig-validation" class="simplex-loop simplex-loop-validation" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.">
           <noscript>Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.</noscript>
         </div>
@@ -229,12 +231,13 @@ Chou</a></div>
         the term become inert. Validators can then vote to abandon the
         rest of the term through Simplex’s normal nullification
         path.</p>
-        <div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with four views. View two fails, making the optimistic work in views three and four inert. A nullification skips the rest of the term and starts view five in the next term.">
-          <noscript>View two fails, making the optimistic work in views three and four inert. A nullification skips the rest of the term and starts view five in the next term.</noscript>
+        <div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. A nullification skips to view nine in the next term.">
+          <noscript>View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. A nullification skips to view nine in the next term.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 4: If a view fails, later optimistic work becomes
-        inert. A nullification skips the rest of the term.</p>
+        <p>Figure 4: When a view fails, later optimistic work becomes
+        inert. A nullification skips the unproposed views and starts the
+        next term.</p>
         </div>
         <p>The term boundary is also a leader handoff, so optimistic
         work stops there. The first view of a new term must start from
@@ -248,8 +251,10 @@ Chou</a></div>
         <h2 id="where-the-pipeline-fits">Where the Pipeline Fits</h2>
         <p>The test used header-only blocks with no transactions or
         execution, so it measured consensus cadence rather than
-        transaction throughput. A higher block rate puts more load on
-        execution, storage, proposal verification, and network
+        transaction throughput. Pipelining overlaps network waits, but
+        every validator still performs the verification, execution, and
+        storage required for each block. A higher block rate therefore
+        puts more pressure on validator compute, storage, and network
         bandwidth. Pipelining does not shorten the time from proposal to
         finalization, but it does shorten the wait before a transaction
         can enter the next proposal.</p>
