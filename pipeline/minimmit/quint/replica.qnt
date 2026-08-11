@@ -929,17 +929,24 @@ module replica {
 
     })
 
-    // It is impossible to produce both a nullification and finalization certificate for the same slot v.
-    // If some honest player sees that iteration h is finalized,
-    // then no honest player will ever see that h is nullified.
+    // No honest replica ever holds evidence for BOTH a finalization and a nullification of the
+    // same view -- whether that evidence is a raw quorum of votes or an assembled certificate.
+    // The two sides are read symmetrically (same stores, same granularity), so the check can no
+    // longer pass merely because finalization was observed as votes while nullification was
+    // observed as a certificate. The cross-replica / certificate form is
+    // `no_nullification_and_finalization_globally`.
     val no_nullification_and_finalization_in_the_same_view = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         val votes = store_vote.get(id)
-        val views_with_nullification =
-            certs.filter(c => cert_kind(c) == NullificationKind).map(c => cert_view(c))
-        val views_with_finalization =
-            VIEWS.filter(v => is_view_finalized_votes(v, votes))
-        views_with_nullification.intersect(views_with_finalization) == Set()
+        val nullified_views = VIEWS.filter(v => or {
+            is_view_nullified_votes(v, votes),   // >= M nullify votes
+            is_view_nullified(v, certs),         // a NullificationKind cert
+        })
+        val finalized_views = VIEWS.filter(v => or {
+            is_view_finalized_votes(v, votes),   // >= L notarize votes
+            is_view_finalized(v, certs),         // a FinalizationKind cert
+        })
+        nullified_views.intersect(finalized_views) == Set()
     })
 
     // No equivocation. A leader may send only one proposal per view, and the whole proposal
@@ -1099,21 +1106,32 @@ module replica {
         })
     })
 
-    // No view carries both a nullification and a finalization certificate, not even in two
+    // No view carries evidence for both a nullification and a finalization, not even in two
     // different replicas' stores. This is what makes the committed sequence the same at
     // every correct replica, and so it is what `agreement` rests on: if one replica commits
     // the finalization of view v1 and another commits a later view v2 rooted at the same
     // parent, the second must hold a nullification for v1, since the gap (parent, v2) covers
     // it. The per-replica form of this check would be true in exactly that state, which is
-    // why it is quantified across all stored certificates.
+    // why it is quantified across the honest network's combined stores.
+    //
+    // Evidence is counted symmetrically in both forms -- a raw quorum of votes (>= L notarize
+    // or >= M nullify) or an assembled certificate -- across the union of all correct
+    // replicas' votes and certificates, mirroring
+    // `no_nullification_and_finalization_in_the_same_view`. Counting votes as well as
+    // certificates makes the check fire as soon as the honest network holds a quorum, before
+    // any certificate is assembled, and keeps it meaningful even if a future change let an
+    // unbacked certificate reach a store.
     val no_nullification_and_finalization_globally = {
         val all_certs = CORRECT.fold(Set(), (acc, id) => acc.union(store_certificate.get(id)))
-        val nullified = all_certs
-            .filter(c => cert_kind(c) == NullificationKind)
-            .map(c => cert_view(c))
-        val finalized = all_certs
-            .filter(c => cert_kind(c) == FinalizationKind)
-            .map(c => cert_view(c))
+        val all_votes = CORRECT.fold(Set(), (acc, id) => acc.union(store_vote.get(id)))
+        val nullified = VIEWS.filter(v => or {
+            is_view_nullified_votes(v, all_votes),   // >= M nullify votes
+            is_view_nullified(v, all_certs),         // a NullificationKind cert
+        })
+        val finalized = VIEWS.filter(v => or {
+            is_view_finalized_votes(v, all_votes),   // >= L notarize votes
+            is_view_finalized(v, all_certs),         // a FinalizationKind cert
+        })
         nullified.intersect(finalized) == Set()
     }
 
