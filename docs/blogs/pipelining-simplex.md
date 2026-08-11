@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-Network latency does not have to set the pace of new blocks.
+Network latency no longer has to pace new blocks.
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they let Simplex produce new blocks without waiting for network round trips.
 
@@ -106,7 +106,7 @@ We ran Alto with 50 validators spread evenly across ten AWS regions worldwide. W
 
 The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
 
-We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At that cadence, about 60 more blocks could be proposed while the first block finalized.
+We measured finality from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms, including indexer and WebSocket delivery. At that cadence, about 60 more blocks could be proposed while the first block finalized.
 
 ## Where the Pipeline Fits
 

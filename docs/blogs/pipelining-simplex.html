@@ -92,8 +92,7 @@ blocks per second, with a median of 5ms between blocks." />
 Chou</a></div>
                         <div class="date">August 10th, 2026</div>
         </div>
-        <p>Network latency does not have to set the pace of new
-        blocks.</p>
+        <p>Network latency no longer has to pace new blocks.</p>
         <p>Today, we’re introducing <a
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> and <a
@@ -232,12 +231,11 @@ Chou</a></div>
         <p>The blocks were light: headers only, with no transactions or
         execution. The goal was to measure consensus cadence, not
         transaction throughput.</p>
-        <p>We measured finality separately, from the leader-stamped
-        proposal time until an external observer received its
-        finalization certificate. The median was 300ms. That path
-        includes indexer and WebSocket delivery. At that cadence, about
-        60 more blocks could be proposed while the first block
-        finalized.</p>
+        <p>We measured finality from the leader-stamped proposal time
+        until an external observer received its finalization
+        certificate. The median was 300ms, including indexer and
+        WebSocket delivery. At that cadence, about 60 more blocks could
+        be proposed while the first block finalized.</p>
         <h2 id="where-the-pipeline-fits">Where the Pipeline Fits</h2>
         <p>More views per second put more load on execution, storage,
         proposal verification, and network bandwidth. Pipelining does
