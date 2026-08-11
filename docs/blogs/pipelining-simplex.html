@@ -174,11 +174,9 @@ Chou</a></div>
         <p>Without Optimistic Validation, the stable leader waits for
         view <code>v</code> to be notarized before proposing view
         <code>v+1</code>. Other validators also wait for that
-        notarization before voting to notarize <code>v+1</code>. Forming
-        the notarization requires votes to cross the network. The child
-        must then cross the network before other validators can vote.
-        Even without a leader handoff, network latency paces each
-        view.</p>
+        notarization before voting to notarize <code>v+1</code>. This
+        leaves a network round between consecutive views, so network
+        latency still paces each view.</p>
         <p>With Optimistic Validation, the leader can start
         <code>v+1</code> after it builds and votes for <code>v</code>. A
         validator that checked and voted for <code>v</code> can also
