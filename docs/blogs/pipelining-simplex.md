@@ -87,13 +87,13 @@ With Optimistic Validation, validators can vote to notarize the child as soon as
 The child can therefore be proposed and voted on while the parent's notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. These waits for network messages can overlap, but every validator still performs the local verification and application work for each block.
 
 ```{=html}
-<div id="simplex-fig-validation" class="simplex-loop simplex-loop-validation" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.">
-  <noscript>Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, each child view starts when the parent is notarized. With Optimistic Validation, three child views start in that same interval while earlier blocks continue toward finalization.</noscript>
+<div id="simplex-fig-validation" class="simplex-loop simplex-loop-validation" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, validators wait for each parent notarization before voting in the child view. With Optimistic Validation, three child views start during the same network interval while earlier blocks continue toward finalization.">
+  <noscript>Red blocks are proposed, gray blocks with one check are notarized, and green blocks with two checks are finalized. With Stable Leader alone, validators wait for each parent notarization before voting in the child view. With Optimistic Validation, three child views start during the same network interval while earlier blocks continue toward finalization.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 3: Arrows show the network messages for notarization and finalization. Stable Leader spaces views one hop apart; Optimistic Validation starts three in the same interval.
+Figure 3: Without optimism, validators wait for the parent notarization before voting in the next view. Optimistic Validation starts three views during the same network interval.
 :::
 
 ## How Optimism Stays Safe
@@ -109,13 +109,13 @@ The term boundary is also a leader handoff, so optimistic work stops there. The 
 Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
 
 ```{=html}
-<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues offscreen.">
-  <noscript>View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues.</noscript>
+<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Validators nullify view three. Optimistic proposals in views four and five are discarded, and views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues offscreen.">
+  <noscript>View one is finalized, view two is notarized, and view three times out. Validators nullify view three. Optimistic proposals in views four and five are discarded, and views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 4: When v3 times out, later proposals are discarded and the rest of the term is skipped. In the next term, v9 builds on v2 and the pipeline resumes.
+Figure 4: When v3 times out, validators nullify it. Later proposals are discarded, and the rest of the term is skipped. In the next term, v9 builds on v2 and the pipeline resumes.
 :::
 
 ## Where the Pipeline Fits

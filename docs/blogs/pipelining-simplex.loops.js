@@ -181,7 +181,7 @@ function buildCadence(mount) {
     squares.push(square);
   }
 
-  addText(svg, 512, 378, '5ms is faster than a typical screen refresh', {
+  addText(svg, 512, 378, 'A 5ms interval is shorter than a typical screen refresh', {
     'text-anchor': 'middle',
     fill: GRAY,
   });
@@ -360,7 +360,7 @@ function buildValidation(mount) {
     lanes.forEach(([label, y]) => {
       addText(svg, 125, y + 5, label, {
         'text-anchor': 'end',
-        'font-size': 13,
+        'font-size': 16,
         fill: GRAY,
       });
       addLine(svg, 145, y, 976, y, {
@@ -671,7 +671,7 @@ function buildRecovery(mount) {
   });
   animated.push(addReveal(unproposedLabel, 0.68, 0.03));
 
-  const skipLabel = addText(svg, 575, 290, 'nullify rest of term', {
+  const skipLabel = addText(svg, 575, 290, 'nullify v3; skip rest of term', {
     'text-anchor': 'middle',
     fill: BLUE,
     opacity: 0,
