@@ -135,11 +135,6 @@ Chou</a></div>
         20 by 10 grid fills in one second. Alto sustained about 200
         successful views per second.</p>
         </div>
-        <p>A separate capture measured 300ms median latency from the
-        leader-stamped block timestamp until an external observer
-        received its finalization certificate. The two measurements
-        describe different clocks. At 5ms per view, one 300ms
-        observer-latency window spans about 60 view intervals.</p>
         <p>The pipeline keeps new views moving while earlier blocks
         finish. Once data reaches the leader, it gets another ordering
         opportunity after one block interval.</p>
@@ -175,8 +170,6 @@ Chou</a></div>
         view. A stable leader extends its own chain and pays the handoff
         cost once per term.</p>
         </div>
-        <p>Every validator must use the same term length. Stable terms
-        currently work with round-robin leader election.</p>
         <p>Stable leadership removes the proposer handoff. The next
         proposal and votes can still wait for the parent
         notarization.</p>
@@ -282,8 +275,11 @@ Chou</a></div>
         </tr>
         </tbody>
         </table>
-        <p>The finality measurement includes indexer and WebSocket
-        delivery to the external observer.</p>
+        <p>A separate capture measured 300ms median latency from the
+        leader-stamped block timestamp until an external observer
+        received its finalization certificate. This measurement includes
+        indexer and WebSocket delivery. At 5ms per view, one 300ms
+        observer-latency window spans about 60 view intervals.</p>
         <h2 id="choose-the-pipeline">Choose the Pipeline</h2>
         <p>Start with the stage that limits your view rate. Alto’s
         settings are an example, not a default.</p>
@@ -319,10 +315,8 @@ Chou</a></div>
         </tr>
         </tbody>
         </table>
-        <p>Stable Leader reduces handoff latency. Optimistic Validation
-        removes the wait for parent notarizations from the path to the
-        next proposal and votes. Neither feature makes a slower stage
-        process more work per second.</p>
+        <p>Neither feature makes a slower application, storage layer, or
+        network process more work per second.</p>
         <p>Longer terms amortize more handoffs, but give one leader more
         consecutive proposals. Networks that rely on proposer rotation
         for censorship resistance should use shorter terms. Alto’s
@@ -335,12 +329,8 @@ Chou</a></div>
         selectively censoring transactions.</p>
         <p>The combined configuration fits networks with reliable
         connectivity and enough CPU and memory for many in-flight views.
-        Application checks must run concurrently, and transactions or
-        block references still need a reliable path to the current
-        leader.</p>
-        <p>A rotating leader or smaller lookahead may fit better when
-        validators are heterogeneous, leaders frequently fail, or
-        proposer rotation is an important censorship defense.</p>
+        A rotating leader or smaller lookahead may fit better when
+        validators are heterogeneous or leaders frequently fail.</p>
         <p>Stable leadership keeps the leader on the transaction data
         path for the whole term. Networks that need concurrent
         dissemination from many producers can combine this pipeline with

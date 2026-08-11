@@ -48,8 +48,6 @@ In a global [Alto](https://alto.commonware.xyz) deployment with 50 validators, t
 Figure 1: Each square represents one 5ms target interval. A 20 by 10 grid fills in one second. Alto sustained about 200 successful views per second.
 :::
 
-A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. The two measurements describe different clocks. At 5ms per view, one 300ms observer-latency window spans about 60 view intervals.
-
 The pipeline keeps new views moving while earlier blocks finish. Once data reaches the leader, it gets another ordering opportunity after one block interval.
 
 A *view* is one opportunity for a leader to propose a block. Validators check and vote on the proposal. The application finishes any remaining work before finalization.
@@ -73,8 +71,6 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 ::: {.image-caption}
 Figure 2: Round-robin rotation changes the proposer every view. A stable leader extends its own chain and pays the handoff cost once per term.
 :::
-
-Every validator must use the same term length. Stable terms currently work with round-robin leader election.
 
 Stable leadership removes the proposer handoff. The next proposal and votes can still wait for the parent notarization.
 
@@ -125,7 +121,7 @@ Here are the relevant configuration and results for the 50-validator Alto run:
 | Median block spacing | 5ms in each reporting window |
 | External-observer finality | p50 300ms / p99 376ms (`n=3,736`) |
 
-The finality measurement includes indexer and WebSocket delivery to the external observer.
+A separate capture measured 300ms median latency from the leader-stamped block timestamp until an external observer received its finalization certificate. This measurement includes indexer and WebSocket delivery. At 5ms per view, one 300ms observer-latency window spans about 60 view intervals.
 
 ## Choose the Pipeline
 
@@ -137,15 +133,13 @@ Start with the stage that limits your view rate. Alto's settings are an example,
 | Waiting for parent notarizations | Add Optimistic Validation | More speculative CPU and memory |
 | Application checks, execution, storage, proposal checks, or dissemination capacity | Improve that stage first | A deeper window will fill |
 
-Stable Leader reduces handoff latency. Optimistic Validation removes the wait for parent notarizations from the path to the next proposal and votes. Neither feature makes a slower stage process more work per second.
+Neither feature makes a slower application, storage layer, or network process more work per second.
 
 Longer terms amortize more handoffs, but give one leader more consecutive proposals. Networks that rely on proposer rotation for censorship resistance should use shorter terms. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence.
 
 If a leader stops making progress, validators vote to skip the rest of the term. A term-wide stall timeout also covers a leader that keeps views moving without finalizing blocks. These controls do not remove a leader that finalizes blocks while selectively censoring transactions.
 
-The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Application checks must run concurrently, and transactions or block references still need a reliable path to the current leader.
-
-A rotating leader or smaller lookahead may fit better when validators are heterogeneous, leaders frequently fail, or proposer rotation is an important censorship defense.
+The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. A rotating leader or smaller lookahead may fit better when validators are heterogeneous or leaders frequently fail.
 
 Stable leadership keeps the leader on the transaction data path for the whole term. Networks that need concurrent dissemination from many producers can combine this pipeline with another design. [Multimmit](/blogs/multimmit) describes one such approach.
 
