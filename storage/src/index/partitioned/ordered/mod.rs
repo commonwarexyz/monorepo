@@ -671,11 +671,27 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             {
                 at += 1;
             }
-            if at > *bounds.last().expect("bounds is non-empty") && at < diffs.len() {
+            if at >= diffs.len() {
+                // A run reaching the end of `diffs` can never host a later
+                // bound, and it would otherwise be rescanned from every
+                // remaining target.
+                break;
+            }
+            if at > *bounds.last().expect("bounds is non-empty") {
                 bounds.push(at);
             }
         }
         bounds.push(diffs.len());
+
+        // Boundary snapping can collapse everything into a single shard (e.g.
+        // one partition dominating the batch); no parallelism is possible, so
+        // skip the fan-out machinery.
+        if bounds.len() == 2 {
+            for &(key, old, new) in diffs {
+                crate::index::apply_one_diff(self, key, old, new);
+            }
+            return;
+        }
 
         // Partition ranges per shard (for carving the partition array), then
         // the spilled entries each shard owns for the duration of the fan-out.
@@ -1960,6 +1976,46 @@ mod tests {
             let (shards, multiplier) = calls[0];
             assert!(shards > 1, "fan-out should have sharded (got {shards})");
             assert_eq!(multiplier, diffs.len() / shards);
+        });
+    }
+
+    /// A batch concentrated in one partition collapses to a single shard after
+    /// boundary snapping: the apply must fall back to the sequential path
+    /// (no fan-out call) and still produce correct results.
+    #[test_traced]
+    fn apply_sorted_diffs_single_partition_batch_falls_back() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut index =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("index"), OneCap, 1024);
+            let mut keys: Vec<[u8; 2]> = Vec::new();
+            for lo in 0u8..=255 {
+                keys.push([7, lo]);
+            }
+            for (n, key) in keys.iter().enumerate() {
+                index.insert(key, n as u64);
+            }
+            let mut diffs: Vec<(&[u8], Option<u64>, Option<u64>)> = Vec::new();
+            for (n, key) in keys.iter().enumerate() {
+                diffs.push((key.as_slice(), Some(n as u64), Some(n as u64 + 10_000)));
+            }
+            diffs.sort_by(|a, b| a.0.cmp(b.0));
+
+            let strategy = RecordingStrategy::new();
+            index.apply_sorted_diffs(&strategy, &diffs);
+
+            assert!(
+                strategy
+                    .multiplier_calls
+                    .lock()
+                    .expect("lock poisoned")
+                    .is_empty(),
+                "single-partition batch must not fan out"
+            );
+            for (n, key) in keys.iter().enumerate() {
+                let got: Vec<u64> = index.get(key).copied().collect();
+                assert_eq!(got, vec![n as u64 + 10_000], "key {key:?}");
+            }
         });
     }
 }
