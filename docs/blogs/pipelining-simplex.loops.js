@@ -309,8 +309,6 @@ function buildValidation(mount) {
     animated.push(addArrow(svg, notarizedX + 9, 322, finalizedX - 9, 375, BLUE, 0.23 + index * 0.075, 0.11));
     animated.push(addReveal(finalized, 0.34 + index * 0.075));
   }
-  const note = addText(svg, 968, 415, 'notarization and finalization remain pipelined', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
-  animated.push(addReveal(note, 0.73));
   return animated;
 }
 

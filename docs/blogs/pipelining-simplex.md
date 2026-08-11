@@ -90,11 +90,11 @@ Figure 3: Optimistic Validation packs new views closer together while notarizati
 
 ## How Optimism Stays Safe
 
-*Optimistic* describes when a participant starts the next view. It does not weaken the evidence required for finalization.
+*Optimistic* means a participant can vote to notarize a proposal before it receives notarizations for every ancestor in the term. It does not weaken the evidence required for finalization.
 
 Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish checks such as confirming that enough erasure-coded data is available.
 
-A participant works ahead only after it has voted for the parent, or when it holds usable quorum proof. The same rule applies to every optimistic ancestor. A validator still waits for the parent to be certified before certifying a child or voting to finalize it. If an ancestor fails to notarize or certify, optimistic votes above it become inert. Validators then abandon that part of the term through the normal timeout path.
+For every ancestor in the term, a participant must have either voted for it or obtained usable quorum proof. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If an ancestor fails to notarize or certify, optimistic votes above it become inert. Validators then abandon that part of the term through the normal timeout path.
 
 Optimistic work stops at the term boundary. The first view of a new term must start from certified ancestry.
 
