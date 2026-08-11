@@ -1,0 +1,889 @@
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const DESIGN_W = 800;
+
+const RED = '#d9251c';
+const BLUE = '#1f1fd1';
+const PURPLE = '#7427a8';
+const GREEN = '#087a35';
+const GRAY = '#6b7280';
+const PALE_BLUE = '#eeeeff';
+const PALE_GREEN = '#e9f5ec';
+const PALE_RED = '#fff1ef';
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const range = (time, start, end) => clamp((time - start) / (end - start), 0, 1);
+const ease = value => 1 - Math.pow(1 - value, 3);
+
+function svgEl(name, attrs = {}) {
+  const element = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
+  return element;
+}
+
+function addText(parent, x, y, value, attrs = {}) {
+  const element = svgEl('text', {
+    x,
+    y,
+    fill: '#111111',
+    'font-size': 17,
+    ...attrs,
+  });
+  element.textContent = value;
+  parent.appendChild(element);
+  return element;
+}
+
+function addLines(parent, x, y, lines, attrs = {}) {
+  const element = svgEl('text', {
+    x,
+    y,
+    fill: '#111111',
+    'font-size': 16,
+    'text-anchor': 'middle',
+    ...attrs,
+  });
+  lines.forEach((line, index) => {
+    const span = svgEl('tspan', { x, dy: index === 0 ? 0 : 19 });
+    span.textContent = line;
+    element.appendChild(span);
+  });
+  parent.appendChild(element);
+  return element;
+}
+
+function addPatterns(svg, prefix) {
+  const defs = svgEl('defs');
+  const checked = svgEl('pattern', {
+    id: `${prefix}-checked`,
+    width: 9,
+    height: 9,
+    patternUnits: 'userSpaceOnUse',
+    patternTransform: 'rotate(45)',
+  });
+  checked.appendChild(svgEl('rect', { width: 9, height: 9, fill: '#fff7f6' }));
+  checked.appendChild(svgEl('line', {
+    x1: 0,
+    y1: 0,
+    x2: 0,
+    y2: 9,
+    stroke: RED,
+    'stroke-width': 3,
+  }));
+
+  const restored = svgEl('pattern', {
+    id: `${prefix}-restored`,
+    width: 9,
+    height: 9,
+    patternUnits: 'userSpaceOnUse',
+    patternTransform: 'rotate(45)',
+  });
+  restored.appendChild(svgEl('rect', { width: 9, height: 9, fill: '#fbf6fd' }));
+  restored.appendChild(svgEl('line', {
+    x1: 0,
+    y1: 0,
+    x2: 0,
+    y2: 9,
+    stroke: PURPLE,
+    'stroke-width': 3,
+  }));
+
+  defs.append(checked, restored);
+  svg.appendChild(defs);
+  return {
+    checked: `url(#${prefix}-checked)`,
+    restored: `url(#${prefix}-restored)`,
+  };
+}
+
+function createSvg(mount, height) {
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${DESIGN_W} ${height}`,
+    class: 'cw-rs-svg',
+    role: 'img',
+  });
+  if (mount.getAttribute('aria-label')) {
+    svg.setAttribute('aria-label', mount.getAttribute('aria-label'));
+  }
+  return svg;
+}
+
+function makeArrow(parent, x0, y0, x1, y1, color = BLUE, width = 2.6) {
+  const length = Math.hypot(x1 - x0, y1 - y0);
+  const line = svgEl('line', {
+    x1: x0,
+    y1: y0,
+    x2: x1,
+    y2: y1,
+    stroke: color,
+    'stroke-width': width,
+    'stroke-linecap': 'round',
+    'stroke-dasharray': length,
+    'stroke-dashoffset': length,
+    opacity: 0,
+  });
+  const unitX = (x1 - x0) / (length || 1);
+  const unitY = (y1 - y0) / (length || 1);
+  const size = 9;
+  const backX = x1 - unitX * size;
+  const backY = y1 - unitY * size;
+  const half = size * 0.45;
+  const head = svgEl('polygon', {
+    points: `${x1},${y1} ${backX - unitY * half},${backY + unitX * half} ${backX + unitY * half},${backY - unitX * half}`,
+    fill: color,
+    opacity: 0,
+  });
+  parent.append(line, head);
+  return {
+    set(value) {
+      const fraction = clamp(value, 0, 1);
+      line.setAttribute('stroke-dashoffset', length * (1 - fraction));
+      line.setAttribute('opacity', fraction > 0 ? 1 : 0);
+      head.setAttribute('opacity', fraction > 0.98 ? 1 : 0);
+    },
+  };
+}
+
+function addLegendItem(parent, x, y, fill, stroke, dash, label) {
+  parent.appendChild(svgEl('rect', {
+    x,
+    y: y - 13,
+    width: 28,
+    height: 16,
+    fill,
+    stroke,
+    'stroke-width': 1.7,
+    'stroke-dasharray': dash,
+  }));
+  addText(parent, x + 36, y, label, { 'font-size': 14, fill: GRAY });
+}
+
+function makeShardRow(parent, patterns, x, y, width, label, provided, options = {}) {
+  if (options.showLabel ?? true) {
+    addText(parent, x - 20, y + 16, label, {
+      'font-size': 15,
+      'font-weight': 600,
+      'text-anchor': 'end',
+    });
+  }
+  const segmentCount = options.segmentCount ?? 12;
+  const segmentGap = 2.5;
+  const segmentWidth = (width - segmentGap * (segmentCount - 1)) / segmentCount;
+  const bases = [];
+  const fills = [];
+
+  for (let index = 0; index < segmentCount; index++) {
+    const segmentX = x + index * (segmentWidth + segmentGap);
+    const base = svgEl('rect', {
+      x: segmentX,
+      y,
+      width: segmentWidth,
+      height: 22,
+      rx: 1,
+      fill: provided ? patterns.checked : 'white',
+      stroke: provided ? RED : GRAY,
+      'stroke-width': 1.6,
+      'stroke-dasharray': provided ? 'none' : '5 3',
+    });
+    parent.appendChild(base);
+    bases.push(base);
+
+    if (!provided) {
+      const fill = svgEl('rect', {
+        x: segmentX,
+        y,
+        width: 0,
+        height: 22,
+        rx: 1,
+        fill: patterns.restored,
+      });
+      parent.appendChild(fill);
+      fills.push(fill);
+    }
+  }
+
+  if (provided) return { set() {} };
+
+  return {
+    set(value) {
+      const fraction = clamp(value, 0, 1);
+      fills.forEach((fill, index) => {
+        const progress = clamp(fraction * segmentCount - index, 0, 1);
+        fill.setAttribute('width', segmentWidth * progress);
+        bases[index].setAttribute('stroke', progress >= 1 ? PURPLE : GRAY);
+        bases[index].setAttribute('stroke-dasharray', progress >= 1 ? 'none' : '5 3');
+        bases[index].setAttribute('stroke-width', progress >= 1 ? 1.8 : 1.6);
+      });
+    },
+  };
+}
+
+function buildStripingFigure(mount) {
+  const height = 690;
+  const svg = createSvg(mount, height);
+  const patterns = addPatterns(svg, 'cw-rs-striping');
+  const layer = svgEl('g');
+  svg.appendChild(layer);
+
+  layer.appendChild(svgEl('rect', {
+    x: 10, y: 10, width: 780, height: 260, rx: 8,
+    fill: '#fcfcfc', stroke: '#e5e7eb',
+  }));
+  layer.appendChild(svgEl('rect', {
+    x: 10, y: 285, width: 780, height: 390, rx: 8,
+    fill: '#fcfcfc', stroke: '#e5e7eb',
+  }));
+
+  addText(layer, 25, 38, 'Before: one full-width recovery job', {
+    'font-size': 20,
+    'font-weight': 700,
+  });
+
+  const states = [true, false, true, true];
+  const labels = ['D0', 'D1', 'D2', 'R0'];
+  const gridX = 82;
+  const gridWidth = 600;
+  const beforeJob = svgEl('rect', {
+    x: 68, y: 53, width: 628, height: 146, rx: 10,
+    fill: '#fcfcfc', stroke: BLUE, 'stroke-width': 1.6,
+  });
+  layer.appendChild(beforeJob);
+  addPill(layer, 314, 48, 172, '1 RS job · full width', BLUE, PALE_BLUE);
+  const beforeRows = labels.map((label, index) =>
+    makeShardRow(layer, patterns, gridX, 76 + index * 29, gridWidth, label, states[index])
+  );
+
+  const playhead = svgEl('line', {
+    x1: gridX, y1: 72, x2: gridX, y2: 190,
+    stroke: BLUE, 'stroke-width': 3, opacity: 0,
+  });
+  layer.appendChild(playhead);
+  addLegendItem(layer, 82, 220, patterns.checked, RED, 'none', 'provided + checked');
+  addLegendItem(layer, 300, 220, 'white', GRAY, '6 4', 'missing D1');
+  addLegendItem(layer, 430, 220, patterns.restored, PURPLE, 'none', 'recovered D1');
+  addText(layer, 775, 220, 'D: original · R: recovery', {
+    'font-size': 12,
+    fill: GRAY,
+    'text-anchor': 'end',
+  });
+
+  addText(layer, 25, 315, 'After: aligned stripes become independent jobs', {
+    'font-size': 20,
+    'font-weight': 700,
+  });
+  const gridY = 373;
+  const jobGap = 14;
+  const jobWidth = (gridWidth - jobGap * 2) / 3;
+
+  const jobLayer = svgEl('g', { opacity: 0 });
+  layer.appendChild(jobLayer);
+  const jobRects = [];
+  for (let index = 0; index < 3; index++) {
+    const start = gridX + index * (jobWidth + jobGap);
+    const rect = svgEl('rect', {
+      x: start - 5, y: 342, width: jobWidth + 10, height: 143, rx: 8,
+      fill: '#fcfcfc', stroke: BLUE, 'stroke-width': 1.5,
+    });
+    jobLayer.appendChild(rect);
+    jobRects.push(rect);
+    addPill(
+      jobLayer,
+      start + jobWidth / 2 - 49,
+      345,
+      98,
+      `RS job ${index}`,
+      BLUE,
+      PALE_BLUE,
+    );
+  }
+  addText(jobLayer, 382, 336, 'non-final cuts · 64-byte aligned', {
+    'font-size': 11,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+
+  const afterRows = [];
+  for (let job = 0; job < 3; job++) {
+    const start = gridX + job * (jobWidth + jobGap);
+    labels.forEach((label, row) => {
+      afterRows.push(makeShardRow(
+        layer,
+        patterns,
+        start,
+        gridY + row * 26,
+        jobWidth,
+        label,
+        states[row],
+        { segmentCount: 4, showLabel: job === 0 },
+      ));
+    });
+  }
+
+  const pieces = [];
+  const finalPieceXs = [140, 300, 460];
+  for (let index = 0; index < 3; index++) {
+    const center = gridX + index * (jobWidth + jobGap) + jobWidth / 2;
+    const startX = center - 80;
+    const piece = svgEl('g', { opacity: 0 });
+    piece.appendChild(svgEl('rect', {
+      x: startX,
+      y: 505,
+      width: 160,
+      height: 24,
+      fill: patterns.restored,
+      stroke: PURPLE,
+      'stroke-width': 1.8,
+    }));
+    addText(piece, startX + 80, 522, index === 2 ? 'D1 · final stripe' : `D1 · stripe ${index}`, {
+      'font-size': 11,
+      'font-weight': 700,
+      'text-anchor': 'middle',
+    });
+    layer.appendChild(piece);
+    pieces.push({
+      group: piece,
+      dx: finalPieceXs[index] - startX,
+    });
+  }
+  const assembledLabel = addText(layer, 130, 642, 'D1', {
+    'font-size': 15,
+    'font-weight': 700,
+    'text-anchor': 'end',
+    opacity: 0,
+  });
+  const equalityLabel = addText(layer, 632, 642, '= full-width D1', {
+    'font-size': 14,
+    'font-weight': 700,
+    fill: GREEN,
+    opacity: 0,
+  });
+
+  function render(time) {
+    const before = ease(range(time, 0.5, 2.4));
+    beforeRows.forEach(row => row.set(before));
+    beforeJob.setAttribute('fill', before > 0 && before < 1 ? PALE_BLUE : '#fcfcfc');
+    beforeJob.setAttribute('stroke-width', before > 0 && before < 1 ? 2.6 : 1.6);
+    playhead.setAttribute('x1', gridX + gridWidth * before);
+    playhead.setAttribute('x2', gridX + gridWidth * before);
+    playhead.setAttribute('opacity', before > 0 && before < 1 ? 0.85 : 0);
+
+    const reveal = ease(range(time, 2.7, 3.35));
+    jobLayer.setAttribute('opacity', reveal);
+
+    const striped = ease(range(time, 3.45, 5.05));
+    afterRows.forEach(row => row.set(striped));
+    jobRects.forEach(rect => {
+      rect.setAttribute('fill', striped > 0 && striped < 1 ? PALE_BLUE : '#fcfcfc');
+      rect.setAttribute('stroke-width', striped > 0 && striped < 1 ? 2.5 : 1.5);
+    });
+
+    const output = ease(range(time, 4.75, 5.15));
+    pieces.forEach(piece => piece.group.setAttribute('opacity', output));
+
+    const assembly = ease(range(time, 5.15, 5.9));
+    pieces.forEach(piece => {
+      piece.group.setAttribute('transform', `translate(${piece.dx * assembly} ${120 * assembly})`);
+    });
+    const equal = ease(range(time, 5.75, 6.05));
+    assembledLabel.setAttribute('opacity', equal);
+    equalityLabel.setAttribute('opacity', equal);
+  }
+
+  render(0);
+  return { svg, duration: 6.1, render };
+}
+
+function addShardChip(parent, x, y, label, patterns, state, options = {}) {
+  const width = options.width ?? 31;
+  const height = options.height ?? 31;
+  const styles = {
+    checked: { fill: patterns.checked, stroke: RED, dash: 'none', opacity: 1 },
+    missing: { fill: 'white', stroke: GRAY, dash: '5 3', opacity: 1 },
+    recovered: { fill: patterns.restored, stroke: PURPLE, dash: 'none', opacity: 1 },
+    hidden: { fill: patterns.restored, stroke: GRAY, dash: '5 3', opacity: 0.55 },
+  }[state];
+  const group = svgEl('g', { opacity: styles.opacity });
+  group.appendChild(svgEl('rect', {
+    x,
+    y,
+    width,
+    height,
+    rx: 3,
+    fill: styles.fill,
+    stroke: styles.stroke,
+    'stroke-width': 1.7,
+    'stroke-dasharray': styles.dash,
+  }));
+  if (state === 'hidden') {
+    group.appendChild(svgEl('line', {
+      x1: x + 4,
+      y1: y + 4,
+      x2: x + width - 4,
+      y2: y + height - 4,
+      stroke: GRAY,
+      'stroke-width': 2,
+    }));
+  }
+  addText(group, x + width / 2, y + height / 2 + 5, label, {
+    'font-size': options.fontSize ?? 13,
+    'font-weight': 700,
+    'text-anchor': 'middle',
+  });
+  parent.appendChild(group);
+  return group;
+}
+
+function addShardSet(parent, x, y, patterns, items, options = {}) {
+  const group = svgEl('g', { opacity: options.opacity ?? 1 });
+  const width = options.width ?? 31;
+  const height = options.height ?? 31;
+  const gap = options.gap ?? 4;
+  const totalWidth = items.length * width + (items.length - 1) * gap;
+  if (options.label) {
+    addText(group, x + totalWidth / 2, y - 9, options.label, {
+      'font-size': options.labelSize ?? 12,
+      fill: options.labelFill ?? GRAY,
+      'text-anchor': 'middle',
+    });
+  }
+  items.forEach((item, index) => {
+    addShardChip(
+      group,
+      x + index * (width + gap),
+      y,
+      item.label,
+      patterns,
+      item.state,
+      { width, height, fontSize: options.fontSize },
+    );
+  });
+  parent.appendChild(group);
+  return group;
+}
+
+function makeTransformNode(parent, cx, cy, lines, color, activeFill) {
+  const group = svgEl('g');
+  const core = svgEl('circle', {
+    cx,
+    cy,
+    r: 35,
+    fill: 'white',
+    stroke: color,
+    'stroke-width': 2,
+  });
+  const ring = svgEl('circle', {
+    cx,
+    cy,
+    r: 40,
+    fill: 'none',
+    stroke: color,
+    'stroke-width': 2.5,
+    'stroke-dasharray': '20 9',
+    opacity: 0.28,
+  });
+  group.append(core, ring);
+  addLines(group, cx, cy - ((lines.length - 1) * 14) / 2 + 4, lines, {
+    'font-size': 12,
+    'font-weight': 700,
+    'text-anchor': 'middle',
+  });
+  parent.appendChild(group);
+  return {
+    setActive(value) {
+      const progress = clamp(value, 0, 1);
+      const active = progress > 0 && progress < 1;
+      core.setAttribute('fill', active ? activeFill : 'white');
+      ring.setAttribute('opacity', active ? 0.95 : 0.28);
+      ring.setAttribute('transform', `rotate(${progress * 300} ${cx} ${cy})`);
+    },
+  };
+}
+
+function makeRootNode(parent, cx, cy) {
+  const group = svgEl('g', { opacity: 0 });
+  const circle = svgEl('circle', {
+    cx,
+    cy,
+    r: 32,
+    fill: 'white',
+    stroke: GREEN,
+    'stroke-width': 2.2,
+  });
+  const check = svgEl('path', {
+    d: `M ${cx - 14} ${cy} l 9 9 l 19 -21`,
+    fill: 'none',
+    stroke: GREEN,
+    'stroke-width': 4,
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+  });
+  group.append(circle, check);
+  addText(group, cx, cy + 51, 'same root', {
+    'font-size': 12,
+    'font-weight': 700,
+    fill: GREEN,
+    'text-anchor': 'middle',
+  });
+  parent.appendChild(group);
+  return {
+    setActive(value) {
+      const progress = clamp(value, 0, 1);
+      group.setAttribute('opacity', progress <= 0 ? 0 : Math.min(1, progress * 4));
+      circle.setAttribute('fill', progress > 0 && progress < 1 ? PALE_GREEN : 'white');
+      circle.setAttribute('stroke-width', progress > 0 && progress < 1 ? 3 : 2.2);
+    },
+  };
+}
+
+function addPill(parent, x, y, width, label, color, fill) {
+  parent.appendChild(svgEl('rect', {
+    x,
+    y,
+    width,
+    height: 24,
+    rx: 12,
+    fill,
+    stroke: color,
+    'stroke-width': 1.4,
+  }));
+  addText(parent, x + width / 2, y + 17, label, {
+    'font-size': 12,
+    'font-weight': 700,
+    fill: color,
+    'text-anchor': 'middle',
+  });
+}
+
+function makeMovingShard(parent, patterns, label, fromX, fromY, toX, toY, state = 'recovered') {
+  const group = svgEl('g', { opacity: 0 });
+  addShardChip(group, fromX, fromY, label, patterns, state, {
+    width: 30,
+    height: 32,
+    fontSize: 12,
+  });
+  parent.appendChild(group);
+  return {
+    set(value) {
+      const progress = clamp(value, 0, 1);
+      group.setAttribute(
+        'transform',
+        `translate(${(toX - fromX) * progress} ${(toY - fromY) * progress})`,
+      );
+      const opacity = progress <= 0 ? 0 : Math.min(1, progress * 8);
+      group.setAttribute('opacity', opacity);
+    },
+  };
+}
+
+function buildRevealFigure(mount) {
+  const height = 510;
+  const svg = createSvg(mount, height);
+  const patterns = addPatterns(svg, 'cw-rs-reveal');
+  const layer = svgEl('g');
+  svg.appendChild(layer);
+
+  addText(layer, 20, 27, 'Reveal already-derived R1; skip one transform', {
+    'font-size': 20,
+    'font-weight': 700,
+  });
+  addText(layer, 20, 50, 'Both paths derive R1; reveal reuses it instead of deriving it again in encode.', {
+    'font-size': 13,
+    fill: GRAY,
+  });
+
+  layer.appendChild(svgEl('rect', {
+    x: 10, y: 65, width: 780, height: 190, rx: 8,
+    fill: '#fcfcfc', stroke: '#e5e7eb',
+  }));
+  layer.appendChild(svgEl('rect', {
+    x: 10, y: 270, width: 780, height: 190, rx: 8,
+    fill: '#fcfcfc', stroke: '#e5e7eb',
+  }));
+
+  addPill(layer, 25, 79, 68, 'BEFORE', RED, PALE_RED);
+  addText(layer, 108, 97, 'Decoder hides R1, so encode derives it again', {
+    'font-size': 17,
+    'font-weight': 700,
+  });
+  addShardSet(layer, 25, 144, patterns, [
+    { label: 'D0', state: 'checked' },
+    { label: 'D2', state: 'checked' },
+    { label: 'R0', state: 'checked' },
+  ], { width: 29, height: 32, gap: 3, label: 'checked inputs' });
+  const oldInputArrow = makeArrow(layer, 119, 160, 175, 160);
+  const oldDecode = makeTransformNode(layer, 220, 160, ['decode', 'D1 + R1'], BLUE, PALE_BLUE);
+
+  addText(layer, 345, 119, 'decode output', {
+    'font-size': 11,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+  layer.appendChild(svgEl('line', {
+    x1: 345, y1: 124, x2: 345, y2: 216,
+    stroke: GRAY, 'stroke-width': 1.5, 'stroke-dasharray': '5 4',
+  }));
+  addText(layer, 375, 135, 'returned', {
+    'font-size': 12,
+    fill: PURPLE,
+    'text-anchor': 'middle',
+  });
+  addText(layer, 320, 219, 'not returned', {
+    'font-size': 10,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+  const oldR1Arrow = makeArrow(layer, 249, 181, 300, 192);
+  const oldD1Arrow = makeArrow(layer, 258, 151, 355, 160);
+  const oldR1Mover = makeMovingShard(layer, patterns, 'R1', 260, 176, 305, 176, 'hidden');
+  const oldD1Mover = makeMovingShard(layer, patterns, 'D1', 260, 144, 360, 144);
+
+  addText(layer, 460, 118, 'D0 · D1 · D2', {
+    'font-size': 11,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+  const oldToEncode = makeArrow(layer, 390, 160, 415, 160);
+  const oldEncode = makeTransformNode(layer, 460, 160, ['encode', 'R0 + R1'], RED, PALE_RED);
+  const oldEncodeArrow = makeArrow(layer, 500, 160, 525, 160);
+  const oldCodeword = svgEl('g');
+  addText(oldCodeword, 598, 135, 'all 5 · checked + recovered', {
+    'font-size': 10,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+  addShardChip(oldCodeword, 530, 144, 'D0', patterns, 'checked', {
+    width: 25, height: 32, fontSize: 11,
+  });
+  addShardChip(oldCodeword, 586, 144, 'D2', patterns, 'checked', {
+    width: 25, height: 32, fontSize: 11,
+  });
+  addShardChip(oldCodeword, 614, 144, 'R0', patterns, 'checked', {
+    width: 25, height: 32, fontSize: 11,
+  });
+  layer.appendChild(oldCodeword);
+  const oldRecoveredPositions = svgEl('g', { opacity: 0 });
+  addShardChip(oldRecoveredPositions, 558, 144, 'D1', patterns, 'recovered', {
+    width: 25, height: 32, fontSize: 11,
+  });
+  addShardChip(oldRecoveredPositions, 642, 144, 'R1', patterns, 'recovered', {
+    width: 25, height: 32, fontSize: 11,
+  });
+  layer.appendChild(oldRecoveredPositions);
+  const oldRootArrow = makeArrow(layer, 671, 160, 695, 160, GREEN);
+  const oldRoot = makeRootNode(layer, 735, 160);
+  addPill(layer, 300, 226, 200, '2 RS transforms · redo R1', RED, PALE_RED);
+
+  addPill(layer, 25, 284, 52, 'NOW', GREEN, PALE_GREEN);
+  addText(layer, 92, 302, 'Decoder returns R1 with D1; encode disappears', {
+    'font-size': 17,
+    'font-weight': 700,
+  });
+  addShardSet(layer, 25, 349, patterns, [
+    { label: 'D0', state: 'checked' },
+    { label: 'D2', state: 'checked' },
+    { label: 'R0', state: 'checked' },
+  ], { width: 29, height: 32, gap: 3, label: 'checked inputs' });
+  const newInputArrow = makeArrow(layer, 119, 365, 175, 365);
+  const newDecode = makeTransformNode(layer, 220, 365, ['decode', 'D1 + R1'], BLUE, PALE_BLUE);
+
+  addText(layer, 345, 324, 'decode output', {
+    'font-size': 11,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+  layer.appendChild(svgEl('line', {
+    x1: 345, y1: 329, x2: 345, y2: 407,
+    stroke: GRAY, 'stroke-width': 1.5, 'stroke-dasharray': '5 4',
+  }));
+  const newRevealArrow = makeArrow(layer, 258, 365, 450, 365);
+  const codeword = svgEl('g');
+  addText(codeword, 536, 340, 'all 5 · checked + recovered', {
+    'font-size': 12,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+  addShardChip(codeword, 455, 349, 'D0', patterns, 'checked', {
+    width: 30, height: 32, fontSize: 11,
+  });
+  addShardChip(codeword, 521, 349, 'D2', patterns, 'checked', {
+    width: 30, height: 32, fontSize: 11,
+  });
+  addShardChip(codeword, 554, 349, 'R0', patterns, 'checked', {
+    width: 30, height: 32, fontSize: 11,
+  });
+  layer.appendChild(codeword);
+  const revealedPositions = svgEl('g', { opacity: 0 });
+  addShardChip(revealedPositions, 488, 349, 'D1', patterns, 'recovered', {
+    width: 30, height: 32, fontSize: 11,
+  });
+  addShardChip(revealedPositions, 587, 349, 'R1', patterns, 'recovered', {
+    width: 30, height: 32, fontSize: 11,
+  });
+  layer.appendChild(revealedPositions);
+  const newRootArrow = makeArrow(layer, 621, 365, 660, 365, GREEN);
+  const newRoot = makeRootNode(layer, 700, 365);
+  addPill(layer, 300, 431, 200, '1 RS transform · reuse R1', GREEN, PALE_GREEN);
+
+  addText(layer, 400, 500, 'All originals present? There is nothing to decode, so re-encode verification remains.', {
+    'font-size': 13,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+
+  function render(time) {
+    const oldDecodeProgress = ease(range(time, 0.35, 1.0));
+    oldInputArrow.set(oldDecodeProgress);
+    oldDecode.setActive(oldDecodeProgress);
+    const oldRevealProgress = ease(range(time, 0.9, 1.55));
+    oldD1Arrow.set(oldRevealProgress);
+    oldR1Arrow.set(oldRevealProgress);
+    oldD1Mover.set(oldRevealProgress);
+    oldR1Mover.set(oldRevealProgress);
+
+    const oldEncodeProgress = ease(range(time, 1.55, 2.25));
+    oldToEncode.set(oldEncodeProgress);
+    oldEncode.setActive(oldEncodeProgress);
+    const oldOutputProgress = ease(range(time, 2.15, 2.8));
+    oldEncodeArrow.set(oldOutputProgress);
+    oldRecoveredPositions.setAttribute('opacity', oldOutputProgress);
+    const oldVerifyProgress = ease(range(time, 2.75, 3.35));
+    oldRootArrow.set(oldVerifyProgress);
+    oldRoot.setActive(oldVerifyProgress);
+
+    const newDecodeProgress = ease(range(time, 3.65, 4.3));
+    newInputArrow.set(newDecodeProgress);
+    newDecode.setActive(newDecodeProgress);
+    const newRevealProgress = ease(range(time, 4.2, 4.85));
+    newRevealArrow.set(newRevealProgress);
+    revealedPositions.setAttribute('opacity', newRevealProgress);
+    const newVerifyProgress = ease(range(time, 4.8, 5.45));
+    newRootArrow.set(newVerifyProgress);
+    newRoot.setActive(newVerifyProgress);
+  }
+
+  render(0);
+  return { svg, duration: 6.1, render };
+}
+
+function injectStyles() {
+  if (document.getElementById('earn-your-stripes-style')) return;
+  const style = document.createElement('style');
+  style.id = 'earn-your-stripes-style';
+  style.textContent = `
+    .cw-rs-figure {
+      background: white;
+      overflow: hidden;
+    }
+
+    .cw-rs-svg {
+      background: white;
+      cursor: pointer;
+      display: block;
+      height: auto;
+      width: 100%;
+    }
+
+    .cw-rs-svg text {
+      font-family: monospace;
+      user-select: none;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function animateFigure(mount, build) {
+  if (typeof mount.cwDispose === 'function') mount.cwDispose();
+  mount.cwDispose = null;
+  const figure = build(mount);
+  mount.textContent = '';
+  mount.appendChild(figure.svg);
+
+  const freezeValue = new URLSearchParams(window.location.search).get('freeze');
+  const freeze = freezeValue === null ? null : Number(freezeValue);
+  if (Number.isFinite(freeze)) {
+    figure.render(clamp(freeze, 0, figure.duration));
+    return;
+  }
+
+  const startHold = 0.45;
+  const endHold = 1.1;
+  const cycle = startHold + figure.duration + endHold;
+  let epoch = performance.now();
+  let frameId = 0;
+  let visible = false;
+  let paused = false;
+  let pausedAt = 0;
+
+  function frame(now) {
+    frameId = 0;
+    const into = ((now - epoch) / 1000) % cycle;
+    figure.render(clamp(into - startHold, 0, figure.duration));
+    if (visible && !paused) frameId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (!frameId && visible && !paused) frameId = requestAnimationFrame(frame);
+  }
+
+  function togglePaused() {
+    paused = !paused;
+    if (paused) {
+      pausedAt = performance.now();
+      if (frameId) cancelAnimationFrame(frameId);
+      frameId = 0;
+    } else {
+      epoch += performance.now() - pausedAt;
+      start();
+    }
+  }
+
+  figure.svg.addEventListener('click', togglePaused);
+  const tooltip = svgEl('title');
+  tooltip.textContent = 'Click to pause';
+  figure.svg.appendChild(tooltip);
+
+  let observer = null;
+  if ('IntersectionObserver' in window) {
+    observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const wasVisible = visible;
+        visible = entry.isIntersecting;
+        if (visible && !wasVisible) {
+          epoch = performance.now();
+          paused = false;
+          figure.render(0);
+          start();
+        }
+        if (!visible && frameId) {
+          cancelAnimationFrame(frameId);
+          frameId = 0;
+        }
+      }
+    }, { threshold: 0.25 });
+    observer.observe(mount);
+  } else {
+    visible = true;
+    start();
+  }
+
+  mount.cwDispose = () => {
+    if (frameId) cancelAnimationFrame(frameId);
+    frameId = 0;
+    paused = true;
+    figure.svg.removeEventListener('click', togglePaused);
+    if (observer) observer.disconnect();
+  };
+}
+
+function init() {
+  injectStyles();
+  const figures = [
+    ['earn-your-stripes-fig-striping', buildStripingFigure],
+    ['earn-your-stripes-fig-reveal', buildRevealFigure],
+  ];
+  figures.forEach(([id, build]) => {
+    const mount = document.getElementById(id);
+    if (mount) animateFigure(mount, build);
+  });
+}
+
+init();
