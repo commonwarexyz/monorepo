@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use ahash::{AHashMap, AHashSet};
-use commonware_codec::{Codec, CodecShared};
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
@@ -49,7 +49,7 @@ type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 /// floor and that source, so a staged merkleize reads it before its serial bookkeeping
 /// runs. `finish` drains this buffer, then resumes the live scan at `next_scan`, producing
 /// exactly the sequence the live scan alone would have.
-pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update + Send + Sync>
+pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update>
 where
     Operation<F, U>: Codec,
 {
@@ -199,10 +199,7 @@ fn merge_sorted_diffs<K: Ord, F: Family, V>(
 }
 
 /// Where this batch's inherited state comes from.
-enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
-where
-    Operation<F, U>: Send + Sync,
-{
+enum Base<F: Family, D: Digest, U: update::Update, S: Strategy> {
     /// Created from the DB via `db.new_batch()`.
     Db {
         state: Commitment<F, D>,
@@ -213,10 +210,7 @@ where
     Child(Arc<MerkleizedBatch<F, D, U, S>>),
 }
 
-impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> Base<F, D, U, S>
-where
-    Operation<F, U>: Send + Sync,
-{
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
     /// The [Commitment] for the state off which this batch was created.
     fn base_state(&self) -> Commitment<F, D> {
         match self {
@@ -268,7 +262,7 @@ where
 /// parameter, so the batch is lifetime-free and can be stored independently of the DB.
 pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -301,7 +295,7 @@ type StagedResolution<F, U> = Option<(StagedLoc<F>, <U as update::Update>::Cache
 /// different batch.
 pub struct Staged<F: Family, H, U, S: Strategy>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -341,10 +335,7 @@ where
 /// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
-where
-    Operation<F, U>: Send + Sync,
-{
+pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
     pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>, S>>,
 
@@ -383,7 +374,7 @@ type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 /// threading.
 struct Merkleizer<F: Family, H, U, S: Strategy>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -396,13 +387,10 @@ where
 }
 
 /// Look up a key in the ancestor chain (immediate parent first).
-fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>(
+fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
     ancestors: &'a [Arc<MerkleizedBatch<F, D, U, S>>],
     key: &U::Key,
-) -> Option<&'a DiffEntry<F, U::Value>>
-where
-    Operation<F, U>: Send + Sync,
-{
+) -> Option<&'a DiffEntry<F, U::Value>> {
     for batch in ancestors {
         if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
             return Some(entry);
@@ -697,14 +685,11 @@ fn fill_candidates<F: Family, const N: usize>(
 /// Panics if `loc` cannot be located in the chain: either it falls outside the region (including
 /// when `ancestors` is empty), or the ancestor spans are non-contiguous (a bookkeeping invariant
 /// violation).
-fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>(
+fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update, S: Strategy>(
     ancestors: &[Arc<MerkleizedBatch<F, D, U, S>>],
     loc: u64,
     db_size: u64,
-) -> &Operation<F, U>
-where
-    Operation<F, U>: Send + Sync,
-{
+) -> &Operation<F, U> {
     // ancestors is ordered parent-first: [parent, grandparent, ...].
     // Each batch's items span [next_batch.size(), this_batch.size()).
     // The last ancestor's base is db_size (committed DB boundary).
@@ -744,7 +729,7 @@ where
 /// In-memory locations are resolved synchronously; only disk locations await the `reader`.
 impl<F: Family, H, U, S: Strategy> Merkleizer<F, H, U, S>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -856,7 +841,7 @@ where
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
-        Operation<F, U>: CodecShared,
+        Operation<F, U>: Codec,
     {
         if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
@@ -1311,7 +1296,7 @@ where
 
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -1349,7 +1334,7 @@ where
 
 impl<F: Family, H, U, S: Strategy> Staged<F, H, U, S>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -1709,7 +1694,7 @@ where
 // Generic get() for both ordered and unordered UnmerkleizedBatch.
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -2573,10 +2558,7 @@ where
     }
 }
 
-impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> MerkleizedBatch<F, D, U, S>
-where
-    Operation<F, U>: Send + Sync,
-{
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S> {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.bounds.tip.root
@@ -2599,7 +2581,7 @@ where
     }
 }
 
-impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> MerkleizedBatch<F, D, U, S>
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S>
 where
     Operation<F, U>: Codec,
 {
@@ -2701,10 +2683,10 @@ impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -2736,10 +2718,10 @@ impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: update::Update + Send + Sync + 'static,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -2885,13 +2867,14 @@ where
     }
 }
 
-impl<F: Family, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
+    F: Family,
     E: Context,
-    U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -3004,8 +2987,8 @@ mod trait_impls {
         }
     }
 
-    impl<F: Family, D: Digest, U: update::Update + Send + Sync + 'static, S: Strategy>
-        MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, S>>
+    impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatchTrait
+        for Arc<MerkleizedBatch<F, D, U, S>>
     where
         Operation<F, U>: Codec,
     {
@@ -3876,7 +3859,7 @@ mod tests {
     );
 
     /// Build a [`Staged`] handle with the keys and resolutions `stage`/`expand` would produce.
-    fn staged_with<F: Family, H: Hasher, U: update::Update + Send + Sync, S: Strategy>(
+    fn staged_with<F: Family, H: Hasher, U: update::Update, S: Strategy>(
         batch: UnmerkleizedBatch<F, H, U, S>,
         keys: Vec<U::Key>,
         resolutions: Vec<StagedResolution<F, U>>,

@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use crate::dkg::{
-    Registrar, ReshareBlock, SecretStore, orchestrator,
+    Registrar, ReshareBlock, SecretStore,
+    network::{Addresses, Directory as DkgDirectory, Manager as DkgManager},
+    orchestrator,
     types::{Payload, SchemeInfo},
 };
 use bytes::{Buf, BufMut};
@@ -30,7 +32,7 @@ use commonware_cryptography::{
     transcript::Summary,
 };
 use commonware_p2p::{
-    Message as P2pMessage, Receiver,
+    Message as P2pMessage, Provider, Receiver, TrackedPeers,
     simulated::{Control, Manager as SimManager},
     utils::mux,
 };
@@ -39,10 +41,12 @@ use commonware_runtime::deterministic;
 use commonware_utils::{
     Acknowledgement, NZU16, NZUsize,
     channel::{fallible::OneshotExt, oneshot},
+    sequence::Unit,
     sync::Mutex,
 };
 use std::{
     collections::{BTreeMap, HashSet},
+    marker::PhantomData,
     num::NonZeroU32,
     sync::Arc,
     time::Duration,
@@ -63,6 +67,92 @@ pub(crate) type TestBlocker = Control<TestPublicKey, deterministic::Context>;
 pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
 pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("peer set unavailable")]
+pub(crate) struct TrackFailed;
+
+#[derive(Clone, Debug)]
+pub(crate) struct FailingManager<M>(pub(crate) M);
+
+impl<M: Provider> Provider for FailingManager<M> {
+    type PublicKey = M::PublicKey;
+
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.0.peer_set(id).await
+    }
+
+    async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
+        self.0.subscribe().await
+    }
+}
+
+impl<M: Provider> DkgManager for FailingManager<M> {
+    type Directory = Unit;
+    type Error = TrackFailed;
+
+    fn track(
+        &mut self,
+        _epoch: Epoch,
+        _peers: TrackedPeers<Self::PublicKey>,
+        _directory: &Self::Directory,
+    ) -> Result<(), Self::Error> {
+        Err(TrackFailed)
+    }
+}
+type DirectoryTracks = Arc<Mutex<Vec<(Epoch, TrackedPeers<PublicKey>, Addresses<PublicKey>)>>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectoryManager<M> {
+    inner: M,
+    tracked: DirectoryTracks,
+}
+
+impl<M> DirectoryManager<M> {
+    pub(crate) fn new(inner: M) -> Self {
+        Self {
+            inner,
+            tracked: Arc::default(),
+        }
+    }
+
+    pub(crate) fn tracked(&self) -> Vec<(Epoch, TrackedPeers<PublicKey>, Addresses<PublicKey>)> {
+        self.tracked.lock().clone()
+    }
+}
+
+impl<M: Provider<PublicKey = PublicKey>> Provider for DirectoryManager<M> {
+    type PublicKey = PublicKey;
+
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.inner.peer_set(id).await
+    }
+
+    async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
+        self.inner.subscribe().await
+    }
+}
+
+impl<M> DkgManager for DirectoryManager<M>
+where
+    M: DkgManager<PublicKey = PublicKey, Directory = Unit>,
+{
+    type Directory = Addresses<PublicKey>;
+    type Error = M::Error;
+
+    fn track(
+        &mut self,
+        epoch: Epoch,
+        peers: TrackedPeers<Self::PublicKey>,
+        directory: &Self::Directory,
+    ) -> Result<(), Self::Error> {
+        self.tracked
+            .lock()
+            .push((epoch, peers.clone(), directory.clone()));
+        self.inner.track(epoch, peers, &Unit)
+    }
+}
+
 pub(crate) type TestActor = orchestrator::Actor<
     deterministic::Context,
     TestBlocker,
@@ -139,13 +229,14 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub(crate) struct MockBlock<D: Digest, C> {
+pub(crate) struct MockBlock<D: Digest, C, Dir = Unit> {
     context: C,
     parent: D,
     height: Height,
     timestamp: u64,
     payload: Option<EncodedPayload>,
     digest: D,
+    _directory: PhantomData<Dir>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,17 +247,24 @@ pub(crate) struct EncodedPayload {
 }
 
 impl EncodedPayload {
-    pub(crate) fn new<V: Variant, S: Signer>(
-        max_participants: NonZeroU32,
-        payload: Payload<V, S>,
-    ) -> Self {
+    pub(crate) fn new<V, S, Dir>(max_participants: NonZeroU32, payload: Payload<V, S, Dir>) -> Self
+    where
+        V: Variant,
+        S: Signer,
+        Dir: DkgDirectory<S::PublicKey>,
+    {
         Self {
             max_participants,
             bytes: payload.encode().to_vec(),
         }
     }
 
-    fn decode<V: Variant, S: Signer>(&self) -> Option<Payload<V, S>> {
+    fn decode<V, S, Dir>(&self) -> Option<Payload<V, S, Dir>>
+    where
+        V: Variant,
+        S: Signer,
+        Dir: DkgDirectory<S::PublicKey>,
+    {
         Payload::decode_cfg(
             self.bytes.as_slice(),
             &(
@@ -206,7 +304,7 @@ impl EncodedPayload {
     }
 }
 
-impl<D: Digest, C: Codec> MockBlock<D, C> {
+impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
     pub(crate) fn new<H: Hasher<Digest = D>>(
         context: C,
         parent: D,
@@ -219,12 +317,13 @@ impl<D: Digest, C: Codec> MockBlock<D, C> {
     pub(crate) fn with_payload<H, V, S>(
         self,
         max_participants: NonZeroU32,
-        payload: Payload<V, S>,
+        payload: Payload<V, S, Dir>,
     ) -> Self
     where
         H: Hasher<Digest = D>,
         V: Variant,
         S: Signer,
+        Dir: DkgDirectory<S::PublicKey>,
     {
         Self::from_parts::<H>(
             self.context,
@@ -273,11 +372,12 @@ impl<D: Digest, C: Codec> MockBlock<D, C> {
             timestamp,
             payload,
             digest,
+            _directory: PhantomData,
         }
     }
 }
 
-impl<D: Digest, C: Write> Write for MockBlock<D, C> {
+impl<D: Digest, C: Write, Dir> Write for MockBlock<D, C, Dir> {
     fn write(&self, writer: &mut impl BufMut) {
         self.context.write(writer);
         self.parent.write(writer);
@@ -291,7 +391,7 @@ impl<D: Digest, C: Write> Write for MockBlock<D, C> {
     }
 }
 
-impl<D: Digest, C: Read<Cfg = ()>> Read for MockBlock<D, C> {
+impl<D: Digest, C: Read<Cfg = ()>, Dir> Read for MockBlock<D, C, Dir> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -306,11 +406,12 @@ impl<D: Digest, C: Read<Cfg = ()>> Read for MockBlock<D, C> {
                 None
             },
             digest: D::read(reader)?,
+            _directory: PhantomData,
         })
     }
 }
 
-impl<D: Digest, C: EncodeSize> EncodeSize for MockBlock<D, C> {
+impl<D: Digest, C: EncodeSize, Dir> EncodeSize for MockBlock<D, C, Dir> {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.parent.encode_size()
@@ -322,7 +423,9 @@ impl<D: Digest, C: EncodeSize> EncodeSize for MockBlock<D, C> {
     }
 }
 
-impl<D: Digest, C: Clone + Send + Sync + 'static> Digestible for MockBlock<D, C> {
+impl<D: Digest, C: Clone + Send + Sync + 'static, Dir: Clone + Send + Sync + 'static> Digestible
+    for MockBlock<D, C, Dir>
+{
     type Digest = D;
 
     fn digest(&self) -> D {
@@ -330,27 +433,35 @@ impl<D: Digest, C: Clone + Send + Sync + 'static> Digestible for MockBlock<D, C>
     }
 }
 
-impl<D: Digest, C: Clone + Send + Sync + 'static> Heightable for MockBlock<D, C> {
+impl<D: Digest, C: Clone + Send + Sync + 'static, Dir: Clone + Send + Sync + 'static> Heightable
+    for MockBlock<D, C, Dir>
+{
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl<D: Digest, C: Codec<Cfg = ()> + Clone + Send + Sync + 'static> Block for MockBlock<D, C> {
+impl<D: Digest, C: Codec<Cfg = ()> + Clone + Send + Sync + 'static, Dir> Block
+    for MockBlock<D, C, Dir>
+where
+    Dir: Clone + Send + Sync + 'static,
+{
     fn parent(&self) -> Self::Digest {
         self.parent
     }
 }
 
-impl<D, C> ReshareBlock for MockBlock<D, C>
+impl<D, C, Dir> ReshareBlock for MockBlock<D, C, Dir>
 where
     D: Digest,
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    Dir: DkgDirectory<TestPublicKey>,
 {
     type Variant = TestBlsVariant;
     type Signer = TestSigner;
+    type Directory = Dir;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
         self.payload.as_ref()?.decode()
     }
 }

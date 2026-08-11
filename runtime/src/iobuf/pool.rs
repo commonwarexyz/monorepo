@@ -3432,6 +3432,9 @@ mod tests {
         let buffer1 = class.global.try_create(false).expect("second slot");
         let slot1 = buffer1.slot();
         let ptr1 = buffer1.as_ptr();
+        let mut expected = [(slot0, ptr0), (slot1, ptr1)];
+        expected.sort_by_key(|(slot, _)| *slot);
+
         class.global.put(buffer0);
         class.global.put(buffer1);
 
@@ -3444,10 +3447,10 @@ mod tests {
         ];
         popped.sort_by_key(PooledBuffer::slot);
 
-        assert_eq!(popped[0].slot(), slot0);
-        assert_eq!(popped[0].as_ptr(), ptr0);
-        assert_eq!(popped[1].slot(), slot1);
-        assert_eq!(popped[1].as_ptr(), ptr1);
+        assert_eq!(popped[0].slot(), expected[0].0);
+        assert_eq!(popped[0].as_ptr(), expected[0].1);
+        assert_eq!(popped[1].slot(), expected[1].0);
+        assert_eq!(popped[1].as_ptr(), expected[1].1);
 
         // Both slots were claimed above, so the global freelist is empty.
         assert!(class.global.take().is_none());

@@ -245,7 +245,7 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
 pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -263,7 +263,7 @@ where
 pub struct Staged<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -306,14 +306,7 @@ where
 ///   are consistent.
 /// - Extending a batch after a different branch has been applied is not safe. Do not call `get`,
 ///   `new_batch`, or `apply_batch` on that branch again.
-pub struct MerkleizedBatch<
-    F: Graftable,
-    D: Digest,
-    U: update::Update + Send + Sync,
-    const N: usize,
-    S: Strategy,
-> where
-    Operation<F, U>: Send + Sync,
+pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
     pub(crate) inner: Arc<any::batch::MerkleizedBatch<F, D, U, S>>,
@@ -331,7 +324,7 @@ pub struct MerkleizedBatch<
 impl<F, H, U, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, U, N, S>
 where
     F: Graftable,
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -425,7 +418,7 @@ where
 impl<F, H, U, const N: usize, S: Strategy> Staged<F, H, U, N, S>
 where
     F: Graftable,
-    U: update::Update + Send + Sync,
+    U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
@@ -757,10 +750,10 @@ async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
 where
     F: Graftable,
     E: Context,
-    U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -1012,10 +1005,8 @@ impl<const N: usize> bitmap::Readable<N> for BitmapBatch<N> {
     }
 }
 
-impl<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize, S: Strategy>
+impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     MerkleizedBatch<F, D, U, N, S>
-where
-    Operation<F, U>: Send + Sync,
 {
     /// Return the canonical root.
     pub const fn root(&self) -> D {
@@ -1046,7 +1037,7 @@ where
     }
 }
 
-impl<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize, S: Strategy>
+impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     MerkleizedBatch<F, D, U, N, S>
 where
     Operation<F, U>: Codec,
@@ -1111,10 +1102,10 @@ impl<F, E, C, I, H, U, const N: usize, S> super::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context,
-    U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -1215,13 +1206,8 @@ mod trait_impls {
         }
     }
 
-    impl<
-        F: Graftable,
-        D: Digest,
-        U: update::Update + Send + Sync + 'static,
-        const N: usize,
-        S: Strategy,
-    > MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, N, S>>
+    impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
+        MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, N, S>>
     where
         Operation<F, U>: Codec,
     {

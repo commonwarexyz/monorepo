@@ -2,6 +2,9 @@ use crate::{
     dkg::{
         ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
         fence::Fence,
+        network::{
+            AddressableManager, Addresses, Directory, Manager as DkgManager, MissingAddress,
+        },
         orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
@@ -26,7 +29,9 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
@@ -56,6 +61,7 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
+use commonware_p2p::{Address, Provider, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
@@ -75,6 +81,7 @@ use commonware_utils::{
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Set},
     range::NonEmptyRange,
+    sequence::Unit,
     sync::Mutex,
     test_rng,
 };
@@ -82,6 +89,7 @@ use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     marker::PhantomData,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
@@ -93,6 +101,9 @@ type Database<E> = Shared<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
+type PublicKey = ed25519::PublicKey;
+type DiscoveryManager = simulated::Manager<PublicKey, DeterministicContext>;
+type LookupManager = AddressableManager<simulated::SocketManager<PublicKey, DeterministicContext>>;
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_E2E";
@@ -111,6 +122,124 @@ const QMDB_CHANNEL: u64 = 5;
 const DKG_CHANNEL: u64 = 6;
 const DKG_PROBE_CHANNEL: u64 = 7;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Network {
+    Discovery,
+    Lookup,
+}
+
+impl Network {
+    fn directory(
+        self,
+        peers: &Set<PublicKey>,
+        addresses: &Map<PublicKey, Address>,
+    ) -> TestDirectory {
+        match self {
+            Self::Discovery => TestDirectory(None),
+            Self::Lookup => TestDirectory(Some(
+                peers
+                    .iter()
+                    .map(|peer| {
+                        let address = addresses
+                            .get_value(peer)
+                            .expect("participant must have an address")
+                            .clone();
+                        (peer.clone(), address)
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    fn manager(self, oracle: &simulated::Oracle<PublicKey, DeterministicContext>) -> TestManager {
+        match self {
+            Self::Discovery => TestManager::Discovery(oracle.manager()),
+            Self::Lookup => TestManager::Lookup(AddressableManager::new(oracle.socket_manager())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TestDirectory(Option<Addresses<PublicKey>>);
+
+impl Write for TestDirectory {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl EncodeSize for TestDirectory {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl Read for TestDirectory {
+    type Cfg = RangeCfg<usize>;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Option::<Addresses<PublicKey>>::read_cfg(buf, cfg).map(Self)
+    }
+}
+
+impl Directory<PublicKey> for TestDirectory {
+    fn codec_config(peers: &Set<PublicKey>) -> Self::Cfg {
+        RangeCfg::exact(peers.len())
+    }
+
+    fn matches(&self, peers: &Set<PublicKey>) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|addresses| addresses.matches(peers))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum TestManager {
+    Discovery(DiscoveryManager),
+    Lookup(LookupManager),
+}
+
+impl Provider for TestManager {
+    type PublicKey = PublicKey;
+
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        match self {
+            Self::Discovery(manager) => manager.peer_set(id).await,
+            Self::Lookup(manager) => manager.peer_set(id).await,
+        }
+    }
+
+    async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
+        match self {
+            Self::Discovery(manager) => manager.subscribe().await,
+            Self::Lookup(manager) => manager.subscribe().await,
+        }
+    }
+}
+
+impl DkgManager for TestManager {
+    type Directory = TestDirectory;
+    type Error = MissingAddress<PublicKey>;
+
+    fn track(
+        &mut self,
+        epoch: Epoch,
+        peers: TrackedPeers<Self::PublicKey>,
+        directory: &Self::Directory,
+    ) -> Result<(), Self::Error> {
+        match (self, &directory.0) {
+            (Self::Discovery(manager), None) => {
+                DkgManager::track(manager, epoch, peers, &Unit).map_err(|error| match error {})
+            }
+            (Self::Lookup(manager), Some(addresses)) => {
+                DkgManager::track(manager, epoch, peers, addresses)
+            }
+            _ => panic!("network and directory must use the same transport"),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Block {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -118,7 +247,7 @@ pub(super) struct Block {
     height: Height,
     state_root: sha256::Digest,
     range: NonEmptyRange<Location>,
-    payload: Option<Payload<MinPk, ed25519::PrivateKey>>,
+    payload: Option<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>,
 }
 
 impl Write for Block {
@@ -153,7 +282,7 @@ impl Read for Block {
             height: Height::read(buf)?,
             state_root: sha256::Digest::read(buf)?,
             range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinPk, ed25519::PrivateKey>>::read_cfg(
+            payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
@@ -192,14 +321,18 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MinPk;
     type Signer = ed25519::PrivateKey;
+    type Directory = TestDirectory;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
         self.payload.clone()
     }
 }
 
 impl Block {
-    fn genesis(leader: ed25519::PublicKey, info: EpochInfo<MinPk, ed25519::PublicKey>) -> Self {
+    fn genesis(
+        leader: ed25519::PublicKey,
+        info: EpochInfo<MinPk, ed25519::PublicKey, TestDirectory>,
+    ) -> Self {
         Self {
             context: Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -243,7 +376,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     type Block = Block;
     type Databases = Database<E>;
     type Provider = ();
-    type Input = ReshareInput<(), MinPk, ed25519::PrivateKey>;
+    type Input = ReshareInput<(), MinPk, ed25519::PrivateKey, TestDirectory>;
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -402,13 +535,20 @@ impl Registrar for TestRegistrar {
 #[derive(Clone)]
 struct ScheduleProvider {
     pub(super) schedule: Arc<CommitteeSchedule>,
+    network: Network,
+    addresses: Arc<Map<PublicKey, Address>>,
 }
 
 impl ParticipantsProvider for ScheduleProvider {
-    type PublicKey = ed25519::PublicKey;
+    type PublicKey = PublicKey;
+    type Directory = TestDirectory;
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         self.schedule.players(epoch)
+    }
+
+    async fn directory(&mut self, _: Epoch, peers: Set<Self::PublicKey>) -> Self::Directory {
+        self.network.directory(&peers, &self.addresses)
     }
 }
 
@@ -431,8 +571,10 @@ impl CommitteeSchedule {
 
 #[derive(Clone)]
 pub(super) struct ReshareEngine {
+    network: Network,
     signers: Vec<ed25519::PrivateKey>,
     pub(super) participants: Vec<ed25519::PublicKey>,
+    addresses: Arc<Map<PublicKey, Address>>,
     pub(super) schedule: Arc<CommitteeSchedule>,
     initial: Arc<InitialState>,
     sharing_mode: Mode,
@@ -455,7 +597,7 @@ pub(super) struct ValidatorEngine {
 
 #[derive(Clone)]
 struct InitialState {
-    info: EpochInfo<MinPk, ed25519::PublicKey>,
+    info: EpochInfo<MinPk, ed25519::PublicKey, TestDirectory>,
     shares: Map<ed25519::PublicKey, Share>,
 }
 
@@ -489,15 +631,19 @@ impl InitialState {
 }
 
 impl ReshareEngine {
-    pub(super) fn new() -> Self {
-        Self::with_committee(5, 4)
+    pub(super) fn new(network: Network) -> Self {
+        Self::with_committee(network, 5, 4)
     }
 
-    pub(super) fn with_committee(total: u32, committee_size: usize) -> Self {
-        Self::with_committees(total, vec![committee_size])
+    pub(super) fn with_committee(network: Network, total: u32, committee_size: usize) -> Self {
+        Self::with_committees(network, total, vec![committee_size])
     }
 
-    pub(super) fn with_committees(total: u32, committee_sizes: Vec<usize>) -> Self {
+    pub(super) fn with_committees(
+        network: Network,
+        total: u32,
+        committee_sizes: Vec<usize>,
+    ) -> Self {
         assert!(!committee_sizes.is_empty());
         for committee_size in &committee_sizes {
             assert!(*committee_size > 0);
@@ -508,24 +654,43 @@ impl ReshareEngine {
             .map(|_| ed25519::PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
         let participants = signers.iter().map(|s| s.public_key()).collect::<Vec<_>>();
+        let addresses = Arc::new(Map::from_iter_dedup(participants.iter().enumerate().map(
+            |(index, participant)| {
+                let socket =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000 + index as u16);
+                (participant.clone(), Address::Symmetric(socket))
+            },
+        )));
         let schedule = Arc::new(CommitteeSchedule {
             participants: participants.clone(),
             committee_sizes,
         });
         let players = schedule.players(Epoch::zero());
+        let next_players = schedule.players(Epoch::new(1));
         let (output, shares) =
             deal::<MinPk, _, N3f1>(TestRng::new(10), Mode::NonZeroCounter, players.clone())
                 .expect("trusted initial deal");
+        let initial_peers = Set::from_iter_dedup(
+            output
+                .players()
+                .iter()
+                .chain(players.iter())
+                .chain(next_players.iter())
+                .cloned(),
+        );
         let info = EpochInfo {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
             output,
             players,
-            next_players: schedule.players(Epoch::new(1)),
+            next_players,
+            directory: network.directory(&initial_peers, &addresses),
         };
         Self {
+            network,
             signers,
             participants,
+            addresses,
             schedule,
             initial: Arc::new(InitialState { info, shares }),
             sharing_mode: Mode::NonZeroCounter,
@@ -659,6 +824,7 @@ impl EngineDefinition for ReshareEngine {
         let provider = DynamicProvider::new();
         let store = self.store(public_key);
         self.initial.register_epoch_zero(&provider, &store).await;
+        let dkg_manager = self.network.manager(oracle);
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
@@ -704,10 +870,11 @@ impl EngineDefinition for ReshareEngine {
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
         let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
             context: context.child("dkg_probe"),
-            manager: oracle.manager(),
+            manager: dkg_manager.clone(),
             bootstrap: dkg_probe::Bootstrap {
                 epoch: Epoch::zero(),
                 participants: self.initial.info.participants(),
+                directory: self.initial.info.directory.clone(),
             },
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
@@ -905,10 +1072,12 @@ impl EngineDefinition for ReshareEngine {
             context.child("reshare"),
             reshare::Config {
                 signer: signer.clone(),
-                manager: oracle.manager(),
+                manager: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 participants_provider: ScheduleProvider {
                     schedule: self.schedule.clone(),
+                    network: self.network,
+                    addresses: self.addresses.clone(),
                 },
                 secret_store: store,
                 strategy: Sequential,
@@ -973,7 +1142,7 @@ impl EngineDefinition for ReshareEngine {
             context.child("orchestrator"),
             orchestrator::Config {
                 oracle: oracle.control(public_key.clone()),
-                manager: oracle.manager(),
+                manager: dkg_manager,
                 provider: provider.clone(),
                 marshal: marshal.clone(),
                 application: deferred,
@@ -1116,7 +1285,7 @@ impl ValidatorState {
 
 #[test]
 fn restart_after_epoch_zero_pruning_does_not_reseed_share() {
-    let engine = ReshareEngine::new();
+    let engine = ReshareEngine::new(Network::Discovery);
     let public_key = engine
         .initial
         .shares

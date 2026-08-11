@@ -119,14 +119,14 @@ pub struct Db<
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
-impl<F, E, U, C, I, H, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -139,14 +139,14 @@ where
 }
 
 // Shared read-only functionality.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -401,15 +401,15 @@ where
     }
 }
 
-// Functionality requiring Mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+// Functionality requiring a mutable journal.
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -688,20 +688,7 @@ where
 
         Ok(self)
     }
-}
 
-// Functionality requiring a mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: Family,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
     /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
@@ -889,14 +876,14 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: Update,
     C: Snapshottable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {

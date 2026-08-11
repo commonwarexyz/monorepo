@@ -1,5 +1,11 @@
 //! Generate keys, sign arbitrary messages, and deterministically verify signatures.
 //!
+//! # Randomness
+//!
+//! Cryptographic operations that accept an RNG require a cryptographically secure and
+//! unpredictable source unless documented otherwise. A weak or predictable RNG may compromise
+//! security.
+//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

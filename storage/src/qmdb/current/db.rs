@@ -173,10 +173,10 @@ impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, 
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -193,10 +193,10 @@ impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -248,20 +248,7 @@ where
     ) -> bool {
         proof.verify::<H, _, N>(start_loc, ops, chunks, root)
     }
-}
 
-// Functionality requiring non-mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
     /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
     /// tree.
     ///
@@ -409,15 +396,15 @@ where
     }
 }
 
-// Functionality requiring mutable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+// Functionality requiring a mutable journal.
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Graftable,
     E: Context,
-    U: Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -732,6 +719,116 @@ where
 
         Ok(self)
     }
+
+    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on startup.
+    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
+    /// the prior sync before starting. Failures surface as described on
+    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
+    #[boxed]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        let (any, handle) = self.any.start_sync().await?;
+        self.any = any;
+        Ok((self, handle))
+    }
+
+    /// Durably commit the journal state published by prior [`Db::apply_batch`]
+    /// calls.
+    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
+    #[boxed]
+    pub async fn commit(mut self) -> Result<Self, Error<F>> {
+        self.any = self.any.commit().await?;
+        Ok(self)
+    }
+
+    /// Sync all database state to disk.
+    #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
+    #[boxed]
+    pub async fn sync(mut self) -> Result<Self, Error<F>> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
+        self.any = self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self = self.sync_metadata().await?;
+        self.update_metrics();
+        Ok(self)
+    }
+
+    /// Destroy the db, removing all data from disk.
+    #[boxed]
+    pub async fn destroy(self) -> Result<(), Error<F>> {
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the future.
+        let Self { any, metadata, .. } = self;
+        metadata.destroy().await?;
+        any.destroy().await
+    }
+
+    /// Check that `batch` can be applied to the database in its current state, without
+    /// applying it.
+    ///
+    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
+    /// fails; callers that want to reject a bad batch and keep the handle can check first.
+    pub fn validate_batch(
+        &self,
+        batch: &super::batch::MerkleizedBatch<F, H::Digest, U, N, S>,
+    ) -> Result<(), Error<F>> {
+        self.any.validate_batch(&batch.inner)
+    }
+
+    /// Apply a batch to the database, returning the range of written operations.
+    ///
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// more details).
+    ///
+    /// This publishes the batch to the in-memory Current view and appends it to the journal, but
+    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
+    /// returned by [`Db::start_sync`], to guarantee durability.
+    #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
+    #[boxed]
+    pub async fn apply_batch(
+        mut self,
+        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
+    ) -> Result<(Self, Range<Location<F>>), Error<F>> {
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
+        let range;
+        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
+        Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
+        self.root = batch.canonical_root;
+        self.update_metrics();
+        Ok((self, range))
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    C: Snapshottable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. It serves the ops-tree proofs state sync needs. Grafted
+    /// proofs require the live bitmap, which keeps no history, so those remain live-only.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let ops;
+        (self.any, ops) = self.any.snapshot().await?;
+        Ok((self, ops))
+    }
 }
 
 /// Compute the safe sync boundary from the chunk-aligned inactivity floor and the current
@@ -786,141 +883,6 @@ fn pair_absorption_threshold<F: Graftable, const N: usize>(chunk_count: u64) -> 
     let pair_start = pair_chunk << grafting_height;
     let pair_pos = F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
     Some(F::peak_birth_size(pair_pos, grafting_height + 1))
-}
-
-// Functionality requiring mutable + persistable journal.
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
-    ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup.
-    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
-    /// the prior sync before starting. Failures surface as described on
-    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
-    #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
-    #[boxed]
-    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let (any, handle) = self.any.start_sync().await?;
-        self.any = any;
-        Ok((self, handle))
-    }
-
-    /// Durably commit the journal state published by prior [`Db::apply_batch`]
-    /// calls.
-    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
-    #[boxed]
-    pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        self.any = self.any.commit().await?;
-        Ok(self)
-    }
-
-    /// Sync all database state to disk.
-    #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
-    #[boxed]
-    pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        let _timer = self.metrics.sync_timer();
-        self.metrics.sync_calls.inc();
-        self.any = self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self = self.sync_metadata().await?;
-        self.update_metrics();
-        Ok(self)
-    }
-
-    /// Destroy the db, removing all data from disk.
-    #[boxed]
-    pub async fn destroy(self) -> Result<(), Error<F>> {
-        // Destructure before the await boundary to avoid stack growth from
-        // retaining the entire `self` in the future.
-        let Self { any, metadata, .. } = self;
-        metadata.destroy().await?;
-        any.destroy().await
-    }
-}
-
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update + 'static,
-    C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Check that `batch` can be applied to the database in its current state, without
-    /// applying it.
-    ///
-    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
-    /// fails; callers that want to reject a bad batch and keep the handle can check first.
-    pub fn validate_batch(
-        &self,
-        batch: &super::batch::MerkleizedBatch<F, H::Digest, U, N, S>,
-    ) -> Result<(), Error<F>> {
-        self.any.validate_batch(&batch.inner)
-    }
-
-    /// Apply a batch to the database, returning the range of written operations.
-    ///
-    /// A batch is valid only if every batch applied to the database since this batch's
-    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
-    /// more details).
-    ///
-    /// This publishes the batch to the in-memory Current view and appends it to the journal, but
-    /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
-    /// returned by [`Db::start_sync`], to guarantee durability.
-    #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
-    #[boxed]
-    pub async fn apply_batch(
-        mut self,
-        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<(Self, Range<Location<F>>), Error<F>> {
-        let _timer = self.metrics.apply_batch_timer();
-        self.metrics.apply_batch_calls.inc();
-        let range;
-        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
-        Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
-        self.root = batch.canonical_root;
-        self.update_metrics();
-        Ok((self, range))
-    }
-}
-
-impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: Graftable,
-    E: Context,
-    U: Update,
-    C: Snapshottable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Capture an owned immutable snapshot of the database's operations log, with bounds
-    /// frozen at capture. It serves the ops-tree proofs state sync needs. Grafted
-    /// proofs require the live bitmap, which keeps no history, so those remain live-only.
-    pub async fn snapshot(
-        mut self,
-    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
-        let ops;
-        (self.any, ops) = self.any.snapshot().await?;
-        Ok((self, ops))
-    }
 }
 
 /// The bitmap's incomplete trailing chunk and the number of bits in it, or `None` if the bitmap
