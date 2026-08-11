@@ -173,31 +173,26 @@ Chou</a></div>
         </div>
         <h2 id="wait-two-the-parent-notarization">Wait Two: The Parent
         Notarization</h2>
-        <p>Without Optimistic Validation, the stable leader waits for
-        view <code>v</code> to be notarized before formally proposing
-        view <code>v+1</code>. Other validators also wait for that
-        notarization before voting to notarize <code>v+1</code>. One
-        network hop still paces each view.</p>
+        <p>Without Optimistic Validation, validators wait for view
+        <code>v</code> to be notarized before voting to notarize
+        <code>v+1</code>. Network latency still paces each view.</p>
         <p>With Optimistic Validation, the leader can start
         <code>v+1</code> immediately after it builds and votes for
         <code>v</code>. A validator that voted for <code>v</code> can
         also vote on <code>v+1</code> when the proposal arrives. Neither
         needs to receive the notarization for <code>v</code> first.</p>
-        <p>The proposal and votes for <code>v+1</code> can overlap the
-        network round that forms the notarization for <code>v</code>.
-        The same rule can carry the pipeline across several views within
-        the stable-leader term. Consecutive proposals can begin less
-        than one network round trip apart, limited by local work and
-        network capacity rather than latency alone. Finalization still
-        follows the same rules.</p>
+        <p>View <code>v+1</code> can therefore be proposed and voted on
+        while <code>v</code>’s notarization is still forming. The same
+        rule can carry the pipeline across several views within the
+        stable-leader term. Consecutive proposals can begin less than
+        one network round trip apart, limited by local work and network
+        capacity rather than latency alone.</p>
         <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
           <noscript>With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, child views can begin while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 3: Stable Leader spaces views one network hop apart.
-        Optimistic Validation packs them closer while notarization and
-        finalization continue in parallel. Both panels use the same
-        horizontal time scale.</p>
+        Optimistic Validation packs them closer.</p>
         </div>
         <h2 id="how-optimism-stays-safe">How Optimism Stays Safe</h2>
         <p><em>Optimistic</em> means a participant can vote to notarize

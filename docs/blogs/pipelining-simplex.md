@@ -72,11 +72,11 @@ Figure 2: Round-robin rotates the proposer every view while Stable Leader change
 
 ## Wait Two: The Parent Notarization
 
-Without Optimistic Validation, the stable leader waits for view `v` to be notarized before formally proposing view `v+1`. Other validators also wait for that notarization before voting to notarize `v+1`. One network hop still paces each view.
+Without Optimistic Validation, validators wait for view `v` to be notarized before voting to notarize `v+1`. Network latency still paces each view.
 
 With Optimistic Validation, the leader can start `v+1` immediately after it builds and votes for `v`. A validator that voted for `v` can also vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
 
-The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v`. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
+View `v+1` can therefore be proposed and voted on while `v`'s notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone.
 
 ```{=html}
 <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
@@ -85,7 +85,7 @@ The proposal and votes for `v+1` can overlap the network round that forms the no
 ```
 
 ::: {.image-caption}
-Figure 3: Stable Leader spaces views one network hop apart. Optimistic Validation packs them closer while notarization and finalization continue in parallel. Both panels use the same horizontal time scale.
+Figure 3: Stable Leader spaces views one network hop apart. Optimistic Validation packs them closer.
 :::
 
 ## How Optimism Stays Safe
