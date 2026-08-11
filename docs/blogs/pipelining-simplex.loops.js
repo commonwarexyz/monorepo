@@ -277,22 +277,18 @@ function buildValidation(mount) {
     svg.appendChild(block);
     animated.push(addReveal(block, 0.06 + index * 0.17));
     addText(svg, x, 50, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
-    if (index < 4) {
-      const notarizedX = x + parentSpan;
-      const notarized = svgEl('circle', { cx: notarizedX, cy: 125, r: 8, fill: BLUE, opacity: 0 });
-      svg.appendChild(notarized);
-      animated.push(addArrow(svg, x + 16, 72, x + sequentialGap - 16, 72, RED, 0.1 + index * 0.17, 0.08));
-      animated.push(addArrow(svg, x, 88, notarizedX - 9, 125, BLUE, 0.12 + index * 0.17, 0.1));
-      animated.push(addReveal(notarized, 0.21 + index * 0.17));
-      animated.push(addArrow(svg, notarizedX, 116, notarizedX, 88, BLUE, 0.22 + index * 0.17, 0.04));
-      if (index < 3) {
-        const finalizedX = notarizedX + finalizationSpan;
-        const finalized = svgEl('circle', { cx: finalizedX, cy: 178, r: 8, fill: BLUE, opacity: 0 });
-        svg.appendChild(finalized);
-        animated.push(addArrow(svg, notarizedX + 9, 125, finalizedX - 9, 178, BLUE, 0.23 + index * 0.17, 0.1));
-        animated.push(addReveal(finalized, 0.33 + index * 0.17));
-      }
-    }
+    const notarizedX = x + parentSpan;
+    const notarized = svgEl('circle', { cx: notarizedX, cy: 125, r: 8, fill: BLUE, opacity: 0 });
+    svg.appendChild(notarized);
+    if (index < 4) animated.push(addArrow(svg, x + 16, 72, x + sequentialGap - 16, 72, RED, 0.1 + index * 0.17, 0.08));
+    animated.push(addArrow(svg, x, 88, notarizedX - 9, 125, BLUE, 0.12 + index * 0.17, 0.1));
+    animated.push(addReveal(notarized, 0.21 + index * 0.17));
+    animated.push(addArrow(svg, notarizedX, 116, notarizedX, 88, BLUE, 0.22 + index * 0.17, 0.04));
+    const finalizedX = notarizedX + finalizationSpan;
+    const finalized = svgEl('circle', { cx: finalizedX, cy: 178, r: 8, fill: BLUE, opacity: 0 });
+    svg.appendChild(finalized);
+    animated.push(addArrow(svg, notarizedX + 9, 125, finalizedX - 9, 178, BLUE, 0.23 + index * 0.17, 0.1));
+    animated.push(addReveal(finalized, 0.33 + index * 0.17));
   }
 
   for (let index = 0; index < 9; index++) {
@@ -302,20 +298,16 @@ function buildValidation(mount) {
     animated.push(addReveal(block, 0.06 + index * 0.075));
     addText(svg, x, 247, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
     if (index < 8) animated.push(addArrow(svg, x + 16, 269, x + optimisticGap - 16, 269, RED, 0.09 + index * 0.075, 0.05));
-    if (index < 7) {
-      const notarizedX = x + parentSpan;
-      const notarized = svgEl('circle', { cx: notarizedX, cy: 322, r: 8, fill: BLUE, opacity: 0 });
-      svg.appendChild(notarized);
-      animated.push(addReveal(notarized, 0.22 + index * 0.075));
-      animated.push(addArrow(svg, x, 285, notarizedX - 9, 322, BLUE, 0.1 + index * 0.075, 0.11));
-      if (index < 5) {
-        const finalizedX = notarizedX + finalizationSpan;
-        const finalized = svgEl('circle', { cx: finalizedX, cy: 375, r: 8, fill: BLUE, opacity: 0 });
-        svg.appendChild(finalized);
-        animated.push(addArrow(svg, notarizedX + 9, 322, finalizedX - 9, 375, BLUE, 0.23 + index * 0.075, 0.11));
-        animated.push(addReveal(finalized, 0.34 + index * 0.075));
-      }
-    }
+    const notarizedX = x + parentSpan;
+    const notarized = svgEl('circle', { cx: notarizedX, cy: 322, r: 8, fill: BLUE, opacity: 0 });
+    svg.appendChild(notarized);
+    animated.push(addReveal(notarized, 0.22 + index * 0.075));
+    animated.push(addArrow(svg, x, 285, notarizedX - 9, 322, BLUE, 0.1 + index * 0.075, 0.11));
+    const finalizedX = notarizedX + finalizationSpan;
+    const finalized = svgEl('circle', { cx: finalizedX, cy: 375, r: 8, fill: BLUE, opacity: 0 });
+    svg.appendChild(finalized);
+    animated.push(addArrow(svg, notarizedX + 9, 322, finalizedX - 9, 375, BLUE, 0.23 + index * 0.075, 0.11));
+    animated.push(addReveal(finalized, 0.34 + index * 0.075));
   }
   const note = addText(svg, 968, 415, 'notarization and finalization remain pipelined', { 'text-anchor': 'end', fill: BLUE, opacity: 0 });
   animated.push(addReveal(note, 0.73));
