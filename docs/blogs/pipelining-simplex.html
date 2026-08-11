@@ -215,18 +215,20 @@ Chou</a></div>
         certify, optimistic votes later in the term become inert.
         Validators then abandon the rest of the term through Simplex’s
         normal nullification path.</p>
-        <p>Optimistic work also stops at the term boundary. The first
-        view of a new term must start from certified ancestry.</p>
+        <p>The term boundary is also a leader handoff, so optimistic
+        work stops there. The first view of a new term must start from
+        certified ancestry.</p>
         <p>Lastly, the consensus configuration sets a bound on how many
         views validators can work ahead at once. A value of zero
         disables Optimistic Validation. A larger bound can keep the
         pipeline full when notarizations fall behind, but uses more CPU
-        and memory on work that may later be discarded.</p>
+        and memory on work that could be discarded if an earlier view
+        fails.</p>
         <h2 id="what-we-measured">What We Measured</h2>
         <p>We ran Alto with 50 validators spread evenly across ten AWS
-        regions. With Stable Leader and Optimistic Validation enabled,
-        the network sustained about 200 blocks per second. The median
-        time between blocks was 5ms.</p>
+        regions worldwide. With Stable Leader and Optimistic Validation
+        enabled, the network sustained about 200 blocks per second. The
+        median time between blocks was 5ms.</p>
         <p>The blocks were light: headers only, with no transactions or
         execution. The goal was to measure consensus cadence, not
         transaction throughput.</p>

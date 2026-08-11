@@ -96,13 +96,13 @@ Notarization is not finalization. The application check that follows is called *
 
 For every ancestor in the term, a participant must have either voted for it or obtained usable quorum proof. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If an ancestor fails to notarize or certify, optimistic votes later in the term become inert. Validators then abandon the rest of the term through Simplex's normal nullification path.
 
-Optimistic work also stops at the term boundary. The first view of a new term must start from certified ancestry.
+The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry.
 
-Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that may later be discarded.
+Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
 
 ## What We Measured
 
-We ran Alto with 50 validators spread evenly across ten AWS regions. With Stable Leader and Optimistic Validation enabled, the network sustained about 200 blocks per second. The median time between blocks was 5ms.
+We ran Alto with 50 validators spread evenly across ten AWS regions worldwide. With Stable Leader and Optimistic Validation enabled, the network sustained about 200 blocks per second. The median time between blocks was 5ms.
 
 The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
 
