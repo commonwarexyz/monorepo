@@ -11,7 +11,7 @@ module tests {
         BYZANTINE = Set(),
         TWINS = Set(),
         VIEWS = 0.to(5),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
+        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5"),
         INVALID_BLOCKS = Set("inv_b3")
     ).* from "../replica"
 

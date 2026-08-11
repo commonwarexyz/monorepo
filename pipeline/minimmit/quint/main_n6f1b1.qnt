@@ -18,7 +18,7 @@ module main {
         BYZANTINE = Set("n5"),
         TWINS = Set(),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4" -> "n4", "n5"->"n5"),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
+        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5"),
         INVALID_BLOCKS = Set("inval_0", "inval_1"),
         VIEWS = 0.to(6),
   ) .* from "./replica"

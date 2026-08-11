@@ -26,7 +26,7 @@ module twins {
     TWINS = Set("n5_1", "n5_2"),
     N = 6,
     F = 1,
-    VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
+    VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5"),
     INVALID_BLOCKS = Set("inval_0", "inval_1"),
     VIEWS = 0.to(6),
   ) as i from "./replica"
@@ -44,10 +44,12 @@ module twins {
   val safe = i::safe
   val all_invariants = safe
   val no_proposal_equivocation = i::no_proposal_equivocation
+  val block_commits_to_parent = i::block_commits_to_parent
   val agreement = i::agreement
   val no_vote_equivocation_inv = i::no_vote_equivocation_inv
   val no_nullification_and_finalization_in_the_same_view = i::no_nullification_and_finalization_in_the_same_view
   val validity = i::validity
+  val finalization_agreement = i::finalization_agreement
   val valid_last_finalized = i::valid_last_finalized
   val certificates_are_valid_inv = i::certificates_are_valid_inv
   val notarized_consistency = i::notarized_consistency

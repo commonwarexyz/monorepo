@@ -11,7 +11,7 @@ module tests {
         BYZANTINE = Set("n5"),
         TWINS = Set(),
         VIEWS = 0.to(8),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
+        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3", "val_b4", "val_b5"),
         INVALID_BLOCKS = Set("inv_b3")
     ).* from "../replica"
 
@@ -19,6 +19,23 @@ module tests {
         L == 5,
         M == 3,
         assumptions_valid
+    }
+
+    // Finalization evidence combines a notarization certificate's signatures with raw votes: an
+    // M = 3 notarization for a proposal plus 2 more raw notarize votes for it reach L = 5 and so
+    // count as a finalization, even though neither the raw votes alone nor a full finalization
+    // certificate is present. Pins `is_proposal_finalized_evidence` against a regression to
+    // votes-only / full-certificate-only counting.
+    run mixedEvidenceFinalizationTest = {
+        pure val p = { block: "val_b0", view: 0, block_parent: GENESIS_BLOCK, view_parent: GENESIS_VIEW, sig: sig_of("n0") }
+        pure val notar_p = notarization(p, Set("n0", "n1", "n2"), sig_of("n0"))   // an M = 3 notarization cert
+        pure val extra_votes = Set(notarize(p, "n3"), notarize(p, "n4"))          // 2 additional raw votes
+        all {
+            // raw votes alone are a sub-quorum (2 < L): not a finalization
+            not(is_proposal_finalized_votes(p, extra_votes)),
+            // but the notarization's 3 signers plus the 2 raw votes reach L = 5: a finalization
+            is_proposal_finalized_evidence(p, extra_votes, Set(notar_p)),
+        }
     }
 
     // `on_certificate` accepts a finalization once its signature set reaches L. Two
@@ -69,11 +86,15 @@ module tests {
                 // them notarize the certificate's own proposal on accepting the forgery
                 assert(not(certificates_are_backed)),
                 assert(not(validity)),
+                // n0 finalized val_b0 and n1 finalized val_b1 in the same view 0: two correct
+                // replicas disagree on the finalized proposal
+                assert(not(finalization_agreement)),
                 assert(not(all_invariants)),
                 unchanged_all,
             })
             .expect(not(certificates_are_backed))
             .expect(not(validity))
+            .expect(not(finalization_agreement))
             .expect(not(all_invariants))
     }
 
@@ -107,36 +128,28 @@ module tests {
                     cert_proposal(c) == Some(proposal_from_n0),
                 })),
                 assert(certificates_are_backed),
+                // a genuine, uniquely-backed finalization in view 0 satisfies finalization_agreement
+                assert(finalization_agreement),
                 assert(all_invariants),
                 unchanged_all,
             })
             .expect(certificates_are_backed)
+            .expect(finalization_agreement)
             .expect(all_invariants)
     }
 
-    // Regression test for the "one byzantine proposal un-commits a finalized block" defect.
+    // Regression test: a byzantine proposal cannot un-commit or rewrite a finalized block.
     //
-    // The parent link of a committed block used to be derived from the global
-    // `sent_proposal` by `claimed_view_parent`, which returned None as soon as two proposals
-    // for the same (block, view) disagreed about `view_parent`. `byzantine_replica_step`
-    // injects one proposal per step, choosing `view` and `view_parent` freely from VIEWS,
-    // and nothing requires `view_parent < view`. A single such message aimed at an already
-    // finalized (block, view) turned its link into None -- permanently, because
-    // `sent_proposal` is never pruned. The committed chain is rebuilt from scratch whenever
-    // a replica stores a new certificate, so the next certificate any replica processed
-    // dropped every block it had committed, and no conjunct of `all_invariants` noticed:
-    // `agreement` only asks that the shorter chain be a prefix of the longer one, and the
-    // empty list is a prefix of everything.
+    // Regression test: a byzantine proposal cannot un-commit or rewrite a finalized block, even
+    // when a later certificate-processing step rebuilds the committed chain afterwards.
     //
-    // A certificate now carries the proposal it certifies, and `next_committable_cert` reads
-    // the parent link off that proposal, so the link is decided when the block is proposed
-    // and nothing outside the certificate can move it afterwards. The shadow below names an
-    // already finalized block with a different parent, which makes it a *different*
-    // proposal: no certificate names it, and `sent_proposal` is not consulted while
-    // rebuilding at all, so the committed chain is untouched and keeps growing. This closes
-    // the byzantine LEADER case as well -- a second leader-signed proposal for the same
-    // (block, view) is likewise a different proposal, and votes for it never join the first
-    // one's quorum.
+    // The committed chain is rebuilt from the stored certificates, not from `sent_proposal`, so a
+    // stray proposal cannot move a committed block's parent link. And a Block commits to its
+    // parent (`block_commits_to_parent`, minimmit.md 10), so the shadow below -- which reuses the
+    // finalized block val_b0 with a different parent -- is a hash collision: it can never arise
+    // via `step` (the proposal guards reject it). We force it into `sent_proposal` with
+    // `inject_proposal` *before* n2's rebuild, to prove the rebuild ignores it: n2's chain grows,
+    // nothing rolls back, and only `block_commits_to_parent` is falsified.
     run committedChainRollbackTest = {
         pure val proposal_0 = {
             block: "val_b0", view: 0,
@@ -146,9 +159,10 @@ module tests {
             block: "val_b1", view: 1,
             view_parent: 0, block_parent: "val_b0", sig: sig_of("n1")
         }
-        // The byzantine shadow of the already finalized (val_b0, view 0), claiming a
-        // different parent view. Every field is one byzantine_replica_step can produce:
-        // view and view_parent in VIEWS, block and block_parent in AllBlocks, sig in BYZANTINE.
+        // n0's view-1 finalization certificate, delivered to n2 later to trigger a rebuild.
+        pure val finalization_1 = notarization(proposal_1, Set("n0","n1","n2","n3","n4"), sig_of("n0"))
+        // The byzantine "shadow" reuses the already finalized (val_b0, view 0) while claiming a
+        // different parent -- a hash collision forbidden by `block_commits_to_parent`.
         pure val byz_shadow_of_view_0 = {
             block: "val_b0", view: 0,
             view_parent: 1, block_parent: "val_b1", sig: "n5"
@@ -173,16 +187,6 @@ module tests {
                 unchanged_all,
             })
 
-            // === the byzantine message that used to do the damage ===
-            .then(inject_proposal(byz_shadow_of_view_0))
-            .then(all {
-                // the shadow is a different proposal from the finalized one, and no
-                // certificate certifies it, so the committed chain cannot see it at all
-                assert(CORRECT.forall(id => ghost_committed_blocks.get(id) == List(proposal_0))),
-                assert(all_invariants),
-                unchanged_all,
-            })
-
             // === view 1 runs normally; n0 is simply the first to finalize it ===
             .then(proposer_step("n1", "val_b1", "val_b0", 0))
             .then(on_proposal("n0", proposal_1))
@@ -192,14 +196,29 @@ module tests {
             .then(replica_receives_notarize_votes("n0", proposal_1, Set("n0","n1","n2","n3","n4")))
             .then(all {
                 assert(replica_state.get("n0").last_finalized == 1),
-                // the chain GROWS -- before the fix this rebuilt to List()
+                // n0 commits val_b1 and, by ancestor finalization, the val_b0 it builds on
                 assert(ghost_committed_blocks.get("n0") == List(proposal_0, proposal_1)),
                 // its peers, which processed no new certificate, still hold the prefix
                 assert(ghost_committed_blocks.get("n2") == List(proposal_0)),
                 assert(all_invariants),
                 unchanged_all,
             })
-            .expect(all_invariants)
+
+            // === the byzantine shadow is injected BEFORE a later rebuild ===
+            // reusing val_b0 with a different parent breaks the hash binding
+            .then(inject_proposal(byz_shadow_of_view_0))
+            // n2 now processes the view-1 finalization, which REBUILDS its committed chain while
+            // the shadow sits in sent_proposal. The rebuild reads certificates, not sent_proposal,
+            // so the shadow cannot un-commit or rewrite anything: n2's chain GROWS to [val_b0, val_b1].
+            .then(on_certificate("n2", finalization_1))
+            .then(all {
+                assert(not(block_commits_to_parent)),
+                // the later rebuild is unaffected by the shadow: n2 grew, n0 unchanged, no rollback
+                assert(ghost_committed_blocks.get("n2") == List(proposal_0, proposal_1)),
+                assert(ghost_committed_blocks.get("n0") == List(proposal_0, proposal_1)),
+                unchanged_all,
+            })
+            .expect(not(block_commits_to_parent))
     }
 
     run contradictionTest = {
@@ -312,16 +331,14 @@ module tests {
             .expect(all_invariants)
     }
 
-    // Regression test for the "commit skips its ancestors" defect.
+    // Agreement holds even when replicas finalize at different views.
     //
-    // A replica enters the next view as soon as it sees M notarize votes, but it only
-    // commits once it sees L of them. When `ghost_committed_blocks` was accumulated by
-    // appending `cert.block`, a replica that saw view 0 as a notarization and then
-    // finalized view 1 recorded ["val_b1"] while a peer that finalized view 0 recorded
-    // ["val_b0"] -- two sequences of equal length differing at index 0, so `agreement`
-    // failed. Now the chain is rebuilt from the stored certificates by walking forward
-    // from genesis, so n3 cannot reach val_b1 without finalization(val_b0, 0) and
-    // commits nothing instead.
+    // n0 finalizes view 0 and commits val_b0. n3 finalizes view 1 while holding
+    // notarization(val_b0, 0), so by ancestor finalization (minimmit.md 8.4) it commits
+    // [val_b0, val_b1]. n0's chain is a prefix of n3's, so `agreement` holds. (The earlier
+    // "commit skips its ancestors" bug had n3 record ["val_b1"] alone, which broke `agreement`
+    // against a peer holding ["val_b0"]; rebuilding the chain from certificates by walking a
+    // finalized block's ancestry fixes that.)
     run agreementViolationTest = {
         pure val proposal_from_n0 = {
             block: "val_b0",
@@ -376,13 +393,14 @@ module tests {
             .then(replica_receives_notarize_votes("n0", proposal_from_n1, Set("n1", "n3", "n4")))
             .then(on_proposal("n2", proposal_from_n1))
 
-            // n3 sees all L = 5 votes for view 1 and finalizes it, but it holds only
-            // notarization(val_b0, 0), so the walk from genesis cannot reach val_b1.
+            // n3 sees all L = 5 votes for view 1 and finalizes it. It also holds
+            // notarization(val_b0, 0), so ancestor finalization commits both val_b0 and val_b1.
             .then(replica_receives_notarize_votes("n3", proposal_from_n1, Set("n0", "n1", "n2", "n3", "n4")))
             .then(all {
                 assert(replica_state.get("n3").last_finalized == 1),
+                // n0's [val_b0] is a prefix of n3's [val_b0, val_b1]: agreement holds
                 assert(ghost_committed_blocks.get("n0") == List(proposal_from_n0)),
-                assert(ghost_committed_blocks.get("n3") == List()),
+                assert(ghost_committed_blocks.get("n3") == List(proposal_from_n0, proposal_from_n1)),
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -496,12 +514,12 @@ module tests {
                 store_certificate.get("n0")
             ))),
 
-            // P1 is finalized, but rebuild_committed_chain cannot traverse
-            // through P0 because P0 has only a notarization certificate.
+            // P1's finalization also finalizes its ancestor P0 (minimmit.md 8.4): P0 carries
+            // only a notarization, but rebuild_committed_chain walks through it, so n0 commits
+            // [P0, P1].
             assert(replica_state.get("n0").last_finalized == 1),
             assert(ghost_committed_blocks.get("n0") == List(proposal_0, proposal_1)),
 
-            // The mismatch is invisible to the encoded invariants.
             assert(all_invariants),
             unchanged_all,
         })
@@ -616,99 +634,40 @@ module tests {
             .expect(all_invariants)
     }
 
-    // Regression test: the conservative "commit only blocks with their own finalization" rule in
-    // `rebuild_committed_chain` is REQUIRED for safety. Committing notarized-only ancestors -- a
-    // naive reading of minimmit.md 8.4 "finalize c and all of its ancestors" -- would break
-    // `agreement` in this model.
+    // Regression test: `block_commits_to_parent` is what makes ancestor finalization safe by
+    // ruling out a parent-equivocation attack.
     //
-    // A Block is a plain string and a child proposal's parent pointer is only
-    // (block_parent, view_parent); it does NOT identify the parent's full proposal. So a
-    // byzantine leader can equivocate a block's PARENT: two notarizations for the SAME block
-    // val_b2 at view 1 with DIFFERENT parents (val_b0 vs val_b1), each backed by M = 3 votes
-    // (2 honest that split on the view-0 parent, plus the byzantine key in both). A child Y at
-    // view 2 built on val_b2@1 then finalizes with L = 5 notarize votes, but its ancestry BELOW
-    // val_b2 is ambiguous: replica n0 (holding notarization(prop_x_via_a)) reconstructs
-    // [val_b0, val_b2, val_b0] while n2 (holding notarization(prop_x_via_b)) reconstructs
-    // [val_b1, val_b2, val_b0] -- divergent at index 0.
+    // Ancestor finalization commits a finalized block's notarized ancestors (minimmit.md 8.4).
+    // That is only sound because a Block is a hash-protected container that commits to its parent
+    // (minimmit.md 10): the SAME block cannot be built on two different parents. Without that, a
+    // byzantine leader could give block val_b2 two parents (val_b0 and val_b1); a finalized
+    // descendant of val_b2 would then have an ambiguous ancestry and two correct replicas could
+    // commit divergent chains ([val_b0, val_b2, ...] vs [val_b1, val_b2, ...]).
     //
-    // The current model commits nothing here, because Y's parent val_b2@1 has no finalization of
-    // its own (a finalization would pin the exact proposal via the L + M > N + F intersection).
-    // This test pins that down: if `rebuild_committed_chain` is ever changed to finalize
-    // notarized-only ancestors, the `ghost_committed_blocks == List()` / `all_invariants`
-    // assertions fail, and `naive_ancestor_blocks` shows the concrete fork such a change causes.
-    // (The real protocol avoids the ambiguity by using block digests, minimmit.md 10, so a block
-    // commits to its parent; the model's plain-string blocks do not.)
+    // `byzantine_replica_step` cannot produce this state -- its proposal guard enforces the
+    // binding, so it can never bind val_b2 to a second parent. We build it here with
+    // `inject_proposal`, which bypasses the guard, purely to show that `block_commits_to_parent`
+    // detects it. This is the invariant `rebuild_committed_chain`'s ancestor walk relies on.
     run equivocatedAncestorTest = {
-        pure val prop_a0 = { block: "val_b0", view: 0, block_parent: GENESIS_BLOCK, view_parent: GENESIS_VIEW, sig: sig_of("n5") }
-        pure val prop_b0 = { block: "val_b1", view: 0, block_parent: GENESIS_BLOCK, view_parent: GENESIS_VIEW, sig: sig_of("n5") }
-        // same block val_b2 at view 1, two different parents (byzantine leader equivocates the parent)
+        // same block val_b2 at view 1, two different parents -- a hash collision
         pure val prop_x_via_a = { block: "val_b2", view: 1, block_parent: "val_b0", view_parent: 0, sig: sig_of("n5") }
         pure val prop_x_via_b = { block: "val_b2", view: 1, block_parent: "val_b1", view_parent: 0, sig: sig_of("n5") }
-        // finalized child at view 2, built on block val_b2@1
-        pure val prop_y = { block: "val_b0", view: 2, block_parent: "val_b2", view_parent: 1, sig: sig_of("n0") }
-        pure val notarization_a0 = notarization(prop_a0, Set("n0", "n1", "n5"), sig_of("n0"))
-        pure val notarization_x_via_a = notarization(prop_x_via_a, Set("n0", "n1", "n5"), sig_of("n0"))
 
         initWithLeader(Map(0 -> "n5", 1 -> "n5", 2 -> "n0", 3 -> "n0",
                            4 -> "n0", 5 -> "n0", 6 -> "n0", 7 -> "n0", 8 -> "n0"))
-            // === view 0: byzantine leader n5 broadcasts two different blocks ===
-            .then(inject_proposal(prop_a0))
-            .then(inject_proposal(prop_b0))
-            .then(on_proposal("n0", prop_a0))
-            .then(on_proposal("n1", prop_a0))
-            .then(on_proposal("n2", prop_b0))
-            .then(on_proposal("n3", prop_b0))
-            .then(inject_vote(notarize(prop_a0, sig_of("n5"))))
-            .then(inject_vote(notarize(prop_b0, sig_of("n5"))))
-            // assemble the two view-0 notarizations; replicas enter view 1
-            .then(replica_receives_notarize_votes("n0", prop_a0, Set("n0", "n1", "n5")))
-            .then(replica_receives_notarize_votes("n1", prop_a0, Set("n0", "n1", "n5")))
-            .then(replica_receives_notarize_votes("n2", prop_b0, Set("n2", "n3", "n5")))
-            .then(replica_receives_notarize_votes("n3", prop_b0, Set("n2", "n3", "n5")))
-            .then(on_certificate("n4", notarization_a0))   // n4 adopts a0 and enters view 1
-            // === view 1: byzantine leader n5 broadcasts SAME block val_b2 with two parents ===
+            .then(all { assert(block_commits_to_parent), unchanged_all })   // holds initially
             .then(inject_proposal(prop_x_via_a))
+            .then(all { assert(block_commits_to_parent), unchanged_all })   // one binding is fine
+            // the second proposal binds the same block val_b2 to a different parent
             .then(inject_proposal(prop_x_via_b))
-            .then(on_proposal("n0", prop_x_via_a))
-            .then(on_proposal("n1", prop_x_via_a))
-            .then(on_proposal("n2", prop_x_via_b))
-            .then(on_proposal("n3", prop_x_via_b))
-            .then(inject_vote(notarize(prop_x_via_a, sig_of("n5"))))
-            .then(inject_vote(notarize(prop_x_via_b, sig_of("n5"))))
-            .then(replica_receives_notarize_votes("n0", prop_x_via_a, Set("n0", "n1", "n5")))
-            .then(replica_receives_notarize_votes("n1", prop_x_via_a, Set("n0", "n1", "n5")))
-            .then(replica_receives_notarize_votes("n2", prop_x_via_b, Set("n2", "n3", "n5")))
-            .then(replica_receives_notarize_votes("n3", prop_x_via_b, Set("n2", "n3", "n5")))
-            .then(on_certificate("n4", notarization_x_via_a))   // n4 adopts x_via_a and enters view 2
-            // === view 2: honest leader n0 proposes Y on val_b2@1; all five notarize -> finalize ===
-            .then(proposer_step("n0", "val_b0", "val_b2", 1))
-            .then(on_proposal("n1", prop_y))
-            .then(on_proposal("n2", prop_y))
-            .then(on_proposal("n3", prop_y))
-            .then(on_proposal("n4", prop_y))
-            .then(replica_receives_notarize_votes("n0", prop_y, Set("n0", "n1", "n2", "n3", "n4")))
-            .then(replica_receives_notarize_votes("n2", prop_y, Set("n0", "n1", "n2", "n3", "n4")))
             .then(all {
-                // Y is finalized at two correct replicas
-                assert(is_proposal_finalized(Some(prop_y), store_certificate.get("n0"))),
-                assert(is_proposal_finalized(Some(prop_y), store_certificate.get("n2"))),
-                // they hold a notarization for the SAME block val_b2 at view 1, DIFFERENT parents
-                assert(store_certificate.get("n0").exists(c => and {
-                    cert_kind(c) == NotarizationKind, cert_view(c) == 1, cert_proposal(c) == Some(prop_x_via_a),
-                })),
-                assert(store_certificate.get("n2").exists(c => and {
-                    cert_kind(c) == NotarizationKind, cert_view(c) == 1, cert_proposal(c) == Some(prop_x_via_b),
-                })),
-                // CURRENT (conservative) model commits nothing for either => agreement holds
-                assert(ghost_committed_blocks.get("n0") == List()),
-                assert(ghost_committed_blocks.get("n2") == List()),
-                assert(all_invariants),
-                // A naive 8.4 ancestor-walk WOULD fork the committed chain (divergent at index 0):
-                assert(naive_ancestor_blocks(prop_y, store_certificate.get("n0")) == List("val_b0", "val_b2", "val_b0")),
-                assert(naive_ancestor_blocks(prop_y, store_certificate.get("n2")) == List("val_b1", "val_b2", "val_b0")),
+                assert(prop_x_via_a.block == prop_x_via_b.block),
+                assert(prop_x_via_a.block_parent != prop_x_via_b.block_parent),
+                // the hash binding is broken -- exactly what a collision-resistant digest forbids
+                assert(not(block_commits_to_parent)),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(not(block_commits_to_parent))
     }
 
     // One rung of the nullification ladder: the two walkers n0 and n1 time out, the
@@ -767,33 +726,5 @@ module tests {
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
-    }
-
-    // Hypothetical "finalize c and all of its ancestors" (minimmit.md 8.4), used ONLY by
-    // `equivocatedAncestorTest` to show why it is unsafe here: walk down from a finalized
-    // proposal following (block_parent, view_parent), taking any notarized/finalized proposal
-    // for that (block, view). Because a block does not commit to its parent, this walk is
-    // ambiguous under a parent-equivocating byzantine leader and can return different chains at
-    // different replicas. Returns the committed blocks genesis-first. Not part of the model.
-    def naive_ancestor_blocks(target: Proposal, certs: Set[Certificate]): List[Block] = {
-        VIEWS.fold((target, List(target.block), false), (acc, _v) => {
-            val cur = acc._1
-            val blocks = acc._2
-            val done = acc._3
-            if (done) acc
-            else if (cur.view_parent == GENESIS_VIEW and cur.block_parent == GENESIS_BLOCK)
-                (cur, blocks, true)
-            else {
-                val parents = certs.filter(c => and {
-                    cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
-                    cert_view(c) == cur.view_parent,
-                    cert_proposal(c).option_has(pp => pp.block == cur.block_parent),
-                }).fold(Set(), (s, c) => match cert_proposal(c) { | Some(pp) => s.union(Set(pp)) | None => s })
-                if (parents.size() >= 1) {
-                    val parent = parents.fold(GENESIS_PROPOSAL, (_a, pp) => pp)
-                    (parent, List(parent.block).concat(blocks), false)
-                } else (cur, blocks, true)
-            }
-        })._2
     }
 }
