@@ -542,15 +542,15 @@ where
     }
 }
 
-impl<F, E, U, C, I, H, const N: usize, S> Source
+impl<F, E, C, I, H, U, const N: usize, S> Source
     for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: crate::qmdb::any::operation::update::Update,
     C: crate::journal::contiguous::Mutable<Item = crate::qmdb::any::operation::Operation<F, U>>,
     I: crate::index::Unordered<Value = Location<F>>,
     H: Hasher,
+    U: crate::qmdb::any::operation::update::Update,
     S: Strategy,
     crate::qmdb::any::operation::Operation<F, U>: commonware_codec::Codec,
 {

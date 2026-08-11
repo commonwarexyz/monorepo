@@ -2683,10 +2683,10 @@ impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: update::Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -2718,10 +2718,10 @@ impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    U: update::Update,
     C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -2867,13 +2867,14 @@ where
     }
 }
 
-impl<F: Family, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
+    F: Family,
     E: Context,
-    U: update::Update,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: update::Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {

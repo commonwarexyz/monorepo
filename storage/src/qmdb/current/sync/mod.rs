@@ -27,7 +27,7 @@
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
+    index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable, fixed, variable},
@@ -353,15 +353,15 @@ impl_current_sync_database!(
 
 /// A `current` database serves proofs from the `any` database it wraps. The sync engine
 /// operates on the ops root, which is `any`'s root.
-impl<F, E, U, C, I, H, const N: usize, S> crate::qmdb::sync::Source
+impl<F, E, C, I, H, U, const N: usize, S> crate::qmdb::sync::Source
     for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context,
-    U: Update,
     C: Mutable<Item = Operation<F, U>>,
-    I: crate::index::Unordered<Value = Location<F>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
