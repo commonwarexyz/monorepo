@@ -45,7 +45,7 @@ In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50
 ```
 
 ::: {.image-caption}
-Figure 1: Each square is one block. At 5ms between blocks, the grid fills in one second.
+Figure 1: Each square represents one 5ms target interval. Alto sustained 200 successful blocks per second.
 :::
 
 The pipeline keeps new views moving while earlier blocks finalize.
@@ -69,7 +69,7 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 ```
 
 ::: {.image-caption}
-Figure 2: With a term length of four, round-robin changes the proposer every view while Stable Leader changes it once per term. The timeline shows three complete terms.
+Figure 2: Round-robin rotates the proposer every view while Stable Leader changes it once per term.
 :::
 
 Stable leadership removes the proposer handoff. Without Optimistic Validation, the next view still waits for the parent notarization and the application check that follows.
@@ -80,31 +80,29 @@ Without Optimistic Validation, the stable leader waits for view `v` to be notari
 
 With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` or wait for its application check first.
 
-The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the application check that follows. The same rule can carry the pipeline across several views within the stable-leader term. New proposals can now arrive faster than a network round trip, limited by local work and network capacity rather than latency alone.
-
-The optimization changes when the next proposal and notarize votes can begin. It does not change the finalization rule.
+The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the application check that follows. The same rule can carry the pipeline across several views within the stable-leader term. New proposals can arrive faster than a network round trip, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
 
 ```{=html}
-<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form on a parallel lane.">
-  <noscript>Without Optimistic Validation, each child view waits for the parent notarization. With Optimistic Validation, child views can begin while parent notarizations form.</noscript>
+<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
+  <noscript>Without Optimistic Validation, each child view waits for the parent notarization. With Optimistic Validation, child views can begin while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 3: Optimistic Validation pipelines new views (red) over the formation of parent notarizations (blue). Both panels use the same horizontal time scale.
+Figure 3: Optimistic Validation packs new views closer together while notarization and finalization continue in parallel. Both panels use the same horizontal time scale.
 :::
 
 ## How Optimism Stays Safe
 
-`Optimistic` describes when a participant starts the next view. It does not weaken the evidence required for finalization.
+*Optimistic* describes when a participant starts the next view. It does not weaken the evidence required for finalization.
 
 Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish checks such as confirming that enough erasure-coded data is available.
 
 A participant works ahead only after it has voted for the parent, or when it holds usable quorum proof. The same rule applies to every optimistic ancestor. A validator still waits for the parent to be certified before certifying a child or voting to finalize it. If an ancestor fails to notarize or certify, optimistic votes above it become inert. Validators then abandon that part of the term through the normal timeout path.
 
-The lookahead stops at the term boundary. The first view of a new term must start from certified ancestry.
+Optimistic work stops at the term boundary. The first view of a new term must start from certified ancestry.
 
-The lookahead is local policy. A value of zero disables Optimistic Validation. Validators can choose different values without affecting safety. A larger value uses more CPU and memory on work that may later be discarded. A smaller value can limit the pipeline when notarizations fall behind.
+Each validator chooses how far it will work ahead. A value of zero disables Optimistic Validation. Validators can choose different limits without affecting safety. A larger limit can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that may later be discarded.
 
 ## What We Measured
 
@@ -112,30 +110,22 @@ We ran Alto with 50 validators spread evenly across ten AWS regions. With Stable
 
 The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
 
-We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At that cadence, the network could start about 60 views during the median finalization time.
+We measured finality separately, from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms. That path includes indexer and WebSocket delivery. At that cadence, about 60 later views could start while the original block finalized.
 
-## Choose the Pipeline
+## Where the Pipeline Fits
 
-Start with the stage that limits your view rate. Alto's settings are an example, not a default.
+These features remove two specific bottlenecks: leader handoffs and waits for parent notarization. They do not speed up application checks, execution, storage, proposal verification, or data dissemination. If one of those stages is slower, improve it first.
 
-| Limiting stage | Configuration | Main cost |
-|---|---|---|
-| Proposer handoff | Stable Leader without Optimistic Validation | Longer proposer authority |
-| Waiting for parent notarization or application checks | Add Optimistic Validation | More speculative CPU and memory |
-| Application checks, execution, storage, proposal checks, or dissemination capacity | Improve that stage first | A deeper window will fill |
+Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. If a leader stays offline, validators can nullify its first stalled view and skip the rest of its term. For a term of `L` views, this reduces that leader's timeout overhead per successful block to about `1/L` of per-view rotation. If a leader keeps views moving without finalizing blocks, a term-wide timeout lets validators rotate. These timeout rules cannot remove a leader that finalizes blocks while selectively censoring transactions.
 
-Longer terms amortize more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Validators can skip a stalled term. A term-wide timeout covers a leader that keeps views moving without finalizing blocks. Neither control removes a leader that finalizes blocks while selectively censoring transactions.
-
-The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. A smaller lookahead may fit heterogeneous validators. Rotating leaders may fit networks where leaders frequently fail or proposer rotation is an important censorship defense.
-
-Stable leadership keeps one leader on the transaction data path for the whole term. Networks with many concurrent producers can pair this pipeline with [Multimmit](/blogs/multimmit).
+The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Rotating leaders may fit networks where leaders frequently fail or proposer rotation is an important censorship defense.
 
 Stable terms currently use round-robin election. Every validator must use the same term length.
 
-## The Next Ordering Opportunity
+## The Next Block
 
-An orderbook update, batch reference, or game action that misses one proposal can be included in the next. In Alto, the median wait between those opportunities was 5ms.
+Every view gives applications another opportunity to order new data. Alto began a new view every 5ms at the median. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
 
-For builders who have already made dissemination and execution fast, the ordering clock can become the next visible limit. Each network can tune that clock around its own latency, capacity, and proposer-rotation requirements.
+This pipeline helps one ordering leader move quickly. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
 
-Stable Leader and Optimistic Validation are [available on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs). [Alto](https://github.com/commonwarexyz/alto) shows the complete integration. In our global deployment, that ordering clock ticked every 5ms at the median.
+Stable Leader and Optimistic Validation are [available on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs). [Alto](https://github.com/commonwarexyz/alto) shows the complete integration. With both features enabled, Simplex can begin the next block without waiting for a network round trip. In Alto, the median interval between blocks was 5ms.
