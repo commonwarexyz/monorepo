@@ -555,6 +555,21 @@ where
     (results, unresolved)
 }
 
+/// Record a diff entry's activity: activate the location it wrote (if any) and deactivate the
+/// prior committed location it superseded (if any).
+fn set_activity<F: Family, const N: usize>(
+    bitmap: &mut bitmap::Prunable<N>,
+    loc: Option<Location<F>>,
+    old: Option<Location<F>>,
+) {
+    if let Some(loc) = loc {
+        bitmap.set_bit(*loc, true);
+    }
+    if let Some(old) = old {
+        bitmap.set_bit(*old, false);
+    }
+}
+
 /// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
 /// install the winning `Active` location and clear the prior committed location.
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
@@ -575,12 +590,7 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
             }
         }
     }
-    if let Some(loc) = entry.loc() {
-        bitmap.set_bit(*loc, true);
-    }
-    if let Some(loc) = base_old_loc {
-        bitmap.set_bit(*loc, false);
-    }
+    set_activity(bitmap, entry.loc(), base_old_loc);
 }
 
 /// k-way sorted merge over diff slices in priority order. On equal keys, the lowest-indexed
@@ -707,12 +717,7 @@ fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
         // apply key-sharded across the strategy where the index supports it (the diff is
         // key-sorted).
         for (_, entry) in batch.diff.iter() {
-            if let Some(loc) = entry.loc() {
-                bitmap.set_bit(*loc, true);
-            }
-            if let Some(loc) = entry.base_old_loc() {
-                bitmap.set_bit(*loc, false);
-            }
+            set_activity(&mut bitmap, entry.loc(), entry.base_old_loc());
         }
         move_commit_bit(&mut bitmap, *last_commit_loc, tip);
         drop(bitmap);
