@@ -761,8 +761,7 @@ where
     strategy
         .clone()
         .spawn(move |strategy| {
-            let new_leaves =
-                grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
+            let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
             for (chunk_idx, digest) in new_leaves {
                 if chunk_idx < old_grafted_leaves {
                     grafted_batch = grafted_batch
@@ -1336,8 +1335,7 @@ mod tests {
     // N=4 -> CHUNK_SIZE_BITS = 32
     const N: usize = 4;
     type Bm = BitMap<N>;
-    type GraftedBatch =
-        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Rayon>>;
+    type GraftedBatch = Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Rayon>>;
     type Location = mmr::Location;
 
     fn make_bitmap(bits: &[bool]) -> Bm {
@@ -1379,12 +1377,7 @@ mod tests {
         let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
         let release = block_rayon(&strategy, 2);
-        let mut merkleize = Box::pin(merkleize_grafted_batch::<
-            mmb::Family,
-            Sha256,
-            _,
-            1,
-        >(
+        let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
             &strategy,
             Arc::clone(&b),
             &mem,
@@ -1402,12 +1395,7 @@ mod tests {
         let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
         let release = block_rayon(&strategy, 2);
-        let mut merkleize = Box::pin(merkleize_grafted_batch::<
-            mmb::Family,
-            Sha256,
-            _,
-            1,
-        >(
+        let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
             &strategy,
             Arc::clone(&b),
             &mem,
