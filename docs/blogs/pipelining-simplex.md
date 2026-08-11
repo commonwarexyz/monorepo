@@ -38,7 +38,7 @@ In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50
     }
   </style>
 </noscript>
-<div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="Animated 20 by 10 grid showing 200 blocks in one second. The grid fills at a rate of one red square per 5ms interval. After a pause, the squares return to gray from left to right and the cycle repeats.">
+<div id="simplex-fig-cadence" class="simplex-loop simplex-loop-cadence" role="img" aria-label="A 20 by 10 grid representing 200 blocks in one second, with one red square per 5ms interval.">
   <noscript>At 5ms between blocks, 200 blocks fit into one second. This figure shows them as a 20 by 10 grid of red squares.</noscript>
 </div>
 <script type="module" src="pipelining-simplex.loops.js"></script>
@@ -63,7 +63,7 @@ Traditionally, rotating leadership assigns each view to a new proposer. The next
 Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. Because that leader built the previous block, it already knows the block and its ancestry before a single network message arrives. There is no handoff before the next proposal. Election still runs at the term boundary.
 
 ```{=html}
-<div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="Animated comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
+<div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
   <noscript>Across 12 views, round-robin changes leaders every view. With a term length of four, each stable leader proposes four consecutive views. The timeline shows three complete terms and two term boundaries.</noscript>
 </div>
 ```
@@ -76,14 +76,14 @@ Stable leadership removes the proposer handoff. Without Optimistic Validation, t
 
 ## Wait Two: Forming the Parent Notarization
 
-Without Optimistic Validation, the stable leader waits for view `v` to be notarized and pass its application check before proposing view `v+1`. Forming the notarization requires votes to cross the network. The child must then cross the network before other validators can vote. Even without a leader handoff, network latency paces each view.
+Without Optimistic Validation, the stable leader waits for view `v` to be notarized before proposing view `v+1`. Other validators also wait for `v` to pass its application check before voting on the child. Forming the notarization requires votes to cross the network. The child must then cross the network before other validators can vote. Even without a leader handoff, network latency paces each view.
 
 With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` or wait for its application check first.
 
-The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the application check that follows. The same rule can carry the pipeline across several views within the stable-leader term. New proposals can arrive faster than a network round trip, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
+The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the application check that follows. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
 
 ```{=html}
-<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
+<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
   <noscript>Without Optimistic Validation, each child view waits for the parent notarization. With Optimistic Validation, child views can begin while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
 </div>
 ```
@@ -102,7 +102,7 @@ A participant works ahead only after it has voted for the parent, or when it hol
 
 Optimistic work stops at the term boundary. The first view of a new term must start from certified ancestry.
 
-Each validator chooses how far it will work ahead. A value of zero disables Optimistic Validation. Validators can choose different limits without affecting safety. A larger limit can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that may later be discarded.
+Each validator sets a local bound, measured in views, on how far it will run ahead at one time. A value of zero disables Optimistic Validation. Validators can choose different limits without affecting safety. A larger limit can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that may later be discarded.
 
 ## What We Measured
 
@@ -128,4 +128,4 @@ Every view gives applications another opportunity to order new data. Alto began 
 
 This pipeline helps one ordering leader move quickly. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
 
-Stable Leader and Optimistic Validation are [available on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/mod.rs). [Alto](https://github.com/commonwarexyz/alto) shows the complete integration. With both features enabled, Simplex can begin the next block without waiting for a network round trip. In Alto, the median interval between blocks was 5ms.
+Stable Leader and Optimistic Validation are available through [`RoundRobin::with_term` on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/elector.rs#L269-L290). The API will appear on docs.rs after the next `commonware-consensus` release. [Alto's integration](https://github.com/commonwarexyz/alto/blob/304b8232df939199d1d856dfb58c2930f45b5e3c/chain/src/engine.rs#L81-L94) shows the complete setup. Within a stable term, Simplex can begin the next block without waiting for a network round trip. In Alto, the median interval between blocks was 5ms.

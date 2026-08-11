@@ -328,7 +328,7 @@ function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS, staticProgress 
     mount.setAttribute('role', 'button');
     mount.setAttribute('tabindex', '0');
     mount.setAttribute('aria-pressed', 'false');
-    mount.setAttribute('aria-label', `${description} Activate to pause or resume the animation.`);
+    mount.setAttribute('aria-label', `Animated figure. ${description} Activate to pause or resume.`);
   };
   const progressAt = elapsed =>
     Math.max(0, Math.min(1, (elapsed - holdMs) / (loopMs - holdMs * 2)));
