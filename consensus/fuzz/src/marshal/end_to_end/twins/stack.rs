@@ -11,7 +11,11 @@ use super::{
     },
     B, Ctx, PublicKeyOf, SchemeOf,
 };
-use crate::{NetworkChannels, POST_GST_WINDOW, simplex::Simplex};
+use crate::{
+    NetworkChannels, POST_GST_WINDOW,
+    network::{WedgeChannel, WedgeNode, WedgeReceiver},
+    simplex::Simplex,
+};
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -387,6 +391,7 @@ pub(crate) async fn setup_validator<P: Simplex>(
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
     genesis: B<P>,
     max_pending_acks: NonZeroUsize,
+    wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
 ) -> Validator<P> {
     let application = if max_pending_acks <= NZUsize!(2) {
         Application::<B<P>>::manual_ack()
@@ -419,7 +424,15 @@ pub(crate) async fn setup_validator<P: Simplex>(
         strategy: Sequential,
     };
     let control = oracle.control(validator.clone());
-    let backfill = control.register(1, TEST_QUOTA).await.unwrap();
+    let (backfill_sender, backfill_receiver) = control.register(1, TEST_QUOTA).await.unwrap();
+    let backfill = (
+        backfill_sender,
+        WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
+            backfill_receiver,
+            wedge.clone(),
+            WedgeChannel::MarshalBackfill,
+        ),
+    );
     let resolver = resolver::init(
         context.child("resolver"),
         resolver::Config {
@@ -447,8 +460,15 @@ pub(crate) async fn setup_validator<P: Simplex>(
             peer_provider: oracle.manager(),
         },
     );
-    let network = control.register(2, TEST_QUOTA).await.unwrap();
-    broadcast_engine.start(network);
+    let (broadcast_sender, broadcast_receiver) = control.register(2, TEST_QUOTA).await.unwrap();
+    broadcast_engine.start((
+        broadcast_sender,
+        WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
+            broadcast_receiver,
+            wedge,
+            WedgeChannel::MarshalBroadcast,
+        ),
+    ));
 
     let finalizations_by_height = immutable::Archive::init(
         context.child("finalizations_by_height"),
