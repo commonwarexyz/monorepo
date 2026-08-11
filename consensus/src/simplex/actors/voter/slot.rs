@@ -82,6 +82,15 @@ where
         self.requested_build = true;
     }
 
+    /// Returns whether verification has yet to be requested for this slot.
+    ///
+    /// Unlike [`Self::should_build`], this does not test for an absent
+    /// proposal: verification is driven by a proposal the caller already
+    /// holds, whereas building is what produces one.
+    pub const fn should_verify(&self) -> bool {
+        !self.requested_verify
+    }
+
     /// Records a proposal that has already been verified.
     ///
     /// Additional observations of the same proposal are ignored here.

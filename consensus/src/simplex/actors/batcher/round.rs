@@ -179,8 +179,9 @@ impl<
             }
         };
 
-        // Completed phases report new signer evidence without forwarding votes
-        // to the verifier.
+        // Retained votes are signer-unique and contribute to certificate
+        // assembly. Compacted phases preserve only signer facts, so new activity
+        // is reported without forwarding the full vote to the verifier.
         let verifier_message = retained.then(|| message.clone());
         let activity = match message {
             Vote::Notarize(notarize) => Activity::Notarize(notarize),

@@ -26,19 +26,20 @@
 //! - Slot ownership is managed by the buffer pool.
 //! - Refill and spill paths naturally move buffers in batches.
 //!
-//! Each slot has two pieces of freelist state: a side-table entry and a free
-//! bit. The side-table entry is stable for the lifetime of the size class and
-//! stores the data pointer, capacity, routing fields, refcount, and any live
-//! size-class lease. The free bit records whether that slot is globally
-//! available. Returning a buffer consumes its lease and sets the bit. Taking a
-//! buffer clears a set bit and then rebuilds a [`PooledBuffer`] handle from the
-//! side-table entry.
+//! Each slot has three pieces of freelist state: a reservation bit, a
+//! side-table entry, and a free bit. The reservation bit records whether a
+//! stable slot id has been assigned to a created buffer. The side-table entry
+//! is stable for the lifetime of the size class and stores the data pointer,
+//! capacity, routing fields, refcount, and any live size-class lease. The free
+//! bit records whether that slot is globally available. Returning a buffer
+//! consumes its lease and sets the bit. Taking a buffer clears a set bit and
+//! then rebuilds a [`PooledBuffer`] handle from the side-table entry.
 //!
-//! Free bits are split across cache-line-padded atomic words. The pool passes
-//! its expected parallelism so the freelist can size this bitmap for the
-//! expected contention level. The freelist rounds that target up to a power of
-//! two, caps it so every word can contain at least one slot, and grows it when
-//! needed so no bitmap word tracks more than 64 slots.
+//! Reservation and free bits are split across cache-line-padded atomic words.
+//! The pool passes its expected parallelism so the freelist can size these
+//! bitmaps for the expected contention level. The freelist rounds that target
+//! up to a power of two, caps it so every word can contain at least one slot,
+//! and grows it when needed so no bitmap word tracks more than 64 slots.
 //!
 //! Consecutive slot ids are not packed into the same word. Instead low slot-id
 //! bits choose the word and high slot-id bits choose the bit inside that word.
@@ -62,6 +63,13 @@
 //!
 //! This gives concurrent threads more independent atomic words to target
 //! without changing the slot ids handed back to the pool.
+//!
+//! Lazy creation uses the same striped mapping. The slot id assigned at
+//! creation determines the word where that buffer will later be parked. If a
+//! single global counter assigns slot ids, a worker can create buffers that
+//! later publish on another worker's home word, then miss them when it starts a
+//! future take from its own home word. Reserving created slots with the same
+//! probe order keeps lazy growth aligned with later global reuse.
 //!
 //! Each thread also gets a stable probe id. The probe id uses the same
 //! power-of-two split as slot ids:
@@ -96,6 +104,9 @@
 //!
 //! The hot paths are fast for a few concrete reasons:
 //!
+//! - `try_create` starts from the same stable per-thread home word as `take`,
+//!   so lazy-created buffers tend to park where their creating thread will look
+//!   first when those buffers later return to the global freelist.
 //! - `put` is just one `fetch_or`, plus a double-return assert on the value
 //!   it returns.
 //! - `take` uses a stable per-thread home word before scanning others, so
@@ -164,12 +175,21 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 pub struct Freelist {
     /// Allocation layout shared by every tracked buffer.
     layout: Layout,
-    /// Number of slot ids reserved for created buffers.
+    /// Number of creation permits claimed.
     ///
-    /// This is a monotonic high-water mark for slot assignment. Draining
-    /// globally-free buffers does not decrement it because higher slot ids may
-    /// still be owned by a pooled backing or parked in thread-local caches.
+    /// This is a monotonic capacity-admission counter. Winning an increment
+    /// gives a creator one permit to reserve a slot id from the reservation
+    /// bitmap. Draining globally-free buffers does not decrement it because
+    /// created slot ids may still be owned by a pooled backing or parked in
+    /// thread-local caches.
     created: AtomicUsize,
+    /// Cache-line-padded striped bitmap of reserved slot ids.
+    ///
+    /// Creation uses the same striped slot mapping and per-thread probe order as
+    /// the free bitmap. This preserves probe affinity during lazy growth: the
+    /// slot chosen for a newly-created buffer determines the global word where
+    /// that buffer will later be parked.
+    reserved: Box<[CachePadded<AtomicU64>]>,
     /// Cache-line-padded striped bitmap of free slots.
     ///
     /// Padding matters here because threads often target different words in
@@ -244,6 +264,20 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+
+        // Constructor-exclusive prefill can reserve every valid slot without
+        // running the concurrent affinity probe.
+        let reserved = (0..word_count)
+            .map(|word_index| {
+                let bits = if prefill {
+                    Self::valid_bits(capacity, word_shift, word_index)
+                } else {
+                    0
+                };
+                CachePadded::new(AtomicU64::new(bits))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let slots = (0..slot_count)
             .map(|slot| CachePadded::new(UnsafeCell::new(PooledOwner::new(slot, layout.size()))))
             .collect::<Vec<_>>()
@@ -251,7 +285,8 @@ impl Freelist {
 
         let freelist = Self {
             layout,
-            created: AtomicUsize::new(0),
+            created: AtomicUsize::new(if prefill { capacity } else { 0 }),
+            reserved,
             words,
             slots,
             word_mask,
@@ -259,10 +294,10 @@ impl Freelist {
         };
 
         if prefill {
-            freelist.put_batch((0..capacity).map(|_| {
-                freelist
-                    .try_create(false)
-                    .expect("prefill creates exactly capacity buffers")
+            freelist.put_batch((0..slot_count).map(|slot| {
+                // SAFETY: construction exclusively owns this reserved
+                // side-table entry. `put_batch` publishes it after initialization.
+                unsafe { PooledBuffer::new(freelist.slot_ptr(slot), layout, false) }
             }));
         }
 
@@ -271,24 +306,74 @@ impl Freelist {
 
     /// Creates a new buffer and reserves a stable slot id for it.
     ///
-    /// Returns `None` once every slot id in the fixed-capacity freelist has
-    /// been reserved.
+    /// Creation has two steps. First, `created` claims one capacity permit.
+    /// Then the reservation bitmap assigns an actual slot id using the same
+    /// per-thread probe order as [`Self::take`]. This keeps newly-created
+    /// buffers mapped to the words their creating thread will probe first after
+    /// those buffers are returned to the global freelist.
+    ///
+    /// Returns `None` once every creation permit in the fixed-capacity
+    /// freelist has been claimed.
     ///
     /// The returned buffer does not deallocate itself. It must be returned to
     /// this same freelist before the freelist is finally dropped, otherwise
     /// its allocation leaks and its owner pointer dangles.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
+        let capacity = self.slots.len();
+
+        // `created` admits exactly `capacity` creators. It does not publish a
+        // buffer or a slot id, so relaxed ordering is enough.
+        //
         // Loom's atomic implementation does not provide `try_update`.
         #[allow(deprecated)]
-        let slot = self
-            .created
+        self.created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                (created < self.slots.len()).then_some(created + 1)
+                (created < capacity).then_some(created + 1)
             })
-            .ok()? as u32;
+            .ok()?;
 
-        // SAFETY: this fetch_update reserved `slot` exactly once, so no other
+        // Capture this thread's probe state once so the inner loop does not
+        // repeatedly touch thread-local storage.
+        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
+
+        // The capacity permit guarantees that some valid reservation bit is
+        // still clear. The bitmap RMW below chooses which slot id this creator
+        // owns.
+        let slot = 'reserve: {
+            for scanned in 0..self.reserved.len() {
+                let word_index = probe.word_index(scanned);
+                let word_ref = &self.reserved[word_index];
+                // Creation searches for zero bits, so unused high bits would
+                // look available without this mask.
+                let valid = Self::valid_bits(capacity, self.word_shift, word_index);
+                // The relaxed load only chooses candidates. The following RMW
+                // decides ownership.
+                let mut available = !word_ref.load(Ordering::Relaxed) & valid;
+
+                while available != 0 {
+                    // Probe a thread-specific bit order inside the chosen word so
+                    // colliding threads do not all stampede bit 0 first.
+                    let bit = probe.select_set_bit(available);
+                    let mask = 1u64 << bit;
+                    // This needs atomic uniqueness, not memory publication: no
+                    // parked buffer is made visible by reserving a slot id.
+                    let observed = word_ref.fetch_or(mask, Ordering::Relaxed);
+                    if observed & mask == 0 {
+                        break 'reserve self.slot_index(word_index, bit);
+                    }
+
+                    // Another creator reserved that candidate first. Continue
+                    // from the word state returned by the RMW instead of
+                    // restarting the whole scan.
+                    available = !observed & valid;
+                }
+            }
+
+            unreachable!("creation permit guarantees one reservable slot");
+        };
+
+        // SAFETY: the reservation RMW assigned `slot` exactly once, so no other
         // thread can initialize or publish this side-table entry.
         let buffer = unsafe { PooledBuffer::new(self.slot_ptr(slot), self.layout, zeroed) };
 
@@ -316,6 +401,22 @@ impl Freelist {
     const fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
         let slot = (bit << self.word_shift) | word_index;
         slot as u32
+    }
+
+    /// Returns the mask of valid slot bits for a bitmap word.
+    ///
+    /// Some words have unused high bits when capacity does not fill a complete
+    /// final logical row. For example, with capacity 10 and 4 words, words 0
+    /// and 1 have three valid bits (slots 0/4/8 and 1/5/9), while words 2 and 3
+    /// have only two.
+    #[inline(always)]
+    const fn valid_bits(capacity: usize, word_shift: u32, word_index: usize) -> u64 {
+        let bits = ((capacity - 1 - word_index) >> word_shift) + 1;
+        if bits == SLOT_BITMAP_WORD_BITS {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
     }
 
     /// Puts one tracked buffer into the global freelist.
@@ -812,6 +913,17 @@ pub(super) mod tests {
         freelist.words.len()
     }
 
+    fn reserve_by_slot(freelist: &Freelist, capacity: usize) -> Vec<Option<PooledBuffer>> {
+        let mut entries = (0..capacity).map(|_| None).collect::<Vec<_>>();
+        for _ in 0..capacity {
+            let buffer = freelist.try_create(false).expect("slot");
+            let slot = buffer.slot() as usize;
+            assert!(slot < capacity);
+            assert!(entries[slot].replace(buffer).is_none());
+        }
+        entries
+    }
+
     const TEST_LAYOUT: Layout = match Layout::from_size_align(64, 64) {
         Ok(layout) => layout,
         Err(_) => unreachable!(),
@@ -819,18 +931,23 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_try_create_tracks_capacity_and_prefill() {
+        // Creation should reserve exactly the configured capacity, whether
+        // slots are created lazily or during prefill.
         let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
         assert_eq!(created(&set), 0);
 
         // Without prefill, slots are reserved lazily as buffers are created.
         let buffer0 = set.try_create(false).expect("first creation");
         let buffer1 = set.try_create(false).expect("second creation");
-        assert_eq!(buffer0.slot(), 0);
-        assert_eq!(buffer1.slot(), 1);
+        let slot0 = buffer0.slot();
+        let slot1 = buffer1.slot();
+        assert_ne!(slot0, slot1);
+        assert!(slot0 < 2);
+        assert!(slot1 < 2);
         assert_eq!(created(&set), 2);
         let debug = format!("{buffer0:?}");
         assert!(debug.contains("PooledBuffer"));
-        assert!(debug.contains("slot: 0"));
+        assert!(debug.contains(&format!("slot: {slot0}")));
 
         // Slot reservation is bounded by capacity, even if the created
         // buffers have not yet been returned to the freelist.
@@ -845,10 +962,31 @@ pub(super) mod tests {
         assert_eq!(created(&set), 2);
         assert!(set.try_create(false).is_none());
 
-        // Prefill reserves and publishes every slot during construction.
-        let prefilled = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, true);
-        assert_eq!(created(&prefilled), 2);
-        assert_eq!(len(&prefilled), 2);
+        // Prefill reserves and publishes every slot during construction. Use a
+        // partial final logical row so unused high bits would show up as extra
+        // free slots if the initialization mask were wrong.
+        let prefilled = Freelist::new(NZU32!(10), NZUsize!(4), TEST_LAYOUT, true);
+        assert_eq!(created(&prefilled), 10);
+        assert_eq!(len(&prefilled), 10);
+        assert!(prefilled.try_create(false).is_none());
+
+        let mut seen = [false; 10];
+        let mut taken = Vec::new();
+        for _ in 0..10 {
+            let buffer = prefilled.take().expect("prefilled slot");
+            let slot = buffer.slot() as usize;
+            assert!(slot < 10);
+            assert!(!seen[slot]);
+            seen[slot] = true;
+            taken.push(buffer);
+        }
+        assert!(seen.into_iter().all(|seen| seen));
+        assert!(prefilled.take().is_none());
+
+        // Return taken test buffers so the freelist owns deallocation.
+        for buffer in taken {
+            prefilled.put(buffer);
+        }
     }
 
     #[test]
@@ -870,14 +1008,16 @@ pub(super) mod tests {
         // Two entries force the multi-entry `put_entries` path, whose per-word
         // assert is separate from the single-buffer `put` assert.
         let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
-        let buffer0 = set.try_create(false).expect("first slot");
-        let buffer1 = set.try_create(false).expect("second slot");
+        let returned = set.try_create(false).expect("returned slot");
+        let returned_slot = returned.slot();
+        let other = set.try_create(false).expect("other slot");
+
         // SAFETY: the duplicate handle exists only to drive the batch
         // double-return assert. put_batch panics before it is used further,
         // and drain deallocates each slot exactly once afterwards.
-        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
-        set.put(buffer0);
-        set.put_batch([buffer1, duplicate]);
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(returned_slot)) };
+        set.put(returned);
+        set.put_batch([other, duplicate]);
     }
 
     #[test]
@@ -889,9 +1029,11 @@ pub(super) mod tests {
         // miri's leak check.
         let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
         let buffer = set.try_create(false).expect("slot available");
+        let slot = buffer.slot();
+
         // SAFETY: the duplicate handle exists only to drive the staging
         // assert. put_batch panics before publishing either handle.
-        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) };
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(slot)) };
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             set.put_batch([buffer, duplicate]);
         }))
@@ -907,9 +1049,9 @@ pub(super) mod tests {
         );
 
         // Republish the slot so teardown reclaims its allocation.
-        // SAFETY: slot 0 was created by this freelist and is not available
+        // SAFETY: `slot` was created by this freelist and is not available
         // (the staging panic happened before its bit was inserted).
-        set.put(unsafe { PooledBuffer::from_owner(set.slot_ptr(0)) });
+        set.put(unsafe { PooledBuffer::from_owner(set.slot_ptr(slot)) });
     }
 
     #[test]
@@ -921,7 +1063,9 @@ pub(super) mod tests {
         let buffer0 = set.try_create(false).unwrap();
         let buffer1 = set.try_create(false).unwrap();
         let buffer2 = set.try_create(false).unwrap();
-        assert_eq!([buffer0.slot(), buffer1.slot(), buffer2.slot()], [0, 1, 2]);
+        let mut created = [buffer0.slot(), buffer1.slot(), buffer2.slot()];
+        created.sort_unstable();
+        assert_eq!(created, [0, 1, 2]);
         set.put(buffer0);
         set.put(buffer1);
         set.put(buffer2);
@@ -944,6 +1088,97 @@ pub(super) mod tests {
 
         // Return taken test buffers so the freelist owns deallocation.
         for buffer in taken {
+            set.put(buffer);
+        }
+    }
+
+    #[test]
+    fn test_freelist_try_create_uses_thread_probe_order() {
+        // Lazy creation should choose the same first word and bit order that
+        // this thread will later use when taking from the global freelist.
+        // Capacity 512 with parallelism 8 gives each word 64 valid bits, so
+        // the second reservation should stay in the home word instead of
+        // falling through to another stripe because of mask limits.
+        let set = Freelist::new(NZU32!(512), NZUsize!(8), TEST_LAYOUT, false);
+        let probe = SlotBitmapProbe::new(set.word_mask, set.word_shift);
+
+        // Derive the expected slot ids from this thread's stable probe state.
+        let expected0 = set.slot_index(probe.word_index(0), probe.bit_offset as usize);
+        let expected1 = set.slot_index(
+            probe.word_index(0),
+            ((probe.bit_offset + 1) & (SLOT_BITMAP_WORD_BITS as u32 - 1)) as usize,
+        );
+
+        // The first two lazy reservations should follow this thread's rotated
+        // bit order within its home word.
+        let buffer0 = set.try_create(false).expect("first probed slot");
+        let buffer1 = set.try_create(false).expect("second probed slot");
+        let slot0 = buffer0.slot();
+        let slot1 = buffer1.slot();
+        assert_eq!(slot0, expected0);
+        assert_eq!(slot1, expected1);
+
+        // Return the created buffers so the freelist owns deallocation.
+        set.put(buffer0);
+        set.put(buffer1);
+    }
+
+    #[test]
+    fn test_freelist_concurrent_try_create_reserves_unique_slots() {
+        // Multiple creators racing to grow the same size class must reserve
+        // every slot at most once and stop exactly at capacity.
+        const CAPACITY: usize = 128;
+
+        // Cover capacity-wide creation with real threads. The Loom sibling
+        // exhaustively covers same-candidate reservation races.
+        let set = Arc::new(Freelist::new(NZU32!(128), NZUsize!(16), TEST_LAYOUT, false));
+        let barrier = Arc::new(Barrier::new(16));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut handles = Vec::new();
+
+        for _ in 0..16 {
+            let set = Arc::clone(&set);
+            let barrier = Arc::clone(&barrier);
+            let tx = tx.clone();
+            handles.push(std::thread::spawn(move || {
+                // Align creators so the reservation bitmap sees real RMW
+                // contention instead of serial thread startup.
+                barrier.wait();
+                let mut entries = Vec::new();
+                while let Some(entry) = set.try_create(false) {
+                    entries.push(entry);
+                }
+                tx.send(entries).expect("send created entries");
+            }));
+        }
+        drop(tx);
+
+        let mut entries = Vec::new();
+        let mut seen = vec![false; CAPACITY];
+        for thread_entries in rx {
+            for buffer in thread_entries {
+                // Each successful reservation must be within capacity and must
+                // be observed exactly once across all racing creators.
+                let slot = buffer.slot() as usize;
+                assert!(slot < CAPACITY);
+                assert!(!seen[slot]);
+                seen[slot] = true;
+                entries.push(buffer);
+            }
+        }
+
+        for handle in handles {
+            handle.join().expect("creator should not panic");
+        }
+
+        // Capacity should be exhausted exactly once: no missing slots, no
+        // duplicate reservations, and the created counter reflects the total.
+        assert_eq!(entries.len(), CAPACITY);
+        assert!(seen.into_iter().all(|seen| seen));
+        assert_eq!(created(&set), CAPACITY);
+
+        // Return every created buffer so the freelist owns deallocation.
+        for buffer in entries {
             set.put(buffer);
         }
     }
@@ -983,19 +1218,16 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_put_batch_handles_empty_single_and_multi_entry_paths() {
+        // Exercise all batch insertion paths while keeping ownership explicit:
+        // empty no-op, single-entry delegation, and multi-entry coalescing.
         let set = Freelist::new(NZU32!(8), NZUsize!(8), TEST_LAYOUT, false);
 
         // Empty batches are a no-op and must not make anything available.
         set.put_batch(Vec::new());
         assert_eq!(len(&set), 0);
 
-        // Reserve the full slot range
-        let mut created = Vec::new();
-        for expected in 0..8 {
-            let buffer = set.try_create(false).unwrap();
-            assert_eq!(buffer.slot(), expected);
-            created.push(Some(buffer));
-        }
+        // Reserve the full slot range.
+        let mut created = reserve_by_slot(&set, 8);
 
         // A single-entry batch delegates to `put`, preserving the cheaper
         // one-buffer path.
@@ -1042,14 +1274,9 @@ pub(super) mod tests {
         let set = Freelist::new(NZU32!(8193), NZUsize!(65), TEST_LAYOUT, false);
         assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
 
-        // Reserve through the highest slot so the original sparse slots are
-        // valid while only those slots are published to the freelist.
-        let mut created = Vec::new();
-        for expected in 0..8193 {
-            let buffer = set.try_create(false).expect("slot");
-            assert_eq!(buffer.slot(), expected);
-            created.push(Some(buffer));
-        }
+        // Reserve all slots so the sparse test slots are valid while only
+        // those slots are published to the freelist.
+        let mut created = reserve_by_slot(&set, 8193);
 
         let mut batch = Vec::new();
         for slot in [0, 1, 64, 8192] {
@@ -1077,29 +1304,23 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_drain_returns_all_available_slots() {
+        // Drain should drop every globally available buffer while leaving
+        // outstanding created buffers owned by the caller.
         let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
-        let buffer0 = set.try_create(false).unwrap();
-        let buffer1 = set.try_create(false).unwrap();
-        let buffer2 = set.try_create(false).unwrap();
-        let buffer3 = set.try_create(false).unwrap();
-        assert_eq!(
-            [
-                buffer0.slot(),
-                buffer1.slot(),
-                buffer2.slot(),
-                buffer3.slot()
-            ],
-            [0, 1, 2, 3]
-        );
-        set.put(buffer0);
-        set.put(buffer2);
-        set.put(buffer3);
+        let mut entries = (0..4)
+            .map(|_| set.try_create(false).expect("slot"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 4);
+        let held = entries.pop().expect("held entry");
+        for buffer in entries {
+            set.put(buffer);
+        }
 
         assert_eq!(set.drain(), 3);
         assert_eq!(len(&set), 0);
 
         // Return taken test buffer so the freelist owns deallocation.
-        set.put(buffer1);
+        set.put(held);
     }
 
     #[test]
@@ -1107,9 +1328,8 @@ pub(super) mod tests {
         // Put fewer slots than the largest requested batch to cover exact,
         // partial, and empty refill behavior in one setup.
         let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
-        for expected in [0, 1, 2] {
+        for _ in [0, 1, 2] {
             let buffer = set.try_create(false).expect("slot");
-            assert_eq!(buffer.slot(), expected);
             set.put(buffer);
         }
 
@@ -1133,7 +1353,10 @@ pub(super) mod tests {
 
         let mut slots = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
         slots.sort_unstable();
-        assert_eq!(slots, vec![0, 1, 2]);
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|&slot| slot < 4));
+        slots.dedup();
+        assert_eq!(slots.len(), 3);
 
         // Return taken test buffers so the freelist owns deallocation.
         for buffer in taken {
@@ -1318,9 +1541,8 @@ pub(super) mod tests {
         // Dropping a non-empty freelist must drop any buffers still parked in
         // globally free slots.
         let set = Freelist::new(NZU32!(2), NZUsize!(2), TEST_LAYOUT, false);
-        for expected in [0, 1] {
+        for _ in [0, 1] {
             let buffer = set.try_create(false).expect("slot");
-            assert_eq!(buffer.slot(), expected);
             set.put(buffer);
         }
         drop(set);
@@ -1528,16 +1750,60 @@ mod loom_tests {
     }
 
     #[test]
+    fn concurrent_creates_do_not_duplicate_slots() {
+        // `created` admits the two creators, then the relaxed reservation
+        // bitmap chooses their slot ids. Parallelism 1 places both slots in
+        // one word and models the smallest same-word race, where both creators
+        // may choose the same first candidate and one must continue to the
+        // remaining bit. Parallelism 2 gives each slot its own word, so a
+        // creator that claims both permits must fall through its full home
+        // word and reserve the remaining slot in the other stripe.
+        for parallelism in [1, 2] {
+            loom::model(move || {
+                let freelist = Arc::new(Freelist::new(
+                    NZU32!(2),
+                    NZUsize!(parallelism),
+                    Layout::from_size_align(64, 64).unwrap(),
+                    false,
+                ));
+                let seen = Arc::new(AtomicUsize::new(0));
+                let expected = 0b11;
+                let leases = Leases::new(freelist.clone());
+                let mut handles = Vec::new();
+
+                for _ in 0..2 {
+                    handles.push(thread::spawn({
+                        let freelist = freelist.clone();
+                        let seen = seen.clone();
+                        let leases = leases.clone();
+                        move || {
+                            while let Some(buffer) = freelist.try_create(false) {
+                                leases.push_expected(&seen, expected, buffer);
+                            }
+                        }
+                    }));
+                }
+
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+
+                assert_eq!(seen.load(Ordering::Relaxed), expected);
+                assert_eq!(freelist.created.load(Ordering::Relaxed), 2);
+            });
+        }
+    }
+
+    #[test]
     fn put_publishes_before_take() {
         // `put` publishes the returned slot with a Release RMW. The taker
         // spins until it can clear that bit with an Acquire RMW, then rebuilds
         // a buffer handle from the same side-table slot. The stamp pins the
         // publication edge itself: the producer's pre-put write must be
         // visible and race-free to the claimant.
-        model(&ALL_GEOMETRIES, |geometry, freelist| {
-            let slot = geometry.slots()[0];
+        model(&ALL_GEOMETRIES, |_, freelist| {
             let buffer = freelist.try_create(false).unwrap();
-            assert_eq!(buffer.slot(), slot);
+            let slot = buffer.slot();
             let leases = Leases::new(freelist.clone());
             let stamps = SlotStamps::new(4);
 
@@ -1652,11 +1918,11 @@ mod loom_tests {
 
     #[test]
     fn put_and_take_compose_on_partially_free_word() {
-        // Slot 0 starts free, then a producer returns slot 1 while `take` races
-        // on the same bitmap word. The producer's `fetch_or` must compose with
-        // the consumer's `fetch_and`: clearing the existing bit must not lose
-        // the newly published bit, and publishing the new bit must not
-        // resurrect a claimed bit.
+        // One slot starts free, then a producer returns another slot while
+        // `take` races on the same bitmap word. The producer's `fetch_or` must
+        // compose with the consumer's `fetch_and`: clearing the existing bit
+        // must not lose the newly published bit, and publishing the new bit
+        // must not resurrect a claimed bit.
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(2));
             let (leases, mut entries) = Leases::reserve(freelist.clone());
@@ -1749,11 +2015,11 @@ mod loom_tests {
 
     #[test]
     fn put_batch_and_drain_compose_on_partially_free_word() {
-        // Slot 0 starts free, then a batch producer stages slots 1 and 2 and
+        // One slot starts free, then a batch producer stages two more slots and
         // publishes them with one `fetch_or`. A concurrent `drain` clears the
         // whole word with `swap(0)`. The two RMWs must compose: the drainer may
-        // get only slot 0 or all three slots, but the slots it misses must
-        // remain available after the writer completes.
+        // get only the initial slot or all three slots, but the slots it misses
+        // must remain available after the writer completes.
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(3));
             let mut entries = Leases::entries(&freelist);
@@ -1800,10 +2066,11 @@ mod loom_tests {
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(2));
             let buffer = freelist.try_create(false).unwrap();
+            let created_slot = buffer.slot();
             freelist.put(buffer);
 
             let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b1;
+            let expected = 1usize << created_slot;
             let mut handles = Vec::new();
             let leases = Leases::new(freelist.clone());
 
@@ -2126,11 +2393,10 @@ mod loom_tests {
         //
         // If the swap does not compose with the successful put, the model can
         // lose or duplicate the returned slot.
-        model(&ALL_GEOMETRIES, |geometry, freelist| {
+        model(&ALL_GEOMETRIES, |_, freelist| {
             let drained = Arc::new(AtomicUsize::new(0));
-            let slot = geometry.slots()[0];
             let buffer = freelist.try_create(false).unwrap();
-            assert_eq!(buffer.slot(), slot);
+            let slot = buffer.slot();
             let stamps = SlotStamps::new(4);
 
             let writer = thread::spawn({
