@@ -123,6 +123,7 @@ commonware-conformance = { version = "2026.7.0", path = "conformance" }
 commonware-conformance-macros = { version = "2026.7.0", path = "conformance/macros" }
 commonware-consensus = { version = "2026.7.0", path = "consensus" }
 commonware-cryptography = { version = "2026.7.0", path = "cryptography", default-features = false }
+commonware-cryptography-curve25519 = { version = "2026.7.0", path = "cryptography/curve25519", default-features = false }
 commonware-deployer = { version = "2026.7.0", path = "deployer", default-features = false }
 commonware-formatting = { version = "2026.7.0", path = "formatting", default-features = false }
 commonware-glue = { version = "2026.7.0", path = "glue" }
