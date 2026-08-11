@@ -72,11 +72,11 @@ Figure 2: Round-robin rotates the proposer every view while Stable Leader change
 
 ## Wait Two: Forming the Parent Notarization
 
-Without Optimistic Validation, the stable leader waits for view `v` to be notarized before proposing view `v+1`. Other validators also wait for `v` to pass its application check before voting on the child. Forming the notarization requires votes to cross the network. The child must then cross the network before other validators can vote. Even without a leader handoff, network latency paces each view.
+Without Optimistic Validation, the stable leader waits for view `v` to be notarized before proposing view `v+1`. Other validators also wait for that notarization before voting to notarize `v+1`. Forming the notarization requires votes to cross the network. The child must then cross the network before other validators can vote. Even without a leader handoff, network latency paces each view.
 
-With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` or wait for its application check first.
+With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
 
-The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the application check that follows. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
+The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v`. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
 
 ```{=html}
 <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
