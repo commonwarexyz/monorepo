@@ -742,6 +742,7 @@ where
     overlay
 }
 
+/// Merkleize grafted chunk digests while retaining the live ancestor chain.
 async fn merkleize_grafted_batch<F, H, S, const N: usize>(
     strategy: &S,
     grafted_parent: Arc<GenericMerkleizedBatch<F, H::Digest, S>>,
