@@ -52,13 +52,13 @@ Figure 1: Each square represents one 5ms target interval. Alto sustained 200 suc
 
 A *view* is one opportunity for a leader to propose a block. Validators verify the proposal and vote. Once a quorum votes for the same proposal, it is *notarized*.
 
-Traditionally, two network hops separate consecutive views: the next leader must receive the previous proposal, then votes must cross the network to form its notarization. Stable Leader and Optimistic Validation remove both waits from the critical path.
+Traditionally, two network hops separate consecutive views: the next leader must receive the previous proposal, then votes must cross the network to form its notarization. Within a term, Stable Leader removes the first wait from the critical path. Optimistic Validation removes the second.
 
 ## Wait One: The Proposer Handoff
 
 With rotating leadership, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
-Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term, reducing proposer handoffs from once per view to once per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives.
+Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term, reducing proposer handoffs from once per view to once per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives. An honest leader also knows it did not equivocate, so it can begin building and distributing the next proposal's data early. The parent notarization still paces each view, but only one network hop remains.
 
 ```{=html}
 <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
@@ -72,20 +72,20 @@ Figure 2: Round-robin rotates the proposer every view while Stable Leader change
 
 ## Wait Two: The Parent Notarization
 
-Without Optimistic Validation, the stable leader waits for view `v` to be notarized before proposing view `v+1`. Other validators also wait for that notarization before voting to notarize `v+1`. This leaves a network round between consecutive views, so network latency still paces each view.
+Without Optimistic Validation, the stable leader waits for view `v` to be notarized before formally proposing view `v+1`. Other validators also wait for that notarization before voting to notarize `v+1`. One network hop still paces each view.
 
 With Optimistic Validation, the leader can start `v+1` immediately after it builds and votes for `v`. A validator that voted for `v` can also vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
 
 The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v`. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. Finalization still follows the same rules.
 
 ```{=html}
-<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
-  <noscript>Without Optimistic Validation, each child view waits for the parent notarization. With Optimistic Validation, child views can begin while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
+<div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, child views begin closer together while parent notarizations form. Finalization continues behind new views in both paths.">
+  <noscript>With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, child views can begin while parent notarizations form. Finalization continues behind new views in both paths.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 3: Optimistic Validation packs new views closer together while notarization and finalization continue in parallel. Both panels use the same horizontal time scale.
+Figure 3: Stable Leader spaces views one network hop apart. Optimistic Validation packs them closer while notarization and finalization continue in parallel. Both panels use the same horizontal time scale.
 :::
 
 ## How Optimism Stays Safe

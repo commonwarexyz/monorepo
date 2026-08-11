@@ -261,8 +261,8 @@ function buildValidation(mount) {
   const parentSpan = sequentialGap;
   const finalizationSpan = sequentialGap;
 
-  addText(svg, 20, 28, 'Waiting for parent notarization', { 'font-size': 18, 'font-weight': 700 });
-  addText(svg, 20, 225, 'Optimistic validation', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 28, 'Stable Leader', { 'font-size': 18, 'font-weight': 700 });
+  addText(svg, 20, 225, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 112, 72, 'views', { 'text-anchor': 'end', 'font-weight': 700 });
   addText(svg, 112, 125, 'notarize', { 'text-anchor': 'end', 'font-weight': 700 });
   addText(svg, 112, 178, 'finalize', { 'text-anchor': 'end', 'font-weight': 700 });
