@@ -110,7 +110,7 @@ We measured finality from the leader-stamped proposal time until an external obs
 
 ## Where the Pipeline Fits
 
-More views per second put more load on execution, storage, proposal verification, and network bandwidth. Pipelining does not shorten the time from proposal to finalization. It shortens the wait before a transaction can enter the next proposal. That wait averages half a view.
+A higher block rate puts more load on execution, storage, proposal verification, and network bandwidth. Pipelining does not shorten the time from proposal to finalization. It shortens the wait before a transaction can enter the next proposal. That wait averages half a view.
 
 Longer terms reduce handoff overhead, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation.
 
