@@ -55,11 +55,11 @@ pub(crate) mod tests;
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, C, T, S>(
+async fn build_db<F, E, U, I, H, C, S>(
     context: E,
     merkle_config: full::Config<S>,
     log: C,
-    translator: T,
+    translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
@@ -71,9 +71,8 @@ where
     F: merkle::Family,
     E: Context + Spawner,
     U: Update + Send + Sync + 'static,
-    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
-    T: Translator,
     C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
@@ -153,7 +152,7 @@ macro_rules! impl_sync_database {
                 let cache_size = config.init_cache_size;
                 let init_buffer = config.init_buffer;
                 let init_concurrency = config.init_concurrency;
-                build_db::<F, _, $update<K, V>, _, H, _, T, S>(
+                build_db::<F, _, $update<K, V>, _, H, _, S>(
                     context,
                     merkle_config,
                     log,
