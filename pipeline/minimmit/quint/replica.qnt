@@ -152,14 +152,14 @@ module replica {
     }
 
     // Does a set of certificates have a notarization certificate for a view?
+    // The `>= M` threshold is explicit so this helper is self-contained: `cert_kind` classifies a
+    // Notarization of any size below L as NotarizationKind, so without the bound an under-threshold
+    // certificate would count as a notarization.
     pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
         certificates.exists(c => and {
-            cert_kind(c) == NotarizationKind,
-            cert_view(c) == view,
-        }),
-        certificates.exists(c => and {
-            cert_kind(c) == FinalizationKind,
+            cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
+            cert_signatures(c).size() >= M,
             cert_view(c) == view,
         })
     }
@@ -211,47 +211,16 @@ module replica {
             .exists(v => vote_proposal(v).option_has(p => is_proposal_finalized_votes(p, votes)))
     }
 
-    // The distinct notarize signers observed for proposal `p`, combining raw notarize votes with
-    // the signatures carried by any stored notarization/finalization certificate for `p`. A
-    // certificate proves its signers cast notarize(p), so those signatures are observed evidence
-    // toward the L-quorum finalization threshold, exactly as a raw vote is. This is what lets an
-    // M-signature notarization plus a few extra raw votes for the same proposal count as a
-    // finalization, not only a raw L-quorum or a full finalization certificate.
-    pure def observed_notarize_signers(p: Proposal, votes: Set[Vote], certs: Set[Certificate]): Set[Signature] = {
-        val vote_sigs = select_votes(p.view, NotarizeKind, votes)
-            .filter(v => vote_proposal(v) == Some(p))
-            .map(v => vote_sig(v))
-        val cert_sigs = certs
-            .filter(c => and {
-                cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
-                cert_proposal(c) == Some(p),
-            })
-            .fold(Set(), (s, c) => s.union(cert_signatures(c)))
-        vote_sigs.union(cert_sigs)
-    }
-
-    // Is `p` finalized by the combined vote-and-certificate evidence a replica holds?
-    pure def is_proposal_finalized_evidence(p: Proposal, votes: Set[Vote], certs: Set[Certificate]): bool = {
-        observed_notarize_signers(p, votes, certs).size() >= L
-    }
-
-    // Does the combined evidence finalize some proposal in this view? Candidate proposals are
-    // those named by a notarize vote OR by a stored notarization/finalization certificate, so a
-    // proposal observed only through a received certificate is still considered.
-    pure def is_view_finalized_evidence(view: ViewNumber, votes: Set[Vote], certs: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW,
-        select_votes(view, NotarizeKind, votes)
-            .exists(v => vote_proposal(v).option_has(p => is_proposal_finalized_evidence(p, votes, certs))),
-        certs
-            .filter(c => (cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind) and cert_view(c) == view)
-            .exists(c => cert_proposal(c).option_has(p => is_proposal_finalized_evidence(p, votes, certs))),
-    }
-
-    // Does a set of certificates contain nullification certificates for this view?
+    // Does a set of certificates contain a nullification certificate for this view? The `>= M`
+    // threshold is explicit so this helper is self-contained rather than depending on
+    // `certificates_are_valid_inv` to reject an under-threshold nullification certificate.
     pure def is_view_nullified(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
-        certificates.exists(c =>
-            cert_kind(c) == NullificationKind and cert_view(c) == view)
+        certificates.exists(c => and {
+            cert_kind(c) == NullificationKind,
+            cert_signatures(c).size() >= M,
+            cert_view(c) == view,
+        })
     }
 
     pure def is_view_nullified_votes(view: ViewNumber, votes: Set[Vote]): bool = or {
@@ -299,20 +268,30 @@ module replica {
             if (done or not(alive))
                 acc
             else if (current.view_parent == GENESIS_VIEW and current.block_parent == GENESIS_BLOCK)
-                (current, chain, true, true)      // reached genesis: ancestry complete
+                // reached genesis: complete only if every view skipped below `current` (i.e. in
+                // (GENESIS_VIEW, current.view)) is nullified -- a genesis-parented block at a view
+                // above 0 still needs those gaps covered
+                if (are_views_nullified(GENESIS_VIEW, current.view, certificates))
+                    (current, chain, true, true)
+                else
+                    (current, chain, false, true)
             else {
                 // the parent must be notarized (or finalized) for the exact (block, view) it
-                // names, and every view between it and `current` must be nullified
+                // names, sit at a strictly lower view than `current`, and every view between it
+                // and `current` must be nullified (the strict-view check makes `are_views_nullified`
+                // non-vacuous, rejecting a malformed proposal whose parent view is >= its own view)
                 val parents = certificates.filter(c => and {
                     cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
                     cert_view(c) == current.view_parent,
                     cert_proposal(c).option_has(pp => pp.block == current.block_parent),
                 }).fold(Set(), (s, c) => match cert_proposal(c) { | Some(pp) => s.union(Set(pp)) | None => s })
-                if (parents.size() >= 1 and are_views_nullified(current.view_parent, current.view, certificates)) {
+                if (current.view_parent < current.view
+                        and parents.size() >= 1
+                        and are_views_nullified(current.view_parent, current.view, certificates)) {
                     val parent = parents.fold(GENESIS_PROPOSAL, (_a, pp) => pp)
                     (parent, List(parent).concat(chain), true, false)
                 } else
-                    (current, chain, false, true)  // ancestry incomplete: stop
+                    (current, chain, false, true)  // ancestry incomplete or malformed: stop
             }
         })
         if (walked._4 and walked._3) Some(walked._2) else None
@@ -402,21 +381,23 @@ module replica {
         val view = cert_view(cert)
         val kind = cert_kind(cert)
         val new_view = view + 1
-        if (not(VIEWS.contains(new_view)))
-            self // no change
-        else
-            {
-                ...self,
-                propose_sent: if (self.view < new_view) false else self.propose_sent,
-                nullified: if (self.view < new_view) false else self.nullified,
-                timer_cancelled: if (self.view < new_view) false else self.timer_cancelled,
-                view:
-                    if (self.view < new_view) new_view else self.view,
-                last_finalized:
-                    if (self.last_finalized < view and kind == FinalizationKind) view else self.last_finalized,
-                ghost_last_seen_notarization:
-                    if (self.ghost_last_seen_notarization < view and kind != NullificationKind) view else self.ghost_last_seen_notarization
-            }
+        // The replica can only enter `view + 1` if that view exists and is ahead of it. The
+        // watermarks, however, record that a finalization/notarization for `view` was observed;
+        // they advance regardless of whether `view + 1` is enterable -- in particular a
+        // finalization at the top of VIEWS still advances `last_finalized`, which also feeds
+        // `on_proposal`'s `proposal.view_parent >= self.last_finalized` guard.
+        val can_advance = VIEWS.contains(new_view) and self.view < new_view
+        {
+            ...self,
+            propose_sent: if (can_advance) false else self.propose_sent,
+            nullified: if (can_advance) false else self.nullified,
+            timer_cancelled: if (can_advance) false else self.timer_cancelled,
+            view: if (can_advance) new_view else self.view,
+            last_finalized:
+                if (self.last_finalized < view and kind == FinalizationKind) view else self.last_finalized,
+            ghost_last_seen_notarization:
+                if (self.ghost_last_seen_notarization < view and kind != NullificationKind) view else self.ghost_last_seen_notarization
+        }
     }
 
     // A predicate `is_select_parent(id, pb, pv)` iff `(pb, pv) = select_parent(r, r.view)`.
@@ -793,6 +774,18 @@ module replica {
             store_certificate.get(id)
         val view = cert_view(cert)
         val proposal = cert_proposal(cert)
+        // EXTENSION (not in the base minimmit.md path). Section 8.2 casts a notarize vote only on
+        // receiving the leader's *proposal*; section 8.4's certificate handling only stores,
+        // rebroadcasts, and enters the view -- it does not vote. Here, a replica still in view v
+        // that has not notarized or nullified adopts a certified proposal it observes (via a
+        // NotarizationKind/FinalizationKind certificate) and votes for it. This is a liveness aid
+        // in the spirit of the section 10 extensions ("attach recent proof(v) messages to a
+        // proposal so replicas unaware of recent proofs can still notarize"): a replica that
+        // learned the certificate but missed the proposal can still contribute to finalizing it.
+        // It is safe because it only ever fires for a proposal already backed by >= M real votes
+        // (the certificate threshold, enforced below), so it cannot manufacture support for a
+        // proposal from nothing; and it preserves the one-notarize-per-view latch and the
+        // not-nullified guard. To model the strict base protocol instead, drop this branch.
         val should_send_notarize_vote = and {
             self.view == view,
             not(self.has_notarized()),
@@ -1007,9 +1000,10 @@ module replica {
             is_view_nullified_votes(v, votes),   // >= M nullify votes
             is_view_nullified(v, certs),         // a NullificationKind cert
         })
-        // finalization by combined evidence: >= L distinct notarize signers across raw votes AND
-        // the signatures of any stored notarization/finalization certificate for the proposal
-        val finalized_views = VIEWS.filter(v => is_view_finalized_evidence(v, votes, certs))
+        val finalized_views = VIEWS.filter(v => or {
+            is_view_finalized_votes(v, votes),   // >= L notarize votes
+            is_view_finalized(v, certs),         // a FinalizationKind cert
+        })
         nullified_views.intersect(finalized_views) == Set()
     })
 
@@ -1140,41 +1134,57 @@ module replica {
     val finalization_agreement = VIEWS.forall(v => {
         val finalized = CORRECT.fold(Set(), (acc, id) => {
             val votes = store_vote.get(id)
-            val certs = store_certificate.get(id)
-            // candidate proposals in view v, named by a notarize vote or a notarization/finalization
-            // certificate, kept if finalized by the combined vote-and-certificate evidence
-            val candidates = select_votes(v, NotarizeKind, votes).map(vote => vote_proposal(vote))
-                .union(certs
-                    .filter(c => (cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind) and cert_view(c) == v)
-                    .map(c => cert_proposal(c)))
-            acc.union(candidates.filter(op => op.option_has(p => is_proposal_finalized_evidence(p, votes, certs))))
+            val by_votes = select_votes(v, NotarizeKind, votes)
+                .filter(vote => vote_proposal(vote).option_has(p => is_proposal_finalized_votes(p, votes)))
+                .map(vote => vote_proposal(vote))
+            val by_cert = store_certificate.get(id)
+                .filter(c => and {
+                    cert_kind(c) == FinalizationKind,
+                    cert_signatures(c).size() >= L,
+                    cert_view(c) == v,
+                })
+                .map(c => cert_proposal(c))
+            acc.union(by_votes).union(by_cert)
         })
         finalized.size() <= 1
     })
 
     // If there is a finalized block in a view v, there is no nullification in the same view.
+    // Finalization and nullification are each recognized from raw votes OR a certificate (an
+    // L-quorum of notarize votes or a FinalizationKind cert; an M-quorum of nullify votes or a
+    // NullificationKind cert), so this holds even when the evidence is a stored certificate with
+    // no corresponding raw votes.
     val no_nullification_in_finalized_view = tuples(CORRECT, VIEWS).forall(((id, v)) => {
-        val self = replica_state.get(id)
         val votes = store_vote.get(id)
-        or {
-            not(is_view_finalized_votes(v, votes)),
-            select_votes(v, NullifyKind, votes)
-                .map(vote => vote_sig(vote))
-                .size() < M
-        }
+        val certs = store_certificate.get(id)
+        not(and {
+            is_view_finalized_votes(v, votes) or is_view_finalized(v, certs),
+            is_view_nullified_votes(v, votes) or is_view_nullified(v, certs),
+        })
     })
 
-    // If there is a finalized block in a view v, there is no notarization for another block in the same view.
+    // If there is a finalized block in a view v, there is no notarization for another block in
+    // the same view. Both a finalization and a conflicting notarization are recognized from raw
+    // votes OR a stored certificate.
     val no_notarization_in_finalized_view = tuples(CORRECT, VIEWS).forall(((id, v)) => {
-        val self = replica_state.get(id)
         val votes = store_vote.get(id)
-        select_votes(v, NotarizeKind, votes).forall(fin_vote => or {
-            not(vote_proposal(fin_vote).option_has(p => is_proposal_finalized_votes(p, votes))),
-            select_votes(v, NotarizeKind, votes)
-                .filter(vote => vote_proposal(vote) != vote_proposal(fin_vote))
-                .map(vote => vote_sig(vote))
-                .size() < M
-        })
+        val certs = store_certificate.get(id)
+        // proposals finalized in view v: an L-quorum of raw votes or a finalization certificate
+        val finalized_props = select_votes(v, NotarizeKind, votes)
+            .filter(vote => vote_proposal(vote).option_has(p => is_proposal_finalized_votes(p, votes)))
+            .map(vote => vote_proposal(vote))
+            .union(certs
+                .filter(c => cert_kind(c) == FinalizationKind and cert_view(c) == v)
+                .map(c => cert_proposal(c)))
+        // proposals notarized in view v: an M-quorum of raw votes or a notarization/finalization cert
+        val notarized_props = select_votes(v, NotarizeKind, votes)
+            .filter(vote => vote_proposal(vote).option_has(p => is_proposal_notarized_votes(p, votes)))
+            .map(vote => vote_proposal(vote))
+            .union(certs
+                .filter(c => (cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind) and cert_view(c) == v)
+                .map(c => cert_proposal(c)))
+        // a finalized proposal is the only proposal notarized in its view
+        finalized_props.forall(fp => notarized_props.forall(np => np == fp))
     })
 
     val safe_finalization = all {
@@ -1187,27 +1197,34 @@ module replica {
     // "finalize `c` and all of its ancestors", the ancestors are committed on the strength of
     // the tip's finalization and need only be notarized; the tip itself must be finalized. This
     // pins down the derived chain and catches a `rebuild_committed_chain` that invents links the
-    // replica cannot justify.
+    // replica cannot justify. The signature thresholds are repeated explicitly (>= M for a
+    // notarization, >= L for the tip's finalization) so this invariant is self-contained when run
+    // on its own: `cert_kind` classifies any Notarization below L as NotarizationKind regardless
+    // of its size, so without these bounds an under-threshold certificate would justify a commit.
     val committed_blocks_are_finalized = CORRECT.forall(id => {
         val chain = ghost_committed_blocks.get(id)
         val certs = store_certificate.get(id)
         and {
             chain.indices().forall(i => certs.exists(c => and {
                 cert_kind(c) == NotarizationKind or cert_kind(c) == FinalizationKind,
+                cert_signatures(c).size() >= M,
                 cert_proposal(c) == Some(chain[i]),
             })),
             chain.length() > 0 implies certs.exists(c => and {
                 cert_kind(c) == FinalizationKind,
+                cert_signatures(c).size() >= L,
                 cert_proposal(c) == Some(chain[chain.length() - 1]),
             }),
         }
     })
 
     // Every committed proposal builds on the one committed before it, the first builds on
-    // genesis, and every view skipped between a committed block and its committed parent is
-    // nullified. The chain is a real chain, not just a list of finalized blocks, and it has no
-    // uncovered gaps. A chain like [view 0, view 2] with no nullification for view 1 is
-    // rejected here, matching what `rebuild_committed_chain`/`ancestry_if_complete` would build.
+    // genesis, views strictly increase along the chain, and every view skipped between a
+    // committed block and its committed parent is nullified. The chain is a real chain, not just
+    // a list of finalized blocks, and it has no uncovered gaps. A chain like [view 0, view 2]
+    // with no nullification for view 1 is rejected here, as is any block whose parent view is not
+    // strictly below its own (which would make the gap check vacuous), matching what
+    // `rebuild_committed_chain`/`ancestry_if_complete` would build.
     val committed_chain_is_connected = CORRECT.forall(id => {
         val chain = ghost_committed_blocks.get(id)
         val certs = store_certificate.get(id)
@@ -1216,6 +1233,7 @@ module replica {
             and {
                 chain[i].view_parent == parent.view,
                 chain[i].block_parent == parent.block,
+                parent.view < chain[i].view,
                 are_views_nullified(parent.view, chain[i].view, certs),
             }
         })
@@ -1243,9 +1261,10 @@ module replica {
             is_view_nullified_votes(v, all_votes),   // >= M nullify votes
             is_view_nullified(v, all_certs),         // a NullificationKind cert
         })
-        // finalization by combined evidence over the honest network's union: >= L distinct
-        // notarize signers across raw votes AND stored notarization/finalization certificate sigs
-        val finalized = VIEWS.filter(v => is_view_finalized_evidence(v, all_votes, all_certs))
+        val finalized = VIEWS.filter(v => or {
+            is_view_finalized_votes(v, all_votes),   // >= L notarize votes
+            is_view_finalized(v, all_certs),         // a FinalizationKind cert
+        })
         nullified.intersect(finalized) == Set()
     }
 

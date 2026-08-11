@@ -79,3 +79,29 @@ The bounded model checker verifies an invariant across all possible executions w
 ```bash
 quint verify --invariant=safe --max-steps=20 ./main_n6f1b1.qnt
 ```
+
+## Modeling Notes
+
+The model is faithful to [minimmit.md](../minimmit.md) except for the following deliberate choices, which materially affect the modeled behavior:
+
+- **`Block` is a hash-protected container that commits to its parent.** A block value uniquely
+  determines its parent, so the same block cannot be built on two different parents. This is the
+  "block digests" extension (minimmit.md §10) and is enforced by the `block_commits_to_parent`
+  invariant and by guards on both the honest proposer and the Byzantine proposal injection. It is
+  what makes ancestor finalization (see below) unambiguous and safe.
+
+- **Ancestor finalization.** `rebuild_committed_chain` realizes minimmit.md §8.4 "finalize `c` and
+  all of its ancestors": committing a finalized block also commits its notarized ancestors, as long
+  as every skipped view is nullified. A block is committed once it carries a notarization and some
+  descendant carries a finalization.
+
+- **Certificate-receipt notarize vote (extension, not in the base spec).** `_process_certificate`
+  lets a replica that is still in view `v`, has not yet notarized or nullified, and observes a
+  notarization/finalization certificate for `v` adopt that certified proposal and cast a
+  `notarize` vote for it. The base protocol's notarize path (§8.2) is proposal-driven, and
+  certificate receipt (§8.4) only stores, rebroadcasts, and enters the next view — it does not
+  vote. This is a liveness aid (a replica that learned the certificate but missed the proposal can
+  still help finalize it) in the spirit of the §10 extensions. It is safe because it only fires for
+  a proposal already backed by ≥ `M` real votes and preserves the one-notarize-per-view latch and
+  the not-nullified guard. Removing the `should_send_notarize_vote` branch in `_process_certificate`
+  recovers the strict base protocol.

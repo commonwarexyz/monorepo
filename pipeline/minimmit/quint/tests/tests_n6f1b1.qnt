@@ -21,23 +21,6 @@ module tests {
         assumptions_valid
     }
 
-    // Finalization evidence combines a notarization certificate's signatures with raw votes: an
-    // M = 3 notarization for a proposal plus 2 more raw notarize votes for it reach L = 5 and so
-    // count as a finalization, even though neither the raw votes alone nor a full finalization
-    // certificate is present. Pins `is_proposal_finalized_evidence` against a regression to
-    // votes-only / full-certificate-only counting.
-    run mixedEvidenceFinalizationTest = {
-        pure val p = { block: "val_b0", view: 0, block_parent: GENESIS_BLOCK, view_parent: GENESIS_VIEW, sig: sig_of("n0") }
-        pure val notar_p = notarization(p, Set("n0", "n1", "n2"), sig_of("n0"))   // an M = 3 notarization cert
-        pure val extra_votes = Set(notarize(p, "n3"), notarize(p, "n4"))          // 2 additional raw votes
-        all {
-            // raw votes alone are a sub-quorum (2 < L): not a finalization
-            not(is_proposal_finalized_votes(p, extra_votes)),
-            // but the notarization's 3 signers plus the 2 raw votes reach L = 5: a finalization
-            is_proposal_finalized_evidence(p, extra_votes, Set(notar_p)),
-        }
-    }
-
     // `on_certificate` accepts a finalization once its signature set reaches L. Two
     // threshold-sized finalizations for different blocks in the same view can therefore be
     // stored by different replicas, even though no corresponding votes were observed.
@@ -138,8 +121,6 @@ module tests {
             .expect(all_invariants)
     }
 
-    // Regression test: a byzantine proposal cannot un-commit or rewrite a finalized block.
-    //
     // Regression test: a byzantine proposal cannot un-commit or rewrite a finalized block, even
     // when a later certificate-processing step rebuilds the committed chain afterwards.
     //
@@ -357,7 +338,7 @@ module tests {
 
         initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n0"))
             // === view 0 ===
-            // n0 proposes, n1 and n2 notarize it: a sub-quorum of M = 3 votes.
+            // n0 proposes, n1 and n2 notarize it: an M = 3 quorum, below the finalization quorum L.
             .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
             .then(on_proposal("n1", proposal_from_n0))
             .then(on_proposal("n2", proposal_from_n0))
@@ -529,15 +510,12 @@ module tests {
 
     // Regression test for the "out-of-order commit at the top view" defect.
     //
-    // `enter_new_view` gates all of its bookkeeping -- including the `last_finalized`
-    // update -- behind `VIEWS.contains(cert_view(cert) + 1)`, so for a certificate on the top
-    // view (8 here) the whole function is a no-op and `last_finalized` is never advanced.
-    // When the commit was an append guarded by `cert_view(cert) > self.last_finalized`, that
-    // stale watermark let n4 record view 8's block and then view 0's block after it.
-    // The rebuilt chain does not consult `last_finalized` at all and derives its order
-    // from parent links, so the defect can no longer reach `ghost_committed_blocks`.
-    // (The stale watermark is still worth fixing on its own account: it also feeds
-    // `on_proposal`'s `proposal.view_parent >= self.last_finalized` guard.)
+    // The committed chain is rebuilt from stored certificates and derives its order from parent
+    // links, not from `last_finalized`, so a top-view finalization cannot commit out of order --
+    // val_b1 (view 8) still cannot precede or follow val_b0 (view 0) unless the (0, 8) gap is
+    // nullified. `enter_new_view` now also advances `last_finalized` for a certificate on the top
+    // view even though it cannot enter `view + 1` (view 9 is outside VIEWS), keeping that
+    // watermark accurate for `on_proposal`'s `proposal.view_parent >= self.last_finalized` guard.
     run outOfOrderCommitTest = {
         pure val proposal_from_n0 = {
             block: "val_b0",
@@ -577,7 +555,7 @@ module tests {
             .then(on_proposal("n2", proposal_from_n0))
             .then(on_proposal("n3", proposal_from_n0))
             .then(on_proposal("n4", proposal_from_n0))
-            // n0 and n1 see only a sub-quorum of M = 3 votes, so they assemble a
+            // n0 and n1 see only an M = 3 quorum of votes (below L), so they assemble a
             // notarization and enter view 1 without committing anything.
             .then(replica_receives_notarize_votes("n0", proposal_from_n0, Set("n0", "n1", "n2")))
             .then(replica_receives_notarize_votes("n1", proposal_from_n0, Set("n0", "n1", "n2")))
@@ -609,14 +587,15 @@ module tests {
             .then(replica_receives_notarize_votes("n2", proposal_at_top_view, Set("n0", "n1", "n5")))
             .then(replica_receives_notarize_votes("n3", proposal_at_top_view, Set("n0", "n1", "n5")))
 
-            // n4 sees all L = 5 votes and finalizes view 8. `enter_new_view` bails out
-            // because view 9 is not in VIEWS, so n4.last_finalized is NOT advanced.
+            // n4 sees all L = 5 votes and finalizes view 8. It cannot enter view 9 (outside
+            // VIEWS), but `last_finalized` still advances to 8.
             .then(replica_receives_notarize_votes("n4", proposal_at_top_view, Set("n0", "n1", "n5", "n2", "n3")))
             .then(all {
-                // val_b1's parent is view 0, which n4 has not finalized, so the walk
-                // from genesis cannot reach it and n4 commits nothing yet.
+                // val_b1's parent is view 0, which n4 has not committed, and the (0, 8) gap is not
+                // nullified in n4's store, so the walk from genesis cannot reach it: n4 commits
+                // nothing yet even though last_finalized == 8.
                 assert(ghost_committed_blocks.get("n4") == List()),
-                assert(replica_state.get("n4").last_finalized == GENESIS_VIEW),
+                assert(replica_state.get("n4").last_finalized == 8),
                 unchanged_all,
             })
 
