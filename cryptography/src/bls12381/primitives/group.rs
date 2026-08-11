@@ -275,9 +275,21 @@ const MIN_PARALLEL_POINTS: usize = 32;
 
 /// A 128-bit scalar for use in batch verification random challenges.
 ///
-/// This provides 128-bit security which is sufficient for preventing
-/// forgery attacks in batch verification while reducing computational cost
-/// compared to full 255-bit scalars.
+/// This represents any value in the range `[0, 2^128)` and is convertible to a [`Scalar`]
+/// via [`From`]. All arithmetic operations treat it as a valid field element.
+///
+/// # Security
+///
+/// Batch verification uses random linear combinations with these scalars to prevent forgery:
+/// signatures are weighted and aggregated, and the result is checked once rather than
+/// individually. Without secure randomness, an attacker can predict the scalars and construct
+/// invalid signatures that cancel out (e.g., sig1 - delta and sig2 + delta where the errors
+/// sum to zero), evading detection. The security of batch verification critically depends on
+/// these scalars being generated securely; without cryptographically secure randomness,
+/// the batch checks are insecure.
+///
+/// Always use [`random`](Self::random) with a cryptographically secure RNG; never use
+/// predictable, fixed, or non-uniform scalars for batch verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmallScalar {
     /// Stored as blst_scalar with only lower 128 bits populated.
@@ -285,7 +297,12 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random 128-bit scalar.
+    /// Generates a random 128-bit scalar using secure randomness.
+    ///
+    /// The resulting value is uniformly distributed in `[0, 2^128)`.
+    /// Any value that reliably appears in batch verification (whether zero or not) allows
+    /// an attacker to construct signatures that cancel out, defeating the security of batch
+    /// verification entirely. This is why a cryptographically secure RNG is necessary.
     pub fn random(mut rng: impl CryptoRng) -> Self {
         // blst_scalar is 32 bytes
         let mut bytes = [0u8; 32];

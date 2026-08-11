@@ -10,9 +10,20 @@
 //! [`aggregate`](super::aggregate) verification. Without weights, an attacker could forge invalid
 //! signatures that cancel out when aggregated (e.g., one signature "too high" and another "too low"
 //! by the same amount). With random weights `r_i`, the errors must satisfy `sum(r_i * err_i) = 0`,
-//! which requires predicting the weights before they're generated (probability ~1/2^255 per invalid
-//! signature). Note, the weights must be unpredictable to the attacker for this to work (i.e. they
-//! must be generated securely).
+//! which requires predicting the weights before they're generated (probability ~1/2^128 per invalid
+//! signature).
+//!
+//! # Security Critical: Randomness Requirement
+//!
+//! The security of batch verification **critically depends on the randomness** used to generate
+//! scalar weights. The weights must be:
+//! - Cryptographically unpredictable (generated with a secure RNG)
+//! - Uniformly distributed
+//! - Independent for each batch
+//!
+//! Without secure randomness, an attacker can predict the weights and construct invalid signatures
+//! that cancel out, bypassing batch verification entirely. **Batch verification with predictable,
+//! fixed, or non-uniform weights is insecure and should never be used.**
 use super::{
     super::{Error, group::SmallScalar, variant::Variant},
     hash_with_namespace,
