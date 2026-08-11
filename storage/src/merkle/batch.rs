@@ -141,6 +141,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Retain the live ancestor chain while consuming this batch in a multi-step operation.
+    #[cfg(feature = "std")]
     pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
         let mut ancestors = Vec::new();
         let mut current = Some(Arc::clone(&self.parent));
