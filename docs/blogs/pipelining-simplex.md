@@ -122,4 +122,4 @@ Every view gives applications another opportunity to order new data. Alto began 
 
 This pipeline helps one ordering leader move quickly. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
 
-Stable Leader and Optimistic Validation are available through [`RoundRobin::with_term` on `main`](https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/elector.rs#L269-L290). The API will appear on docs.rs after the next `commonware-consensus` release. [Alto's integration](https://github.com/commonwarexyz/alto/blob/304b8232df939199d1d856dfb58c2930f45b5e3c/chain/src/engine.rs#L81-L94) shows the complete setup. Within a stable term, Simplex can begin the next block without waiting for a network round trip. In Alto, the median interval between blocks was 5ms.
+Stable Leader and Optimistic Validation are now part of Simplex and will ship in the next `commonware-consensus` release.
