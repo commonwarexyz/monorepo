@@ -10,8 +10,9 @@
 use super::partition::Partition;
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
+use commonware_utils::{hash_map, HashMap};
 use std::{
-    collections::{BTreeMap, HashMap, btree_map, hash_map},
+    collections::{BTreeMap, btree_map},
     ops::Range,
 };
 

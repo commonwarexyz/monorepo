@@ -10,10 +10,9 @@ use commonware_storage::{
     qmdb::current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU16, NZU64, NZUsize, hash_map, HashMap, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
     num::{NonZeroU16, NonZeroU64},
 };
 
@@ -157,8 +156,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
 
         // committed_state tracks state after apply_batch. pending_expected tracks
         // uncommitted mutations that haven't been applied yet.
-        let mut committed_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
-        let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+        let mut committed_state: HashMap<RawKey, Option<RawValue>> = hash_map::new();
+        let mut pending_expected: HashMap<RawKey, Option<RawValue>> = hash_map::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut committed_op_count = Location::<F>::new(1);

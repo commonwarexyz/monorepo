@@ -10,11 +10,11 @@ use commonware_runtime::{
         status::{self, Status},
     },
 };
-use commonware_utils::{PrioritySet, Span, SystemTimeExt};
+use commonware_utils::{hash_map, HashMap, PrioritySet, Span, SystemTimeExt};
 use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
@@ -183,15 +183,15 @@ where
             participants: PrioritySet::new(),
             request_id: 0,
             active: PrioritySet::new(),
-            requests: HashMap::new(),
-            key_to_id: HashMap::new(),
+            requests: hash_map::new(),
+            key_to_id: hash_map::new(),
             initial: config.initial,
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
             retry_timeout: config.retry_timeout,
             priority_requests: config.priority_requests,
-            targets: HashMap::new(),
+            targets: hash_map::new(),
             performance,
             requests_created,
             requests_sent,

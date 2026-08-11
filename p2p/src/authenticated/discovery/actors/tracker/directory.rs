@@ -12,10 +12,10 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::GaugeExt};
-use commonware_utils::{PrioritySet, SystemTimeExt, ordered::Set as OrderedSet};
+use commonware_utils::{hash_map, HashMap, PrioritySet, SystemTimeExt, ordered::Set as OrderedSet};
 use rand::{Rng, seq::IteratorRandom};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     num::NonZeroUsize,
     ops::Deref,
     time::{Duration, SystemTime},
@@ -104,7 +104,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         releaser: Releaser<C>,
     ) -> Self {
         // Create the list of peers and add the bootstrappers.
-        let mut peers = HashMap::new();
+        let mut peers = hash_map::new();
         for (peer, ingress) in bootstrappers {
             peers.insert(peer, Record::bootstrapper(ingress));
         }

@@ -199,12 +199,13 @@ mod tests {
     use commonware_utils::{
         NZU32, NZUsize,
         channel::mpsc,
+        hash_map,
         hostname, ordered,
         ordered::{Map, Set},
     };
     use rand::RngExt as _;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         net::SocketAddr,
         num::NonZeroU32,
         time::Duration,
@@ -370,7 +371,7 @@ mod tests {
             network.start();
 
             // Register agents
-            let mut agents = HashMap::new();
+            let mut agents = hash_map::new();
             for i in 0..10 {
                 let pk = PrivateKey::from_seed(i as u64).public_key();
                 let (sender, _) = oracle

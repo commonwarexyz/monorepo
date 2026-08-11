@@ -50,10 +50,9 @@ use super::mpsc::{
     self,
     error::{SendError, TryRecvError, TrySendError},
 };
-use crate::sync::Mutex;
+use crate::{hash_map, sync::Mutex, HashMap};
 use futures::Stream;
 use std::{
-    collections::HashMap,
     hash::Hash,
     pin::Pin,
     sync::Arc,
@@ -126,8 +125,8 @@ impl<B> Default for State<B> {
         Self {
             next: 1,
             watermark: 0,
-            batches: HashMap::new(),
-            pending: HashMap::new(),
+            batches: hash_map::new(),
+            pending: hash_map::new(),
         }
     }
 }

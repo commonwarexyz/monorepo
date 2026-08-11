@@ -76,14 +76,11 @@ use commonware_cryptography::{
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    N3f1,
-    ordered::{Quorum, Set},
-};
+use commonware_utils::{hash_map, N3f1, ordered::{Quorum, Set}};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     fmt::Debug,
 };
 
@@ -642,7 +639,7 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         let identity = self.identity();
         let namespace = self.namespace();
 
-        let mut seeds = HashMap::new();
+        let mut seeds = hash_map::new();
         let mut entries: Vec<_> = Vec::new();
 
         for (context, certificate) in certificates {

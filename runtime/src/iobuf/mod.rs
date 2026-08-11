@@ -2951,7 +2951,7 @@ mod tests {
     use commonware_utils::range::NonEmptyRange;
     use core::ops::Bound;
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::BTreeMap,
         mem::size_of,
     };
 
@@ -5874,7 +5874,8 @@ mod tests {
         btree.insert(1u8, Bytes::from(vec![0xEE; 48]));
         assert_encode_with_pool_matches_encode(&btree);
 
-        let mut hash = HashMap::new();
+        #[allow(clippy::disallowed_types)]
+        let mut hash = std::collections::HashMap::new();
         hash.insert(2u8, Bytes::from(vec![0x11; 96]));
         hash.insert(1u8, Bytes::from(vec![0x22; 48]));
         assert_encode_with_pool_matches_encode(&hash);

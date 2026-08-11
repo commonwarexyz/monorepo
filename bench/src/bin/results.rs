@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 use crate::{
     config::{Benchmark, Gate, tracked_labels},
     render::render_report,

@@ -22,11 +22,12 @@ use commonware_runtime::{
 use commonware_utils::{
     TestRng,
     channel::{mpsc, oneshot},
+    hash_map,
+    HashMap,
 };
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use std::{
-    collections::HashMap,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -134,7 +135,7 @@ struct FuzzHandler {
 
 impl FuzzHandler {
     fn new(respond: bool, mut rng: TestRng) -> Self {
-        let mut response_map = HashMap::new();
+        let mut response_map = hash_map::new();
         for _ in 0..rng.random_range(0..10) {
             let id = rng.random();
             let result_len = rng.random_range(0..100);
@@ -312,9 +313,9 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let mut peers: Vec<PrivateKey> = Vec::new();
-        let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = HashMap::new();
-        let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
-        let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
+        let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = hash_map::new();
+        let mut handlers: HashMap<usize, FuzzHandler> = hash_map::new();
+        let mut monitors: HashMap<usize, FuzzMonitor> = hash_map::new();
         let mut restarts = 0usize;
 
         for i in 2..5 {

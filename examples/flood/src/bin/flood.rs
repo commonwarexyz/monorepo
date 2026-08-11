@@ -16,10 +16,9 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{TryCollect, ordered::Set, union};
+use commonware_utils::{TryCollect, HashMap, ordered::Set, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},

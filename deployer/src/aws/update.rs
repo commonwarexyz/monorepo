@@ -12,7 +12,8 @@ use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
 };
-use std::{collections::HashMap, fs::File, path::PathBuf};
+use std::{fs::File, path::PathBuf};
+use commonware_utils::HashMap;
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes

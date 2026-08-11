@@ -21,10 +21,10 @@ use commonware_storage::{
     qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU16, NZU64, NZUsize, hash_map, HashMap, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     num::NonZeroU16,
 };
 
@@ -386,8 +386,8 @@ fn fuzz(data: FuzzInput) {
                 .await
                 .expect("init reference current db");
 
-        let mut committed_state: HashMap<LogicalKey, Option<RawValue>> = HashMap::new();
-        let mut pending_expected: HashMap<LogicalKey, Option<RawValue>> = HashMap::new();
+        let mut committed_state: HashMap<LogicalKey, Option<RawValue>> = hash_map::new();
+        let mut pending_expected: HashMap<LogicalKey, Option<RawValue>> = hash_map::new();
         let mut all_keys = HashSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut issued_writes = 0usize;

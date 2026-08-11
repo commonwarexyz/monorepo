@@ -7,7 +7,8 @@
 use crate::types::Epoch;
 use commonware_cryptography::certificate::{Provider as CertificateProvider, Scheme, Scoped};
 use commonware_utils::sync::Mutex;
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc};
+use commonware_utils::{hash_map, HashMap};
 
 /// Provides signing schemes for different epochs.
 #[derive(Clone)]
@@ -24,7 +25,7 @@ impl<S: Scheme> Default for Provider<S> {
 impl<S: Scheme> Provider<S> {
     pub fn new() -> Self {
         Self {
-            schemes: Arc::new(Mutex::new(HashMap::new())),
+            schemes: Arc::new(Mutex::new(hash_map::new())),
         }
     }
 }

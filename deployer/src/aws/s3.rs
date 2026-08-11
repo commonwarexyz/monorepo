@@ -12,12 +12,13 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_utils::{hash_map, HashMap};
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     io::Read,
     path::Path,
     time::Duration,
@@ -505,8 +506,8 @@ pub async fn upload_instance_files(
     // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
-    let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
-    let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
+    let mut instance_binary_digest: HashMap<String, String> = hash_map::new(); // instance -> digest
+    let mut instance_config_digest: HashMap<String, String> = hash_map::new(); // instance -> digest
     for instance in instances {
         let binary_digest = path_to_digest[&instance.binary].clone();
         let config_digest = path_to_digest[&instance.config].clone();
@@ -574,8 +575,8 @@ pub async fn upload_instance_files(
     )?;
 
     // Map instance names to URLs via their digests
-    let mut binary_urls: HashMap<String, String> = HashMap::new();
-    let mut config_urls: HashMap<String, String> = HashMap::new();
+    let mut binary_urls: HashMap<String, String> = hash_map::new();
+    let mut config_urls: HashMap<String, String> = hash_map::new();
     for instance in instances {
         let binary_digest = &instance_binary_digest[&instance.name];
         let config_digest = &instance_config_digest[&instance.name];

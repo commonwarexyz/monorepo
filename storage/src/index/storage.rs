@@ -2,10 +2,8 @@
 
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
-use std::{
-    collections::HashMap,
-    hash::{BuildHasher, Hash},
-};
+use hashbrown::HashMap;
+use std::hash::{BuildHasher, Hash};
 
 /// Maps a translated key to the values that conflict with the value stored inline in the index's
 /// map, stored oldest first.

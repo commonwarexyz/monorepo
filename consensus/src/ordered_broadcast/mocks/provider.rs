@@ -1,7 +1,8 @@
 use crate::types::Epoch;
 use commonware_cryptography::certificate::{Provider as CertificateProvider, Scheme, Scoped};
 use commonware_utils::sync::Mutex;
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc};
+use commonware_utils::{hash_map, HashMap};
 
 /// A mock certificate provider that allows registering different schemes per epoch.
 ///
@@ -15,7 +16,7 @@ pub struct Provider<S: Scheme> {
 impl<S: Scheme> Provider<S> {
     pub fn new() -> Self {
         Self {
-            schemes: Arc::new(Mutex::new(HashMap::new())),
+            schemes: Arc::new(Mutex::new(hash_map::new())),
         }
     }
 

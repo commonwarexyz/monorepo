@@ -1,6 +1,6 @@
 use crate::{Delivery, Span};
-use commonware_utils::channel::{fallible::FallibleExt, mpsc, oneshot};
-use std::{collections::HashMap, marker::PhantomData};
+use commonware_utils::{channel::{fallible::FallibleExt, mpsc, oneshot}, hash_map, HashMap};
+use std::marker::PhantomData;
 
 /// A consumer that can be used for testing
 #[derive(Clone)]
@@ -25,7 +25,7 @@ impl<R: Span, V: Clone + PartialEq, S> Consumer<R, V, S> {
         (
             Self {
                 sender,
-                expected: HashMap::new(),
+                expected: hash_map::new(),
                 _subscriber: PhantomData,
             },
             receiver,
@@ -49,7 +49,7 @@ impl<R: Span, V: Clone + PartialEq> Consumer<R, V, ()> {
         let (sender, _) = mpsc::unbounded_channel();
         Self {
             sender,
-            expected: HashMap::new(),
+            expected: hash_map::new(),
             _subscriber: PhantomData,
         }
     }

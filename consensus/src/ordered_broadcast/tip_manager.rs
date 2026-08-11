@@ -1,6 +1,6 @@
 use super::types::Node;
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
-use std::collections::{HashMap, hash_map::Entry};
+use commonware_utils::{hash_map, hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
@@ -17,7 +17,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
     /// Creates a new `TipManager`.
     pub fn new() -> Self {
         Self {
-            tips: HashMap::new(),
+            tips: hash_map::new(),
         }
     }
 

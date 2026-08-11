@@ -161,13 +161,12 @@ pub(crate) mod test {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, hash_map, HashMap};
     use core::num::NonZeroUsize;
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
     use std::{
-        collections::HashMap,
-        future::{Future, ready},
+            future::{Future, ready},
         sync::Arc,
         time::Duration,
     };
@@ -1153,7 +1152,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: HashMap<Digest, Option<Digest>> = hash_map::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }

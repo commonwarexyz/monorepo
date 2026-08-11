@@ -5,7 +5,8 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use commonware_utils::{hash_map, HashMap};
+use std::collections::{BTreeMap, HashSet};
 
 /// A struct representing a set of votes for a payload digest.
 #[derive(Default)]
@@ -29,7 +30,7 @@ impl<S: Scheme, D: Digest> Default for Evidence<S, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             signers: HashSet::new(),
-            attestations: HashMap::new(),
+            attestations: hash_map::new(),
         })
     }
 }
@@ -54,7 +55,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
     /// Creates a new `AckManager`.
     pub fn new() -> Self {
         Self {
-            acks: HashMap::new(),
+            acks: hash_map::new(),
         }
     }
 

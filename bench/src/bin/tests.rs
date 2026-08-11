@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+
 use super::{
     config::{
         Benchmark, CALLGRIND_METRICS, Direction, Gate, callgrind_labels, load_config,

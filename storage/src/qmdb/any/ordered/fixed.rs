@@ -168,11 +168,11 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng, sequence::FixedBytes};
+    use commonware_utils::{NZU64, NZUsize, TestRng, hash_map, HashMap, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::{Rng, seq::IteratorRandom};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::BTreeMap,
         sync::Arc,
     };
 
@@ -327,7 +327,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: HashMap<Digest, Option<Digest>> = hash_map::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }
@@ -1020,7 +1020,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.child("first")).await;
 
-            let mut map = HashMap::<Digest, Digest>::default();
+            let mut map = hash_map::new();
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
@@ -1275,7 +1275,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.child("first")).await;
 
-            let mut map = HashMap::<Digest, Digest>::default();
+            let mut map = hash_map::new();
             const ELEMENTS: u64 = 10;
             // insert & apply multiple batches to ensure repeated inactivity floor raising.
             let metadata = Sha256::hash(&[&42u64.to_be_bytes()]);
