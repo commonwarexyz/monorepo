@@ -662,6 +662,75 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
+/// Publish `batch`'s key-level changes to the in-memory snapshot index and activity bitmap.
+///
+/// `snapshot` and `bitmap` must hold the state committed through `last_commit_loc`, the location of
+/// the commit operation they currently end at. On return they reflect `batch.bounds.tip`.
+fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
+    snapshot: &mut I,
+    bitmap: &mut bitmap::Prunable<N>,
+    batch: &MerkleizedBatch<F, D, U, S>,
+    last_commit_loc: Location<F>,
+) where
+    F: Family,
+    D: Digest,
+    I: UnorderedIndex<Value = Location<F>>,
+    U: update::Update,
+    S: Strategy,
+    Operation<F, U>: Send + Sync,
+{
+    let db_size = *last_commit_loc + 1;
+    let tip = *batch.bounds.tip.size;
+    bitmap.extend_to(tip);
+
+    if batch.ancestor_diffs.is_empty() {
+        // Fast path: no ancestors to merge, no fixups to look up.
+        for (key, entry) in batch.diff.iter() {
+            apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+        }
+    } else {
+        // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups) and pending
+        // (still to be applied; merged with the child).
+        let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
+        let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
+        for (ancestor, diff) in batch.bounds.ancestors.iter().zip(&batch.ancestor_diffs) {
+            if ancestor.state.size <= db_size {
+                applied.push(diff.as_slice());
+            } else {
+                pending.push(diff.as_slice());
+            }
+        }
+        let mut resolver = DiffCursors::new(applied);
+        let mut base_locs = batch.ancestor_base_locs.iter().peekable();
+        let merge =
+            DiffMerge::new(iter::once(batch.diff.as_slice()).chain(pending.iter().copied()));
+        for (key, entry) in merge {
+            // Merged keys ascend, so the boundary cursor only moves forward.
+            while base_locs
+                .peek()
+                .is_some_and(|(candidate, _)| candidate < key)
+            {
+                base_locs.next();
+            }
+
+            // The key's location before this batch: from an already-applied ancestor, else the
+            // location recorded at the retained chain's boundary, else the batch's own record.
+            let old = if let Some(ancestor_entry) = resolver.resolve(key) {
+                ancestor_entry.loc()
+            } else if let Some((_, loc)) = base_locs.next_if(|(candidate, _)| candidate == key) {
+                *loc
+            } else {
+                entry.base_old_loc()
+            };
+            apply_diff(snapshot, bitmap, key, entry, old);
+        }
+    }
+
+    // Maintain the invariant that only the most recent CommitFloor operation can be active.
+    bitmap.set_bit(*last_commit_loc, false);
+    bitmap.set_bit(tip - 1, true);
+}
+
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
 /// read guard, returning the next `floor`.
 fn fill_candidates<F: Family, const N: usize>(
@@ -2749,94 +2818,30 @@ where
         let db_size = *self.last_commit_loc + 1;
         let start_loc = Location::new(db_size);
 
-        // The journal append and the in-memory index application touch disjoint state
-        // (the log vs the snapshot and bitmap), so run them concurrently: the index
-        // application is one job on the strategy while the journal append proceeds on
-        // this task. A storage failure leaves the instance unusable either way, so the
-        // index job's effects on error do not need to be rolled back.
+        // The journal append and the in-memory index application touch disjoint state (the log vs
+        // the snapshot and bitmap), so run them concurrently. The index application is spawned as a
+        // job on the strategy while the journal append proceeds on this task.
         let strategy = self.strategy().clone();
         let log = self.log;
         let snapshot = self.snapshot;
         let index_batch = Arc::clone(&batch);
         let index_bitmap = Arc::clone(&self.bitmap);
         let last_commit_loc = self.last_commit_loc;
-        // The job merges or scans every ancestor diff in addition to the tip diff, so
-        // size the spawn from all of them.
+
+        // The job merges or scans the tip and its uncommitted ancestor diffs.
         let work_hint = batch
             .ancestor_diffs
             .iter()
             .map(|diff| diff.len())
             .fold(batch.diff.len(), usize::saturating_add);
         let index_job = strategy.spawn(work_hint, move |_| {
-            let batch = index_batch;
             let mut snapshot = snapshot;
-            let mut bitmap = index_bitmap.write();
-            bitmap.extend_to(*batch.bounds.tip.size);
-
-            if batch.ancestor_diffs.is_empty() {
-                // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(&mut snapshot, &mut bitmap, key, entry, entry.base_old_loc());
-                }
-            } else {
-                // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
-                // and pending (still to be applied; merged with the child).
-                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].state.size <= db_size {
-                        applied.push(ancestor_diff.as_slice());
-                    } else {
-                        pending.push(ancestor_diff.as_slice());
-                    }
-                }
-                let mut resolver = DiffCursors::new(applied);
-                if batch.ancestor_base_locs.is_empty() {
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver
-                            .resolve(key)
-                            .map(DiffEntry::loc)
-                            .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut snapshot, &mut bitmap, key, entry, old);
-                    }
-                } else {
-                    let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver.resolve(key).map_or_else(
-                            || {
-                                while ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate < key)
-                                {
-                                    ancestor_base_locs.next();
-                                }
-                                if ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate == key)
-                                {
-                                    ancestor_base_locs.next().expect("peeked entry exists").1
-                                } else {
-                                    entry.base_old_loc()
-                                }
-                            },
-                            DiffEntry::loc,
-                        );
-                        apply_diff(&mut snapshot, &mut bitmap, key, entry, old);
-                    }
-                }
-            }
-
-            // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-            // set the new; earlier ancestor commits between them are already 0 from
-            // `extend_to`.
-            bitmap.set_bit(*last_commit_loc, false);
-            bitmap.set_bit(*batch.bounds.tip.size - 1, true);
+            apply_batch_to_index(
+                &mut snapshot,
+                &mut index_bitmap.write(),
+                &index_batch,
+                last_commit_loc,
+            );
             snapshot
         });
 
