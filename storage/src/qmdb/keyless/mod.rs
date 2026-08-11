@@ -651,22 +651,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Generates the per-Merkle-family entry points for the shared scenarios below.
-    ///
-    /// A row is `<test name> => <scenario>, <trace level>, <fixture>;` and emits the named test
-    /// against `mmr::Family` plus a `_mmb`-suffixed twin against `mmb::Family`. The MMR name is
-    /// written out in full so it stays greppable from the invocation.
-    ///
-    /// The fixture names what the scenario is handed. `db` passes the database alone. `reopen` also
-    /// passes a reopen closure. `reopen_indexed` is the same but labels the initial context with
-    /// `index = 1`, which those scenarios require because they reopen at `index` 2 and above under
-    /// the same child name, and two databases sharing one metric path collide.
-    ///
-    /// To add a scenario, write it as a `pub(crate) async fn` here and add one row to the table in
-    /// `fixed.rs` and `variable.rs`. A test that needs `#[test_group("slow")]`, a single Merkle
-    /// family, or any setup beyond one opener call does not belong here; write it out by hand.
+    /// Emits the named test against `mmr::Family` and `mmb::Family`.
     macro_rules! keyless_tests {
-        ($($name:ident => $scenario:ident, $level:literal, $fixture:tt;)*) => {
+        ($($name:ident => $scenario:ident, $level:literal, $fixture:ident;)*) => {
             $(
                 #[test_traced($level)]
                 fn $name() {
@@ -701,7 +688,7 @@ pub(crate) mod tests {
         };
     }
 
-    pub(crate) use keyless_tests;
+    pub(super) use keyless_tests;
 
     #[boxed]
     pub(crate) async fn run_empty<F: Family, V, C, H, S: Strategy>(

@@ -484,6 +484,7 @@ mod tests {
         test_keyless_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, "INFO", reopen_indexed;
         test_keyless_fixed_get_many => run_get_many, "INFO", db;
     }
+
     #[test_traced("INFO")]
     fn test_keyless_fixed_shared_helper_accepts_rayon_strategy() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -559,8 +560,6 @@ mod tests {
             tests::run_floor_changes_root(db_a, db_b).await;
         });
     }
-
-    // mmb::Family variants
 
     #[test_traced("INFO")]
     fn test_keyless_fixed_floor_changes_root_mmb() {

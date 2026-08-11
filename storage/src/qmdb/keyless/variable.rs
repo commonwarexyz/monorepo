@@ -218,6 +218,7 @@ mod tests {
         test_keyless_variable_partial_ancestor_commit => run_partial_ancestor_commit, "DEBUG", db;
         test_keyless_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, "DEBUG", db;
     }
+
     /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
     /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
     /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
@@ -337,8 +338,6 @@ mod tests {
             assert_compact_root_compatibility::<mmb::Family>(ctx).await;
         });
     }
-
-    // mmb::Family variants
 
     #[test_traced("INFO")]
     fn test_keyless_variable_floor_changes_root_mmb() {

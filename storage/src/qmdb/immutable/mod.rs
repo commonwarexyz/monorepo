@@ -855,22 +855,13 @@ pub(super) mod tests {
 
     const ITEMS_PER_SECTION: u64 = 5;
 
-    /// Generates the per-Merkle-family entry points for the shared scenarios above.
-    ///
-    /// A row is `<test name> => <scenario>, <trace level>, <opener>;` and emits the named test
-    /// against `mmr::Family` plus a `_mmb`-suffixed twin against `mmb::Family`. The MMR name is
-    /// written out in full so it stays greppable from the invocation.
-    ///
-    /// To add a scenario, write it as a `pub(crate) async fn` here and add one row to the table in
-    /// `fixed.rs` and `variable.rs`. A test that needs `#[test_group("slow")]`, a single Merkle
-    /// family, or any setup beyond one opener call does not belong here; write it out by hand.
+    /// Emits the named test against `mmr::Family` and `mmb::Family`.
     macro_rules! immutable_tests {
         ($($name:ident => $scenario:ident, $level:literal, $open:ident;)*) => {
             $(
                 #[test_traced($level)]
                 fn $name() {
-                    let executor = deterministic::Runner::default();
-                    executor.start(|ctx| async move {
+                    deterministic::Runner::default().start(|ctx| async move {
                         tests::$scenario(ctx, $open::<mmr::Family>).await;
                     });
                 }
@@ -879,8 +870,7 @@ pub(super) mod tests {
                 $(
                     #[test_traced($level)]
                     fn [<$name _mmb>]() {
-                        let executor = deterministic::Runner::default();
-                        executor.start(|ctx| async move {
+                        deterministic::Runner::default().start(|ctx| async move {
                             tests::$scenario(ctx, $open::<mmb::Family>).await;
                         });
                     }
@@ -889,7 +879,7 @@ pub(super) mod tests {
         };
     }
 
-    pub(crate) use immutable_tests;
+    pub(super) use immutable_tests;
 
     type TestDb<F, V, C> = Immutable<
         F,
