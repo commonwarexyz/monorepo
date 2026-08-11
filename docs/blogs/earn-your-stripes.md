@@ -1,6 +1,6 @@
 ---
 title: "Earn Your Stripes"
-description: "Reed-Solomon recovery stayed single-core inside Commonware's parallel reconstruction path. By splitting shards into aligned stripes and removing a redundant re-encode, we made worst-case block reconstruction scale with available cores."
+description: "Striping Reed-Solomon recovery across cores and avoiding a separate re-encode made worst-case decoding nearly 4x faster."
 date: "August 10th, 2026"
 published-time: "2026-08-10T00:00:00Z"
 modified-time: "2026-08-10T00:00:00Z"
