@@ -93,7 +93,7 @@ The child can therefore be proposed and voted on while the parent's notarization
 ```
 
 ::: {.image-caption}
-Figure 3: Stable Leader spaces views one network hop apart. Here, Optimistic Validation starts three views in the same interval. Blocks turn gray when notarized and green when finalized.
+Figure 3: Diagonal arrows show the network messages for notarization and finalization. Stable Leader spaces views one hop apart; Optimistic Validation starts three in the same interval.
 :::
 
 ## How Optimism Stays Safe
@@ -102,20 +102,20 @@ Figure 3: Stable Leader spaces views one network hop apart. Here, Optimistic Val
 
 Notarization is not finalization. After a block is notarized, each validator asks its application whether the payload is safe to commit. This decision is called *certification* and happens before the validator votes to finalize the block. Certification lets an application finish any checks required before commit, such as confirming data availability or validating application-specific block and transaction rules.
 
-A participant only votes optimistically when every earlier proposal in the term is consistent with the chain it has already supported. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If any proposal fails to notarize or certify, optimistic votes later in the term become inert. Validators can then vote to abandon the rest of the term through Simplex's normal nullification path.
+A participant only votes optimistically when every earlier proposal in the term is consistent with the chain it has already supported. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If any proposal fails to notarize or certify, later optimistic votes in the term cannot be used. Validators can then vote to abandon the rest of the term through Simplex's normal nullification path.
 
 The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry.
 
 Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
 
 ```{=html}
-<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.">
-  <noscript>View one is finalized, view two is notarized, and view three fails. Optimistic proposals in views four and five become inert. Views six through eight are never proposed. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.</noscript>
+<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.">
+  <noscript>View one is finalized, view two is notarized, and view three times out. Optimistic proposals in views four and five are discarded. Views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 4: When v3 fails, later work becomes inert and unproposed views are skipped. In the next term, v9 builds on v2.
+Figure 4: When v3 times out, later proposals are discarded and the rest of the term is skipped. In the next term, v9 builds on v2.
 :::
 
 ## Where the Pipeline Fits

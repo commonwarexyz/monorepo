@@ -55,9 +55,9 @@ const addArrow = (
   color,
   delay,
   duration = 0.1,
-  { strokeWidth = 2.5, headSize = 9 } = {},
+  { strokeWidth = 2.5, headSize = 9, opacity = 1 } = {},
 ) => {
-  const group = svgEl('g');
+  const group = svgEl('g', { opacity });
   const line = addLine(group, x1, y1, x2, y2, {
     stroke: color,
     'stroke-width': strokeWidth,
@@ -80,6 +80,49 @@ const addArrow = (
     set(progress) {
       const value = Math.max(0, Math.min(1, (progress - delay) / duration));
       line.setAttribute('stroke-dashoffset', length * (1 - value));
+      head.setAttribute('opacity', value > 0.96 ? 1 : 0);
+    },
+  };
+};
+
+const addCurvedArrow = (
+  parent,
+  x1,
+  y1,
+  controlX,
+  controlY,
+  x2,
+  y2,
+  color,
+  delay,
+  duration = 0.1,
+  { strokeWidth = 2.5, headSize = 9, opacity = 1 } = {},
+) => {
+  const group = svgEl('g', { opacity });
+  const path = svgEl('path', {
+    d: `M ${x1} ${y1} Q ${controlX} ${controlY} ${x2} ${y2}`,
+    fill: 'none',
+    stroke: color,
+    'stroke-width': strokeWidth,
+    'stroke-linecap': 'round',
+    pathLength: 1,
+    'stroke-dasharray': 1,
+    'stroke-dashoffset': 1,
+  });
+  group.appendChild(path);
+  const angle = Math.atan2(y2 - controlY, x2 - controlX);
+  const points = [
+    [x2, y2],
+    [x2 - headSize * Math.cos(angle - 0.5), y2 - headSize * Math.sin(angle - 0.5)],
+    [x2 - headSize * Math.cos(angle + 0.5), y2 - headSize * Math.sin(angle + 0.5)],
+  ].map(point => point.join(',')).join(' ');
+  const head = svgEl('polygon', { points, fill: color, opacity: 0 });
+  group.appendChild(head);
+  parent.appendChild(group);
+  return {
+    set(progress) {
+      const value = Math.max(0, Math.min(1, (progress - delay) / duration));
+      path.setAttribute('stroke-dashoffset', 1 - value);
       head.setAttribute('opacity', value > 0.96 ? 1 : 0);
     },
   };
@@ -296,17 +339,38 @@ function buildLeaders(mount) {
 }
 
 function buildValidation(mount) {
-  const svg = makeSvg(mount, 330);
+  const svg = makeSvg(mount, 380);
   const animated = [];
   const x0 = 190;
   const sequentialGap = 186;
   const optimisticGap = 62;
-  const topY = 105;
+  const networkHop = sequentialGap;
+  const topY = 75;
   const bottomY = 260;
 
   addText(svg, 20, 30, 'Stable Leader', { 'font-size': 18, 'font-weight': 700 });
-  addText(svg, 20, 185, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
-  [topY, bottomY].forEach(y => addLine(svg, 145, y, 976, y, { stroke: LIGHT, 'stroke-width': 3 }));
+  addText(svg, 20, 215, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
+
+  const addLanes = proposalY => {
+    const lanes = [
+      ['propose', proposalY],
+      ['notarize', proposalY + 45],
+      ['finalize', proposalY + 80],
+    ];
+    lanes.forEach(([label, y]) => {
+      addText(svg, 125, y + 5, label, {
+        'text-anchor': 'end',
+        'font-size': 13,
+        fill: GRAY,
+      });
+      addLine(svg, 145, y, 976, y, {
+        stroke: LIGHT,
+        'stroke-width': label === 'propose' ? 3 : 1.4,
+      });
+    });
+  };
+  addLanes(topY);
+  addLanes(bottomY);
 
   const addCadenceArrows = (count, gap, y, firstProposalAt, proposalStep) => {
     for (let index = 0; index < count - 1; index++) {
@@ -329,6 +393,31 @@ function buildValidation(mount) {
   const optimisticCount = 13;
   addCadenceArrows(sequentialCount, sequentialGap, topY, 0.05, 0.15);
   addCadenceArrows(optimisticCount, optimisticGap, bottomY, 0.05, 0.05);
+
+  const addNetworkRounds = (x, y, proposedAt) => {
+    animated.push(addArrow(
+      svg,
+      x + 4,
+      y + 17,
+      x + networkHop - 9,
+      y + 45,
+      ARROW,
+      proposedAt + 0.01,
+      0.13,
+      { strokeWidth: 1.4, headSize: 6, opacity: 0.8 },
+    ));
+    animated.push(addArrow(
+      svg,
+      x + networkHop + 9,
+      y + 45,
+      x + networkHop * 2 - 9,
+      y + 80,
+      GREEN,
+      proposedAt + 0.16,
+      0.13,
+      { strokeWidth: 1.4, headSize: 6, opacity: 0.65 },
+    ));
+  };
 
   const addBlock = (x, y, label, proposedAt, notarizedAt, finalizedAt) => {
     addText(svg, x, y - 27, label, { 'text-anchor': 'middle', fill: GRAY });
@@ -378,6 +467,7 @@ function buildValidation(mount) {
 
   for (let index = 0; index < sequentialCount; index++) {
     const proposedAt = 0.05 + index * 0.15;
+    addNetworkRounds(x0 + index * sequentialGap, topY, proposedAt);
     addBlock(
       x0 + index * sequentialGap,
       topY,
@@ -390,6 +480,7 @@ function buildValidation(mount) {
 
   for (let index = 0; index < optimisticCount; index++) {
     const proposedAt = 0.05 + index * 0.05;
+    addNetworkRounds(x0 + index * optimisticGap, bottomY, proposedAt);
     addBlock(
       x0 + index * optimisticGap,
       bottomY,
@@ -403,7 +494,7 @@ function buildValidation(mount) {
 }
 
 function buildRecovery(mount) {
-  const svg = makeSvg(mount, 300);
+  const svg = makeSvg(mount, 320);
   const animated = [];
   const y = 125;
   const x0 = 135;
@@ -411,7 +502,7 @@ function buildRecovery(mount) {
   const views = Array.from({ length: 8 }, (_, index) => x0 + index * gap);
   const nextView = 900;
 
-  addText(svg, 20, 32, 'A failed view ends the optimistic pipeline', {
+  addText(svg, 20, 32, 'A timeout ends the optimistic pipeline', {
     'font-size': 18,
     'font-weight': 700,
   });
@@ -501,7 +592,7 @@ function buildRecovery(mount) {
   });
   svg.appendChild(failureMark);
   animated.push(addStep(failureMark, 0.55));
-  const failureLabel = addText(svg, views[2], 177, 'fails', {
+  const failureLabel = addText(svg, views[2], 210, 'times out', {
     'text-anchor': 'middle',
     fill: RED,
     opacity: 0,
@@ -526,13 +617,13 @@ function buildRecovery(mount) {
       opacity: 0,
     });
     animated.push(addStep(slash, 0.63));
-    const label = addText(svg, views[index], 177, 'inert', {
-      'text-anchor': 'middle',
-      fill: RED,
-      opacity: 0,
-    });
-    animated.push(addStep(label, 0.63));
   }
+  const discardedLabel = addText(svg, (views[3] + views[4]) / 2, 210, 'discarded', {
+    'text-anchor': 'middle',
+    fill: RED,
+    opacity: 0,
+  });
+  animated.push(addStep(discardedLabel, 0.63));
 
   for (let index = 5; index < 8; index++) {
     const label = addText(svg, views[index], 100, `v${index + 1}`, {
@@ -556,22 +647,50 @@ function buildRecovery(mount) {
     svg.appendChild(unproposed);
     animated.push(addReveal(unproposed, 0.68, 0.03));
   }
-  const unproposedLabel = addText(svg, views[6], 205, 'not proposed', {
+  const unproposedLabel = addText(svg, views[6], 210, 'skipped', {
     'text-anchor': 'middle',
     fill: GRAY,
     opacity: 0,
   });
   animated.push(addReveal(unproposedLabel, 0.68, 0.03));
 
-  const skipLabel = addText(svg, 650, 246, 'nullify rest of term', {
+  const skipLabel = addText(svg, 575, 290, 'nullify rest of term', {
     'text-anchor': 'middle',
     fill: BLUE,
     opacity: 0,
   });
   animated.push(addStep(skipLabel, 0.72));
-  animated.push(addArrow(svg, views[1] + 20, 218, nextView - 20, 150, BLUE, 0.72, 0.14));
+  animated.push(addArrow(
+    svg,
+    views[2] + 20,
+    255,
+    810,
+    255,
+    BLUE,
+    0.72,
+    0.08,
+    { strokeWidth: 1.8, headSize: 7 },
+  ));
+  animated.push(addCurvedArrow(
+    svg,
+    views[1] + 18,
+    y + 19,
+    560,
+    190,
+    nextView - 20,
+    y + 19,
+    ARROW,
+    0.81,
+    0.06,
+    { strokeWidth: 1.8, headSize: 7 },
+  ));
 
-  addText(svg, nextView, 100, 'v9', { 'text-anchor': 'middle', fill: GRAY });
+  const nextLabel = addText(svg, nextView, 100, 'v9', {
+    'text-anchor': 'middle',
+    fill: GRAY,
+    opacity: 0,
+  });
+  animated.push(addStep(nextLabel, 0.87));
   addState(nextView, RED, 0, 0.88);
   addState(nextView, GRAY, 1, 0.93);
   addState(nextView, GREEN, 2, 0.98);
