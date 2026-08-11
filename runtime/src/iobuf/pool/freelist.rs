@@ -1,6 +1,6 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! A [`Freelist`] owns the allocation layout for one [`super::pool::BufferPool`]
+//! A [`Freelist`] owns the allocation layout for one [`super::BufferPool`]
 //! size class and is responsible for deallocating every tracked buffer created
 //! with that layout. Buffers that are not owned by pooled views and not held in
 //! a thread-local cache are parked in the freelist, making them available for
@@ -127,7 +127,7 @@
 //! thread-local cache, or available in this freelist. Only the thread that owns
 //! a slot outside the freelist may mutate that slot's side-table entry.
 
-use super::owner::{PooledBuffer, PooledOwner};
+use crate::iobuf::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
