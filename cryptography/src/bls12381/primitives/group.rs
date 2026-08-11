@@ -284,7 +284,13 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random scalar in `[0, 2^128)`.
+    /// Generates a uniformly random scalar in `[0, 2^128)`.
+    ///
+    /// Zero is intentionally included. Predictable challenges are unsafe regardless of their value,
+    /// but zero from uniform, independent sampling does not weaken the check. An invalid random
+    /// linear-combination check has at least one non-zero error term. Fixing every other challenge
+    /// leaves at most one value in this range for that term that can make the check pass, so the
+    /// soundness error remains at most `2^-128`.
     pub fn random(mut rng: impl CryptoRng) -> Self {
         // blst_scalar is 32 bytes.
         let mut bytes = [0u8; SCALAR_LENGTH];
