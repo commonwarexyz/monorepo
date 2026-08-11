@@ -119,6 +119,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// For [`CertifiableAutomaton`] implementations, returning a payload from
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
+        ///
+        /// Consensus may request a payload for a future context before earlier
+        /// contexts complete. Honor any dependencies supplied in the context
+        /// rather than rebuilding them from current local state. If consensus
+        /// later abandons a dependency, it also abandons the proposal.
+        ///
+        /// Closing the response declines this request, which consensus may
+        /// treat as final for the context. Keep the response pending when
+        /// temporary unavailability should not abandon the context.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -140,6 +149,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Closing the channel is also terminal for this request and should be reserved for cases
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
+        ///
+        /// The future-context requirement on [`Self::propose`] applies here
+        /// too: the context's dependencies may not be resolvable locally yet.
         fn verify(
             &mut self,
             context: Self::Context,

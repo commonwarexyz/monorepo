@@ -1,4 +1,4 @@
-//! End-to-end `BufferPool` allocation benchmarks.
+//! End-to-end buffer allocation benchmarks.
 //!
 //! This module compares pooled allocation against direct aligned allocation for
 //! the steady-state hot path we care about here: allocate and drop, optionally
@@ -31,10 +31,8 @@
 //! measures the cost observed by callers that actually use the buffer, including
 //! first-touch behavior for pages that have not yet been materialized.
 
-use super::utils::{Threading, measure};
-use commonware_runtime::{
-    BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _, page_size, tokio,
-};
+use super::utils::{Threading, measure, start_pool};
+use commonware_runtime::{BufferPool, BufferPoolConfig, IoBufMut, page_size};
 use commonware_utils::{NZU32, NZUsize};
 use criterion::Criterion;
 use std::{hint::black_box, num::NonZeroUsize};
@@ -197,9 +195,5 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_parallelism(NZUsize!(threads))
         .with_prefill(true);
 
-    let runner_cfg = tokio::Config::default()
-        .with_worker_threads(1)
-        .with_network_buffer_pool_config(cfg);
-
-    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
+    start_pool(cfg)
 }
