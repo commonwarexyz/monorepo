@@ -94,11 +94,11 @@ Figure 3: Optimistic Validation packs new views closer together while notarizati
 
 Notarization is not finalization. The application check that follows is called *certification*. After a block is notarized, each validator asks its application to certify the payload before voting to finalize it. This lets an application finish checks such as confirming that enough erasure-coded data is available.
 
-For every ancestor in the term, a participant must have either voted for it or obtained usable quorum proof. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If an ancestor fails to notarize or certify, optimistic votes above it become inert. Validators then abandon that part of the term through the normal timeout path.
+For every ancestor in the term, a participant must have either voted for it or obtained usable quorum proof. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If an ancestor fails to notarize or certify, optimistic votes later in the term become inert. Validators then abandon the rest of the term through Simplex's normal nullification path.
 
-Optimistic work stops at the term boundary. The first view of a new term must start from certified ancestry.
+Optimistic work also stops at the term boundary. The first view of a new term must start from certified ancestry.
 
-Each validator sets a local bound, measured in views, on how far it will run ahead at one time. A value of zero disables Optimistic Validation. Validators can choose different limits without affecting safety. A larger limit can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that may later be discarded.
+Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that may later be discarded.
 
 ## What We Measured
 

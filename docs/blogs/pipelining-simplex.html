@@ -215,17 +215,16 @@ Chou</a></div>
         finalize vote. It can certify later views without waiting for
         the child to finalize, so certification and finalization
         continue in parallel. If an ancestor fails to notarize or
-        certify, optimistic votes above it become inert. Validators then
-        abandon that part of the term through the normal timeout
-        path.</p>
-        <p>Optimistic work stops at the term boundary. The first view of
-        a new term must start from certified ancestry.</p>
-        <p>Each validator sets a local bound, measured in views, on how
-        far it will run ahead at one time. A value of zero disables
-        Optimistic Validation. Validators can choose different limits
-        without affecting safety. A larger limit can keep the pipeline
-        full when notarizations fall behind, but uses more CPU and
-        memory on work that may later be discarded.</p>
+        certify, optimistic votes later in the term become inert.
+        Validators then abandon the rest of the term through Simplex’s
+        normal nullification path.</p>
+        <p>Optimistic work also stops at the term boundary. The first
+        view of a new term must start from certified ancestry.</p>
+        <p>Lastly, the consensus configuration sets a bound on how many
+        views validators can work ahead at once. A value of zero
+        disables Optimistic Validation. A larger bound can keep the
+        pipeline full when notarizations fall behind, but uses more CPU
+        and memory on work that may later be discarded.</p>
         <h2 id="what-we-measured">What We Measured</h2>
         <p>We ran Alto with 50 validators spread evenly across ten AWS
         regions. With Stable Leader and Optimistic Validation enabled,
