@@ -10,7 +10,6 @@ author2: "Patrick O'Grady"
 author2_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/earn-your-stripes"
 image: "https://commonware.xyz/imgs/reed-solomon-stripes.png"
-katex: true
 ---
 
 In `marshal::coding`, a leader erasure-codes a block into shards and sends one to each validator. Validators can check their shard and vote on the commitment without waiting for the whole payload.
@@ -19,23 +18,45 @@ But eventually, a node needs the full block. Once it gathers enough checked shar
 
 ## Where `Strategy` fell short
 
-Decode already accepted a `Strategy` for parallelism, and it helped: the per-shard hashing and Merkle work around decode spread across cores. The recovery itself did not. It stayed a single sequential `decoder.decode()` call, because `reed-solomon-simd` is optimized for one core with SIMD rather than threads. So even at `conc=8`, the costly part still ran on one core.
+Decode already accepted a `Strategy` for parallelism, and it helped: hashing the missing shards used to rebuild the Merkle root spread across cores. The recovery itself did not. It stayed a single synchronous `decoder.decode()` call. `reed-solomon-simd` selects a SIMD backend on supported CPUs, but a single encode or decode call does not spawn worker threads. So even at `conc=8`, the costly part still ran on one core.
 
-Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show the gap. `best` decodes with all originals present (no recovery); `worst` forces full recovery:
+Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show where recovery stops scaling. The all-original case does no recovery; the full-recovery case reconstructs every original:
 
-| Workers | Best | Worst | Gap |
-|:--------|-----:|------:|----:|
-| 1 | 34.96 ms | 51.19 ms | 16.23 ms |
-| 8 | 9.45 ms | 26.85 ms | 17.40 ms |
-| 16 | 7.90 ms | 25.94 ms | 18.04 ms |
+```{=html}
+<style>
+  .cw-rs-chart {
+    aspect-ratio: 500 / 310;
+    margin: 24px auto 6px;
+    max-width: 600px;
+  }
+</style>
+<noscript>
+  <style>
+    .cw-rs-chart {
+      display: none;
+    }
+  </style>
+</noscript>
+<div id="earn-your-stripes-chart-recovery-gap" class="cw-rs-chart" role="img" aria-label="Line chart of latency by worker count. With 1, 8, and 16 workers, full recovery takes 51.19, 26.85, and 25.94 milliseconds, while the all-original path takes 34.96, 9.45, and 7.90 milliseconds. The recovery-heavy path flattens as more workers are added."></div>
+<noscript>
+  <table>
+    <thead><tr><th>Workers</th><th>Full recovery</th><th>All originals</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>51.19 ms</td><td>34.96 ms</td></tr>
+      <tr><td>8</td><td>26.85 ms</td><td>9.45 ms</td></tr>
+      <tr><td>16</td><td>25.94 ms</td><td>7.90 ms</td></tr>
+    </tbody>
+  </table>
+</noscript>
+```
 
-From 1 to 16 workers the parallelizable work dropped from 34.96 ms to 7.90 ms, but the gap between `best` and `worst` held near 16 to 18 ms. That gap is only a proxy for recovery because the two cases hash different missing shards, but concurrency was not reaching the full-width decoder.
+From 1 to 16 workers the all-original end-to-end latency dropped from 34.96 ms to 7.90 ms, but full recovery remained at 25.94 ms. The 16 to 18 ms separation is only a proxy for recovery because the two cases hash different missing shards, but concurrency was not reaching the full-width decoder.
 
 ## From One Decoder to Many
 
 Reed-Solomon encoding represents the block as `k + m` equal-length shards, with `k` original shards and `m` recovery shards. When original shards are missing, any `k` shards can recover the original block. Before this change, recovery handed the full shard width to one Reed-Solomon decoder.
 
-To recover one position inside a missing shard, the decoder only needs that same position from the available shards. We turn that into parallel work by cutting the shard width into contiguous byte ranges, or stripes. Each stripe covers the same range across all shards, runs as its own Reed-Solomon job, and is scheduled through `Strategy`.
+To recover one 16-bit symbol inside a missing shard, the decoder only needs the corresponding symbol column from the available shards. We turn that into parallel work by cutting the shard width into contiguous byte ranges, or stripes. Each stripe covers the same range across all shards, runs as its own Reed-Solomon job, and is scheduled through `Strategy`.
 
 ```{=html}
 <style>
@@ -75,13 +96,21 @@ Stripe cuts land on 64-byte shard-chunk boundaries (`SHARD_CHUNK_BYTES`) so the 
 
 The same worst-case decode, before and after striping:
 
-| Workers | Before | After | Speedup |
-|:--------|-------:|------:|--------:|
-| 1 | 51.19 ms | 51.79 ms | - |
-| 8 | 26.85 ms | 10.22 ms | 2.63x |
-| 16 | 25.94 ms | 7.67 ms | 3.38x |
+```{=html}
+<div id="earn-your-stripes-chart-striping" class="cw-rs-chart" role="img" aria-label="Line chart of worst-case decode latency before and after striping. With 1, 8, and 16 workers, latency changes from 51.19 to 51.79 milliseconds, 26.85 to 10.22 milliseconds, and 25.94 to 7.67 milliseconds. The latter two improvements are 2.63 and 3.38 times."></div>
+<noscript>
+  <table>
+    <thead><tr><th>Workers</th><th>Before</th><th>After</th><th>Speedup</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>51.19 ms</td><td>51.79 ms</td><td>-</td></tr>
+      <tr><td>8</td><td>26.85 ms</td><td>10.22 ms</td><td>2.63x</td></tr>
+      <tr><td>16</td><td>25.94 ms</td><td>7.67 ms</td><td>3.38x</td></tr>
+    </tbody>
+  </table>
+</noscript>
+```
 
-At `conc=1` nothing changes; one stripe is the original decode. At `conc=8`, recovery finally rides the same cores as everything else, and worst-case decode drops from 26.85 ms to 10.22 ms, a 2.63x speedup. At `conc=16`, it drops to 7.67 ms, a 3.38x speedup. The recovery tail that used to ignore concurrency is now the part that shrinks the most.
+At `conc=1`, one stripe follows the original full-width decode, so no parallel speedup is expected. At `conc=8`, recovery finally rides the same cores as everything else, and worst-case decode drops from 26.85 ms to 10.22 ms, a 2.63x speedup. At `conc=16`, it drops to 7.67 ms, a 3.38x speedup. The recovery tail that used to ignore concurrency is now the part that shrinks the most.
 
 ## Vendoring and Further Optimizations
 
@@ -107,26 +136,42 @@ Exposing recovery positions required updating both the high-rate and low-rate de
 
 A back-to-back rerun of the striped-only checkpoint and the immediate decode-reveal change isolates the improvement:
 
-| Workers | Decode + encode | Decode + reveal | Change |
-|:--------|----------------:|----------------:|-------:|
-| 8 | 10.20 ms | 9.09 ms | 10.8% lower |
-| 16 | 7.64 ms | 6.87 ms | 10.1% lower |
+```{=html}
+<div id="earn-your-stripes-chart-reveal" class="cw-rs-chart" role="img" aria-label="Line chart of recovery-heavy verification latency for decode plus encode and decode plus reveal. With 8 and 16 workers, latency changes from 10.20 to 9.09 milliseconds and from 7.64 to 6.87 milliseconds, reductions of 10.8 and 10.1 percent."></div>
+<noscript>
+  <table>
+    <thead><tr><th>Workers</th><th>Decode + encode</th><th>Decode + reveal</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td>8</td><td>10.20 ms</td><td>9.09 ms</td><td>10.8% lower</td></tr>
+      <tr><td>16</td><td>7.64 ms</td><td>6.87 ms</td><td>10.1% lower</td></tr>
+    </tbody>
+  </table>
+</noscript>
+```
 
 These are end-to-end measurements of the recovery-heavy verification path, not isolated timings of the two transforms.
 
 The final [pull request](https://github.com/commonwarexyz/monorepo/pull/4091) combines striping with decode-reveal:
 
-| Workers | Baseline | Final | Speedup |
-|:--------|---------:|------:|--------:|
-| 1 | 51.19 ms | 47.14 ms | 1.09x |
-| 8 | 26.85 ms | 8.91 ms | 3.01x |
-| 16 | 25.94 ms | 6.51 ms | 3.99x |
+```{=html}
+<div id="earn-your-stripes-chart-final" class="cw-rs-chart" role="img" aria-label="Line chart of baseline and final recovery-heavy verification latency. With 1, 8, and 16 workers, latency changes from 51.19 to 47.14 milliseconds, 26.85 to 8.91 milliseconds, and 25.94 to 6.51 milliseconds, improvements of 1.09, 3.01, and 3.99 times."></div>
+<noscript>
+  <table>
+    <thead><tr><th>Workers</th><th>Baseline</th><th>Final</th><th>Speedup</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>51.19 ms</td><td>47.14 ms</td><td>1.09x</td></tr>
+      <tr><td>8</td><td>26.85 ms</td><td>8.91 ms</td><td>3.01x</td></tr>
+      <tr><td>16</td><td>25.94 ms</td><td>6.51 ms</td><td>3.99x</td></tr>
+    </tbody>
+  </table>
+</noscript>
+```
 
 The one-worker row is an end-to-end baseline-to-final comparison; it does not isolate either optimization on its own. The final patch also checks that striped and full-width operations produce the same codeword, that revealed recovery shards match encoder output, and that tampered originals, recoveries, padding, and surplus shards are rejected.
 
 ## LLM in a Research Loop
 
-QED's bot—our AI research agent—found this optimization by reading the coding stack and noticing that the hashing and Merkle work in decode was parallelized, but Reed-Solomon recovery was not. Then it tested the hypothesis that recovery could be split into independent stripes and run in parallel.
+QED's bot—our AI research agent—found this optimization by reading the coding stack and noticing that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. Then it tested the hypothesis that recovery could be split into independent stripes and run in parallel.
 
 The loop used here looks a lot like our security audit agent. It keeps scanning the code, gathers evidence from the repo, forms hypotheses, and verifies them with tests and benchmarks. Whether a finding is useful depends on repository context. A finding may be a known issue or an intentional design choice, so the lessons from continuous auditing Commonware helped a lot to find a valid optimization.
 
