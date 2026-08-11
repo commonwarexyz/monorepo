@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, deterministic::AuditHasher};
+use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
@@ -215,35 +215,29 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), crate::Error> {
-        let buf = bufs.into().coalesce();
+        let bufs = bufs.into();
+        let sync = options.contains(WriteOptions::SYNC);
+        if sync && !bufs.has_remaining() {
+            return Ok(());
+        }
+        let buf = bufs.coalesce();
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(crate::Error::OffsetOverflow)?;
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
-        let mut content = self.content.write();
-        let required = offset + buf.len();
-        if required > content.len() {
-            content.resize(required, 0);
+        {
+            let mut content = self.content.write();
+            let required = offset + buf.len();
+            if required > content.len() {
+                content.resize(required, 0);
+            }
+            content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         }
-        content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
-        Ok(())
-    }
-
-    async fn write_at_sync(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), crate::Error> {
-        let bufs = bufs.into();
-        if !bufs.has_remaining() {
-            return Ok(());
-        }
-
-        self.write_at(offset, bufs).await?;
-        self.sync().await
+        if sync { self.sync().await } else { Ok(()) }
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
@@ -286,6 +280,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_empty_write_semantics() {
+        let storage = Storage::new(test_pool());
+
+        let (plain, _) = storage.open("partition", b"plain").await.unwrap();
+        plain
+            .write_at(8, Vec::<u8>::new(), WriteOptions::default())
+            .await
+            .unwrap();
+        plain.sync().await.unwrap();
+        drop(plain);
+        let (_, plain_len) = storage.open("partition", b"plain").await.unwrap();
+        assert_eq!(plain_len, 8);
+
+        let (sync, _) = storage.open("partition", b"sync").await.unwrap();
+        sync.write_at(8, Vec::<u8>::new(), WriteOptions::SYNC)
+            .await
+            .unwrap();
+        drop(sync);
+        let (_, sync_len) = storage.open("partition", b"sync").await.unwrap();
+        assert_eq!(sync_len, 0);
+    }
+
+    #[tokio::test]
     async fn test_blob_header_handling() {
         let storage = Storage::new(test_pool());
 
@@ -308,7 +325,9 @@ mod tests {
 
         // Write at logical offset 0 stores at the data offset
         let data = b"hello world";
-        blob.write_at(0, data).await.unwrap();
+        blob.write_at(0, data, WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw storage layout
@@ -340,7 +359,9 @@ mod tests {
         assert_eq!(size, data.len() as u64);
         let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
-        blob.write_at(data.len() as u64, b"!").await.unwrap();
+        blob.write_at(data.len() as u64, b"!", WriteOptions::default())
+            .await
+            .unwrap();
         blob.sync().await.unwrap();
         {
             let partitions = storage.partitions.lock();
@@ -398,12 +419,18 @@ mod tests {
     async fn test_audit_separates_partition_and_blob_names() {
         let storage_a = Storage::new(test_pool());
         let (blob_a, _) = storage_a.open("a", b"bc").await.unwrap();
-        blob_a.write_at(0, b"d").await.unwrap();
+        blob_a
+            .write_at(0, b"d", WriteOptions::default())
+            .await
+            .unwrap();
         blob_a.sync().await.unwrap();
 
         let storage_b = Storage::new(test_pool());
         let (blob_b, _) = storage_b.open("ab", b"c").await.unwrap();
-        blob_b.write_at(0, b"d").await.unwrap();
+        blob_b
+            .write_at(0, b"d", WriteOptions::default())
+            .await
+            .unwrap();
         blob_b.sync().await.unwrap();
 
         assert_ne!(storage_a.audit(), storage_b.audit());
@@ -432,7 +459,9 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size, 0);
-            blob.write_at(0, b"data".to_vec()).await.unwrap();
+            blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             drop(blob);
 

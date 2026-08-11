@@ -416,6 +416,13 @@ impl Executor {
         now
     }
 
+    /// Ensure the runtime has not reached its configured deadline.
+    fn assert_deadline(&self, current: SystemTime) {
+        if self.deadline.is_some_and(|deadline| current >= deadline) {
+            panic!("runtime timeout");
+        }
+    }
+
     /// When idle, jump directly to the next actionable time.
     ///
     /// When built with the `external` feature, never skip ahead (to ensure we poll all pending tasks
@@ -457,15 +464,29 @@ impl Executor {
         }
     }
 
-    /// Ensure the runtime is making progress.
+    /// Wake sleepers until the runtime can make progress.
     ///
-    /// When built with the `external` feature, always poll pending tasks after the passage of time.
-    fn assert_liveness(&self) {
-        if cfg!(feature = "external") || self.tasks.ready() != 0 {
-            return;
-        }
+    /// Canceling a polled sleep leaves its alarm registered until its deadline. If that alarm
+    /// wakes no task, continue to later deadlines before deciding the runtime has stalled.
+    ///
+    /// When built with the `external` feature, the passage of time is sufficient to continue.
+    fn wake_until_progress(&self, mut current: SystemTime) {
+        loop {
+            // Move to the next actionable time. Check the runtime deadline before waking sleepers
+            // so timeout takes precedence over work scheduled at the deadline.
+            current = self.skip_idle_time(current);
+            self.assert_deadline(current);
+            self.wake_ready_sleepers(current);
 
-        panic!("runtime stalled");
+            // Continue once external work or a woken task can make progress. Without either,
+            // another alarm is the runtime's only remaining source of progress.
+            if cfg!(feature = "external") || self.tasks.ready() != 0 {
+                return;
+            }
+            if self.sleeping.lock().is_empty() {
+                panic!("runtime stalled");
+            }
+        }
     }
 }
 
@@ -570,15 +591,8 @@ impl Runner {
         let result = catch_unwind(AssertUnwindSafe(|| {
             loop {
                 // Ensure we have not exceeded our deadline
-                {
-                    let current = executor.time.lock();
-                    if let Some(deadline) = executor.deadline
-                        && *current >= deadline
-                    {
-                        drop(current);
-                        panic!("runtime timeout");
-                    }
-                }
+                let current = *executor.time.lock();
+                executor.assert_deadline(current);
 
                 // Drain all ready tasks
                 let mut queue = executor.tasks.drain();
@@ -664,13 +678,9 @@ impl Runner {
                     break output;
                 }
 
-                // Advance time (skipping ahead if no tasks are ready yet)
-                let mut current = executor.advance_time();
-                current = executor.skip_idle_time(current);
-
-                // Wake sleepers and ensure we continue to make progress
-                executor.wake_ready_sleepers(current);
-                executor.assert_liveness();
+                // Advance time and wake sleepers until the runtime can make progress
+                let current = executor.advance_time();
+                executor.wake_until_progress(current);
 
                 // Record that we completed another iteration of the event loop.
                 executor.metrics.iterations.inc();
@@ -1607,7 +1617,7 @@ mod tests {
     use crate::FutureExt;
     use crate::{
         Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, deterministic, reschedule,
+        Supervisor as _, WriteOptions, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1732,6 +1742,47 @@ mod tests {
     }
 
     #[test]
+    fn test_dropped_sleeper_before_live_deadline() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleepers = FuturesUnordered::new();
+                sleepers.push(context.sleep(Duration::from_secs(1)));
+                started_sender.send(()).unwrap();
+                sleepers.next().await;
+            });
+
+            // Waiting for the signal ensures the child registered its alarm before being aborted.
+            started_receiver.await.unwrap();
+            sleeper.abort();
+
+            // The stale child alarm must not prevent a later live alarm from firing.
+            context.sleep(Duration::from_secs(2)).await;
+        });
+    }
+
+    #[cfg(not(feature = "external"))]
+    #[test]
+    #[should_panic(expected = "runtime timeout")]
+    fn test_dropped_sleeper_beyond_timeout() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (started_sender, started_receiver) = oneshot::channel();
+            let sleeper = context.child("sleeper").spawn(|context| async move {
+                let mut sleep = Box::pin(context.sleep(Duration::from_secs(20)));
+                assert!(sleep.as_mut().now_or_never().is_none());
+                started_sender.send(()).unwrap();
+                sleep.await;
+            });
+
+            started_receiver.await.unwrap();
+            sleeper.abort();
+            pending::<()>().await;
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "runtime timeout")]
     fn test_timeout() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1776,7 +1827,9 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1821,7 +1874,9 @@ mod tests {
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(0, data).await.unwrap();
+            blob.write_at(0, data, WriteOptions::default())
+                .await
+                .unwrap();
         });
 
         // Recover the runtime
@@ -2261,7 +2316,9 @@ mod tests {
         let (result, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
                 let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
-                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.write_at(0, b"data".to_vec(), WriteOptions::default())
+                    .await
+                    .unwrap();
                 blob.sync().await // This should fail due to fault injection
             });
 
@@ -2278,7 +2335,9 @@ mod tests {
             assert_eq!(len, 0, "unsynced data should be lost after recovery");
 
             // Now we can write and sync successfully
-            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.write_at(0, b"recovered".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync()
                 .await
                 .expect("sync should succeed with faults disabled");
@@ -2296,7 +2355,9 @@ mod tests {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
             // Initially no faults - sync should succeed
-            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             blob.sync().await.expect("initial sync should succeed");
 
             // Enable sync faults dynamically
@@ -2304,7 +2365,9 @@ mod tests {
             storage_fault_cfg.write().sync_rate = Some(1.0);
 
             // Now sync should fail
-            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
+                .await
+                .unwrap();
             let result = blob.sync().await;
             assert!(result.is_err(), "sync should fail with faults enabled");
 
@@ -2381,7 +2444,11 @@ mod tests {
                             let name = format!("task{i}_blob{j}");
                             if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
                                 successes += 1;
-                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                if blob
+                                    .write_at(0, b"data".to_vec(), WriteOptions::default())
+                                    .await
+                                    .is_ok()
+                                {
                                     successes += 1;
                                 }
                                 if blob.sync().await.is_ok() {

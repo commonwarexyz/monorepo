@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Array, Faults, Participant, Span, TryCollect,
+    Array, N3f1, Participant, Span, TryCollect,
     ordered::{Quorum, Set},
     sequence::U32,
     sync::Mutex,
@@ -300,10 +300,11 @@ where
 
 impl certificate::Verifier for Scheme {
     type Subject<'a, D: Digest> = Subject<'a, D>;
+    type Faults = N3f1;
     type PublicKey = PublicKey;
     type Certificate = Certificate;
 
-    fn verify_certificate<R, D, M>(
+    fn verify_certificate<R, D>(
         &self,
         _rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -313,7 +314,6 @@ impl certificate::Verifier for Scheme {
     where
         R: rand_core::CryptoRng,
         D: Digest,
-        M: Faults,
     {
         if certificate.signers.len() != self.participants.len() {
             return false;
@@ -321,7 +321,7 @@ impl certificate::Verifier for Scheme {
         if certificate.signers.count() != certificate.signatures.len() {
             return false;
         }
-        if certificate.signers.count() < self.participants.quorum::<M>() as usize {
+        if certificate.signers.count() < self.participants.quorum::<Self::Faults>() as usize {
             return false;
         }
 
@@ -408,15 +408,10 @@ impl certificate::Scheme for Scheme {
         self.record.contains(signature.signer, hash)
     }
 
-    fn assemble<I, M>(
-        &self,
-        attestations: I,
-        _strategy: &impl Strategy,
-    ) -> Option<Self::Certificate>
+    fn assemble<I>(&self, attestations: I, _strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
-        M: Faults,
     {
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
@@ -434,7 +429,7 @@ impl certificate::Scheme for Scheme {
             entries.push((signer, signature));
         }
 
-        if entries.len() < self.participants.quorum::<M>() as usize {
+        if entries.len() < self.participants.quorum::<Self::Faults>() as usize {
             return None;
         }
 

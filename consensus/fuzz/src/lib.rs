@@ -128,7 +128,6 @@ pub(crate) const POST_GST_WINDOW: Duration = Duration::from_secs(360);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
-const DEFAULT_FETCH_CONCURRENT: NonZeroUsize = NZUsize!(1);
 
 pub(crate) fn fuzz_mailbox_size(
     u: &mut arbitrary::Unstructured<'_>,
@@ -138,17 +137,6 @@ pub(crate) fn fuzz_mailbox_size(
         50..=74 => NZUsize!(1),
         75..=89 => NZUsize!(2),
         90..=96 => NZUsize!(4),
-        _ => NZUsize!(8),
-    })
-}
-
-pub(crate) fn fuzz_fetch_concurrent(
-    u: &mut arbitrary::Unstructured<'_>,
-) -> arbitrary::Result<NonZeroUsize> {
-    Ok(match u.int_in_range(0..=99)? {
-        0..=49 => DEFAULT_FETCH_CONCURRENT,
-        50..=74 => NZUsize!(2),
-        75..=89 => NZUsize!(4),
         _ => NZUsize!(8),
     })
 }
@@ -348,7 +336,6 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("strategy", &input.strategy)
             .field("messaging_faults", &input.messaging_faults)
             .field("mailbox_size", &input.mailbox_size)
-            .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("reporting", &input.reporting)
@@ -366,7 +353,6 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
             .field("events", &input.events)
             .field("term_length", &input.term_length)
             .field("mailbox_size", &input.mailbox_size)
-            .field("fetch_concurrent", &input.fetch_concurrent)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
             .field("reporting", &input.reporting)
@@ -410,8 +396,6 @@ pub struct FuzzInput {
     pub messaging_faults: Vec<(View, u8)>,
     /// Per-iteration mailbox capacity threaded into every honest engine.
     pub mailbox_size: NonZeroUsize,
-    /// Per-iteration resolver fetch concurrency threaded into every honest engine.
-    pub fetch_concurrent: NonZeroUsize,
     /// Per-iteration forwarding policy threaded into every engine the harness
     /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
     /// `batcher::forward_targets` instead of pinning to `Disabled`.
@@ -503,7 +487,6 @@ impl Arbitrary<'_> for FuzzInput {
         let reporting = ReporterWiring::arbitrary(u)?;
 
         let mailbox_size = fuzz_mailbox_size(u)?;
-        let fetch_concurrent = fuzz_fetch_concurrent(u)?;
 
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
@@ -523,7 +506,6 @@ impl Arbitrary<'_> for FuzzInput {
             strategy,
             messaging_faults: Vec::new(),
             mailbox_size,
-            fetch_concurrent,
             forwarding,
             certify,
             reporting,
@@ -601,6 +583,7 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
         context.child("network"),
         NetworkConfig {
             max_size: 1024 * 1024,
+            max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets: NZUsize!(1),
         },
@@ -957,7 +940,6 @@ pub(crate) fn spawn_honest_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -986,7 +968,6 @@ where
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         pending,
         recovered,
@@ -1022,7 +1003,6 @@ fn spawn_audited_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -1063,7 +1043,6 @@ where
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         partition,
         pending,
@@ -1100,7 +1079,6 @@ pub(crate) fn build_validator<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
@@ -1131,7 +1109,6 @@ where
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         partition,
         pending,
@@ -1261,7 +1238,6 @@ pub(crate) fn build_validator_with_reporter<
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     partition: String,
     pending: (PendingSender, PendingReceiver),
@@ -1332,12 +1308,12 @@ where
         fetch_timeout: Duration::from_secs(1),
         view_retention: Delta::new(10),
         skip_timeout: Duration::from_secs(11),
-        fetch_concurrent,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding,
+        track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     let engine_handle = engine.start(
@@ -1372,7 +1348,6 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
     certify: CertifyChoice,
@@ -1416,7 +1391,6 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         leader_timeout,
         certification_timeout,
         mailbox_size,
-        fetch_concurrent,
         forwarding,
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
@@ -1969,7 +1943,6 @@ fn run_standard_once<P: simplex::Simplex>(
                     Duration::from_secs(1),
                     Duration::from_secs(2),
                     input.mailbox_size,
-                    input.fetch_concurrent,
                     input.forwarding,
                     pending,
                     recovered,
@@ -2163,7 +2136,6 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     Duration::from_secs(1),
                     Duration::from_secs(2),
                     input.mailbox_size,
-                    input.fetch_concurrent,
                     input.forwarding,
                     pending,
                     recovered,
@@ -2217,7 +2189,6 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     Duration::from_secs(1),
                     Duration::from_secs(2),
                     input.mailbox_size,
-                    input.fetch_concurrent,
                     input.forwarding,
                     (sender, receiver),
                     (certificate_sender, certificate_receiver),
@@ -2237,7 +2208,6 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     Duration::from_secs(1),
                     Duration::from_secs(2),
                     input.mailbox_size,
-                    input.fetch_concurrent,
                     input.forwarding,
                     pending,
                     recovered,
@@ -2432,7 +2402,6 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 Duration::from_secs(1),
                 Duration::from_secs(2),
                 input.mailbox_size,
-                input.fetch_concurrent,
                 input.forwarding,
                 channels,
                 input.certify,
@@ -3006,12 +2975,12 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: Delta::new(10),
                 skip_timeout: Duration::from_secs(11),
-                fetch_concurrent: self.input.fetch_concurrent,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forwarding: self.input.forwarding,
+                track_historical_votes: false,
             },
         );
         engine.start(vote, certificate, resolver);
@@ -3250,7 +3219,6 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     Duration::from_secs(1),
                     Duration::from_millis(1_500),
                     self.input.mailbox_size,
-                    self.input.fetch_concurrent,
                     self.input.forwarding,
                     pending,
                     recovered,
@@ -3270,7 +3238,6 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     Duration::from_secs(1),
                     Duration::from_millis(1_500),
                     self.input.mailbox_size,
-                    self.input.fetch_concurrent,
                     self.input.forwarding,
                     pending,
                     recovered,
@@ -3483,7 +3450,6 @@ where
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
     let mailbox_size = input.mailbox_size;
-    let fetch_concurrent = input.fetch_concurrent;
     let forwarding = input.forwarding;
     let certify = input.certify;
     let reporting = input.reporting;
@@ -3506,7 +3472,6 @@ where
                 schemes,
                 term_length,
                 mailbox_size,
-                fetch_concurrent,
                 forwarding,
                 certify,
                 reporting,
@@ -4031,7 +3996,6 @@ mod tests {
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
             mailbox_size: DEFAULT_MAILBOX_SIZE,
-            fetch_concurrent: DEFAULT_FETCH_CONCURRENT,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
             reporting: ReporterWiring::Solo,

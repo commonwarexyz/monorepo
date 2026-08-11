@@ -11,7 +11,7 @@ use std::{
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with
-/// the exception of `crypto`, `listen`, `allow_private_ips`, `mailbox_size`,
+/// the exception of `crypto`, `listen`, `allow_private_ips`, `max_peers_per_set`, `mailbox_size`,
 /// `send_batch_size`, and `dial_timeout`). If this is not synchronized, connections could
 /// be unnecessarily dropped, messages could be parsed incorrectly, and/or peers will rate
 /// limit each other during normal operation.
@@ -39,17 +39,30 @@ pub struct Config<C: Signer> {
     /// (allows known peers to connect from unknown IPs).
     pub bypass_ip_check: bool,
 
-    /// Maximum size allowed for messages over any connection.
+    /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The actual size of the network message will be higher due to overhead from the protocol;
-    /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
+    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
+    /// part of the payload and counts toward this limit.
+    ///
+    /// Framing and transport overhead are added after this size check and do not count toward
+    /// the limit, so the resulting network message will be larger.
     pub max_message_size: u32,
 
-    /// Message backlog allowed for internal actors.
+    /// Maximum number of distinct identities at one peer-set index, including the local identity.
     ///
-    /// When there are more messages in a mailbox than this value, messages may be rejected before
-    /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
-    /// [`commonware_actor::mailbox`] for a signal this is occurring.
+    /// This applies to the deduplicated union of a peer set's primary and secondary identities.
+    /// The local identity counts even when omitted from the registered set. Configure only this
+    /// per-set value; the network derives its retained identity bound by multiplying it by
+    /// [`Config::tracked_peer_sets`]. Tracking an oversized peer set panics.
+    ///
+    /// The derived bound sizes every application channel's inbound mailbox and its contribution
+    /// to the shared outbound router mailbox.
+    pub max_peers_per_set: NonZeroUsize,
+
+    /// Capacity for internal actor mailboxes.
+    ///
+    /// This does not affect inbound application message capacity, which is derived from channel
+    /// rate limits and [`Config::max_peers_per_set`].
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
@@ -119,6 +132,7 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
+        max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
@@ -130,6 +144,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
+            max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -153,7 +168,13 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: u32) -> Self {
+    pub fn local(
+        crypto: C,
+        namespace: &[u8],
+        listen: SocketAddr,
+        max_peers_per_set: NonZeroUsize,
+        max_message_size: u32,
+    ) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
@@ -163,6 +184,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
+            max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
@@ -191,6 +213,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
+            max_peers_per_set: NZUsize!(32),
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),

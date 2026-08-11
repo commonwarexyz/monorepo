@@ -9,7 +9,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature, Variant},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{N3f1, Participant, test_rng};
+use commonware_utils::{Participant, test_rng};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -266,7 +266,7 @@ fn fuzz(op: FuzzOperation) {
             share,
             namespace,
         } => {
-            if share.index.get() <= public.required::<N3f1>() {
+            if share.index.get() <= public.required() {
                 let _ = threshold::sign_proof_of_possession::<MinPk>(&public, &share, &namespace);
             }
         }
@@ -276,7 +276,7 @@ fn fuzz(op: FuzzOperation) {
             share,
             namespace,
         } => {
-            if share.index.get() <= public.required::<N3f1>() {
+            if share.index.get() <= public.required() {
                 let _ = threshold::sign_proof_of_possession::<MinSig>(&public, &share, &namespace);
             }
         }
@@ -286,7 +286,7 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             partial,
         } => {
-            if partial.index.get() <= public.required::<N3f1>() {
+            if partial.index.get() <= public.required() {
                 let _ =
                     threshold::verify_proof_of_possession::<MinPk>(&public, &namespace, &partial);
             }
@@ -297,7 +297,7 @@ fn fuzz(op: FuzzOperation) {
             namespace,
             partial,
         } => {
-            if partial.index.get() <= public.required::<N3f1>() {
+            if partial.index.get() <= public.required() {
                 let _ =
                     threshold::verify_proof_of_possession::<MinSig>(&public, &namespace, &partial);
             }
@@ -308,7 +308,7 @@ fn fuzz(op: FuzzOperation) {
             index,
             entries,
         } => {
-            if index.get() <= public.required::<N3f1>() && !entries.is_empty() {
+            if index.get() <= public.required() && !entries.is_empty() {
                 let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinPk>)> = entries
                     .iter()
                     .enumerate()
@@ -338,7 +338,7 @@ fn fuzz(op: FuzzOperation) {
             index,
             entries,
         } => {
-            if index.get() <= public.required::<N3f1>() && !entries.is_empty() {
+            if index.get() <= public.required() && !entries.is_empty() {
                 let entries_refs: Vec<(&[u8], &[u8], PartialSignature<MinSig>)> = entries
                     .iter()
                     .enumerate()
@@ -369,7 +369,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             partials,
         } => {
-            if public.required::<N3f1>() as usize == partials.len() {
+            if public.required() as usize == partials.len() {
                 let partials_evals: Vec<PartialSignature<MinPk>> = partials
                     .into_iter()
                     .map(|(idx, sig)| PartialSignature {
@@ -394,7 +394,7 @@ fn fuzz(op: FuzzOperation) {
             message,
             partials,
         } => {
-            if public.required::<N3f1>() as usize == partials.len() {
+            if public.required() as usize == partials.len() {
                 let partials_evals: Vec<PartialSignature<MinSig>> = partials
                     .into_iter()
                     .map(|(idx, sig)| PartialSignature {
@@ -414,11 +414,11 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::RecoverMinPk { sharing, partials } => {
-            let _ = threshold::recover::<MinPk, _, N3f1>(&sharing, &partials, &Sequential);
+            let _ = threshold::recover(&sharing, &partials, &Sequential);
         }
 
         FuzzOperation::RecoverMinSig { sharing, partials } => {
-            let _ = threshold::recover::<MinSig, _, N3f1>(&sharing, &partials, &Sequential);
+            let _ = threshold::recover(&sharing, &partials, &Sequential);
         }
 
         FuzzOperation::RecoverMultipleMinPk {
@@ -432,8 +432,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ =
-                    threshold::recover_multiple::<MinPk, _, N3f1>(&sharing, groups_refs, &strategy);
+                let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
             }
         }
 
@@ -448,11 +447,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple::<MinSig, _, N3f1>(
-                    &sharing,
-                    groups_refs,
-                    &strategy,
-                );
+                let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
             }
         }
 
@@ -461,12 +456,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ = threshold::recover_pair::<MinPk, _, N3f1>(
-                &sharing,
-                &partials_1,
-                &partials_2,
-                &Sequential,
-            );
+            let _ = threshold::recover_pair(&sharing, &partials_1, &partials_2, &Sequential);
         }
 
         FuzzOperation::RecoverPairMinSig {
@@ -474,12 +464,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ = threshold::recover_pair::<MinSig, _, N3f1>(
-                &sharing,
-                &partials_1,
-                &partials_2,
-                &Sequential,
-            );
+            let _ = threshold::recover_pair(&sharing, &partials_1, &partials_2, &Sequential);
         }
 
         FuzzOperation::SignMessageMinPk {

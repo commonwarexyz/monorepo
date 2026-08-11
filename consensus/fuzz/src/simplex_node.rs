@@ -77,7 +77,6 @@ pub struct NodeFuzzInput {
     /// with lengths 2-5.
     pub term_length: TermLength,
     pub mailbox_size: NonZeroUsize,
-    pub fetch_concurrent: NonZeroUsize,
     pub forwarding: ForwardingPolicy,
     pub certify: crate::CertifyChoice,
     pub reporting: crate::ReporterWiring,
@@ -105,7 +104,6 @@ impl Arbitrary<'_> for NodeFuzzInput {
 
         let reporting = crate::ReporterWiring::arbitrary(u)?;
         let mailbox_size = crate::fuzz_mailbox_size(u)?;
-        let fetch_concurrent = crate::fuzz_fetch_concurrent(u)?;
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
@@ -119,7 +117,6 @@ impl Arbitrary<'_> for NodeFuzzInput {
             events,
             term_length: TermLength::ONE,
             mailbox_size,
-            fetch_concurrent,
             forwarding,
             certify,
             reporting,
@@ -1526,7 +1523,6 @@ where
         },
         messaging_faults: Vec::new(),
         mailbox_size: input.mailbox_size,
-        fetch_concurrent: input.fetch_concurrent,
         forwarding: input.forwarding,
         certify: input.certify,
         reporting: input.reporting,
@@ -1586,7 +1582,6 @@ where
         Duration::from_secs(1),
         Duration::from_secs(2),
         input.mailbox_size,
-        input.fetch_concurrent,
         base.forwarding,
         pending,
         recovered,
@@ -1634,7 +1629,6 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
     schemes: Vec<P::Scheme>,
     term_length: TermLength,
     mailbox_size: NonZeroUsize,
-    fetch_concurrent: NonZeroUsize,
     forwarding: ForwardingPolicy,
     certify: crate::CertifyChoice,
     wiring: crate::ReporterWiring,
@@ -1646,6 +1640,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             context.child("network_recovery"),
             simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(participants.len()),
                 disconnect_on_block: false,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -1709,7 +1704,6 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             Duration::from_secs(1),
             Duration::from_secs(2),
             mailbox_size,
-            fetch_concurrent,
             forwarding,
             pending,
             recovered,
@@ -1781,7 +1775,6 @@ mod tests {
                 },
             ],
             mailbox_size: NZUsize!(1024),
-            fetch_concurrent: NZUsize!(1),
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
             reporting: crate::ReporterWiring::Solo,
@@ -1810,7 +1803,6 @@ mod tests {
                 },
             ],
             mailbox_size: NZUsize!(1024),
-            fetch_concurrent: NZUsize!(1),
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
             reporting: crate::ReporterWiring::Solo,
@@ -1839,7 +1831,6 @@ mod tests {
                 },
             ],
             mailbox_size: NZUsize!(1024),
-            fetch_concurrent: NZUsize!(1),
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
             reporting: crate::ReporterWiring::Solo,

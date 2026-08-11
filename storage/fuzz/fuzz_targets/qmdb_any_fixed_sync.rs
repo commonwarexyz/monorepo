@@ -121,7 +121,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Se
 
 async fn test_sync<F, R>(
     context: deterministic::Context,
-    resolver: R,
+    source: R,
     target: sync::Target<F, commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
@@ -129,11 +129,12 @@ async fn test_sync<F, R>(
 ) -> bool
 where
     F: MerkleFamily,
-    R: sync::resolver::Resolver<
+    R: sync::source::Source<
             Family = F,
             Digest = commonware_cryptography::sha256::Digest,
             Op = FixedOperation<F, Key, Value>,
-        >,
+        > + Clone
+        + 'static,
 {
     let db_config = test_config(test_name, &context);
     let expected_root = target.root;
@@ -146,8 +147,8 @@ where
         db_config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
-        resolver,
-        apply_batch_size: 100,
+        source,
+        apply_batch_size: NZU64!(100),
         max_outstanding_requests: 10,
         max_retained_roots: 8,
     };

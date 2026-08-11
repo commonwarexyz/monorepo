@@ -71,7 +71,7 @@
 //! ```rust
 //! # use commonware_cryptography::{
 //! #     bls12381::primitives::group::{G1, Scalar},
-//! #     transcript::Transcript,
+//! #     transcript::{Transcript, Version},
 //! #     zk::bulletproofs::ipa::{prove, verify, Setup, Witness},
 //! # };
 //! # use commonware_math::algebra::{Additive, CryptoGroup, Ring};
@@ -105,7 +105,7 @@
 //! .expect("witness should fit the setup");
 //!
 //! // The proof is bound to this transcript state.
-//! let mut prover_transcript = Transcript::new(b"ipa-example");
+//! let mut prover_transcript = Transcript::new(b"ipa-example", Version::V1);
 //! prover_transcript.commit(b"context".as_slice());
 //!
 //! // Any Strategy works here. Sequential is simplest; a parallel strategy can
@@ -115,7 +115,7 @@
 //!     .expect("claim should match the witness and setup");
 //!
 //! // Verification must replay the same transcript state.
-//! let mut verifier_transcript = Transcript::new(b"ipa-example");
+//! let mut verifier_transcript = Transcript::new(b"ipa-example", Version::V1);
 //! verifier_transcript.commit(b"context".as_slice());
 //! let valid = setup
 //!     .eval(|vs| verify(&mut verifier_transcript, vs, &claim, proof), &strategy)
@@ -838,6 +838,7 @@ mod conformance {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
+    use crate::transcript::Version;
     use arbitrary::{Arbitrary, Unstructured};
     #[cfg(test)]
     use commonware_codec::Decode;
@@ -885,7 +886,7 @@ pub mod fuzz {
                 Witness::new_with_claim(setup, y, a.iter().zip(b).map(|(&a, &b)| (a, b)))
                     .expect("prover expects arguments to match setup");
             let proof = prove(
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 setup,
                 &claim,
                 witness.clone(),
@@ -929,7 +930,7 @@ pub mod fuzz {
             self.claim.product -= &delta;
             self.claim.commitment += &(*self.setup.product_generator() * &delta);
             self.proof = prove(
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 self.setup,
                 &self.claim,
                 self.witness.clone(),
@@ -958,7 +959,7 @@ pub mod fuzz {
                 ..self.claim
             };
             self.proof = prove(
-                &mut Transcript::new(NAMESPACE),
+                &mut Transcript::new(NAMESPACE, Version::V1),
                 self.setup,
                 &longer_claim,
                 self.witness.clone(),
@@ -1004,7 +1005,7 @@ pub mod fuzz {
             let proof = self.proof;
             setup
                 .eval(
-                    |vs| super::verify(&mut Transcript::new(ns), vs, &claim, proof),
+                    |vs| super::verify(&mut Transcript::new(ns, Version::V1), vs, &claim, proof),
                     &Sequential,
                 )
                 .map(|g| g == G::zero())

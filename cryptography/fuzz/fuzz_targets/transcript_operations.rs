@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::transcript::Transcript;
+use commonware_cryptography::transcript::{Transcript, Version};
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 
@@ -10,6 +10,21 @@ const LABELS: &[&[u8]] = &[
 ];
 
 const MAX_OPERATIONS: usize = 100;
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzVersion {
+    V0,
+    V1,
+}
+
+impl From<FuzzVersion> for Version {
+    fn from(version: FuzzVersion) -> Self {
+        match version {
+            FuzzVersion::V0 => Version::V0,
+            FuzzVersion::V1 => Version::V1,
+        }
+    }
+}
 
 #[derive(Debug, Arbitrary)]
 enum TranscriptOperation {
@@ -25,10 +40,12 @@ enum TranscriptOperation {
 struct FuzzInput {
     operations: Vec<TranscriptOperation>,
     namespace: Vec<u8>,
+    version: FuzzVersion,
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut transcript = Transcript::new(input.namespace.as_slice());
+    let version = Version::from(input.version);
+    let mut transcript = Transcript::new(input.namespace.as_slice(), version);
 
     for operation in input.operations.into_iter().take(MAX_OPERATIONS) {
         match operation {
@@ -61,7 +78,7 @@ fn fuzz(input: FuzzInput) {
             TranscriptOperation::Resume => {
                 let _ = transcript.commit(&[] as &[u8]);
                 let summary = transcript.summarize();
-                transcript = Transcript::resume(summary);
+                transcript = Transcript::resume(summary, version);
             }
 
             TranscriptOperation::Summarize => {

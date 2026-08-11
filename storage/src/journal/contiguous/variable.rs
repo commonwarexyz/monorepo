@@ -1278,17 +1278,28 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
         }
 
-        // After a same-blob crash during a previous clear_to_size, the journal may recover to a
-        // stale position ahead of the requested start.
+        // A pruned start cannot be reconstructed from the retained suffix.
         let bounds = journal.bounds.clone();
-        if bounds.is_empty() && bounds.start > range.start {
+        if bounds.start > range.start {
+            debug!(
+                size,
+                bounds.start,
+                range.start,
+                range.end,
+                "existing journal is incompatible with sync range, resetting to start position"
+            );
             return journal.clear_to_size(range.start).await;
         }
 
-        // Check if data exceeds the sync range
-        if size > range.end {
-            return Err(Error::ItemOutOfRange(size));
-        }
+        // Sync targets describe the same append-only log, so progress beyond an older target can
+        // retain its authenticated prefix instead of refetching it.
+        let journal = if size > range.end {
+            debug!(size, range.end, "rewinding journal to sync range end");
+            journal.rewind(range.end).await?
+        } else {
+            journal
+        };
+        let size = journal.size();
 
         // If all existing data is before our sync range, reset to range start
         if size <= range.start {
@@ -2196,10 +2207,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// - Fresh (no data): returns an empty journal, resetting to `range.start` if needed.
     /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
     ///   crash-safe clear path and returns an empty journal.
-    /// - Overlap within [`range.start`, `range.end`]:
-    ///   - Prunes toward `range.start` (blob-aligned, so some items before
-    ///     `range.start` may be retained)
-    /// - Data beyond `range.end`: returns [Error::ItemOutOfRange].
+    /// - Overlap within [`range.start`, `range.end`]: prunes toward `range.start`
+    ///   (blob-aligned, so some items before `range.start` may be retained).
+    /// - Data that has pruned `range.start`: resets to `range.start`.
+    /// - Data beyond `range.end`: rewinds to `range.end` and retains the requested prefix.
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -2209,8 +2220,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// # Returns
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
-    /// # Errors
-    /// Returns [Error::ItemOutOfRange] if existing data extends beyond `range.end`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
@@ -2570,7 +2579,7 @@ mod tests {
     use crate::journal::contiguous::tests::{corrupt_page, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
+        Metrics as _, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, Writer},
         deterministic,
         mocks::{
@@ -3694,7 +3703,9 @@ mod tests {
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            blob.write_at_sync(0, vec![0xFF; 1]).await.unwrap();
+            blob.write_at(0, vec![0xFF; 1], WriteOptions::SYNC)
+                .await
+                .unwrap();
 
             {
                 let cache = CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10));
@@ -5820,7 +5831,7 @@ mod tests {
 
             for partition in [&legacy_partition, &blobs_partition] {
                 let (blob, _) = context.open(partition, &0u64.to_be_bytes()).await.unwrap();
-                blob.write_at_sync(0, vec![0]).await.unwrap();
+                blob.write_at(0, vec![0], WriteOptions::SYNC).await.unwrap();
             }
 
             let result = Journal::<_, u64>::init_at_size(context.child("storage"), cfg, 7).await;
@@ -7054,10 +7065,9 @@ mod tests {
         });
     }
 
-    /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that ItemOutOfRange is returned when existing data goes beyond the upper bound.
+    /// Test `init_sync` rewinds data that exceeds the sync target range.
     #[test_traced]
-    fn test_init_sync_existing_data_exceeds_upper_bound() {
+    fn test_init_sync_rewinds_data_exceeding_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
@@ -7083,19 +7093,22 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // Initialize with sync boundaries that are exceeded by existing data
+            // Initialize with sync boundaries that are exceeded by existing data.
             let lower_bound = 8; // blob 1
-            for (i, upper_bound) in (9..29).enumerate() {
-                let result = Journal::<_, u64>::init_sync(
-                    context.child("sync").with_attribute("index", i),
-                    cfg.clone(),
-                    lower_bound..upper_bound,
-                )
-                .await;
+            let upper_bound = 20;
+            let journal = Journal::<_, u64>::init_sync(
+                context.child("sync"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to rewind journal to the older sync range");
 
-                // Should return ItemOutOfRange error since data exists beyond upper_bound
-                assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
+            assert_eq!(journal.bounds(), 5..upper_bound);
+            for i in lower_bound..upper_bound {
+                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
             }
+            journal.destroy().await.unwrap();
         });
     }
 

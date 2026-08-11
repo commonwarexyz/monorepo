@@ -339,7 +339,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     match expect_err {
                         None => {
                             let expected_root = merkleized.root();
-                            let expected_size = Location::new(merkleized.bounds().total_size);
+                            let expected_size = merkleized.bounds().tip.size;
                             let (db, _) = db
                                 .apply_batch(merkleized)
                                 .await
@@ -483,7 +483,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             vec![merkleized.get(loc, &db).await.unwrap()]
                         );
                         assert_eq!(
-                            merkleized.bounds().total_size,
+                            merkleized.bounds().tip.size.as_u64(),
                             db.bounds().end.as_u64() + pending_appends.len() as u64 + 1
                         );
                     }
@@ -620,8 +620,8 @@ fn fuzz_family<F: Family, S: Strategy>(
                 Operation::ToBatch => {
                     let batch = db.to_batch();
                     assert_eq!(batch.root(), db.root());
-                    assert_eq!(batch.bounds().base_size, db.bounds().end.as_u64());
-                    assert_eq!(batch.bounds().total_size, db.bounds().end.as_u64());
+                    assert_eq!(batch.bounds().base.size, db.bounds().end);
+                    assert_eq!(batch.bounds().tip.size, db.bounds().end);
                     assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
                     db
                 }

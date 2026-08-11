@@ -115,10 +115,10 @@ impl Iterator for PeakIterator {
         let leaves_in_peak = 1u64 << height;
 
         // The last leaf in this peak's subtree.
-        let last_leaf = Location::new(self.start_leaf_cursor.as_u64() + leaves_in_peak - 1);
+        let last_leaf = self.start_leaf_cursor + leaves_in_peak - 1;
 
         // Advance the cursor rightward for the next (newer) peak.
-        self.start_leaf_cursor = Location::new(self.start_leaf_cursor.as_u64() + leaves_in_peak);
+        self.start_leaf_cursor += leaves_in_peak;
         self.current_i = self.current_i.wrapping_sub(1);
         self.remaining -= 1;
 

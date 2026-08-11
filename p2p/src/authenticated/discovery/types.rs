@@ -375,7 +375,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::data::MAX_PAYLOAD_DATA_OVERHEAD;
+    use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
@@ -568,7 +568,7 @@ mod tests {
         });
         assert_eq!(
             payload.encode_size(),
-            message_len + MAX_PAYLOAD_DATA_OVERHEAD as usize
+            message_len + MAX_PAYLOAD_OVERHEAD as usize
         );
     }
 

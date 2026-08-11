@@ -30,8 +30,8 @@ fn rust_min_stack() -> Option<usize> {
 /// default for this use case. In practice, that means preferring the larger
 /// 8 MB process default over the 512 KB secondary-thread pthread default.
 ///
-/// On other platforms, or if the platform-specific query fails, this falls back
-/// to [RUST_DEFAULT_THREAD_STACK_SIZE].
+/// If the platform-specific query fails, this falls back to
+/// [RUST_DEFAULT_THREAD_STACK_SIZE].
 pub(crate) fn system_thread_stack_size() -> usize {
     *SYSTEM_THREAD_STACK_SIZE.get_or_init(|| {
         rust_min_stack()
@@ -93,11 +93,6 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     }
 
     Some(limit)
-}
-
-#[cfg(not(unix))]
-const fn system_thread_stack_size_impl() -> Option<usize> {
-    None
 }
 
 /// Spawns a thread with an explicit stack size.

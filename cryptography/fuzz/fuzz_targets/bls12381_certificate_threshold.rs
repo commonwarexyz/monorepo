@@ -48,7 +48,7 @@ impl Subject for TestSubject<'_> {
     }
 }
 
-impl_certificate_bls12381_threshold!(TestSubject<'a>, Vec<u8>);
+impl_certificate_bls12381_threshold!(TestSubject<'a>, Vec<u8>, N3f1);
 
 fn subject(message: &[u8]) -> TestSubject<'_> {
     TestSubject { message }
@@ -236,18 +236,14 @@ where
                     .filter_map(|i| signers[i].sign::<Sha256Digest>(subject(message)))
                     .collect();
                 if attestations.len() < quorum {
-                    assert!(
-                        signers[0]
-                            .assemble::<_, N3f1>(attestations, &Sequential)
-                            .is_none()
-                    );
+                    assert!(signers[0].assemble(attestations, &Sequential).is_none());
                 } else {
                     // Exactly a quorum of valid, distinct partials must assemble.
                     attestations.truncate(quorum);
                     let certificate = signers[0]
-                        .assemble::<_, N3f1>(attestations, &Sequential)
+                        .assemble(attestations, &Sequential)
                         .expect("quorum-valid attestations assemble");
-                    assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+                    assert!(verifier.verify_certificate::<_, Sha256Digest>(
                         &mut rng,
                         subject(message),
                         &certificate,
@@ -266,20 +262,20 @@ where
                 let (message, certificate) = &certs[*which as usize % certs.len()];
                 if *corrupt {
                     let bad = Certificate::<V>::new(V::Signature::zero());
-                    let _ = cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+                    let _ = cert_verifier.verify_certificate::<_, Sha256Digest>(
                         &mut rng,
                         subject(message),
                         &bad,
                         &Sequential,
                     );
                 } else {
-                    assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+                    assert!(verifier.verify_certificate::<_, Sha256Digest>(
                         &mut rng,
                         subject(message),
                         certificate,
                         &Sequential,
                     ));
-                    assert!(cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+                    assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
                         &mut rng,
                         subject(message),
                         certificate,
@@ -292,7 +288,7 @@ where
                     .iter()
                     .map(|(message, certificate)| (subject(message), certificate))
                     .collect();
-                assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+                assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
                     &mut rng,
                     items.into_iter(),
                     &Sequential,
@@ -303,11 +299,7 @@ where
                 let none: Vec<(TestSubject<'_>, &Certificate<V>)> = Vec::new();
                 assert!(
                     verifier
-                        .verify_certificates_bisect::<_, Sha256Digest, N3f1>(
-                            &mut rng,
-                            &none,
-                            &Sequential
-                        )
+                        .verify_certificates_bisect::<_, Sha256Digest>(&mut rng, &none, &Sequential)
                         .is_empty()
                 );
 
@@ -319,7 +311,7 @@ where
                     .map(|(message, certificate)| (subject(message), certificate))
                     .collect();
                 items.push((subject(b"corrupt"), &bad));
-                let verified = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+                let verified = verifier.verify_certificates_bisect::<_, Sha256Digest>(
                     &mut rng,
                     &items,
                     &Sequential,
@@ -336,7 +328,7 @@ where
                     let decoded =
                         Certificate::<V>::decode(encoded).expect("certificate roundtrips");
                     assert_eq!(decoded, certificate);
-                    let _ = cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+                    let _ = cert_verifier.verify_certificate::<_, Sha256Digest>(
                         &mut rng,
                         subject(b"arbitrary"),
                         &certificate,

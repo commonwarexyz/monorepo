@@ -171,12 +171,12 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         );
         let parent = batch.merkleize(&db, None).await.unwrap();
         assert_eq!(
-            parent.bounds().base_size,
+            *parent.bounds().base.size,
             *db.bounds().end,
             "parent batch should start at the committed database size"
         );
         assert!(
-            parent.bounds().total_size > parent.bounds().base_size,
+            *parent.bounds().tip.size > *parent.bounds().base.size,
             "merkleized batch should include a commit operation"
         );
         let parent_many = parent.get_many(&parent_key_refs, &db).await.unwrap();
@@ -215,7 +215,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             "snapshot ops root should match the database"
         );
         assert_eq!(
-            snapshot.bounds().total_size,
+            *snapshot.bounds().tip.size,
             *db.bounds().end,
             "snapshot size should match the database"
         );
@@ -237,13 +237,13 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         let committed_child = batch.merkleize(&db, None).await.unwrap();
 
         assert_eq!(
-            pending_child.bounds().base_size,
-            committed_child.bounds().base_size,
+            pending_child.bounds().base.size,
+            committed_child.bounds().base.size,
             "child base size depended on pending-vs-committed parent path"
         );
         assert_eq!(
-            pending_child.bounds().total_size,
-            committed_child.bounds().total_size,
+            pending_child.bounds().tip.size,
+            committed_child.bounds().tip.size,
             "child total size depended on pending-vs-committed parent path"
         );
         assert_eq!(
@@ -303,7 +303,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         );
         assert_eq!(
             db.bounds().end,
-            commonware_storage::merkle::Location::<F>::new(committed_child.bounds().total_size),
+            committed_child.bounds().tip.size,
             "applied child size should match its batch bounds"
         );
         assert_eq!(
@@ -314,7 +314,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         assert!(
             matches!(
                 db.validate_batch(&committed_child),
-                Err(commonware_storage::qmdb::Error::StaleBatch { .. })
+                Err(commonware_storage::qmdb::Error::StaleBatch)
             ),
             "sibling child should be stale after the other branch is applied"
         );
