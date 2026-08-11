@@ -667,8 +667,8 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
 
 /// Publish `batch`'s key-level changes to the in-memory snapshot index and activity bitmap.
 ///
-/// `snapshot` and `bitmap` must hold the state committed through `last_commit_loc`, the location of
-/// the commit operation they currently end at. On return they reflect `batch.bounds.tip`.
+/// `snapshot` and `bitmap` must hold the state already applied through `last_commit_loc`, the
+/// location of the commit operation they currently end at. On return they reflect `batch.bounds.tip`.
 fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
     snapshot: &mut I,
     bitmap: &mut bitmap::Prunable<N>,
@@ -718,13 +718,14 @@ fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
 
             // The key's location before this batch: from an already-applied ancestor, else the
             // location recorded at the retained chain's boundary, else the batch's own record.
-            let old = if let Some(ancestor_entry) = resolver.resolve(key) {
-                ancestor_entry.loc()
-            } else if let Some((_, loc)) = base_locs.next_if(|(candidate, _)| candidate == key) {
-                *loc
-            } else {
-                entry.base_old_loc()
-            };
+            let old = resolver.resolve(key).map_or_else(
+                || {
+                    base_locs
+                        .next_if(|(candidate, _)| candidate == key)
+                        .map_or_else(|| entry.base_old_loc(), |(_, loc)| *loc)
+                },
+                |ancestor_entry| ancestor_entry.loc(),
+            );
             apply_diff(snapshot, bitmap, key, entry, old);
         }
     }
@@ -2870,7 +2871,7 @@ where
         let index_bitmap = Arc::clone(&self.bitmap);
         let last_commit_loc = self.last_commit_loc;
 
-        // The job merges or scans the tip and its uncommitted ancestor diffs.
+        // The job merges or scans the tip and its pending ancestor diffs.
         let work_hint = batch
             .ancestor_diffs
             .iter()
