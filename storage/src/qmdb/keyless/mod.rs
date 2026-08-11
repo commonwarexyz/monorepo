@@ -653,9 +653,9 @@ pub(crate) mod tests {
 
     /// Emits the named test against `mmr::Family` and `mmb::Family`.
     macro_rules! keyless_tests {
-        ($($name:ident => $scenario:ident, $level:literal, $fixture:ident;)*) => {
+        ($($name:ident => $scenario:ident, $fixture:ident;)*) => {
             $(
-                #[test_traced($level)]
+                #[test_traced]
                 fn $name() {
                     deterministic::Runner::default().start(|ctx| async move {
                         keyless_tests!(@fixture $fixture, $scenario, mmr, ctx);
@@ -664,7 +664,7 @@ pub(crate) mod tests {
             )*
             paste::paste! {
                 $(
-                    #[test_traced($level)]
+                    #[test_traced]
                     fn [<$name _mmb>]() {
                         deterministic::Runner::default().start(|ctx| async move {
                             keyless_tests!(@fixture $fixture, $scenario, mmb, ctx);

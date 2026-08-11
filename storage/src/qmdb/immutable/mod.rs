@@ -857,9 +857,9 @@ pub(super) mod tests {
 
     /// Emits the named test against `mmr::Family` and `mmb::Family`.
     macro_rules! immutable_tests {
-        ($($name:ident => $scenario:ident, $level:literal, $open:ident;)*) => {
+        ($($name:ident => $scenario:ident, $open:ident;)*) => {
             $(
-                #[test_traced($level)]
+                #[test_traced]
                 fn $name() {
                     deterministic::Runner::default().start(|ctx| async move {
                         tests::$scenario(ctx, $open::<mmr::Family>).await;
@@ -868,7 +868,7 @@ pub(super) mod tests {
             )*
             paste::paste! {
                 $(
-                    #[test_traced($level)]
+                    #[test_traced]
                     fn [<$name _mmb>]() {
                         deterministic::Runner::default().start(|ctx| async move {
                             tests::$scenario(ctx, $open::<mmb::Family>).await;
