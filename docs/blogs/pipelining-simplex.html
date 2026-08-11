@@ -158,10 +158,10 @@ Chou</a></div>
         a notarization forms: a Byzantine leader may have sent
         conflicting proposals.</p>
         <p>Stable Leader groups consecutive views into a <em>term</em>.
-        One leader proposes throughout the term. Because that leader
-        built the previous block, it already knows the block and its
-        ancestry before a single network message arrives. There is no
-        handoff before the next proposal.</p>
+        One leader proposes throughout the term, reducing proposer
+        handoffs from once per view to once per term. Within the term,
+        the leader already knows the previous block and its ancestry
+        before a single network message arrives.</p>
         <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
           <noscript>Across 12 views, round-robin changes leaders every view. With a term length of four, each stable leader proposes four consecutive views. The timeline shows three complete terms and two term boundaries.</noscript>
         </div>
@@ -169,9 +169,6 @@ Chou</a></div>
         <p>Figure 2: Round-robin rotates the proposer every view while
         Stable Leader changes it once per term.</p>
         </div>
-        <p>Stable leadership removes the proposer handoff. Without
-        Optimistic Validation, the next view still waits for the parent
-        notarization and the application check that follows.</p>
         <h2 id="wait-two-forming-the-parent-notarization">Wait Two:
         Forming the Parent Notarization</h2>
         <p>Without Optimistic Validation, the stable leader waits for

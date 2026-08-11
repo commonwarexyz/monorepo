@@ -58,7 +58,7 @@ Traditionally, two network hops separate consecutive views: the next leader must
 
 Traditionally, rotating leadership assigns each view to a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
-Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term. Because that leader built the previous block, it already knows the block and its ancestry before a single network message arrives. There is no handoff before the next proposal.
+Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term, reducing proposer handoffs from once per view to once per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives.
 
 ```{=html}
 <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders across 12 views. Round-robin rotates among three leaders every view. With a term length of four, each stable leader proposes four consecutive views before leadership changes. The timeline shows three complete terms and two term boundaries.">
@@ -69,8 +69,6 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 ::: {.image-caption}
 Figure 2: Round-robin rotates the proposer every view while Stable Leader changes it once per term.
 :::
-
-Stable leadership removes the proposer handoff. Without Optimistic Validation, the next view still waits for the parent notarization and the application check that follows.
 
 ## Wait Two: Forming the Parent Notarization
 
