@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-Network latency no longer has to pace new blocks.
+New blocks no longer have to wait for network round trips.
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they let Simplex produce new blocks without waiting for network round trips.
 
@@ -45,7 +45,7 @@ In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50
 ```
 
 ::: {.image-caption}
-Figure 1: Each square represents one 5ms target interval. Alto sustained 200 successful blocks per second.
+Figure 1: Each square represents one 5ms target interval. Alto sustained about 200 blocks per second.
 :::
 
 ## Two Waits Between Views
