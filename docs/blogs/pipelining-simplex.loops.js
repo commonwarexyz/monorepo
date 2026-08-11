@@ -336,6 +336,115 @@ function buildValidation(mount) {
   return animated;
 }
 
+function buildRecovery(mount) {
+  const svg = makeSvg(mount, 300);
+  const animated = [];
+  const y = 125;
+  const views = [150, 320, 490, 660];
+  const nextView = 875;
+
+  addText(svg, 20, 32, 'A failed view ends the optimistic pipeline', {
+    'font-size': 18,
+    'font-weight': 700,
+  });
+  addText(svg, 405, 66, 'term 1', { 'text-anchor': 'middle', fill: GRAY });
+  addText(svg, nextView, 66, 'term 2', { 'text-anchor': 'middle', fill: GRAY });
+  addLine(svg, 95, y, 930, y, { stroke: LIGHT, 'stroke-width': 3 });
+  addLine(svg, 770, 48, 770, 205, {
+    stroke: BLUE,
+    'stroke-dasharray': '7 7',
+    'stroke-width': 2,
+  });
+
+  views.forEach((x, index) => {
+    addText(svg, x, 100, `v${index + 1}`, { 'text-anchor': 'middle', fill: GRAY });
+    const block = svgEl('rect', {
+      x: x - 17,
+      y: y - 17,
+      width: 34,
+      height: 34,
+      rx: 4,
+      fill: RED,
+      opacity: 0,
+    });
+    svg.appendChild(block);
+    animated.push(addReveal(block, 0.08 + index * 0.08, 0.05));
+  });
+
+  const failed = svgEl('rect', {
+    x: views[1] - 17,
+    y: y - 17,
+    width: 34,
+    height: 34,
+    rx: 4,
+    fill: LIGHT,
+    opacity: 0,
+  });
+  svg.appendChild(failed);
+  animated.push(addReveal(failed, 0.46, 0.06));
+
+  const failureMark = svgEl('g', { opacity: 0 });
+  addLine(failureMark, views[1] - 10, y - 10, views[1] + 10, y + 10, {
+    stroke: RED,
+    'stroke-width': 3,
+  });
+  addLine(failureMark, views[1] + 10, y - 10, views[1] - 10, y + 10, {
+    stroke: RED,
+    'stroke-width': 3,
+  });
+  svg.appendChild(failureMark);
+  animated.push(addReveal(failureMark, 0.49, 0.04));
+  const failureLabel = addText(svg, views[1], 177, 'fails', {
+    'text-anchor': 'middle',
+    fill: RED,
+    opacity: 0,
+  });
+  animated.push(addReveal(failureLabel, 0.49, 0.04));
+
+  for (let index = 2; index < 4; index++) {
+    const inert = svgEl('rect', {
+      x: views[index] - 17,
+      y: y - 17,
+      width: 34,
+      height: 34,
+      rx: 4,
+      fill: GRAY,
+      opacity: 0,
+    });
+    svg.appendChild(inert);
+    animated.push(addReveal(inert, 0.55, 0.08));
+    const label = addText(svg, views[index], 177, 'inert', {
+      'text-anchor': 'middle',
+      fill: GRAY,
+      opacity: 0,
+    });
+    animated.push(addReveal(label, 0.59, 0.05));
+  }
+
+  const skipLabel = addText(svg, 605, 246, 'nullify rest of term', {
+    'text-anchor': 'middle',
+    fill: BLUE,
+    opacity: 0,
+  });
+  animated.push(addReveal(skipLabel, 0.66, 0.05));
+  animated.push(addArrow(svg, views[1] + 20, 218, nextView - 20, 150, BLUE, 0.65, 0.17));
+
+  addText(svg, nextView, 100, 'v5', { 'text-anchor': 'middle', fill: GRAY });
+  const nextBlock = svgEl('rect', {
+    x: nextView - 17,
+    y: y - 17,
+    width: 34,
+    height: 34,
+    rx: 4,
+    fill: RED,
+    opacity: 0,
+  });
+  svg.appendChild(nextBlock);
+  animated.push(addReveal(nextBlock, 0.84, 0.06));
+
+  return animated;
+}
+
 function run(mount, builder, loopMs = LOOP_MS, holdMs = HOLD_MS, staticProgress = 1) {
   const description = mount.getAttribute('aria-label');
   const animated = builder(mount);
@@ -440,6 +549,7 @@ const figures = [
   ['simplex-fig-cadence', buildCadence, 4600, 300, 0.4],
   ['simplex-fig-leaders', buildLeaders, LOOP_MS, HOLD_MS, 1],
   ['simplex-fig-validation', buildValidation, LOOP_MS, HOLD_MS, 1],
+  ['simplex-fig-recovery', buildRecovery, 6200, 700, 1],
 ];
 for (const [id, builder, loopMs, holdMs, staticProgress] of figures) {
   const mount = document.getElementById(id);

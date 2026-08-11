@@ -14,7 +14,7 @@ New blocks no longer have to wait for network round trips.
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they let Simplex produce new blocks without waiting for network round trips.
 
-In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50 validators, this combination sustained about 200 blocks per second. The pipeline kept new views moving while earlier blocks finalized.
+In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The median time between blocks was 5ms, while the median time from proposal to finalization was 300ms. At that cadence, about 60 newer blocks could be in flight while the first finalized.
 
 ```{=html}
 <style>
@@ -25,6 +25,10 @@ In a globally distributed [Alto](https://alto.commonware.xyz) deployment with 50
 
   .simplex-loop-cadence {
     aspect-ratio: 1024 / 400;
+  }
+
+  .simplex-loop-recovery {
+    aspect-ratio: 1024 / 300;
   }
 </style>
 <noscript>
@@ -96,21 +100,23 @@ Notarization is not finalization. The application check that follows is called *
 
 A participant only votes optimistically when every earlier proposal in the term is consistent with the chain it has already supported. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If any proposal fails to notarize or certify, optimistic votes later in the term become inert. Validators can then vote to abandon the rest of the term through Simplex's normal nullification path.
 
+```{=html}
+<div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with four views. View two fails, making the optimistic work in views three and four inert. A nullification skips the rest of the term and starts view five in the next term.">
+  <noscript>View two fails, making the optimistic work in views three and four inert. A nullification skips the rest of the term and starts view five in the next term.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 4: If a view fails, later optimistic work becomes inert. A nullification skips the rest of the term.
+:::
+
 The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry.
 
 Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
 
-## What We Measured
-
-We ran Alto with 50 validators spread evenly across ten AWS regions worldwide. With Stable Leader and Optimistic Validation enabled, the network sustained about 200 blocks per second. The median time between blocks was 5ms.
-
-The blocks were light: headers only, with no transactions or execution. The goal was to measure consensus cadence, not transaction throughput.
-
-We measured finality from the leader-stamped proposal time until an external observer received its finalization certificate. The median was 300ms, including indexer and WebSocket delivery. At that cadence, about 60 more blocks could be proposed while the first block finalized.
-
 ## Where the Pipeline Fits
 
-A higher block rate puts more load on execution, storage, proposal verification, and network bandwidth. Pipelining does not shorten the time from proposal to finalization, but it does shorten the wait before a transaction can enter the next proposal.
+The test used header-only blocks with no transactions or execution, so it measured consensus cadence rather than transaction throughput. A higher block rate puts more load on execution, storage, proposal verification, and network bandwidth. Pipelining does not shorten the time from proposal to finalization, but it does shorten the wait before a transaction can enter the next proposal.
 
 Longer terms reduce handoff overhead, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. An offline leader causes one timeout for the entire term, so longer terms spread that overhead across more successful blocks.
 

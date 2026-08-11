@@ -105,10 +105,12 @@ Chou</a></div>
         leader keep proposing and validators keep voting without waiting
         for the previous view’s notarization. Together, they let Simplex
         produce new blocks without waiting for network round trips.</p>
-        <p>In a globally distributed <a
-        href="https://alto.commonware.xyz">Alto</a> deployment with 50
-        validators, this combination sustained about 200 blocks per
-        second. The pipeline kept new views moving while earlier blocks
+        <p>In an <a href="https://alto.commonware.xyz">Alto</a>
+        deployment with 50 validators spread across ten AWS regions
+        worldwide, this combination sustained about 200 blocks per
+        second. The median time between blocks was 5ms, while the median
+        time from proposal to finalization was 300ms. At that cadence,
+        about 60 newer blocks could be in flight while the first
         finalized.</p>
         <style>
           .simplex-loop {
@@ -118,6 +120,10 @@ Chou</a></div>
 
           .simplex-loop-cadence {
             aspect-ratio: 1024 / 400;
+          }
+
+          .simplex-loop-recovery {
+            aspect-ratio: 1024 / 300;
           }
         </style>
         <noscript>
@@ -218,6 +224,13 @@ Chou</a></div>
         the term become inert. Validators can then vote to abandon the
         rest of the term through Simplex’s normal nullification
         path.</p>
+        <div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with four views. View two fails, making the optimistic work in views three and four inert. A nullification skips the rest of the term and starts view five in the next term.">
+          <noscript>View two fails, making the optimistic work in views three and four inert. A nullification skips the rest of the term and starts view five in the next term.</noscript>
+        </div>
+        <div class="image-caption">
+        <p>Figure 4: If a view fails, later optimistic work becomes
+        inert. A nullification skips the rest of the term.</p>
+        </div>
         <p>The term boundary is also a leader handoff, so optimistic
         work stops there. The first view of a new term must start from
         certified ancestry.</p>
@@ -227,25 +240,14 @@ Chou</a></div>
         pipeline full when notarizations fall behind, but uses more CPU
         and memory on work that could be discarded if an earlier view
         fails.</p>
-        <h2 id="what-we-measured">What We Measured</h2>
-        <p>We ran Alto with 50 validators spread evenly across ten AWS
-        regions worldwide. With Stable Leader and Optimistic Validation
-        enabled, the network sustained about 200 blocks per second. The
-        median time between blocks was 5ms.</p>
-        <p>The blocks were light: headers only, with no transactions or
-        execution. The goal was to measure consensus cadence, not
-        transaction throughput.</p>
-        <p>We measured finality from the leader-stamped proposal time
-        until an external observer received its finalization
-        certificate. The median was 300ms, including indexer and
-        WebSocket delivery. At that cadence, about 60 more blocks could
-        be proposed while the first block finalized.</p>
         <h2 id="where-the-pipeline-fits">Where the Pipeline Fits</h2>
-        <p>A higher block rate puts more load on execution, storage,
-        proposal verification, and network bandwidth. Pipelining does
-        not shorten the time from proposal to finalization, but it does
-        shorten the wait before a transaction can enter the next
-        proposal.</p>
+        <p>The test used header-only blocks with no transactions or
+        execution, so it measured consensus cadence rather than
+        transaction throughput. A higher block rate puts more load on
+        execution, storage, proposal verification, and network
+        bandwidth. Pipelining does not shorten the time from proposal to
+        finalization, but it does shorten the wait before a transaction
+        can enter the next proposal.</p>
         <p>Longer terms reduce handoff overhead, but give one leader
         more consecutive proposals. Alto’s 10,000-view term lasted
         roughly 50 seconds at the measured cadence. Any nullification
