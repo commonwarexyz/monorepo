@@ -110,11 +110,11 @@ We measured finality separately, from the leader-stamped proposal time until an 
 
 ## Where the Pipeline Fits
 
-More views per second put more load on execution, storage, proposal verification, and network bandwidth. The pipeline does not reduce finalization latency itself. It still improves the user experience: new transactions wait half a view on average for the next proposal.
+More views per second put more load on execution, storage, proposal verification, and network bandwidth. Pipelining does not shorten the time from proposal to finalization. It shortens the wait before a transaction can enter the next proposal. That wait averages half a view.
 
-Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation.
+Longer terms reduce handoff overhead, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation.
 
-A leader can still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
+A Byzantine leader could still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
@@ -122,6 +122,6 @@ This pipeline fits networks with reliable connectivity and enough CPU and memory
 
 Each 5ms view gives applications another opportunity to order new data. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
 
-This pipeline helps one ordering leader move quickly. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
+This pipeline lets one ordering leader publish new blocks as quickly as local work and network capacity allow. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
 
 Stable Leader and Optimistic Validation will be available in the next `commonware-consensus` release.
