@@ -254,12 +254,10 @@ Chou</a></div>
         rotation. A leader can still finalize blocks while selectively
         censoring transactions. That behavior can be difficult to detect
         when the leader otherwise performs well.</p>
-        <p>The combined configuration fits networks with reliable
-        connectivity and enough CPU and memory for many in-flight views.
-        Rotating leaders may fit networks where leaders frequently fail
-        or proposer rotation is an important censorship defense.</p>
-        <p>Stable terms currently use round-robin election. Every
-        validator must use the same term length.</p>
+        <p>This pipeline fits networks with reliable connectivity and
+        enough CPU and memory for many in-flight views. Networks that
+        prioritize proposer rotation as a censorship defense may prefer
+        shorter terms.</p>
         <h2 id="the-next-block">The Next Block</h2>
         <p>Every view gives applications another opportunity to order
         new data. Alto began a new view every 5ms at the median. That

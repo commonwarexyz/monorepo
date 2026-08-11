@@ -114,9 +114,7 @@ More views per second put more load on execution, storage, proposal verification
 
 Longer terms remove more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. For an offline leader, a term of `L` views reduces timeout overhead per successful block to about `1/L` of per-view rotation. A leader can still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
 
-The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Rotating leaders may fit networks where leaders frequently fail or proposer rotation is an important censorship defense.
-
-Stable terms currently use round-robin election. Every validator must use the same term length.
+This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
 ## The Next Block
 
