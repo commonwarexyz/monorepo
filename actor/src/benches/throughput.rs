@@ -110,15 +110,12 @@ async fn tell_flush(mailbox: &ThroughputMailbox, iters: u64, msgs: u64) -> Durat
     let start = Instant::now();
     for _ in 0..iters {
         for _ in 0..msgs {
-            let feedback = mailbox.increment_internal();
+            let feedback = mailbox.increment();
             assert!(feedback.accepted());
             black_box(feedback);
         }
         expected += msgs;
-        assert_eq!(
-            mailbox.drain_internal().await.expect("drain ask failed"),
-            expected
-        );
+        assert_eq!(mailbox.drain().await.expect("drain ask failed"), expected);
     }
     start.elapsed()
 }
@@ -127,7 +124,7 @@ async fn ask_readonly_seq(mailbox: &ThroughputMailbox, iters: u64, msgs: u64) ->
     let start = Instant::now();
     for _ in 0..iters {
         for _ in 0..msgs {
-            black_box(mailbox.value_internal().await.expect("value ask failed"));
+            black_box(mailbox.value().await.expect("value ask failed"));
         }
     }
     start.elapsed()
@@ -137,7 +134,7 @@ async fn ask_readwrite_seq(mailbox: &ThroughputMailbox, iters: u64, msgs: u64) -
     let start = Instant::now();
     for _ in 0..iters {
         for _ in 0..msgs {
-            black_box(mailbox.drain_internal().await.expect("drain ask failed"));
+            black_box(mailbox.drain().await.expect("drain ask failed"));
         }
     }
     start.elapsed()
@@ -157,8 +154,7 @@ async fn ask_readonly_parallel(
         while issued < msgs || completed < msgs {
             while issued < msgs && inflight.len() < window {
                 let mailbox = mailbox.clone();
-                inflight
-                    .push(async move { mailbox.value_internal().await.expect("value ask failed") });
+                inflight.push(async move { mailbox.value().await.expect("value ask failed") });
                 issued += 1;
             }
             if let Some(value) = inflight.next().await {
@@ -176,9 +172,9 @@ async fn mixed_readonly_readwrite(mailbox: &ThroughputMailbox, iters: u64) -> Du
         for _ in 0..MIXED_CYCLES {
             let mut reads = Vec::with_capacity(READS_PER_WRITE as usize);
             for _ in 0..READS_PER_WRITE {
-                reads.push(mailbox.read_internal());
+                reads.push(mailbox.read());
             }
-            black_box(mailbox.drain_internal().await.expect("drain ask failed"));
+            black_box(mailbox.drain().await.expect("drain ask failed"));
             for read in reads {
                 black_box(read.await.expect("read response missing"));
             }
@@ -302,7 +298,7 @@ fn bench_mixed_fence(group: &mut BenchmarkGroup<'_, criterion::measurement::Wall
         group.throughput(Throughput::Elements(messages));
         group.bench_function(
             format!(
-                "kind=mixed_readonly_readwrite lane_batch={lane_batch} reads_per_write={READS_PER_WRITE} msgs={messages}"
+                "kind=mixed lane_batch={lane_batch} reads_per_write={READS_PER_WRITE} msgs={messages}"
             ),
             |b| {
                 b.to_async(tokio_runner()).iter_custom(move |iters| async move {
@@ -338,15 +334,12 @@ async fn multi_lane_tell(
             } else {
                 first
             };
-            let feedback = mailbox.increment_internal();
+            let feedback = mailbox.increment();
             assert!(feedback.accepted());
             black_box(feedback);
         }
         expected += msgs;
-        assert_eq!(
-            second.drain_internal().await.expect("drain ask failed"),
-            expected
-        );
+        assert_eq!(second.drain().await.expect("drain ask failed"), expected);
     }
     start.elapsed()
 }
@@ -357,7 +350,7 @@ fn bench_multi_lane(group: &mut BenchmarkGroup<'_, criterion::measurement::WallT
             group.throughput(Throughput::Elements(MESSAGES + 1));
             group.bench_function(
                 format!(
-                    "kind=multi_lane_tell lanes=2 distribution={distribution} lane_batch={lane_batch} msgs={MESSAGES} flushes=1"
+                    "kind=multi_lane lanes=2 distribution={distribution} lane_batch={lane_batch} msgs={MESSAGES} flushes=1"
                 ),
                 |b| {
                     b.to_async(tokio_runner()).iter_custom(move |iters| async move {
@@ -420,7 +413,7 @@ fn bench_cloned_producers(group: &mut BenchmarkGroup<'_, criterion::measurement:
                                 context.child("producer").with_attribute("index", producer);
                             producers.push(context.spawn(|_| async move {
                                 for _ in 0..PRODUCER_MESSAGES {
-                                    let feedback = mailbox.increment_internal();
+                                    let feedback = mailbox.increment();
                                     assert!(feedback.accepted());
                                     black_box(feedback);
                                 }
@@ -429,7 +422,7 @@ fn bench_cloned_producers(group: &mut BenchmarkGroup<'_, criterion::measurement:
                         while let Some(result) = producers.next().await {
                             result.expect("producer join failed");
                         }
-                        black_box(mailbox.drain_internal().await.expect("drain ask failed"));
+                        black_box(mailbox.drain().await.expect("drain ask failed"));
                     }
                     let elapsed = start.elapsed();
 
@@ -467,9 +460,7 @@ fn bench_cloned_producers(group: &mut BenchmarkGroup<'_, criterion::measurement:
                                 context.child("producer").with_attribute("index", producer);
                             producers.push(context.spawn(|_| async move {
                                 for _ in 0..PRODUCER_MESSAGES {
-                                    black_box(
-                                        mailbox.value_internal().await.expect("value ask failed"),
-                                    );
+                                    black_box(mailbox.value().await.expect("value ask failed"));
                                 }
                             }));
                         }
@@ -494,7 +485,7 @@ fn tokio_runner() -> &'static tokio::Runner {
 }
 
 fn bench_message_throughput(c: &mut Criterion) {
-    let mut group = c.benchmark_group(module_path!());
+    let mut group = c.benchmark_group(format!("{}::message", module_path!()));
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(10);
 

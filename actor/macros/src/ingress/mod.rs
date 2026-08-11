@@ -12,11 +12,25 @@ mod model;
 use input::Input;
 use model::Ingress;
 
+fn dependency_ident(name: &str) -> Result<Ident> {
+    let name = name.replace('-', "_");
+    let mut ident = syn::parse_str::<Ident>(&name)
+        .or_else(|_| syn::parse_str::<Ident>(&format!("r#{name}")))
+        .map_err(|_| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("dependency alias `{name}` cannot be used as a Rust crate path"),
+            )
+        })?;
+    ident.set_span(Span::call_site());
+    Ok(ident)
+}
+
 fn actor_path() -> Result<TokenStream2> {
     match crate_name("commonware-actor") {
-        Ok(FoundCrate::Itself) => Ok(quote!(::commonware_actor)),
+        Ok(FoundCrate::Itself) => Ok(quote!(crate)),
         Ok(FoundCrate::Name(name)) => {
-            let ident = Ident::new(&name.replace('-', "_"), Span::call_site());
+            let ident = dependency_ident(&name)?;
             Ok(quote!(::#ident))
         }
         Err(err) => Err(syn::Error::new(
@@ -66,6 +80,32 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("generated enum `{name}` not found"))
+    }
+
+    fn inherent_method_names(file: &syn::File, name: &str) -> Vec<String> {
+        let mut methods = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item) if item.trait_.is_none() => Some(item),
+                _ => None,
+            })
+            .filter(|item| match item.self_ty.as_ref() {
+                syn::Type::Path(path) => path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == name),
+                _ => false,
+            })
+            .flat_map(|item| &item.items)
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(item) => Some(item.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        methods
     }
 
     fn doc_values(attrs: &[syn::Attribute]) -> Vec<String> {
@@ -133,6 +173,146 @@ mod tests {
     }
 
     #[test]
+    fn emits_documented_mailbox_method_names() {
+        let tokens = expand_str(
+            "Mailbox, \
+             pub tell Ping; \
+             pub ask GetValue -> u64; \
+             pub subscribe Watch -> u64;",
+        )
+        .expect("expansion should succeed");
+        let file: syn::File = syn::parse2(tokens).expect("output should parse");
+
+        assert_eq!(
+            inherent_method_names(&file, "Mailbox"),
+            [
+                "enqueue_get_value",
+                "enqueue_watch",
+                "get_value",
+                "ping",
+                "watch",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_prefixed_method_name_collision() {
+        let errors = expand_errors(
+            "Mailbox, \
+             pub tell EnqueueFoo; \
+             pub ask Foo -> ();",
+        );
+
+        assert!(errors.contains("enqueue_foo"), "{errors}");
+        assert!(errors.contains("conflicts"), "{errors}");
+    }
+
+    #[test]
+    fn rejects_normalized_method_name_collision() {
+        let errors = expand_errors(
+            "Mailbox, \
+             pub tell XMLHttpRequest; \
+             pub tell XmlHttpRequest;",
+        );
+
+        assert!(errors.contains("xml_http_request"), "{errors}");
+        assert!(errors.contains("conflicts"), "{errors}");
+    }
+
+    #[test]
+    fn rejects_fixed_wrapper_method_collision() {
+        for item in ["Clone", "From"] {
+            let errors = expand_errors(&format!("Mailbox, pub tell {item};"));
+
+            assert!(errors.contains("conflicts"), "{errors}");
+        }
+    }
+
+    #[test]
+    fn rejects_generated_type_name_generic_collision() {
+        let errors = expand_errors(
+            "CapturedMailbox<CapturedMailboxMessage: Send + 'static>, \
+             pub tell Store { value: CapturedMailboxMessage };",
+        );
+
+        assert!(errors.contains("CapturedMailboxMessage"), "{errors}");
+        assert!(errors.contains("generated type"), "{errors}");
+    }
+
+    #[test]
+    fn emits_raw_identifier_for_keyword_method() {
+        let tokens = expand_str("Mailbox, pub tell Type;").expect("expansion should succeed");
+        let file: syn::File = syn::parse2(tokens).expect("output should parse");
+
+        assert_eq!(inherent_method_names(&file, "Mailbox"), ["r#type"]);
+    }
+
+    #[test]
+    fn normalizes_raw_item_identifier() {
+        let tokens = expand_str("Mailbox, pub tell r#Ping;").expect("expansion should succeed");
+        let file: syn::File = syn::parse2(tokens).expect("output should parse");
+
+        assert_eq!(inherent_method_names(&file, "Mailbox"), ["ping"]);
+    }
+
+    #[test]
+    fn rejects_unrawable_keyword_method() {
+        let errors = expand_errors("Mailbox, pub tell Crate;");
+
+        assert!(errors.contains("crate"), "{errors}");
+        assert!(errors.contains("method name"), "{errors}");
+    }
+
+    #[test]
+    fn generated_support_paths_are_absolute() {
+        let rendered = expand_str("Mailbox, pub tell Ping; pub ask Get -> u64;")
+            .expect("expansion should succeed")
+            .to_string();
+
+        for path in [
+            ":: core :: clone :: Clone",
+            ":: core :: ops :: FnMut",
+            ":: core :: option :: Option",
+            ":: core :: result :: Result",
+        ] {
+            assert!(rendered.contains(path), "missing `{path}` in {rendered}");
+        }
+    }
+
+    #[test]
+    fn generated_policy_generic_does_not_shadow_mailbox_generic() {
+        let rendered = expand_str(
+            "Mailbox<__Push: Send + 'static>, \
+             pub tell Store { value: __Push };",
+        )
+        .expect("expansion should succeed")
+        .to_string();
+
+        assert!(!rendered.contains("fn drain < __Push >"), "{rendered}");
+    }
+
+    #[test]
+    fn generated_policy_generic_does_not_shadow_raw_mailbox_generic() {
+        let rendered = expand_str(
+            "Mailbox<r#__Push: Send + 'static>, \
+             pub tell Store { value: r#__Push };",
+        )
+        .expect("expansion should succeed")
+        .to_string();
+
+        assert!(!rendered.contains("fn drain < __Push >"), "{rendered}");
+    }
+
+    #[test]
+    fn raw_generic_spelling_matches_ordinary_uses() {
+        expand_str(
+            "Mailbox<r#Payload: Send + 'static>, \
+             pub tell Store { value: Payload };",
+        )
+        .expect("raw and ordinary spellings name the same generic parameter");
+    }
+
+    #[test]
     fn log_shape_expansion_drops_unused_generic_without_phantom() {
         let tokens = expand_str(
             "Mailbox<D: Digest>, \
@@ -189,6 +369,49 @@ mod tests {
         let file: syn::File = syn::parse2(tokens).expect("output should parse");
         let read_only = find_enum(&file, "MailboxReadOnlyMessage");
         assert_eq!(read_only.generics.params.len(), 2);
+    }
+
+    #[test]
+    fn type_macro_retains_referenced_branch_generics() {
+        let tokens = expand_str(
+            "Mailbox<T: Send + 'static>, \
+             tell Store { value: identity_ty!(T) };",
+        )
+        .expect("type macro should retain referenced `T`");
+        let file: syn::File = syn::parse2(tokens).expect("output should parse");
+
+        assert_eq!(
+            find_enum(&file, "MailboxReadWriteMessage")
+                .generics
+                .params
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn type_macro_ignores_qualified_matching_identifiers() {
+        let tokens = expand_str(
+            "Mailbox<T: Send + 'static>, \
+             tell Store { value: T }; \
+             ask Fetch -> identity_ty!(types::T);",
+        )
+        .expect("qualified type should not retain generic `T`");
+        let file: syn::File = syn::parse2(tokens).expect("output should parse");
+
+        assert!(
+            find_enum(&file, "MailboxReadOnlyMessage")
+                .generics
+                .params
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn dependency_keyword_needs_raw_identifier() {
+        let ident = dependency_ident("type").expect("keyword should be raw escaped");
+
+        assert!(syn::parse2::<syn::Path>(quote!(::#ident)).is_ok());
     }
 
     #[test]

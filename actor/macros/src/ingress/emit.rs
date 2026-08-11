@@ -1,5 +1,5 @@
 use super::{
-    input::SpanRecord,
+    input::{SpanRecord, canonical_ident},
     model::{
         Branch, Feedback, Field, Ingress, MailboxKind, Message, Method, MethodKind, Policy,
         PolicyMode, SpanField,
@@ -7,6 +7,30 @@ use super::{
 };
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, quote};
+use syn::{GenericParam, Generics, Ident};
+
+fn unused_type_parameter(generics: &Generics, base: &str) -> Ident {
+    let used = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Type(param) => Some(canonical_ident(&param.ident)),
+            GenericParam::Const(param) => Some(canonical_ident(&param.ident)),
+            GenericParam::Lifetime(_) => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    (0usize..)
+        .map(|suffix| {
+            if suffix == 0 {
+                base.to_string()
+            } else {
+                format!("{base}{suffix}")
+            }
+        })
+        .find(|candidate| !used.contains(candidate))
+        .map(|candidate| Ident::new(&candidate, proc_macro2::Span::call_site()))
+        .expect("identifier suffix space is unbounded")
+}
 
 fn variant_fields(fields: &[Field]) -> Vec<TokenStream2> {
     fields
@@ -100,7 +124,10 @@ fn message_variant(message: &Message, actor: &TokenStream2) -> TokenStream2 {
 fn response_closed_arm(message: &Message) -> TokenStream2 {
     let name = &message.name;
     match &message.response {
-        Some(_) => quote!(Self::#name { response, .. } => response.is_closed(),),
+        Some(_) => quote!(
+            Self::#name { response: __commonware_actor_response, .. } =>
+                __commonware_actor_response.is_closed(),
+        ),
         None if message.is_unit() => quote!(Self::#name => false,),
         None => quote!(Self::#name { .. } => false,),
     }
@@ -152,7 +179,6 @@ impl ToTokens for Method {
         let attrs = &self.attrs;
         let variant = &self.variant;
         let method = &self.name;
-        let method_internal = quote::format_ident!("{}_internal", method);
         let visibility = if self.public { quote!(pub) } else { quote!() };
         let dead_code = if self.public {
             quote!()
@@ -180,10 +206,10 @@ impl ToTokens for Method {
                     #(#attrs)*
                     #dead_code
                     #[must_use = "caller must handle enqueue feedback"]
-                    #visibility fn #method_internal(&self #(, #args)*) -> #feedback {
+                    #visibility fn #method(&self #(, #args)*) -> #feedback {
                         let __commonware_actor_current = #actor::tracing::Span::current();
                         let __commonware_actor_span = #actor::tracing::debug_span!(
-                            parent: None::<#actor::tracing::span::Id>,
+                            parent: ::core::option::Option::None::<#actor::tracing::span::Id>,
                             #span_name,
                             #(#span_fields)*
                         );
@@ -206,7 +232,10 @@ impl ToTokens for Method {
                 let span_fields = span_field_tokens(&self.span_fields);
                 let values = method_values(&self.fields);
                 let call_values = method_call_values(&self.fields);
-                let enqueue_method = quote::format_ident!("enqueue_{}_internal", method);
+                let enqueue_method = self
+                    .enqueue_name
+                    .as_ref()
+                    .expect("request methods always have an enqueue method");
                 let feedback = match feedback {
                     Feedback::Reliable => quote!(#actor::Feedback),
                     Feedback::Unreliable => quote!(#actor::Unreliable<#actor::Feedback>),
@@ -238,7 +267,7 @@ impl ToTokens for Method {
                     tokens.extend(quote! {
                         #(#attrs)*
                         #dead_code
-                        #visibility async fn #method_internal(&self #(, #args)*) -> Result<#response, #actor::ingress::Cancelled> {
+                        #visibility async fn #method(&self #(, #args)*) -> ::core::result::Result<#response, #actor::ingress::Cancelled> {
                             let (_, __commonware_actor_receiver) = self.#enqueue_method(#(#call_values)*);
                             __commonware_actor_receiver
                                 .await
@@ -249,7 +278,7 @@ impl ToTokens for Method {
                     tokens.extend(quote! {
                         #(#attrs)*
                         #dead_code
-                        #visibility fn #method_internal(&self #(, #args)*) -> #actor::oneshot::Receiver<#response> {
+                        #visibility fn #method(&self #(, #args)*) -> #actor::oneshot::Receiver<#response> {
                             let (_, __commonware_actor_receiver) = self.#enqueue_method(#(#call_values)*);
                             __commonware_actor_receiver
                         }
@@ -267,6 +296,7 @@ impl ToTokens for Policy {
         let overflow = &self.names.overflow;
         let generics = &self.generics;
         let (impl_generics, ty_generics, _) = generics.split_for_impl();
+        let push = unused_type_parameter(generics, "__Push");
 
         match self.mode {
             PolicyMode::Custom => {}
@@ -290,16 +320,18 @@ impl ToTokens for Policy {
                             self.0.is_empty()
                         }
 
-                        fn drain<__Push>(&mut self, mut push: __Push)
+                        fn drain<#push>(&mut self, mut __commonware_actor_push: #push)
                         where
-                            __Push: FnMut(#ingress #ty_generics) -> Option<#ingress #ty_generics>,
+                            #push: ::core::ops::FnMut(#ingress #ty_generics) -> ::core::option::Option<#ingress #ty_generics>,
                         {
-                            while let Some(message) = self.0.pop_front() {
-                                if message.response_closed() {
+                            while let ::core::option::Option::Some(__commonware_actor_message) = self.0.pop_front() {
+                                if __commonware_actor_message.response_closed() {
                                     continue;
                                 }
-                                if let Some(message) = push(message) {
-                                    self.0.push_front(message);
+                                if let ::core::option::Option::Some(__commonware_actor_message) =
+                                    __commonware_actor_push(__commonware_actor_message)
+                                {
+                                    self.0.push_front(__commonware_actor_message);
                                     break;
                                 }
                             }
@@ -309,9 +341,12 @@ impl ToTokens for Policy {
                     impl #impl_generics #actor::mailbox::Policy for #ingress #ty_generics {
                         type Overflow = #overflow #ty_generics;
 
-                        fn handle(overflow: &mut Self::Overflow, message: Self) {
-                            if !message.response_closed() {
-                                overflow.0.push_back(message);
+                        fn handle(
+                            __commonware_actor_overflow: &mut Self::Overflow,
+                            __commonware_actor_message: Self,
+                        ) {
+                            if !__commonware_actor_message.response_closed() {
+                                __commonware_actor_overflow.0.push_back(__commonware_actor_message);
                             }
                         }
                     }
@@ -320,7 +355,7 @@ impl ToTokens for Policy {
             PolicyMode::Unreliable => {
                 tokens.extend(quote! {
                     #[doc(hidden)]
-                    #[derive(Default)]
+                    #[derive(::core::default::Default)]
                     pub struct #overflow;
 
                     impl #impl_generics #actor::mailbox::Overflow<#ingress #ty_generics> for #overflow {
@@ -328,9 +363,9 @@ impl ToTokens for Policy {
                             true
                         }
 
-                        fn drain<__Push>(&mut self, _push: __Push)
+                        fn drain<#push>(&mut self, __commonware_actor_push: #push)
                         where
-                            __Push: FnMut(#ingress #ty_generics) -> Option<#ingress #ty_generics>,
+                            #push: ::core::ops::FnMut(#ingress #ty_generics) -> ::core::option::Option<#ingress #ty_generics>,
                         {
                         }
                     }
@@ -338,7 +373,10 @@ impl ToTokens for Policy {
                     impl #impl_generics #actor::mailbox::UnreliablePolicy for #ingress #ty_generics {
                         type Overflow = #overflow;
 
-                        fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
+                        fn handle(
+                            __commonware_actor_overflow: &mut Self::Overflow,
+                            __commonware_actor_message: Self,
+                        ) -> bool {
                             false
                         }
                     }
@@ -395,8 +433,10 @@ impl ToTokens for Ingress {
                 #[doc(hidden)]
                 pub fn response_closed(&self) -> bool {
                     match self {
-                        Self::ReadOnly { message, .. } => message.response_closed(),
-                        Self::ReadWrite { message, .. } => message.response_closed(),
+                        Self::ReadOnly { message: __commonware_actor_message, .. } =>
+                            __commonware_actor_message.response_closed(),
+                        Self::ReadWrite { message: __commonware_actor_message, .. } =>
+                            __commonware_actor_message.response_closed(),
                     }
                 }
             }
@@ -405,21 +445,27 @@ impl ToTokens for Ingress {
 
             pub struct #mailbox #generics (#mailbox_inner_ty);
 
-            impl #impl_generics Clone for #mailbox #ty_generics {
+            impl #impl_generics ::core::clone::Clone for #mailbox #ty_generics {
                 fn clone(&self) -> Self {
-                    Self(self.0.clone())
+                    Self(::core::clone::Clone::clone(&self.0))
                 }
             }
 
             impl #impl_generics ::core::fmt::Debug for #mailbox #ty_generics {
-                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    f.write_str(stringify!(#mailbox))
+                fn fmt(
+                    &self,
+                    __commonware_actor_formatter: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    ::core::fmt::Write::write_str(
+                        __commonware_actor_formatter,
+                        ::core::stringify!(#mailbox),
+                    )
                 }
             }
 
             impl #impl_generics ::core::convert::From<#mailbox_inner_ty> for #mailbox #ty_generics {
-                fn from(inner: #mailbox_inner_ty) -> Self {
-                    Self(inner)
+                fn from(__commonware_actor_inner: #mailbox_inner_ty) -> Self {
+                    Self(__commonware_actor_inner)
                 }
             }
 
@@ -438,11 +484,23 @@ impl ToTokens for Ingress {
                     #actor::ingress::Envelope<Self::ReadOnlyMessage, Self::ReadWriteMessage>,
                 ) {
                     match self {
-                        Self::ReadOnly { span, message } => {
-                            (span, #actor::ingress::Envelope::ReadOnly(message))
+                        Self::ReadOnly {
+                            span: __commonware_actor_span,
+                            message: __commonware_actor_message,
+                        } => {
+                            (
+                                __commonware_actor_span,
+                                #actor::ingress::Envelope::ReadOnly(__commonware_actor_message),
+                            )
                         }
-                        Self::ReadWrite { span, message } => {
-                            (span, #actor::ingress::Envelope::ReadWrite(message))
+                        Self::ReadWrite {
+                            span: __commonware_actor_span,
+                            message: __commonware_actor_message,
+                        } => {
+                            (
+                                __commonware_actor_span,
+                                #actor::ingress::Envelope::ReadWrite(__commonware_actor_message),
+                            )
                         }
                     }
                 }
