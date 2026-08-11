@@ -72,11 +72,11 @@ Figure 2: Round-robin spaces views two network hops apart. With four-view terms,
 
 ## Wait Two: The Parent Notarization
 
-Without Optimistic Validation, validators wait for view `v` to be notarized before voting to notarize `v+1`. Network latency still paces each view.
+Without Optimistic Validation, validators wait for the parent to be notarized before voting to notarize its child. Network latency still paces each view.
 
-With Optimistic Validation, validators can vote to notarize `v+1` as soon as its proposal arrives, provided they already voted for `v`. They do not need to receive `v`'s notarization first.
+With Optimistic Validation, validators can vote to notarize the child as soon as its proposal arrives, provided they already voted for the parent. They do not need to receive the parent's notarization first.
 
-View `v+1` can therefore be proposed and voted on while `v`'s notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone.
+The child can therefore be proposed and voted on while the parent's notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone.
 
 ```{=html}
 <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="A comparison of Stable Leader with and without Optimistic Validation. With Stable Leader alone, each child view starts when the parent notarization arrives, spacing views one network hop apart. With Optimistic Validation, three child views start in that same interval while parent notarizations form. Finalization continues behind new views in both paths.">
@@ -114,7 +114,7 @@ A higher block rate puts more load on execution, storage, proposal verification,
 
 Longer terms reduce handoff overhead, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Any nullification skips the rest of the term and rotates to the next leader. An offline leader causes one timeout for the entire term, so longer terms spread that overhead across more successful blocks.
 
-A Byzantine leader could still finalize blocks while selectively censoring transactions. That behavior can be difficult to detect when the leader otherwise performs well.
+A Byzantine leader could still finalize blocks while selectively censoring transactions. This risk also exists with rotating leaders, but longer terms can increase inclusion delay because the same leader proposes more consecutive blocks. Selective censorship can be difficult to detect when the leader otherwise performs well.
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
