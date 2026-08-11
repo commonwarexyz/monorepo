@@ -418,46 +418,55 @@ where
         Some(req.key)
     }
 
-    /// Processes a response from a peer. Removes and returns the relevant key.
-    ///
-    /// Returns the key if the response was valid. Returns `None` if the response was
-    /// invalid or unsolicited.
-    ///
-    /// Targets are not removed here, regardless of response type. Targets persist through
-    /// "no data" responses (peer might get data later). On valid data response, caller
-    /// should call `clear_targets()`. On invalid data, caller should block the peer which
-    /// removes them from all target sets.
-    ///
-    /// Note that this matches responses against the peer a request was already sent to. A later
-    /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
-    /// does not retroactively invalidate the in-flight request.
-    pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
-        // Confirm ID exists and is for the peer
+    /// Remove the active request matching `id` and `peer`.
+    fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
         let req = self.requests.get(&id)?;
         if &req.peer != peer {
             return None;
         }
 
-        // Remove the request
         let req = self.requests.remove(&id)?;
         self.active.remove(&id);
         self.key_to_id.remove(&req.key);
+        Some(req)
+    }
 
-        // Update the peer's performance
-        if has_response {
-            // Compute elapsed time and update performance
-            let elapsed = self
-                .context
-                .current()
-                .duration_since(req.start)
-                .unwrap_or_default();
-            self.update_performance(&req.peer, elapsed);
-            self.resolves.observe(elapsed.as_secs_f64());
-        } else {
-            // Treat lack of response as a timeout
-            self.update_performance(&req.peer, self.timeout);
-        }
+    /// Processes a data response from a peer.
+    ///
+    /// Removes the matching request and returns its key and network response time. The caller
+    /// must report the response with [`Self::record_response`] after the consumer decides it
+    /// should be attributed to the peer.
+    ///
+    /// Targets are not removed here. The caller clears them when the logical fetch completes or
+    /// is ignored. On invalid data, the caller blocks the peer, removing it from all target sets.
+    ///
+    /// Note that this matches responses against the peer a request was already sent to. A later
+    /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
+    /// does not retroactively invalidate the in-flight request.
+    pub fn pop_response(&mut self, id: ID, peer: &P) -> Option<(Key, Duration)> {
+        let req = self.pop_request(id, peer)?;
+        let elapsed = self
+            .context
+            .current()
+            .duration_since(req.start)
+            .unwrap_or_default();
+        Some((req.key, elapsed))
+    }
 
+    /// Attribute a received data response to its serving peer.
+    ///
+    /// Ignored responses must not be recorded because the consumer declined to attribute them.
+    pub fn record_response(&mut self, peer: &P, elapsed: Duration) {
+        self.update_performance(peer, elapsed);
+        self.resolves.observe(elapsed.as_secs_f64());
+    }
+
+    /// Processes a response indicating that the peer does not have the requested data.
+    ///
+    /// Missing data is scored like a timeout because it did not resolve the request.
+    pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
+        let req = self.pop_request(id, peer)?;
+        self.update_performance(&req.peer, self.timeout);
         Some(req.key)
     }
 
@@ -1053,24 +1062,30 @@ mod tests {
     }
 
     #[test]
-    fn test_pop_by_id() {
+    fn test_pop_response_defers_peer_rating() {
         let runner = Runner::default();
-        runner.start(|context| async {
+        runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-            let dummy_peer = PrivateKey::from_seed(1).public_key();
+            let local_peer = PrivateKey::from_seed(0).public_key();
+            let peer = PrivateKey::from_seed(1).public_key();
+            fetcher.reconcile(&[local_peer, peer.clone()]);
 
-            // Add key to active state
             add_test_active(&mut fetcher, 100, MockKey(10));
 
-            // Test pop with non-existent ID
-            assert!(fetcher.pop_by_id(999, &dummy_peer, true).is_none());
-
-            // The active entry should still be there since the ID wasn't found
+            assert!(fetcher.pop_response(999, &peer).is_none());
             assert_eq!(fetcher.len_active(), 1);
 
-            // Test pop with correct ID and peer
-            assert_eq!(fetcher.pop_by_id(100, &dummy_peer, true), Some(MockKey(10)));
+            fetcher.context.sleep(Duration::from_millis(20)).await;
+            let (key, elapsed) = fetcher.pop_response(100, &peer).expect("matching response");
+            assert_eq!(key, MockKey(10));
+            assert_eq!(elapsed, Duration::from_millis(20));
             assert_eq!(fetcher.len_active(), 0);
+
+            // Receiving bytes is not enough to score the peer: the consumer may
+            // decide the key became obsolete before inspecting the response.
+            assert_eq!(fetcher.participants.get(&peer), Some(100));
+            fetcher.record_response(&peer, elapsed);
+            assert_eq!(fetcher.participants.get(&peer), Some(60));
         });
     }
 
@@ -1776,7 +1791,7 @@ mod tests {
             fetcher.add_ready(MockKey(2));
             fetcher.fetch(&mut sender);
             let id = *fetcher.active.iter().next().unwrap().0;
-            assert_eq!(fetcher.pop_by_id(id, &peer1, false), Some(MockKey(2)));
+            assert_eq!(fetcher.pop_missing(id, &peer1), Some(MockKey(2)));
             // Target should still be present after "no data" response
             assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
             fetcher.targets.clear();
@@ -1787,7 +1802,10 @@ mod tests {
             fetcher.add_ready(MockKey(3));
             fetcher.fetch(&mut sender);
             let id = *fetcher.active.iter().next().unwrap().0;
-            assert_eq!(fetcher.pop_by_id(id, &peer1, true), Some(MockKey(3)));
+            assert_eq!(
+                fetcher.pop_response(id, &peer1).map(|(key, _)| key),
+                Some(MockKey(3))
+            );
             assert!(fetcher.targets.get(&MockKey(3)).unwrap().contains(&peer1));
         });
     }

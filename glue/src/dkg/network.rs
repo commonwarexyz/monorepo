@@ -267,7 +267,7 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_utils::{NZU32, channel::mpsc, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
@@ -494,6 +494,7 @@ mod tests {
                     dealer,
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
+                    NZUsize!(2),
                     1024,
                 ),
             );
@@ -503,13 +504,14 @@ mod tests {
                     participant,
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,
+                    NZUsize!(2),
                     1024,
                 ),
             );
             let (mut dealer_sender, mut dealer_receiver) =
-                dealer_network.register(0, Quota::per_second(NZU32!(100)), 16);
+                dealer_network.register(0, Quota::per_second(NZU32!(100)));
             let (mut participant_sender, mut participant_receiver) =
-                participant_network.register(0, Quota::per_second(NZU32!(100)), 16);
+                participant_network.register(0, Quota::per_second(NZU32!(100)));
 
             let mut dealer_manager = AddressableManager::new(dealer_oracle);
             let mut participant_manager = AddressableManager::new(participant_oracle);

@@ -8,9 +8,9 @@
 //! and that they can be looked up by their identifiers.
 
 mod channels;
-pub use channels::backlog;
 mod data;
-pub use data::MAX_PAYLOAD_OVERHEAD;
+pub use crate::sizing::peer_set_limit;
+pub use data::{MAX_PAYLOAD_OVERHEAD, MAX_SIZE};
 pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;

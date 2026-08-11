@@ -128,6 +128,12 @@ commonware_macros::stability_scope!(BETA {
         /// The resolver retries the key without penalizing the serving peer so another response
         /// can be tried.
         Ambiguous,
+
+        /// The consumer no longer needs the key, so the response does not need to be validated.
+        ///
+        /// The resolver retires the key and all of its subscribers without retrying or
+        /// attributing the response to its source.
+        Ignored,
     }
 
     impl From<bool> for Outcome {
@@ -136,7 +142,7 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// Notified when data is available, and must validate it.
+    /// Determines the disposition of data returned for a fetch.
     pub trait Consumer: Clone + Send + 'static {
         /// Type used to key data requested from peers.
         type Key: Span;
@@ -157,7 +163,8 @@ commonware_macros::stability_scope!(BETA {
         /// Deliver data to the consumer.
         ///
         /// Returns a receiver that reports whether the response completes the
-        /// delivery, is invalid, or is valid but leaves subscribers unresolved.
+        /// delivery, is invalid, is valid but leaves subscribers unresolved, or
+        /// can be ignored because the key is no longer needed.
         ///
         /// The returned receiver may be dropped before completion if the application
         /// cancels the fetch via [`Resolver::retain`]. When this happens, the

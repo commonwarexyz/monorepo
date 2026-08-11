@@ -7,7 +7,7 @@ use commonware_consensus::{
             secp256r1,
         },
     },
-    types::TermLength,
+    types::{TermLength, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
@@ -18,12 +18,13 @@ use commonware_cryptography::{
 use commonware_runtime::deterministic;
 use std::time::Duration;
 
-/// Returns a round-robin elector config for the fuzzed term length.
-fn round_robin(term_length: TermLength) -> RoundRobin {
+/// Returns a round-robin elector config for the fuzzed term length and
+/// optimistic lookahead (ignored for single-view terms, where it is a no-op).
+fn round_robin(term_length: TermLength, optimistic_views: ViewDelta) -> RoundRobin {
     if term_length.get() == 1 {
         RoundRobin::default()
     } else {
-        RoundRobin::default().with_term(term_length, Duration::from_secs(12))
+        RoundRobin::default().with_term(term_length, Duration::from_secs(12), optimistic_views)
     }
 }
 
@@ -33,7 +34,7 @@ where
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     type Elector: elector::Config<Self::Scheme>;
-    fn elector(term_length: TermLength) -> Self::Elector;
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector;
     fn fixture(
         context: &mut deterministic::Context,
         namespace: &[u8],
@@ -47,8 +48,8 @@ impl Simplex for SimplexEd25519 {
     type Scheme = ed25519::Scheme;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn fixture(
@@ -66,8 +67,8 @@ impl Simplex for SimplexBls12381MultisigMinPk {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn fixture(
@@ -85,8 +86,8 @@ impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn fixture(
@@ -104,8 +105,8 @@ impl Simplex for SimplexBls12381MinPk {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn fixture(
@@ -123,8 +124,8 @@ impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn fixture(
@@ -142,8 +143,8 @@ impl Simplex for SimplexSecp256r1 {
     type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn fixture(
@@ -159,7 +160,7 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{FuzzInput, N4F1C3, Standard, fuzz, strategy::StrategyChoice, utils::Partition};
-    use commonware_consensus::types::TermLength;
+    use commonware_consensus::types::{TermLength, ViewDelta};
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::NZU32;
     use proptest::prelude::*;
@@ -176,6 +177,8 @@ mod tests {
             configuration: N4F1C3,
             required_containers: containers,
             term_length,
+            optimistic_views: ViewDelta::new(term_length.get()),
+            heterogeneous_optimism: true,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }
@@ -185,6 +188,18 @@ mod tests {
     #[test_traced]
     fn test_ed25519_connected() {
         fuzz::<SimplexEd25519, Standard>(test_input(SEED, TEST_CONTAINERS, TermLength::ONE));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_ed25519_stable_leader_connected() {
+        // Multi-view terms with a small optimistic-view budget exercise the
+        // stable-leader path, unlike the TermLength::ONE tests above.
+        let input = FuzzInput {
+            optimistic_views: ViewDelta::new(2),
+            ..test_input(SEED, TEST_CONTAINERS, TermLength::new(NZU32!(5)))
+        };
+        fuzz::<SimplexEd25519, Standard>(input);
     }
 
     #[test_group("slow")]

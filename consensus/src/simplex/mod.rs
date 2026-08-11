@@ -130,6 +130,10 @@
 //! * With stable leaders (`term_length > 1`), a prior same-term `nullify` vote blocks later `finalize` votes until
 //!   a covering finalization is observed; notarize votes are never withheld (see
 //!   [Same-Term Vote Safety](#same-term-vote-safety)).
+//! * With stable leaders, optionally verify proposals and broadcast `notarize` votes up to
+//!   `optimistic_views` views ahead of certified ancestry within a term (configured alongside the
+//!   term length, see [`elector::Terms::stable`]); certification and `finalize` votes always wait
+//!   for explicit parent certification (see [Optimistic Validation](#optimistic-validation)).
 //! * If an entered view remains unfinalized for the stall timeout (configured alongside the term
 //!   length, see [`elector::Terms`]) and we are still in the same term, we locally time out the
 //!   current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we have
@@ -207,6 +211,35 @@
 //! participants withhold `finalize`). Such a view is either finalized transitively by the
 //! finalization of a descendant in a later term or skipped entirely by a covering nullification:
 //! the timeouts that blocked the gate also mean forced inclusion does not apply to it.
+//!
+//! ### Optimistic Validation
+//!
+//! With stable leaders, a leader can propose for view `v+1` as soon as its proposal for view `v`
+//! is notarized, but participants that wait for `v`'s certification before verifying the new
+//! proposal add a round of certification latency to every view. When a nonzero `optimistic_views`
+//! lookahead is configured (see [`elector::Terms::stable`]), a participant instead verifies a
+//! proposal and broadcasts its `notarize` vote before the parent is certified, if all of the
+//! following hold:
+//!
+//! * The proposal's view is in the same term as its parent (optimism never crosses a term
+//!   boundary; a term start always requires explicitly certified ancestry).
+//! * At most `optimistic_views` views lie between the proposal's view and the last *directly
+//!   notarized* view (a view with an observed notarization or finalization certificate; a view is
+//!   *indirectly notarized* when only a descendant's certificate implies it), bounding
+//!   how far local votes run ahead of certified ancestry. This is the *issuance* window.
+//! * There is local evidence for the immediate parent: our own broadcast `notarize` vote, an
+//!   observed notarization certificate (unless our own certification rejected it), or (once the
+//!   proposal's view is current) the parent's explicit certification.
+//!
+//! Certification requests and `finalize` votes never run ahead: both require the parent's
+//! explicit certification first. If an optimistic ancestor fails to notarize or certify, the
+//! usual timeout and nullification path skips it, and any optimistic votes above it are inert.
+//!
+//! Peers admit and buffer votes up to `optimistic_views` views beyond their own current
+//! view (the *admission* window), so optimistic votes are not dropped by participants that have
+//! not yet observed the sender's ancestry. The setting is local: mismatched values across
+//! participants only degrade the optimization (votes beyond a peer's window are dropped until it
+//! catches up), never safety.
 //!
 //! ### Optimistic Finality
 //!
@@ -310,7 +343,15 @@
 //!
 //! Proposal verification repairs this split by requesting the first missing nullification or named
 //! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
-//! full ancestry after each delivery and votes only once it is valid.
+//! full ancestry after each delivery and votes only once it is valid. The voter does not request
+//! an uncertified parent inside the optimistic issuance window: its certificate is still forming
+//! from live votes (see [Optimistic Validation](#optimistic-validation)).
+//!
+//! Certification repairs a missed certificate the same way. A notarized view certifies only after
+//! its parent certifies, which requires the parent's exact-view notarization. When the voter holds
+//! a view's notarization but not its parent's, the parent's votes have stopped circulating.
+//! Peers broadcast a certificate only once, so the voter requests the parent's notarization from
+//! the term's leader, or from any peer when the term's leader is unknown.
 //!
 //! A resolver key identifies a view, not a certificate. A notarization and a covering nullification
 //! for one view answer opposite questions, so a peer can return valid evidence that does not settle
@@ -425,9 +466,93 @@ pub mod elector;
 pub mod scheme;
 pub mod types;
 
+use crate::types::{TermLength, View, ViewDelta};
+
+/// Defines term boundaries and optimistic lookahead.
+///
+/// The admission window limits future votes relative to the current view
+/// ([`Self::in_admission_window`]). The issuance window limits how far a
+/// directly notarized anchor can authorize uncertified descendants
+/// ([`Self::issuance_floor`]). See the [module docs] for the full rules.
+///
+/// `current` arguments must be locally derived views (they feed
+/// panicking arithmetic in [`View::term_end`]); candidate arguments
+/// (`pending`, `view`) may be adversarial.
+///
+/// [module docs]: crate::simplex#optimistic-validation
+#[derive(Clone, Copy)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct Lookahead {
+    /// Number of views in each leader term.
+    pub term_length: TermLength,
+    /// Depth of the admission and issuance windows; zero disables
+    /// optimistic validation.
+    pub optimistic_views: ViewDelta,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+impl Lookahead {
+    /// Builds the term geometry from an elector's [`elector::Terms`].
+    pub(crate) const fn new(terms: &elector::Terms) -> Self {
+        Self {
+            term_length: terms.length(),
+            optimistic_views: terms.optimistic_views(),
+        }
+    }
+
+    /// Returns true when `pending` is inside the optimistic admission
+    /// window of `current`: a same-term future view at most
+    /// `optimistic_views` ahead.
+    pub fn in_admission_window(&self, current: View, pending: View) -> bool {
+        current < pending && pending <= self.admission_limit(current)
+    }
+
+    /// Returns whether `pending` is admissible relative to `current`
+    /// (extending [`View::admits`] with the optimistic admission
+    /// window).
+    ///
+    /// Views at or below `current` are always admitted. Admitted futures are:
+    /// - `current + 1`
+    /// - `next_term_start(current)`
+    /// - views in the optimistic admission window
+    pub fn admits(&self, current: View, pending: View) -> bool {
+        current.admits(pending, self.term_length) || self.in_admission_window(current, pending)
+    }
+
+    /// Returns the highest view in the admission window of `current`
+    /// (`current` itself when the window is empty).
+    pub fn admission_limit(&self, current: View) -> View {
+        current
+            .term_end(self.term_length)
+            .min(current.saturating_add(self.optimistic_views))
+    }
+
+    /// Returns the lowest view whose direct notarization can anchor
+    /// `view` inside the optimistic *issuance* window, or `None` when
+    /// `view` can never be issued optimistically, either because
+    /// optimism is disabled or because `view` starts a term and so
+    /// requires explicitly certified ancestry.
+    ///
+    /// An anchor below the floor fails the hop bound exactly like no
+    /// anchor at all, so a caller decides membership by asking whether
+    /// any directly-notarized view sits in `floor..view`. A floor of
+    /// genesis means the window is open until the first notarization
+    /// lands. Compare [`Self::in_admission_window`], which anchors at
+    /// the current view instead.
+    pub const fn issuance_floor(&self, view: View) -> Option<View> {
+        if self.optimistic_views.is_zero() || view.is_term_start(self.term_length) {
+            return None;
+        }
+        Some(
+            view.saturating_sub(self.optimistic_views)
+                .saturating_sub(ViewDelta::new(1)),
+        )
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use crate::types::{Round, TermLength, View, ViewDelta};
+        use crate::types::Round;
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
 
@@ -448,8 +573,8 @@ cfg_if::cfg_if! {
             pub current: View,
             /// Views retained below `finalized` (for reporting and backfill).
             pub view_retention: ViewDelta,
-            /// Number of views in each leader term.
-            pub term_length: TermLength,
+            /// Term geometry bounding admitted future views.
+            pub lookahead: Lookahead,
         }
 
         impl Viewport {
@@ -466,20 +591,21 @@ cfg_if::cfg_if! {
                 !view.is_zero() && view.get() >= self.floor().get()
             }
 
-            /// Returns whether a vote at `view` is tracked: retained and no
-            /// further ahead than the next view or the first view of the next
-            /// term, bounding memory committed to unverified votes (see
+            /// Returns whether a vote at `pending` is tracked: retained and no
+            /// further ahead than the next view, the first view of the next
+            /// term, or a bounded same-term optimistic lookahead view,
+            /// bounding memory committed to unverified votes (see
             /// [`View::admits`]).
-            pub const fn admits_vote(&self, view: View) -> bool {
-                self.retains(view) && self.current.admits(view, self.term_length)
+            pub fn admits_vote(&self, pending: View) -> bool {
+                self.retains(pending) && self.lookahead.admits(self.current, pending)
             }
 
-            /// Returns whether a certificate at `view` is tracked: certificates
-            /// are self-certifying and may arrive from arbitrarily far ahead
-            /// (letting a lagging participant fast-forward), so only retention
-            /// bounds them.
-            pub const fn admits_certificate(&self, view: View) -> bool {
-                self.retains(view)
+            /// Returns whether a certificate at `pending` is tracked:
+            /// certificates are self-certifying and may arrive from arbitrarily
+            /// far ahead (letting a lagging participant fast-forward), so only
+            /// retention bounds them.
+            pub const fn admits_certificate(&self, pending: View) -> bool {
+                self.retains(pending)
             }
         }
 
@@ -653,6 +779,92 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    /// Builds a [Lookahead] with a term length of 5.
+    fn test_lookahead(optimistic_views: u64) -> Lookahead {
+        Lookahead {
+            term_length: TermLength::new(NZU32!(5)),
+            optimistic_views: ViewDelta::new(optimistic_views),
+        }
+    }
+
+    #[test]
+    fn test_lookahead_admits() {
+        let current = View::new(6);
+
+        // Always allow immediate successor.
+        assert!(test_lookahead(0).admits(current, current.next()));
+
+        // Always allow next-term start.
+        let next_term_start = current.next_term_start(test_lookahead(0).term_length);
+        assert!(test_lookahead(0).admits(current, next_term_start));
+
+        // Bounded same-term optimistic lookahead.
+        assert!(test_lookahead(2).admits(current, View::new(8)));
+        assert!(!test_lookahead(2).admits(current, View::new(9)));
+
+        // Never allow arbitrarily far future when outside all accepted lanes.
+        assert!(!test_lookahead(10).admits(current, View::new(100)));
+    }
+
+    #[test]
+    fn test_optimistic_future_does_not_bleed_into_next_term() {
+        let lookahead = test_lookahead(100);
+        let current = View::new(9);
+        let next_term_start = current.next_term_start(lookahead.term_length);
+
+        // Large configuration still caps same-term optimism at term end (view 10).
+        assert!(lookahead.admits(current, View::new(10)));
+
+        // Next-term start is always accepted as a special transition.
+        assert!(lookahead.admits(current, next_term_start));
+
+        // But optimistic lookahead must not bleed into later views of the next term.
+        assert!(!lookahead.admits(current, next_term_start.next()));
+    }
+
+    #[test]
+    fn test_admission_limit() {
+        // Term of view 6 spans views 6..=10.
+        let current = View::new(6);
+
+        // No optimism: the window is empty and the limit is `current` itself.
+        assert_eq!(test_lookahead(0).admission_limit(current), current);
+
+        // Bounded by the optimistic lookahead when it fits within the term.
+        assert_eq!(test_lookahead(3).admission_limit(current), View::new(9));
+
+        // Clamped at term end when the lookahead would cross it.
+        assert_eq!(test_lookahead(100).admission_limit(current), View::new(10));
+
+        // At the last view of a term, the window is always empty.
+        assert_eq!(
+            test_lookahead(3).admission_limit(View::new(10)),
+            View::new(10)
+        );
+    }
+
+    #[test]
+    fn test_issuance_floor() {
+        // No optimism: nothing is issuable.
+        assert!(test_lookahead(0).issuance_floor(View::new(7)).is_none());
+
+        // Term starts are never issued optimistically (terms start at 1, 6, 11).
+        assert!(test_lookahead(100).issuance_floor(View::new(11)).is_none());
+
+        // The floor sits `optimistic_views + 1` views below: view 9 is anchored
+        // by a notarization at view 6, but not by one at view 5.
+        assert_eq!(
+            test_lookahead(2).issuance_floor(View::new(9)),
+            Some(View::new(6))
+        );
+
+        // Genesis floors the window until the first notarization lands.
+        assert_eq!(
+            test_lookahead(2).issuance_floor(View::new(2)),
+            Some(View::zero())
+        );
+    }
+
     /// Register a validator with the oracle.
     async fn register_validator(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
@@ -720,10 +932,13 @@ mod tests {
     where
         I: IntoIterator<Item = PublicKey>,
     {
+        let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
                 max_size: 1024 * 1024,
+                // Some tests replace the initial set with the committee plus one injector.
+                max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -744,10 +959,13 @@ mod tests {
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
     {
+        let primary: Vec<_> = primary.into_iter().collect();
+        let secondary: Vec<_> = secondary.into_iter().collect();
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
             },
@@ -857,9 +1075,13 @@ mod tests {
                     .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
+            // Link all validators. The 200ms latency is deliberate: high
+            // enough (relative to the 2s/3s timeouts below) that stable-leader
+            // variants only stay nullification-free by pipelining views
+            // optimistically, while still leaving the non-optimistic variants
+            // comfortable margin.
             let link = Link {
-                latency: Duration::from_millis(10),
+                latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
@@ -913,8 +1135,8 @@ mod tests {
                     floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
+                    leader_timeout: Duration::from_secs(2),
+                    certification_timeout: Duration::from_secs(3),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
@@ -1333,7 +1555,11 @@ mod tests {
     #[test_traced]
     fn test_non_genesis_floor_joiner_catches_tip_stable_leader() {
         non_genesis_floor_joiner_catches_tip_with_term::<_, _, RoundRobin>(
-            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(12),
+                ViewDelta::new(0),
+            ),
             scheme_mocks::fixture,
         );
     }
@@ -1492,6 +1718,275 @@ mod tests {
         dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
     }
 
+    /// Reporter used by the stable-leader end-to-end tests.
+    type StableLeaderReporter = mocks::reporter::Reporter<
+        deterministic::Context,
+        ed25519::Scheme,
+        RoundRobin<Sha256>,
+        Sha256Digest,
+    >;
+
+    /// Spins up the fully-linked five-validator ed25519 cluster shared by the
+    /// stable-leader end-to-end tests, parameterized by the knobs that differ
+    /// between them. Returns the per-validator reporters, the index of the
+    /// leader elected for view 1 (stable for the whole term), and the network
+    /// oracle.
+    ///
+    /// The 1.5s leader and 3.5s certification timeouts are tuned to the
+    /// callers' link latencies: with latency near or above
+    /// half the leader timeout, a view that waits for its parent's
+    /// certification (two or more network trips) times out, so runs stay
+    /// nullification-free only when views pipeline optimistically.
+    async fn setup_stable_leader_cluster(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        link: Link,
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+        propose_latency: (f64, f64),
+        stall_timeout: Duration,
+    ) -> (
+        Vec<StableLeaderReporter>,
+        usize,
+        Oracle<PublicKey, deterministic::Context>,
+    ) {
+        let epoch = Epoch::new(333);
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(context, namespace, 5);
+        let mut oracle =
+            start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                .await;
+        let mut registrations = register_validators(&mut oracle, &participants).await;
+        link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+        let elector =
+            RoundRobin::<Sha256>::default().with_term(term_length, stall_timeout, optimistic_views);
+        let relay = Arc::new(mocks::relay::Relay::new());
+        let mut reporters = Vec::new();
+
+        for (idx, validator) in participants.iter().enumerate() {
+            let context = context
+                .child("validator")
+                .with_attribute("public_key", validator);
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[idx].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            reporters.push(reporter.clone());
+
+            let application_cfg = mocks::application::Config::<Sha256, _> {
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency,
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
+            actor.start();
+
+            let blocker = oracle.control(validator.clone());
+            let cfg = config::Config {
+                scheme: schemes[idx].clone(),
+                elector: elector.clone(),
+                blocker,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                partition: validator.to_string(),
+                mailbox_size: NZUsize!(1024),
+                epoch,
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                leader_timeout: Duration::from_millis(1_500),
+                certification_timeout: Duration::from_millis(3_500),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                view_retention: ViewDelta::new(10),
+                skip_timeout: Duration::from_secs(12),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forwarding: ForwardingPolicy::Disabled,
+                track_historical_votes: false,
+            };
+            let engine = Engine::new(context.child("engine"), cfg);
+            let (pending, recovered, resolver) = registrations
+                .remove(validator)
+                .expect("validator should be registered");
+            engine.start(pending, recovered, resolver);
+        }
+
+        let participants_set = participants.clone().try_into().unwrap();
+        let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+            elector.build(&participants_set);
+        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+
+        (reporters, leader_idx, oracle)
+    }
+
+    #[test_traced]
+    fn test_stable_leader_optimistic_blocks_faster_than_network_latency() {
+        let required_containers = View::new(100);
+        let link_latency = Duration::from_millis(100);
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (reporters, leader_idx, _oracle) = setup_stable_leader_cluster(
+                &mut context,
+                b"consensus_stable_leader_high_latency",
+                Link {
+                    latency: link_latency,
+                    jitter: Duration::from_millis(0),
+                    success_rate: 1.0,
+                },
+                TermLength::new(NZU32!(128)),
+                ViewDelta::new(128),
+                /* propose_latency */ (10.0, 0.0),
+                /* stall_timeout */ Duration::from_secs(20),
+            )
+            .await;
+
+            let leader_reporter = reporters[leader_idx].clone();
+            let start = context.current();
+            while !leader_reporter
+                .notarizes
+                .lock()
+                .contains_key(&required_containers)
+            {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let elapsed = context.current().duration_since(start).unwrap_or_default();
+            let average_block_time_s = elapsed.as_secs_f64() / required_containers.get() as f64;
+            let network_latency_s = link_latency.as_secs_f64();
+            assert!(
+                average_block_time_s < network_latency_s,
+                "expected average optimistic block time ({:.3}ms) to be below network latency ({:.3}ms); elapsed {:?} for {} views",
+                average_block_time_s * 1000.0,
+                network_latency_s * 1000.0,
+                elapsed,
+                required_containers
+            );
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_invalid();
+            }
+        });
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn test_stable_leader_finalizes_full_term_without_nullification() {
+        let required_view = View::new(1000);
+        let executor = deterministic::Runner::timed(Duration::from_secs(40));
+        executor.start(|mut context| async move {
+            let (reporters, leader_idx, oracle) = setup_stable_leader_cluster(
+                &mut context,
+                b"consensus_stable_leader_full_term_no_nullify",
+                // 1s latency shrinks the 1.5s leader timeout below a
+                // certification round-trip: staying nullification-free (the
+                // assertion below) is only possible via optimistic pipelining.
+                Link {
+                    latency: Duration::from_millis(1_000),
+                    jitter: Duration::from_millis(1),
+                    success_rate: 1.0,
+                },
+                TermLength::new(NZU32!(1000)),
+                ViewDelta::new(100),
+                /* propose_latency */ (1.0, 0.0),
+                /* stall_timeout */ Duration::from_secs(6),
+            )
+            .await;
+
+            let start = context.current();
+            let deadline = start + Duration::from_secs(25);
+            while !reporters
+                .iter()
+                .all(|reporter| reporter.finalizations.lock().contains_key(&required_view))
+            {
+                if context.current() >= deadline {
+                    let progress: Vec<_> = reporters
+                        .iter()
+                        .map(|reporter| {
+                            let finalized = reporter
+                                .finalizations
+                                .lock()
+                                .keys()
+                                .copied()
+                                .max()
+                                .unwrap_or(View::zero());
+                            (finalized, reporter.nullifications.lock().len())
+                        })
+                        .collect();
+                    panic!(
+                        "expected all validators to finalize view {required_view} before {deadline:?}; (max finalized, nullifications) per reporter: {progress:?}",
+                    );
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let leader_reporter = &reporters[leader_idx];
+            assert!(
+                leader_reporter.notarizes.lock().contains_key(&required_view),
+                "stable leader must notarize through full term ending at view {}",
+                required_view
+            );
+            let leader_tip_notarization = leader_reporter
+                .notarizations
+                .lock()
+                .get(&required_view)
+                .cloned()
+                .expect("leader reporter missing tip notarization");
+            assert_eq!(
+                leader_tip_notarization.proposal.parent,
+                required_view.previous().unwrap_or(View::zero()),
+                "unexpected parent for leader tip notarization"
+            );
+
+            for (idx, reporter) in reporters.iter().enumerate() {
+                reporter.assert_no_invalid();
+                reporter.assert_no_faults();
+
+                assert!(
+                    reporter.nullifies.lock().is_empty(),
+                    "reporter {} observed unexpected nullify votes",
+                    idx
+                );
+                assert!(
+                    reporter.nullifications.lock().is_empty(),
+                    "reporter {} observed unexpected nullification certificates",
+                    idx
+                );
+
+                let finalization = reporter
+                    .finalizations
+                    .lock()
+                    .get(&required_view)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("reporter {idx} missing tip finalization"));
+                assert_eq!(
+                    finalization.proposal.round.view(),
+                    required_view,
+                    "reporter {idx} has mismatched tip finalization round"
+                );
+                assert_eq!(
+                    finalization.proposal.parent,
+                    required_view.previous().unwrap_or(View::zero()),
+                    "reporter {idx} has non-chain tip finalization parent"
+                );
+            }
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1644,7 +2139,16 @@ mod tests {
 
     test_for_all_fixtures!(observer);
 
-    fn unclean_shutdown<S, F, L>(mut fixture: F)
+    fn unclean_shutdown<S, F, L>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        unclean_shutdown_with_term::<S, F, L>(L::default(), fixture);
+    }
+
+    fn unclean_shutdown_with_term<S, F, L>(elector: L, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1680,6 +2184,7 @@ mod tests {
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
             let relay = relay.clone();
+            let elector = elector.clone();
             relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
@@ -1701,7 +2206,7 @@ mod tests {
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
                 // Create engines
-                let elector = L::default();
+                let elector = elector.clone();
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
@@ -1833,7 +2338,36 @@ mod tests {
 
     test_for_all_fixtures!(unclean_shutdown);
 
-    fn backfill<S, F, L>(mut fixture: F)
+    /// Regression test: with stable leaders and optimistic validation, a
+    /// whole-cluster crash can leave a mid-term view without any certificate
+    /// while a higher same-term notarization survives in some journals. Nodes
+    /// stuck below that view must be able to fetch the exact-view notarization
+    /// (a higher-view floor cannot substitute for certification's per-view
+    /// parent requirement) or the cluster wedges permanently (see
+    /// [`resolver::State::get`]).
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_unclean_shutdown_stable_leader_optimistic() {
+        unclean_shutdown_with_term::<_, _, RoundRobin>(
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(13),
+                ViewDelta::new(2),
+            ),
+            ed25519::fixture,
+        );
+    }
+
+    fn backfill<S, F, L>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        backfill_with_term::<S, F, L>(L::default(), fixture);
+    }
+
+    fn backfill_with_term<S, F, L>(elector: L, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1873,7 +2407,7 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::default();
+            let elector = elector.clone();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2079,6 +2613,21 @@ mod tests {
     }
 
     test_for_all_fixtures!(backfill);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_backfill_stable_leader_optimistic() {
+        backfill_with_term::<_, _, RoundRobin>(
+            // Keep the stall timeout long so the healthy prefix of the run
+            // (finalizing with one validator offline) never stall-nullifies.
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(51),
+                ViewDelta::new(2),
+            ),
+            ed25519::fixture,
+        );
+    }
 
     fn one_offline<S, F, L>(fixture: F)
     where
@@ -2319,7 +2868,11 @@ mod tests {
     #[test_traced]
     fn test_one_offline_stable_leader() {
         one_offline_with_term::<_, _, RoundRobin>(
-            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(12),
+                ViewDelta::new(0),
+            ),
             scheme_mocks::fixture,
         );
     }
@@ -2925,7 +3478,16 @@ mod tests {
 
     test_for_all_fixtures!(all_crash_after_nullify);
 
-    fn partition<S, F, L>(mut fixture: F)
+    fn partition<S, F, L>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        partition_with_term::<S, F, L>(L::default(), fixture);
+    }
+
+    fn partition_with_term<S, F, L>(elector: L, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2959,7 +3521,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
             // Create engines
-            let elector = L::default();
+            let elector = elector.clone();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3103,7 +3665,33 @@ mod tests {
 
     test_for_all_fixtures!(partition);
 
-    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, mut fixture: F) -> String
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_partition_stable_leader_optimistic() {
+        partition_with_term::<_, _, RoundRobin>(
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(13),
+                ViewDelta::new(2),
+            ),
+            ed25519::fixture,
+        );
+    }
+
+    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, fixture: F) -> String
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        slow_and_lossy_links_seeded_with_term::<S, F, L>(L::default(), seed, fixture)
+    }
+
+    fn slow_and_lossy_links_seeded_with_term<S, F, L>(
+        elector: L,
+        seed: u64,
+        mut fixture: F,
+    ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3146,7 +3734,6 @@ mod tests {
             .await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3253,6 +3840,20 @@ mod tests {
     }
 
     test_for_all_fixtures!(slow_and_lossy_links);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_slow_and_lossy_links_stable_leader_optimistic() {
+        slow_and_lossy_links_seeded_with_term::<_, _, RoundRobin>(
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(13),
+                ViewDelta::new(2),
+            ),
+            6,
+            ed25519::fixture,
+        );
+    }
 
     fn determinism<S, F, L>(seed: u64, fixture: F)
     where
@@ -4078,7 +4679,16 @@ mod tests {
 
     test_for_all_fixtures!(impersonator, seeds = 5);
 
-    fn equivocator_seeded<S, F, L>(seed: u64, mut fixture: F) -> bool
+    fn equivocator_seeded<S, F, L>(seed: u64, fixture: F) -> bool
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        equivocator_seeded_with_term::<S, F, L>(seed, L::default(), fixture)
+    }
+
+    fn equivocator_seeded_with_term<S, F, L>(seed: u64, elector: L, mut fixture: F) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4115,7 +4725,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
+            let elector = elector.clone();
             let mut engines = Vec::new();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
@@ -4326,6 +4936,26 @@ mod tests {
     }
 
     test_for_all_fixtures!(equivocator);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_stable_leader_optimistic() {
+        let detected = (0..5).any(|seed| {
+            equivocator_seeded_with_term::<_, _, RoundRobin>(
+                seed,
+                RoundRobin::default().with_term(
+                    TermLength::new(NZU32!(5)),
+                    Duration::from_secs(13),
+                    ViewDelta::new(2),
+                ),
+                ed25519::fixture,
+            )
+        });
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
+    }
 
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
@@ -6963,16 +7593,22 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                RoundRobin::default()
-                    .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+                RoundRobin::default().with_term(
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(12),
+                    ViewDelta::new(0)
+                ),
                 ed25519::fixture
             ),
             run_hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
-                RoundRobin::default()
-                    .with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+                RoundRobin::default().with_term(
+                    TermLength::new(NZU32!(3)),
+                    Duration::from_secs(12),
+                    ViewDelta::new(0)
+                ),
                 ed25519::fixture
             )
         );
@@ -7011,9 +7647,14 @@ mod tests {
     ///
     /// - `trailing_finalizations`: Number of finalizations each honest node
     ///   must produce *after* the adversarial prefix before the case is
-    ///   considered successful. This is the liveness assertion -- it ensures
+    ///   considered successful. This is the liveness assertion: it ensures
     ///   the protocol actually commits blocks under synchrony, not just
     ///   reaches a high view via nullifications.
+    ///
+    /// The term structure (length and optimistic lookahead) comes from the
+    /// elector passed to [twins_campaign]: multi-view terms exercise the
+    /// stable-leader finalize gate under equivocation, and a nonzero
+    /// lookahead exercises optimistic validation.
     #[derive(Clone, Copy, Debug)]
     struct TwinsCampaign {
         n: u32,
@@ -7511,7 +8152,24 @@ mod tests {
     fn test_twins_stable_leader() {
         twins_campaign_all_links(
             TWINS_CAMPAIGN,
-            RoundRobin::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(12)),
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(12),
+                ViewDelta::new(0),
+            ),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_stable_leader_optimistic() {
+        twins_campaign_all_links(
+            TWINS_CAMPAIGN,
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(3)),
+                Duration::from_secs(12),
+                ViewDelta::new(2),
+            ),
         );
     }
 
@@ -7573,7 +8231,10 @@ mod tests {
             finalized: View::new(20),
             current: View::new(25),
             view_retention: ViewDelta::new(10),
-            term_length: TermLength::new(commonware_utils::NZU32!(10)),
+            lookahead: Lookahead {
+                term_length: TermLength::new(commonware_utils::NZU32!(10)),
+                optimistic_views: ViewDelta::new(0),
+            },
         };
 
         // Genesis is never tracked
@@ -7597,5 +8258,32 @@ mod tests {
         // respect the retention floor
         assert!(!viewport.admits_certificate(View::new(9)));
         assert!(viewport.admits_certificate(View::new(10_000)));
+
+        // With an optimistic window, votes are additionally admitted up to
+        // `optimistic_views` ahead within the current term
+        let optimistic = Viewport {
+            lookahead: Lookahead {
+                optimistic_views: ViewDelta::new(2),
+                ..viewport.lookahead
+            },
+            ..viewport
+        };
+        assert!(optimistic.admits_vote(View::new(26)));
+        assert!(optimistic.admits_vote(View::new(27)));
+        assert!(!optimistic.admits_vote(View::new(28)));
+        assert!(optimistic.admits_vote(View::new(31)));
+
+        // The window never crosses the term boundary (term [21, 30])
+        let term_edge = Viewport {
+            current: View::new(29),
+            lookahead: Lookahead {
+                optimistic_views: ViewDelta::new(5),
+                ..viewport.lookahead
+            },
+            ..viewport
+        };
+        assert!(term_edge.admits_vote(View::new(30)));
+        assert!(term_edge.admits_vote(View::new(31)));
+        assert!(!term_edge.admits_vote(View::new(32)));
     }
 }
