@@ -82,7 +82,7 @@ With Optimistic Validation, the leader can start `v+1` after it builds and votes
 
 The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v`. The same rule can carry the pipeline across several views within the stable-leader term.
 
-The optimization changes when validators cast notarize votes. It does not change the finalization rule.
+The optimization changes when the next proposal and notarize votes can begin. It does not change the finalization rule.
 
 ```{=html}
 <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form on a parallel lane.">
@@ -124,7 +124,7 @@ Start with the stage that limits your view rate. Alto's settings are an example,
 
 Longer terms amortize more handoffs, but give one leader more consecutive proposals. Alto's 10,000-view term lasted roughly 50 seconds at the measured cadence. Validators can skip a stalled term. A term-wide timeout covers a leader that keeps views moving without finalizing blocks. Neither control removes a leader that finalizes blocks while selectively censoring transactions.
 
-The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. A rotating leader or smaller lookahead may fit better when validators are heterogeneous or leaders frequently fail.
+The combined configuration fits networks with reliable connectivity and enough CPU and memory for many in-flight views. A smaller lookahead may fit heterogeneous validators. Rotating leaders may fit networks where leaders frequently fail or proposer rotation is an important censorship defense.
 
 Stable leadership keeps one leader on the transaction data path for the whole term. Networks with many concurrent producers can pair this pipeline with [Multimmit](/blogs/multimmit).
 

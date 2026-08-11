@@ -191,8 +191,8 @@ Chou</a></div>
         network round that forms the notarization for <code>v</code>.
         The same rule can carry the pipeline across several views within
         the stable-leader term.</p>
-        <p>The optimization changes when validators cast notarize votes.
-        It does not change the finalization rule.</p>
+        <p>The optimization changes when the next proposal and notarize
+        votes can begin. It does not change the finalization rule.</p>
         <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form on a parallel lane.">
           <noscript>Without Optimistic Validation, each child view waits for the parent notarization. With Optimistic Validation, child views can begin while parent notarizations form.</noscript>
         </div>
@@ -278,8 +278,9 @@ Chou</a></div>
         transactions.</p>
         <p>The combined configuration fits networks with reliable
         connectivity and enough CPU and memory for many in-flight views.
-        A rotating leader or smaller lookahead may fit better when
-        validators are heterogeneous or leaders frequently fail.</p>
+        A smaller lookahead may fit heterogeneous validators. Rotating
+        leaders may fit networks where leaders frequently fail or
+        proposer rotation is an important censorship defense.</p>
         <p>Stable leadership keeps one leader on the transaction data
         path for the whole term. Networks with many concurrent producers
         can pair this pipeline with <a
