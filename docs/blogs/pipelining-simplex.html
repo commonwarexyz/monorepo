@@ -139,12 +139,13 @@ Chou</a></div>
         finish. Once data reaches the leader, it gets another ordering
         opportunity after one block interval.</p>
         <p>A <em>view</em> is one opportunity for a leader to propose a
-        block. Validators check and vote on the proposal. The
-        application finishes any remaining work before finalization.</p>
+        block. Validators check and vote on the proposal. Enough votes
+        notarize the proposal. The application then certifies it before
+        validators can finalize the block.</p>
         <p>These steps remain ordered for each block, but different
         blocks can be at different steps. Two waits otherwise limit how
-        quickly new views notarize: a proposer handoff and waiting to
-        receive the parent notarization.</p>
+        quickly new views notarize: a proposer handoff and waiting for
+        the parent to be certified.</p>
         <p><a
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> removes the first wait. <a
@@ -170,27 +171,27 @@ Chou</a></div>
         proposer every view while Stable Leader changes it once per
         term. The timeline shows three complete terms.</p>
         </div>
-        <p>Stable leadership removes the proposer handoff. The next
-        proposal and votes can still wait for the parent
-        notarization.</p>
-        <h2 id="wait-two-waiting-for-the-parent-notarization">Wait Two:
-        Waiting for the Parent Notarization</h2>
-        <p>Without Optimistic Validation, the stable leader waits to
-        receive the notarization for view <code>v</code> before it
-        proposes view <code>v+1</code>. Other validators wait for the
-        same evidence before voting on the child. This puts the network
-        time to form and distribute each notarization on the path
-        between views.</p>
+        <p>Stable leadership removes the proposer handoff. Starting the
+        next view can still wait for parent notarization and
+        certification.</p>
+        <h2 id="wait-two-waiting-for-the-parent">Wait Two: Waiting for
+        the Parent</h2>
+        <p>Without Optimistic Validation, the stable leader waits for
+        the notarization of view <code>v</code> before proposing view
+        <code>v+1</code>. Other validators wait for <code>v</code> to be
+        certified before checking and voting on the child. Together,
+        those waits put notarization and certification latency between
+        successful views.</p>
         <p>With Optimistic Validation, the leader can start
         <code>v+1</code> after it builds and votes for <code>v</code>. A
         validator that checked and voted for <code>v</code> can also
         check and vote on <code>v+1</code> when the proposal arrives.
-        Neither needs to receive the notarization for <code>v</code>
-        first.</p>
+        Neither needs to receive the notarization for <code>v</code> or
+        wait for its certification first.</p>
         <p>The proposal and votes for <code>v+1</code> can overlap the
-        network round that forms the notarization for <code>v</code>.
-        The same rule can carry the pipeline across several views within
-        the stable-leader term.</p>
+        network round that forms the notarization for <code>v</code> and
+        the certification that follows. The same rule can carry the
+        pipeline across several views within the stable-leader term.</p>
         <p>The optimization changes when the next proposal and notarize
         votes can begin. It does not change the finalization rule.</p>
         <div id="simplex-fig-validation" class="simplex-loop" role="img" aria-label="Animated comparison of sequential and optimistic validation. In the sequential path, each child proposal and its votes wait for the parent notarization. In the optimistic path, child views begin closer together while parent notarizations form on a parallel lane.">

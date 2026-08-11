@@ -50,9 +50,9 @@ Figure 1: Each square represents one 5ms target interval. A 20 by 10 grid fills 
 
 The pipeline keeps new views moving while earlier blocks finish. Once data reaches the leader, it gets another ordering opportunity after one block interval.
 
-A *view* is one opportunity for a leader to propose a block. Validators check and vote on the proposal. The application finishes any remaining work before finalization.
+A *view* is one opportunity for a leader to propose a block. Validators check and vote on the proposal. Enough votes notarize the proposal. The application then certifies it before validators can finalize the block.
 
-These steps remain ordered for each block, but different blocks can be at different steps. Two waits otherwise limit how quickly new views notarize: a proposer handoff and waiting to receive the parent notarization.
+These steps remain ordered for each block, but different blocks can be at different steps. Two waits otherwise limit how quickly new views notarize: a proposer handoff and waiting for the parent to be certified.
 
 [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) removes the first wait. [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416) removes the second wait from the path to the next proposal and votes.
 
@@ -72,15 +72,15 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 Figure 2: With a term length of four, round-robin changes the proposer every view while Stable Leader changes it once per term. The timeline shows three complete terms.
 :::
 
-Stable leadership removes the proposer handoff. The next proposal and votes can still wait for the parent notarization.
+Stable leadership removes the proposer handoff. Starting the next view can still wait for parent notarization and certification.
 
-## Wait Two: Waiting for the Parent Notarization
+## Wait Two: Waiting for the Parent
 
-Without Optimistic Validation, the stable leader waits to receive the notarization for view `v` before it proposes view `v+1`. Other validators wait for the same evidence before voting on the child. This puts the network time to form and distribute each notarization on the path between views.
+Without Optimistic Validation, the stable leader waits for the notarization of view `v` before proposing view `v+1`. Other validators wait for `v` to be certified before checking and voting on the child. Together, those waits put notarization and certification latency between successful views.
 
-With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` first.
+With Optimistic Validation, the leader can start `v+1` after it builds and votes for `v`. A validator that checked and voted for `v` can also check and vote on `v+1` when the proposal arrives. Neither needs to receive the notarization for `v` or wait for its certification first.
 
-The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v`. The same rule can carry the pipeline across several views within the stable-leader term.
+The proposal and votes for `v+1` can overlap the network round that forms the notarization for `v` and the certification that follows. The same rule can carry the pipeline across several views within the stable-leader term.
 
 The optimization changes when the next proposal and notarize votes can begin. It does not change the finalization rule.
 
