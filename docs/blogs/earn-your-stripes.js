@@ -146,6 +146,8 @@ function makeArrow(parent, x0, y0, x1, y1, color = BLUE, width = 2.6) {
   };
 }
 
+const legendItemWidth = label => 36 + label.length * 8.4;
+
 function addLegendItem(parent, x, y, fill, stroke, dash, label) {
   parent.appendChild(svgEl('rect', {
     x,
@@ -158,6 +160,7 @@ function addLegendItem(parent, x, y, fill, stroke, dash, label) {
     'stroke-dasharray': dash,
   }));
   addText(parent, x + 36, y, label, { 'font-size': 14, fill: GRAY });
+  return legendItemWidth(label);
 }
 
 function makeShardRow(parent, patterns, x, y, width, label, provided, options = {}) {
@@ -220,6 +223,8 @@ function makeShardRow(parent, patterns, x, y, width, label, provided, options = 
   };
 }
 
+const chartLegendWidth = label => 39 + label.length * 6;
+
 function addChartLegend(parent, x, y, label, color) {
   parent.appendChild(svgEl('line', {
     x1: x,
@@ -243,7 +248,7 @@ function addChartLegend(parent, x, y, label, color) {
     'font-weight': 600,
     fill: GRAY,
   });
-  return 39 + label.length * 6;
+  return chartLegendWidth(label);
 }
 
 function buildBenchmarkChart(mount, config) {
@@ -269,24 +274,10 @@ function buildBenchmarkChart(mount, config) {
     fill: '#fcfcfc',
     stroke: '#e5e7eb',
   }));
-  addText(layer, 18, 31, config.title, {
-    'font-size': chartFontSize(20),
-    'font-weight': 700,
-  });
-  addText(layer, 18, 51, 'End-to-end latency (ms) · lower is better', {
-    'font-size': chartFontSize(13),
-    fill: GRAY,
-  });
-
-  let legendX = 55;
-  config.series.forEach(series => {
-    legendX += addChartLegend(layer, legendX, 73, series.label, series.color);
-  });
-
   const plotLeft = 45;
   const plotRight = 472;
-  const plotTop = 93;
-  const plotBottom = 244;
+  const plotTop = 26;
+  const plotBottom = 208;
   const xInset = 32;
   const xMin = Math.min(...config.workers);
   const xMax = Math.max(...config.workers);
@@ -328,9 +319,23 @@ function buildBenchmarkChart(mount, config) {
       'text-anchor': 'middle',
     });
   });
-  addText(layer, (plotLeft + plotRight) / 2, 294, 'Workers', {
+  addText(layer, (plotLeft + plotRight) / 2, 252, 'Workers', {
     'font-size': chartFontSize(12),
     'font-weight': 600,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
+
+  const legendWidth = config.series.reduce(
+    (total, series) => total + chartLegendWidth(series.label),
+    0,
+  );
+  let legendX = (width - legendWidth) / 2;
+  config.series.forEach(series => {
+    legendX += addChartLegend(layer, legendX, 276, series.label, series.color);
+  });
+  addText(layer, width / 2, 298, 'End-to-end latency (ms) · lower is better', {
+    'font-size': chartFontSize(13),
     fill: GRAY,
     'text-anchor': 'middle',
   });
@@ -424,32 +429,29 @@ function buildBenchmarkChart(mount, config) {
 }
 
 function buildStripingFigure(mount) {
-  const height = 690;
+  const height = 570;
   const svg = createSvg(mount, height);
   const patterns = addPatterns(svg, 'cw-rs-striping');
   const layer = svgEl('g');
   svg.appendChild(layer);
 
   layer.appendChild(svgEl('rect', {
-    x: 10, y: 10, width: 780, height: 260, rx: 8,
+    x: 10, y: 10, width: 780, height: 220, rx: 8,
     fill: '#fcfcfc', stroke: '#e5e7eb',
   }));
   layer.appendChild(svgEl('rect', {
-    x: 10, y: 285, width: 780, height: 390, rx: 8,
+    x: 10, y: 245, width: 780, height: 315, rx: 8,
     fill: '#fcfcfc', stroke: '#e5e7eb',
   }));
 
-  addText(layer, 25, 38, 'Before: one full-width recovery job', {
-    'font-size': 20,
-    'font-weight': 700,
-  });
+  addPanelLabel(layer, 25, 10, 'BEFORE', RED);
 
   const states = [true, false, true, true];
   const labels = ['D0', 'D1', 'D2', 'R0'];
-  const gridX = 82;
+  const gridX = 100;
   const gridWidth = 600;
   const beforeJob = svgEl('rect', {
-    x: 68, y: 53, width: 628, height: 146, rx: 10,
+    x: 86, y: 53, width: 628, height: 146, rx: 10,
     fill: '#fcfcfc', stroke: BLUE, 'stroke-width': 1.6,
   });
   layer.appendChild(beforeJob);
@@ -463,20 +465,8 @@ function buildStripingFigure(mount) {
     stroke: BLUE, 'stroke-width': 3, opacity: 0,
   });
   layer.appendChild(playhead);
-  addLegendItem(layer, 82, 220, patterns.checked, RED, 'none', 'provided + checked');
-  addLegendItem(layer, 300, 220, 'white', GRAY, '6 4', 'missing D1');
-  addLegendItem(layer, 430, 220, patterns.restored, PURPLE, 'none', 'recovered D1');
-  addText(layer, 775, 220, 'D: original · R: recovery', {
-    'font-size': 12,
-    fill: GRAY,
-    'text-anchor': 'end',
-  });
-
-  addText(layer, 25, 315, 'After: aligned stripes become independent jobs', {
-    'font-size': 20,
-    'font-weight': 700,
-  });
-  const gridY = 373;
+  addPanelLabel(layer, 25, 245, 'AFTER', GREEN);
+  const gridY = 318;
   const jobGap = 14;
   const jobWidth = gridWidth / 3;
   const afterLabels = ['D0', 'D2', 'R0', 'D1'];
@@ -488,7 +478,7 @@ function buildStripingFigure(mount) {
   for (let index = 0; index < 3; index++) {
     const start = gridX + index * (jobWidth + jobGap);
     const rect = svgEl('rect', {
-      x: start - 5, y: 342, width: jobWidth + 10, height: 143, rx: 8,
+      x: start - 5, y: 287, width: jobWidth + 10, height: 143, rx: 8,
       fill: '#fcfcfc', stroke: BLUE, 'stroke-width': 1.5,
     });
     jobLayer.appendChild(rect);
@@ -496,7 +486,7 @@ function buildStripingFigure(mount) {
     addPill(
       jobLayer,
       start + jobWidth / 2 - 49,
-      345,
+      290,
       98,
       `RS job ${index}`,
       BLUE,
@@ -558,11 +548,28 @@ function buildStripingFigure(mount) {
     return { line, start };
   });
 
-  const equalityLabel = addText(layer, 686, 642, '= full-width D1', {
+  const equalityLabel = addText(layer, DESIGN_W / 2, 526, 'same full-width D1', {
     'font-size': 11,
     'font-weight': 700,
     fill: GREEN,
+    'text-anchor': 'middle',
     opacity: 0,
+  });
+
+  const legendItems = [
+    [patterns.checked, RED, 'none', 'checked'],
+    ['white', GRAY, '6 4', 'missing'],
+    [patterns.restored, PURPLE, 'none', 'recovered'],
+  ];
+  const legendGap = 20;
+  const legendWidth = legendItems.reduce(
+    (total, item) => total + legendItemWidth(item[3]),
+    legendGap * (legendItems.length - 1),
+  );
+  let legendX = (DESIGN_W - legendWidth) / 2;
+  legendItems.forEach(([fill, stroke, dash, label]) => {
+    legendX += addLegendItem(layer, legendX, 548, fill, stroke, dash, label);
+    legendX += legendGap;
   });
 
   function render(time) {
@@ -596,7 +603,7 @@ function buildStripingFigure(mount) {
     recoveredStripes.forEach(stripe => {
       stripe.group.setAttribute(
         'transform',
-        `translate(${stripe.dx * assembly} ${174 * assembly})`,
+        `translate(${stripe.dx * assembly} ${92 * assembly})`,
       );
     });
     const equal = ease(range(time, 5.75, 6.05));
@@ -749,6 +756,23 @@ function makeRootNode(parent, cx, cy) {
   };
 }
 
+function addPanelLabel(parent, x, y, label, color) {
+  const width = 16 + label.length * 8;
+  parent.appendChild(svgEl('line', {
+    x1: x - 6,
+    y1: y,
+    x2: x + width,
+    y2: y,
+    stroke: '#fcfcfc',
+    'stroke-width': 5,
+  }));
+  addText(parent, x, y + 5, label, {
+    'font-size': 13,
+    'font-weight': 700,
+    fill: color,
+  });
+}
+
 function addPill(parent, x, y, width, label, color, fill, fontSize = 12) {
   parent.appendChild(svgEl('rect', {
     x,
@@ -769,20 +793,12 @@ function addPill(parent, x, y, width, label, color, fill, fontSize = 12) {
 }
 
 function buildRevealFigure(mount) {
-  const height = 510;
+  const height = 415;
   const svg = createSvg(mount, height);
+  svg.setAttribute('viewBox', `0 55 ${DESIGN_W} ${height}`);
   const patterns = addPatterns(svg, 'cw-rs-reveal');
   const layer = svgEl('g');
   svg.appendChild(layer);
-
-  addText(layer, 20, 27, 'Reveal already-derived R1; skip one transform', {
-    'font-size': 20,
-    'font-weight': 700,
-  });
-  addText(layer, 20, 50, 'Both paths derive R1; reveal reuses it instead of deriving it again in encode.', {
-    'font-size': 13,
-    fill: GRAY,
-  });
 
   layer.appendChild(svgEl('rect', {
     x: 10, y: 65, width: 780, height: 190, rx: 8,
@@ -793,11 +809,7 @@ function buildRevealFigure(mount) {
     fill: '#fcfcfc', stroke: '#e5e7eb',
   }));
 
-  addPill(layer, 25, 79, 68, 'BEFORE', RED, PALE_RED);
-  addText(layer, 108, 97, 'Decoder hides R1, so encode derives it again', {
-    'font-size': 17,
-    'font-weight': 700,
-  });
+  addPanelLabel(layer, 25, 65, 'BEFORE', RED);
   addShardSet(layer, 25, 144, patterns, [
     { label: 'D0', state: 'checked' },
     { label: 'D2', state: 'checked' },
@@ -833,10 +845,15 @@ function buildRevealFigure(mount) {
     layer,
     460,
     160,
-    ['encode', 'R0 + R1', 'compare R0'],
+    ['encode', 'R0 + R1'],
     RED,
     PALE_RED,
   );
+  addText(layer, 460, 214, 'compare checked R0', {
+    'font-size': 10,
+    fill: GRAY,
+    'text-anchor': 'middle',
+  });
   const oldEncodeArrow = makeArrow(layer, 500, 160, 525, 160);
   const oldCodeword = svgEl('g');
   addText(oldCodeword, 598, 135, 'all 5 · checked + recovered', {
@@ -866,13 +883,8 @@ function buildRevealFigure(mount) {
   layer.appendChild(oldDerivedRecovery);
   const oldRootArrow = makeArrow(layer, 671, 160, 695, 160, GREEN);
   const oldRoot = makeRootNode(layer, 735, 160);
-  addPill(layer, 300, 226, 200, '2 RS transforms · redo R1', RED, PALE_RED);
 
-  addPill(layer, 25, 284, 52, 'NOW', GREEN, PALE_GREEN);
-  addText(layer, 92, 302, 'Decoder returns R1 with D1; encode disappears', {
-    'font-size': 17,
-    'font-weight': 700,
-  });
+  addPanelLabel(layer, 25, 270, 'AFTER', GREEN);
   addShardSet(layer, 25, 349, patterns, [
     { label: 'D0', state: 'checked' },
     { label: 'D2', state: 'checked' },
@@ -908,13 +920,6 @@ function buildRevealFigure(mount) {
   layer.appendChild(revealedPositions);
   const newRootArrow = makeArrow(layer, 621, 365, 660, 365, GREEN);
   const newRoot = makeRootNode(layer, 700, 365);
-  addPill(layer, 300, 431, 200, '1 RS transform · reuse R1', GREEN, PALE_GREEN);
-
-  addText(layer, 400, 500, 'All originals present? There is nothing to decode, so re-encode verification remains.', {
-    'font-size': 13,
-    fill: GRAY,
-    'text-anchor': 'middle',
-  });
 
   function render(time) {
     const oldDecodeProgress = ease(range(time, 0.35, 1.0));
@@ -1045,7 +1050,6 @@ function init() {
   injectStyles();
   const charts = [
     ['earn-your-stripes-chart-recovery-gap', {
-      title: 'Full recovery flattens near 26 ms',
       workers: [1, 8, 16],
       yMax: 60,
       yTicks: [0, 15, 30, 45, 60],
@@ -1056,7 +1060,6 @@ function init() {
       ],
     }],
     ['earn-your-stripes-chart-striping', {
-      title: 'Striping makes recovery scale',
       workers: [1, 8, 16],
       yMax: 60,
       yTicks: [0, 15, 30, 45, 60],
@@ -1071,7 +1074,6 @@ function init() {
       ],
     }],
     ['earn-your-stripes-chart-reveal', {
-      title: 'Decode-reveal removes the second transform',
       workers: [8, 16],
       yMax: 12,
       yTicks: [0, 3, 6, 9, 12],
@@ -1086,7 +1088,6 @@ function init() {
       ],
     }],
     ['earn-your-stripes-chart-final', {
-      title: 'The optimizations compound',
       workers: [1, 8, 16],
       yMax: 60,
       yTicks: [0, 15, 30, 45, 60],

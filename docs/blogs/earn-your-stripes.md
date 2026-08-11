@@ -61,12 +61,12 @@ To recover one 16-bit symbol inside a missing shard, the decoder only needs the 
 ```{=html}
 <style>
   .cw-rs-figure {
-    aspect-ratio: 800 / 690;
+    aspect-ratio: 800 / 570;
     margin: 28px 0 6px;
   }
 
   .cw-rs-figure-verify {
-    aspect-ratio: 800 / 510;
+    aspect-ratio: 800 / 415;
   }
 </style>
 <noscript>
