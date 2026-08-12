@@ -1197,7 +1197,7 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    /// Finalize `batch` into `db` and wait for the deferred flush.
+    /// Finalize `batch` into `db` and wait for the database sync.
     #[boxed]
     async fn finalize<D: ManagedDb<deterministic::Context>>(db: D, batch: D::Merkleized) -> D {
         let db = D::finalize(db, batch).await.unwrap();
