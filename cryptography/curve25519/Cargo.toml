@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-cryptography-curve25519"
 workspace = true
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
 commonware-macros.workspace = true
@@ -22,10 +23,10 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 arbitrary.workspace = true
+commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = [ "std" ] }
 commonware-utils = { workspace = true, features = [ "std" ] }
@@ -42,6 +43,10 @@ path = "benches/batch_verify.rs"
 
 [features]
 default = [ "std" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"dep:arbitrary",
+]
 std = [
 	"bytes/std",
 	"commonware-codec/std",
@@ -49,5 +54,4 @@ std = [
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
-	"thiserror/std",
 ]

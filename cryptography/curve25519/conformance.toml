@@ -1,0 +1,3 @@
+["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<Signature>"]
+n_cases = 65536
+hash = "531e2ab4737f7f537ff85f70911ba454a184d90a2b5349eb4488ab81b26f0cfc"

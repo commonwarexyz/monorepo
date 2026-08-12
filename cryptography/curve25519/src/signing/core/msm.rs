@@ -9,7 +9,7 @@
 //! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
-use crate::simplified::{Backend, G, GAffine, GAffineVec, GVec, LANES};
+use crate::curve::{Backend, G, GAffine, GAffineVec, GVec, LANES};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_parallel::Strategy;
@@ -403,7 +403,7 @@ pub(super) fn multiscalar_mul<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signing::scalar::test_support::rand_scalar;
+    use crate::signing::core::scalar::test_support::rand_scalar;
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use ed25519_consensus::SigningKey;
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn matches_naive_double_and_add() {
-        let backend = crate::simplified::test_backend();
+        let backend = crate::curve::test_backend();
         let mut rng = test_rng();
         for n in [0, 1, 2, 5, 8, 9, 32, 64, 100] {
             let points = rand_affine_points(n);
@@ -525,7 +525,7 @@ mod tests {
     /// one contiguous slice.
     #[test]
     fn chunked_matches_single_chunk() {
-        let backend = crate::simplified::test_backend();
+        let backend = crate::curve::test_backend();
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
             let terms = rand_terms(n, 7);
             let single = split_terms(rand_terms(n, 7), &[]);
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn strategy_path_matches_serial() {
-        let backend = crate::simplified::test_backend();
+        let backend = crate::curve::test_backend();
         for n in [0, 1, 2, 5, 32, 600] {
             for width in TEST_WIDTHS {
                 let chunks = split_terms(rand_terms(n, width), &[64, 64, 64, 64]);
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn tile_parallel_matches_serial_under_real_parallelism() {
-        let backend = crate::simplified::test_backend();
+        let backend = crate::curve::test_backend();
         // `Manual` disables the adaptive serial/parallel policy, forcing every call through
         // actual Rayon dispatch (rather than the policy falling back to serial for small inputs).
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
@@ -579,7 +579,7 @@ mod tests {
     /// combine same-window tiles with a single addition.
     #[test]
     fn split_window_partials_match_whole_range() {
-        let backend = crate::simplified::test_backend();
+        let backend = crate::curve::test_backend();
         const WIDTH: u32 = 7;
         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
             let chunks = split_terms(rand_terms(n, WIDTH), &[n / 3, n / 3]);

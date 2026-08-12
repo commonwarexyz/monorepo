@@ -33,6 +33,15 @@ impl F {
     pub(crate) const ZERO: Self = Self([0, 0, 0, 0, 0]);
     pub(crate) const ONE: Self = Self([1, 0, 0, 0, 0]);
 
+    /// Selects `other` when `select_other` is true without branching.
+    #[inline]
+    fn select(self, other: Self, select_other: bool) -> Self {
+        let mask = 0u64.wrapping_sub(select_other as u64);
+        Self(array::from_fn(|i| {
+            (self.0[i] & !mask) | (other.0[i] & mask)
+        }))
+    }
+
     /// The curve25519 twisted-Edwards curve constant `d = -121665/121666 mod p`.
     pub(crate) const EDWARDS_D: Self = Self([
         0x0034dca135978a3,
@@ -377,6 +386,17 @@ impl G {
         z: F::ONE,
     };
 
+    /// Selects `other` when `select_other` is true without branching.
+    #[inline]
+    fn select(self, other: Self, select_other: bool) -> Self {
+        Self {
+            x: self.x.select(other.x, select_other),
+            y: self.y.select(other.y, select_other),
+            t: self.t.select(other.t, select_other),
+            z: self.z.select(other.z, select_other),
+        }
+    }
+
     /// Compresses this point to its canonical Ed25519 encoding.
     pub(crate) fn to_bytes(self) -> [u8; 32] {
         let z_inverse = self.z.invert();
@@ -472,6 +492,21 @@ impl G {
             if bit {
                 result = result.add(self);
             }
+        }
+        result
+    }
+
+    /// Multiplies this point by a secret 256-bit little-endian scalar.
+    ///
+    /// This performs one doubling and one addition per bit, selecting the result without
+    /// secret-dependent branches or indexing.
+    pub(crate) fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
+        let mut result = Self::IDENTITY;
+        for i in (0..256).rev() {
+            let doubled = result.double();
+            let added = doubled.add(self);
+            let bit = scalar[i / 8] >> (i % 8) & 1 == 1;
+            result = doubled.select(added, bit);
         }
         result
     }

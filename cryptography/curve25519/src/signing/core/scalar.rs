@@ -34,17 +34,22 @@ fn limbs_lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
     false
 }
 
-/// Returns `a - b`, assuming `a >= b`.
-fn limbs_sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
-    let mut out = [0u64; 4];
+/// Returns `a - b` modulo `2^(64*N)` and whether the subtraction underflowed.
+fn limbs_sub_with_borrow<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], bool) {
+    let mut out = [0u64; N];
     let mut borrow = false;
-    for i in 0..4 {
+    for i in 0..N {
         let (d1, b1) = a[i].overflowing_sub(b[i]);
         let (d2, b2) = d1.overflowing_sub(borrow as u64);
         out[i] = d2;
-        borrow = b1 || b2;
+        borrow = b1 | b2;
     }
-    out
+    (out, borrow)
+}
+
+/// Returns `a - b`, assuming `a >= b`.
+fn limbs_sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+    limbs_sub_with_borrow(a, b).0
 }
 
 /// Returns `a + b`, assuming the true sum is `< 2^256` (no carry out of the top limb).
@@ -55,19 +60,21 @@ fn limbs_add(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
         let (sum, c1) = a[i].overflowing_add(b[i]);
         let (sum, c2) = sum.overflowing_add(carry as u64);
         out[i] = sum;
-        carry = c1 || c2;
+        carry = c1 | c2;
     }
     out
 }
 
-/// Returns `true` if `a < b`, comparing as 320-bit unsigned integers (little-endian limbs).
-fn limbs_lt5(a: &[u64; 5], b: &[u64; 5]) -> bool {
-    for i in (0..5).rev() {
-        if a[i] != b[i] {
-            return a[i] < b[i];
-        }
-    }
-    false
+/// Selects `b` when `select_b` is true without branching.
+fn limbs_select<const N: usize>(a: &[u64; N], b: &[u64; N], select_b: bool) -> [u64; N] {
+    let mask = 0u64.wrapping_sub(select_b as u64);
+    core::array::from_fn(|i| (a[i] & !mask) | (b[i] & mask))
+}
+
+/// Subtracts `b` from `a` when `a >= b`, leaving `a` unchanged otherwise.
+fn limbs_conditional_sub<const N: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+    let (difference, underflow) = limbs_sub_with_borrow(a, b);
+    limbs_select(&difference, a, underflow)
 }
 
 /// Returns `(a - b) mod 2^320`, as five little-endian 64-bit limbs: the final borrow (if any) is
@@ -75,15 +82,7 @@ fn limbs_lt5(a: &[u64; 5], b: &[u64; 5]) -> bool {
 /// in [`barrett_reduce`], when the true difference is negative (the discarded borrow is
 /// equivalent to adding `2^320` back in).
 fn limbs_sub5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
-    let mut out = [0u64; 5];
-    let mut borrow = false;
-    for i in 0..5 {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(borrow as u64);
-        out[i] = d2;
-        borrow = b1 || b2;
-    }
-    out
+    limbs_sub_with_borrow(a, b).0
 }
 
 /// Returns the full 512-bit product `a * b` as eight little-endian 64-bit limbs, via the standard
@@ -154,9 +153,10 @@ fn barrett_reduce(x: [u64; 8]) -> Scalar {
     let mut r = limbs_sub5(&r1, &r2);
 
     let l5 = [L[0], L[1], L[2], L[3], 0];
-    while !limbs_lt5(&r, &l5) {
-        r = limbs_sub5(&r, &l5);
-    }
+    // The Barrett quotient estimate leaves a residue below `3L`, so two fixed conditional
+    // subtractions are sufficient and avoid data-dependent control flow for secret scalars.
+    r = limbs_conditional_sub(&r, &l5);
+    r = limbs_conditional_sub(&r, &l5);
     debug_assert_eq!(r[4], 0, "residue must fit in L's 4 limbs after reduction");
     Scalar([r[0], r[1], r[2], r[3]])
 }
@@ -201,6 +201,15 @@ impl Scalar {
         (0..256)
             .rev()
             .map(move |i| (self.0[i / 64] >> (i % 64)) & 1 == 1)
+    }
+
+    /// Returns the canonical little-endian encoding of this scalar.
+    pub(crate) fn to_bytes(self) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        for (chunk, limb) in bytes.chunks_exact_mut(8).zip(self.0) {
+            chunk.copy_from_slice(&limb.to_le_bytes());
+        }
+        bytes
     }
 
     /// Constructs a scalar from a little-endian 128-bit value. Always canonical, since every
@@ -261,11 +270,7 @@ impl Scalar {
     /// Returns `(self + rhs) mod L`, assuming both operands are already `< L`.
     pub(crate) fn add_mod_l(&self, rhs: &Self) -> Self {
         let sum = limbs_add(&self.0, &rhs.0);
-        if limbs_lt(&sum, &L) {
-            Self(sum)
-        } else {
-            Self(limbs_sub(&sum, &L))
-        }
+        Self(limbs_conditional_sub(&sum, &L))
     }
 
     /// Returns `(self * rhs) mod L`.

@@ -17,6 +17,5 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+commonware_macros::stability_mod!(ALPHA, mod curve);
 commonware_macros::stability_mod!(ALPHA, pub mod signing);
-commonware_macros::stability_mod!(ALPHA, mod simplified);
-commonware_macros::stability_mod!(ALPHA, pub mod simplified_signing);
