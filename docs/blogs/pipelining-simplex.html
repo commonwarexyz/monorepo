@@ -95,8 +95,8 @@ per second with 5ms median spacing." />
 Chou</a></div>
                         <div class="date">August 12th, 2026</div>
         </div>
-        <p>Simplex can build blocks as fast as local work and network
-        capacity allow.</p>
+        <p>Simplex can now order blocks as fast as a validator can build
+        them.</p>
         <p>Today, we’re introducing <a
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> and <a
@@ -104,21 +104,18 @@ Chou</a></div>
         Validation</a>, two features that pipeline <a
         href="https://eprint.iacr.org/2023/463">Simplex</a> views.
         Stable Leader keeps one proposer for many views in a row,
-        reducing handoff overhead. Optimistic Validation lets that
+        reducing handoff overhead. Optimistic Validation enables that
         leader keep proposing and validators keep voting without waiting
         for the previous view’s notarization. Together, they keep
         several views moving through the network at once. For users,
-        more frequent proposals mean less time waiting for a transaction
-        to enter the next block.</p>
-        <p>In an <a href="https://alto.commonware.xyz">Alto</a>
-        deployment with 50 validators across ten AWS regions, the
-        pipeline sustained about 200 blocks per second with a median
-        block interval of 5ms. Median external finality was 300ms from
-        the leader’s block timestamp to WebSocket delivery through the
-        indexer. At that cadence, about 60 newer blocks could be in
-        flight before the first finalized. To isolate consensus cadence,
-        the workload contained headers only—no transactions or
-        execution.</p>
+        more frequent proposals means as little time as possible waiting
+        for a transaction to finalize (the sum of block time and
+        finality latency).</p>
+        <p>On a global deployment with 50 validators, this new Simplex
+        variant sustained 200 blocks per second with a median external
+        finality of 300ms (from the leader to WebSocket delivery in your
+        browser). That’s a faster refresh rate than the monitor you’re
+        probably reading this on.</p>
         <style>
           .simplex-loop {
             aspect-ratio: 1024 / 430;
@@ -173,7 +170,12 @@ Chou</a></div>
         the next proposer cannot safely build until a notarization
         forms: a Byzantine leader may have sent conflicting
         proposals.</p>
-        <p>Stable Leader groups consecutive views into a <em>term</em>.
+        <p>Stable Leader groups consecutive views into a <em>term</em>,
+        an approach described in <a
+        href="https://eprint.iacr.org/2023/1916">Sing a Song of
+        Simplex</a> and referred to as <em>multi-view leadership</em> in
+        <a href="https://arxiv.org/abs/2603.11797">The Carnot Bound:
+        Limits and Possibilities for Bandwidth-Efficient Consensus</a>.
         One leader proposes throughout the term, reducing proposer
         handoffs from one per view to one per term. Within the term, the
         leader already knows the previous block and its ancestry before
@@ -181,9 +183,7 @@ Chou</a></div>
         did not equivocate, so it can begin building and distributing
         the next proposal’s data early. This cuts the wait between views
         from two network hops to one: the hop that forms the parent
-        notarization. This stable-leader variant was introduced in <a
-        href="https://eprint.iacr.org/2023/1916">Sing a Song of
-        Simplex</a>.</p>
+        notarization.</p>
         <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders over the same time span. Round-robin rotates among three leaders every view, with views spaced two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term, while term-boundary handoffs still take two hops. The timeline shows three complete stable-leader terms and two term boundaries.">
           <noscript>Over the same time span, round-robin changes leaders every view and spaces views two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term and two hops apart at leader handoffs. The timeline shows three complete stable-leader terms.</noscript>
         </div>
