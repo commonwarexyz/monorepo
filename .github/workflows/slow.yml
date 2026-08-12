@@ -155,6 +155,7 @@ jobs:
             partition: "1/2"
           - fuzz_dir: cryptography/fuzz
             partition: "2/2"
+          - fuzz_dir: cryptography/curve25519/fuzz
           - fuzz_dir: math/fuzz
           - fuzz_dir: p2p/fuzz
           - fuzz_dir: runtime/fuzz

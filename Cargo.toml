@@ -41,6 +41,7 @@ members = [
     "collector/fuzz",
     "consensus/fuzz",
     "cryptography/fuzz",
+    "cryptography/curve25519/fuzz",
     "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",

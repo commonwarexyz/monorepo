@@ -1551,6 +1551,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-cryptography-curve25519-fuzz"
+version = "2026.7.0"
+dependencies = [
+ "arbitrary",
+ "commonware-cryptography-curve25519",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-cryptography-fuzz"
 version = "2026.7.0"
 dependencies = [

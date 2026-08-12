@@ -28,7 +28,7 @@ subtle.workspace = true
 zeroize = { workspace = true, features = [ "zeroize_derive" ] }
 
 [dev-dependencies]
-arbitrary.workspace = true
+arbitrary = { workspace = true, features = [ "derive" ] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = [ "std" ] }
@@ -53,6 +53,7 @@ arbitrary = [
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
+fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 std = [
 	"bytes/std",
 	"commonware-codec/std",

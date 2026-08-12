@@ -778,7 +778,7 @@ impl GAffineVec {
     }
 
     /// Untransposes backend lanes into scalar affine points.
-    #[cfg(any(test, not(target_arch = "aarch64")))]
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
     pub fn untranspose(self) -> [GAffine; LANES] {
         let x = self.x.untranspose();
         let y = self.y.untranspose();
@@ -889,10 +889,10 @@ pub mod montgomery;
 mod avx512;
 #[cfg(target_arch = "aarch64")]
 mod neon;
-#[cfg(any(test, not(target_arch = "aarch64")))]
+#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
 mod portable;
-#[cfg(test)]
-mod test;
+#[cfg(any(test, feature = "fuzz"))]
+pub mod test;
 
 /// Returns the portable backend for deterministic tests.
 #[cfg(test)]
@@ -902,54 +902,28 @@ pub fn test_backend() -> impl Backend {
 
 #[cfg(test)]
 #[test]
-fn test_portable() {
-    commonware_invariants::minifuzz::test(|u| test::fuzz_backend(u, portable::Backend::new()));
-}
-
-#[cfg(all(test, target_arch = "x86_64"))]
-#[test]
-fn test_avx512() {
-    let Some(backend) = avx512::Backend::new() else {
-        return;
-    };
-    commonware_invariants::minifuzz::test(|u| test::fuzz_backend(u, backend));
-}
-
-#[cfg(all(test, target_arch = "x86_64"))]
-#[test]
-fn test_avx512_against_portable() {
-    let Some(backend) = avx512::Backend::new() else {
-        return;
-    };
-    test::check_backend_at_bounds(portable::Backend::new(), backend);
-    commonware_invariants::minifuzz::test(|u| {
-        test::fuzz_backend_against(u, portable::Backend::new(), backend)
-    });
-}
-
-#[cfg(all(test, target_arch = "aarch64"))]
-#[test]
-fn test_neon() {
+fn test_fuzz() {
     // The fully inlined NEON group formulas need more than the test harness's default stack in
     // unoptimized builds.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            commonware_invariants::minifuzz::test(|u| test::fuzz_backend(u, neon::Backend::new()));
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    let run = || {
+        commonware_invariants::minifuzz::test(|u| u.arbitrary::<test::Plan>()?.run(u));
+    };
+    if cfg!(target_arch = "aarch64") {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
+    } else {
+        run();
+    }
 }
 
-#[cfg(all(test, target_arch = "aarch64"))]
+#[cfg(test)]
 #[test]
-fn test_neon_against_portable() {
-    let backend = neon::Backend::new();
-    test::check_backend_at_bounds(portable::Backend::new(), backend);
-    commonware_invariants::minifuzz::test(|u| {
-        test::fuzz_backend_against(u, portable::Backend::new(), backend)
-    });
+fn test_backend_at_bounds() {
+    test::check_backend_at_bounds();
 }
 
 /// Run a computation with the best [`Backend`] this CPU supports.

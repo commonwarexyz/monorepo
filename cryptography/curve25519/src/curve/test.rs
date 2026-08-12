@@ -1,9 +1,25 @@
 //! Property suites shared by field and group backends.
 
 use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend};
-use arbitrary::Unstructured;
+use arbitrary::{Arbitrary, Unstructured};
 
 const MASK_52: u64 = (1 << 52) - 1;
+
+/// A field or group arithmetic fuzzing operation.
+#[derive(Debug, Arbitrary)]
+pub enum Plan {
+    /// Check field arithmetic identities.
+    Field,
+    /// Check group arithmetic identities.
+    Group,
+}
+
+impl Plan {
+    /// Runs the operation with the best backend supported by this CPU.
+    pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        super::with_backend(Run { plan: self, u })
+    }
+}
 
 fn arbitrary_fvec(u: &mut Unstructured<'_>) -> arbitrary::Result<FVec> {
     let limbs: [[u64; LANES]; 5] = u.arbitrary()?;
@@ -12,7 +28,7 @@ fn arbitrary_fvec(u: &mut Unstructured<'_>) -> arbitrary::Result<FVec> {
     })
 }
 
-fn canonical(mut limbs: [u64; 5]) -> [u64; 5] {
+const fn canonical(mut limbs: [u64; 5]) -> [u64; 5] {
     limbs[1] += limbs[0] >> 51;
     limbs[0] &= MASK_51;
     limbs[2] += limbs[1] >> 51;
@@ -71,7 +87,7 @@ fn assert_f_nonzero(value: FVec, property: &str) {
     }
 }
 
-fn identity() -> GVec {
+const fn identity() -> GVec {
     GVec {
         x: FVec::splat(F::ZERO),
         y: FVec::splat(F::ONE),
@@ -273,21 +289,40 @@ fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
     Ok(())
 }
 
-/// Checks the field and group properties required of every backend.
-pub(super) fn fuzz_backend<B: Backend>(
+fn run_with_backend<B: Backend>(
+    plan: Plan,
     u: &mut Unstructured<'_>,
     backend: B,
 ) -> arbitrary::Result<()> {
-    if u.arbitrary()? {
-        fuzz_field(u, backend)
-    } else {
-        fuzz_group(u, backend)
+    match plan {
+        Plan::Field => {
+            fuzz_field(u, backend)?;
+            fuzz_field_matches_portable(u, backend)
+        }
+        Plan::Group => {
+            fuzz_group(u, backend)?;
+            fuzz_group_matches_portable(u, backend)
+        }
+    }
+}
+
+struct Run<'a, 'b> {
+    plan: Plan,
+    u: &'a mut Unstructured<'b>,
+}
+
+impl WithBackend for Run<'_, '_> {
+    type Output = arbitrary::Result<()>;
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        run_with_backend(self.plan, self.u, backend)
     }
 }
 
 /// Compares field operations at the loosest input allowed by [`FVec`].
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(super) fn check_backend_at_bounds<R: Backend, B: Backend>(reference: R, backend: B) {
+#[cfg(test)]
+fn check_backend_at_bounds_with_backend<B: Backend>(backend: B) {
+    let reference = super::portable::Backend::new();
     let max = FVec {
         limbs: [[MASK_52; LANES]; 5],
     };
@@ -319,13 +354,30 @@ pub(super) fn check_backend_at_bounds<R: Backend, B: Backend>(reference: R, back
     );
 }
 
-/// Compares a backend's field and group operations with a reference backend.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub(super) fn fuzz_backend_against<R: Backend, B: Backend>(
+#[cfg(test)]
+struct CheckBackendAtBounds;
+
+#[cfg(test)]
+impl WithBackend for CheckBackendAtBounds {
+    type Output = ();
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        check_backend_at_bounds_with_backend(backend);
+    }
+}
+
+/// Compares the dispatched backend with the portable backend at field input bounds.
+#[cfg(test)]
+pub fn check_backend_at_bounds() {
+    super::with_backend(CheckBackendAtBounds);
+}
+
+/// Checks that a backend's field operations match the portable backend.
+fn fuzz_field_matches_portable<B: Backend>(
     u: &mut Unstructured<'_>,
-    reference: R,
     backend: B,
 ) -> arbitrary::Result<()> {
+    let reference = super::portable::Backend::new();
     let a = arbitrary_fvec(u)?;
     let b = arbitrary_fvec(u)?;
     assert_f_eq(reference.add(a, b), backend.add(a, b), "backend addition");
@@ -342,6 +394,15 @@ pub(super) fn fuzz_backend_against<R: Backend, B: Backend>(
     );
     assert_f_eq(reference.square(a), backend.square(a), "backend square");
 
+    Ok(())
+}
+
+/// Checks that a backend's group operations match the portable backend.
+fn fuzz_group_matches_portable<B: Backend>(
+    u: &mut Unstructured<'_>,
+    backend: B,
+) -> arbitrary::Result<()> {
+    let reference = super::portable::Backend::new();
     let scalar = u.arbitrary::<u16>()?;
     let basepoint = basepoint(reference);
     let point = scale(reference, basepoint, u32::from(scalar));
@@ -371,6 +432,7 @@ pub(super) fn fuzz_backend_against<R: Backend, B: Backend>(
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct DispatchComputation {
     field: FVec,
@@ -378,6 +440,7 @@ struct DispatchComputation {
     affine: GAffineVec,
 }
 
+#[cfg(test)]
 impl WithBackend for DispatchComputation {
     type Output = (FVec, GVec);
 

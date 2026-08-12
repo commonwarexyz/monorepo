@@ -20,3 +20,8 @@ extern crate alloc;
 commonware_macros::stability_mod!(ALPHA, mod curve);
 commonware_macros::stability_mod!(ALPHA, pub mod key_exchange);
 commonware_macros::stability_mod!(ALPHA, pub mod signing);
+
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz;
+});
