@@ -95,8 +95,8 @@ deployment of 50 validators, it sustained 200 blocks per second with
 Chou</a></div>
                         <div class="date">August 12th, 2026</div>
         </div>
-        <p>Simplex can now produce blocks as fast as its leader can build
-        them.</p>
+        <p>Simplex can now produce blocks as fast as its leader can
+        build them.</p>
         <p>Today, we’re introducing <a
         href="https://github.com/commonwarexyz/monorepo/pull/3352">Stable
         Leader</a> and <a
@@ -105,16 +105,16 @@ Chou</a></div>
         href="https://eprint.iacr.org/2023/463">Simplex</a> views.
         Stable Leader keeps one proposer for many views in a row,
         reducing handoff overhead. Optimistic Validation lets that
-        leader keep proposing and validators keep voting without
-        waiting for the previous view’s notarization. Together, they
-        turn Simplex into a high-frequency decentralized sequencer, with
+        leader keep proposing and validators keep voting without waiting
+        for the previous view’s notarization. Together, they turn
+        Simplex into a high-frequency decentralized sequencer, with
         several views moving through the network at once. For users,
         more frequent proposals mean less time waiting for a transaction
         to enter the next block.</p>
         <p>In a global deployment with 50 validators, this Simplex
         variant sustained 200 blocks per second with 300ms finality to
-        your browser. At 5ms per block, Simplex moves faster
-        than most monitors refresh.</p>
+        your browser. At 5ms per block, Simplex moves faster than most
+        monitors refresh.</p>
         <style>
           .simplex-loop {
             aspect-ratio: 1024 / 430;
@@ -174,8 +174,8 @@ Chou</a></div>
         href="https://eprint.iacr.org/2023/1916">Sing a Song of
         Simplex</a> and Commonware’s <a
         href="https://arxiv.org/abs/2603.11797">Carnot</a>. One leader
-        proposes throughout the term, reducing proposer handoffs
-        from one per view to one per term. Within the term, the leader
+        proposes throughout the term, reducing proposer handoffs from
+        one per view to one per term. Within the term, the leader
         already knows the previous block and its ancestry before a
         single network message arrives. An honest leader also knows it
         did not equivocate, so it can begin building and distributing
@@ -271,10 +271,10 @@ Chou</a></div>
         proposal.</p>
         <p>Longer terms reduce handoff overhead but give one leader more
         consecutive proposals. With 5ms views, a 10,000-view term lasts
-        roughly 50 seconds. If a leader goes offline,
-        nullifying its first stalled view skips the rest of the term and
-        rotates to the next leader. One timeout therefore covers the
-        offline leader’s entire term.</p>
+        roughly 50 seconds. If a leader goes offline, nullifying its
+        first stalled view skips the rest of the term and rotates to the
+        next leader. One timeout therefore covers the offline leader’s
+        entire term.</p>
         <p>A Byzantine leader could still finalize blocks while
         selectively censoring transactions. This risk also exists with
         rotating leaders, but longer terms can increase inclusion delay
@@ -291,8 +291,8 @@ Chou</a></div>
         new data. That finer schedule means orderbooks, batchers, and
         games respond to new input as fast as a traditional web
         page.</p>
-        <p>This design maintains a single proposal chain. Within a stable
-        term, the leader knows the parent it is extending, so
+        <p>This design maintains a single proposal chain. Within a
+        stable term, the leader knows the parent it is extending, so
         applications can evaluate stateful transitions against a
         predictable pending state. Multiple Concurrent Proposer
         constructions address a different bottleneck. <a
