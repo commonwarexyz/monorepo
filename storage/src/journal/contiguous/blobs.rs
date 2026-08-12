@@ -422,6 +422,15 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
+    /// Flush the tail writer's buffered bytes to storage without syncing.
+    ///
+    /// Flushed bytes are not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [`Self::start_sync`]) completes.
+    pub(super) async fn flush(mut self) -> Result<Self, Error> {
+        self.tail = self.tail.flush().await?;
+        Ok(self)
+    }
+
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
     pub(super) async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
