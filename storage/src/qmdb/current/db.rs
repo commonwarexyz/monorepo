@@ -714,6 +714,17 @@ where
         Ok((self, handle))
     }
 
+    /// Flush buffered state to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [Self::sync]) completes.
+    #[tracing::instrument(name = "qmdb.current.db.flush", level = "info", skip_all)]
+    #[boxed]
+    pub async fn flush(mut self) -> Result<Self, Error<F>> {
+        self.any = self.any.flush().await?;
+        Ok(self)
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
@@ -1929,6 +1940,47 @@ mod tests {
                 |i| Sha256::hash(&[&i.to_be_bytes()]),
             )
             .await;
+        });
+    }
+
+    /// Flushing applied state before start_sync leaves the committed state recoverable on reopen,
+    /// including the grafted bitmap contribution to the root.
+    #[test_traced]
+    fn test_flush_then_start_sync_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("first"),
+                fixed_config::<OneCap>("flush-start-sync-recovery"),
+                None,
+            )
+            .await
+            .unwrap();
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let merkleized = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.flush().await.unwrap();
+            let (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let root = db.root();
+            drop(db);
+
+            let db = MmrDb::init(
+                ctx.child("second"),
+                fixed_config::<OneCap>("flush-start-sync-recovery"),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
         });
     }
 
