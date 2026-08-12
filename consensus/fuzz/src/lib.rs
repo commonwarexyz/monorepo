@@ -2317,7 +2317,16 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         );
         invariants::check::<P>(term_length, reporter_only.as_slice());
         if let Some(index) = omitted_reporter {
-            invariants::check_notarization_unlocks_finalize_quorum(&reporter_only[index]);
+            // The finalizer wait excludes the victim, so a recovery whose
+            // trigger is already in its log can still be in flight between
+            // batcher and voter. Recovery is message-driven: one quiescing
+            // sleep drains it, and only a recovery pending across both
+            // snapshots is genuinely stuck.
+            let earlier = invariants::unresolved_finalize_recoveries(&reporter_only[index]);
+            if !earlier.is_empty() {
+                context.sleep(MAX_SLEEP_DURATION).await;
+                invariants::check_finalize_recoveries_drained(&reporter_only[index], &earlier);
+            }
         }
         (true, rejected_certification_observed)
     })
