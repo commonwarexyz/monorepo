@@ -331,12 +331,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -427,12 +427,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 

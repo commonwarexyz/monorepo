@@ -107,7 +107,6 @@ impl TestDb {
         }
     }
 
-    /// A database with test-controlled syncs and pruning.
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
             sync: Mutex::new(None),
@@ -139,14 +138,14 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+    async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
         if let Some(control) = &self.control {
             control.applied.fetch_add(1, Ordering::Relaxed);
         }
         Ok(self)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Self::Error> {
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);

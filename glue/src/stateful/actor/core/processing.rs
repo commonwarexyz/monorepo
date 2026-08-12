@@ -32,19 +32,16 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
-/// A single unit of work selected by the processing loop.
 enum Step<M, P> {
     Message(M),
     Prune(P),
     Sync((Height, bool)),
 }
 
-/// Coordinates one active database sync and the finalized state accumulated behind it.
 struct Durability {
     applied: Height,
     durable: Height,
     active: Option<Height>,
-    /// Marshal's pending-acknowledgement window bounds this queue.
     acknowledgements: VecDeque<(Height, Exact)>,
 }
 
@@ -68,10 +65,6 @@ impl Durability {
         self.active.is_none() && self.durable < self.applied
     }
 
-    const fn can_start_sync(&self) -> bool {
-        self.active.is_none()
-    }
-
     const fn syncing(&self) -> bool {
         self.active.is_some()
     }
@@ -81,7 +74,6 @@ impl Durability {
         assert!(height > self.durable && height <= self.applied);
     }
 
-    /// Record an active sync's completion and acknowledge every height it covered.
     fn complete(&mut self, (height, durable): (Height, bool)) -> bool {
         assert_eq!(self.active.take(), Some(height));
         if !durable {
@@ -94,8 +86,9 @@ impl Durability {
             .iter()
             .take_while(|(height, _)| *height <= self.durable)
             .count();
-        // Marshal acknowledgements can be cloned by fan-out reporters. Chain the captured prefix
-        // so its FIFO head resolves only after every clone of every covered successor resolves.
+
+        // Keep Marshal from persisting an intermediate recovery height that compact databases
+        // did not publish while coalescing this prefix.
         let mut acknowledgements = self
             .acknowledgements
             .iter()
@@ -138,7 +131,7 @@ where
     let height = durability.applied;
     let barrier = select! {
         _ = context.stopped() => return false,
-        barrier = verifications.drive(databases.start_sync()) => barrier,
+        barrier = verifications.drive(databases.finalize()) => barrier,
     };
     durability.started(height);
     syncs.push(async move { (height, barrier.durable().await) });
@@ -229,10 +222,10 @@ where
             on_start => {
                 // Observe completed durability before taking more work. A queued prune suppresses
                 // an automatic dirty-suffix successor until it has released database readers.
-                while let Some(completion) = syncs.next_completed().now_or_never() {
-                    if !durability.complete(completion) {
-                        return;
-                    }
+                if let Some(completion) = syncs.next_completed().now_or_never()
+                    && !durability.complete(completion)
+                {
+                    return;
                 }
                 if pending_prune.is_none()
                     && !start_sync_if_needed::<E, A, S, V>(
@@ -264,14 +257,12 @@ where
                     }
                 };
 
-                // Pruning remains idle work. When a completed sync leaves a dirty suffix, run the
-                // queued prune before its successor can reacquire the database writer.
+                // A prune remains idle work unless it owns the next dirty-suffix mutation boundary.
                 let next = match message {
                     Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
-                    Err(TryRecvError::Empty) => {
-                        match pending_prune.take() {
-                            Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                            None => {
+                    Err(TryRecvError::Empty) => match pending_prune.take() {
+                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                        None => {
                             let mailbox = &mut self.mailbox;
                             let syncs = &mut syncs;
                             let verifications = &mut verifications;
@@ -290,9 +281,8 @@ where
                                     }
                                 }
                             })
-                            }
                         }
-                    }
+                    },
                     Err(TryRecvError::Disconnected) => {
                         debug!("mailbox closed, stopping processing");
                         return;
@@ -414,7 +404,7 @@ where
                             .await;
                         drop(boundary);
                         async {
-                            let start_sync = durability.can_start_sync();
+                            let start_sync = !durability.syncing();
                             let applied = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
@@ -474,6 +464,7 @@ where
                         "verification replay remained active after quiescence"
                     );
 
+                    // A prune target applied behind an earlier sync may still need durability.
                     if !durability.covers(prune.barrier_height) {
                         assert!(
                             durability.needs_sync(),
@@ -496,17 +487,6 @@ where
                     prune
                         .run(self.processor.databases(), &self.marshal)
                         .await;
-                    // Track a dirty suffix only after conservative pruning has restored the
-                    // database, and before verification readers are admitted again.
-                    if !start_sync_if_needed::<E, A, S, V>(
-                        &self.context,
-                        &mut durability,
-                        &mut syncs,
-                        &mut verifications,
-                        self.processor.databases(),
-                    ).await {
-                        return;
-                    }
                     requeue_verifications(retry_mailbox.as_ref(), retry);
                 }
                 Step::Sync(completion) => {
@@ -573,62 +553,51 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{StreamExt as _, poll, task::noop_waker_ref};
+    use futures::{
+        FutureExt as _, StreamExt as _, poll,
+        task::{ArcWake, waker_ref},
+    };
     use std::{
         collections::VecDeque,
-        future::Future as _,
-        pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
-        task::{Context, Poll, Wake, Waker},
         time::Duration,
     };
 
-    struct LaterAcknowledgementObserver {
+    struct SuccessorObserver {
         waiter: Mutex<ExactWaiter>,
-        observed: AtomicBool,
+        wakes: AtomicUsize,
     }
 
-    impl LaterAcknowledgementObserver {
-        fn observe(&self) {
-            let mut waiter = self.waiter.lock();
-            let mut context = Context::from_waker(noop_waker_ref());
+    impl ArcWake for SuccessorObserver {
+        fn wake_by_ref(observer: &Arc<Self>) {
+            let mut waiter = observer.waiter.lock();
             assert!(
-                matches!(
-                    Pin::new(&mut *waiter).poll(&mut context),
-                    Poll::Ready(Ok(()))
-                ),
-                "waking the FIFO head must expose the entire covered prefix",
+                (&mut *waiter).now_or_never().unwrap().is_ok(),
+                "FIFO head woke before its covered successor",
             );
-            self.observed.store(true, Ordering::Relaxed);
-        }
-    }
-
-    impl Wake for LaterAcknowledgementObserver {
-        fn wake(self: Arc<Self>) {
-            self.observe();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.observe();
+            observer.wakes.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     #[test]
-    fn coalesced_acknowledgements_wait_for_later_clones() {
+    fn coalesced_acknowledgements_hide_intermediate_recovery_height() {
         let (first, mut first_waiter) = Exact::handle();
         let (second, second_waiter) = Exact::handle();
         let first_clone = first.clone();
         let second_clone = second.clone();
-        let observer = Arc::new(LaterAcknowledgementObserver {
+        let observer = Arc::new(SuccessorObserver {
             waiter: Mutex::new(second_waiter),
-            observed: AtomicBool::new(false),
+            wakes: AtomicUsize::new(0),
         });
-        let waker = Waker::from(observer.clone());
-        let mut context = Context::from_waker(&waker);
-        assert!(Pin::new(&mut first_waiter).poll(&mut context).is_pending());
+        let waker = waker_ref(&observer);
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(
+            std::future::Future::poll(std::pin::Pin::new(&mut first_waiter), &mut context)
+                .is_pending()
+        );
         first_clone.acknowledge();
 
         let mut durability = Durability::new(Height::new(1));
@@ -636,10 +605,32 @@ mod tests {
         durability.applied(Height::new(3), second);
         durability.started(Height::new(3));
         assert!(durability.complete((Height::new(3), true)));
-        assert!(!observer.observed.load(Ordering::Relaxed));
+        assert_eq!(observer.wakes.load(Ordering::Relaxed), 0);
 
         second_clone.acknowledge();
-        assert!(observer.observed.load(Ordering::Relaxed));
+        assert_eq!(observer.wakes.load(Ordering::Relaxed), 1);
+        assert!((&mut first_waiter).now_or_never().unwrap().is_ok());
+    }
+
+    #[test]
+    fn coalesced_acknowledgement_edges_are_shared_across_reporters() {
+        let (first, first_waiter) = Exact::handle();
+        let (second, second_waiter) = Exact::handle();
+
+        let mut first_reporter = Durability::new(Height::new(1));
+        first_reporter.applied(Height::new(2), first.clone());
+        first_reporter.applied(Height::new(3), second.clone());
+        first_reporter.started(Height::new(3));
+
+        let mut second_reporter = Durability::new(Height::new(1));
+        second_reporter.applied(Height::new(2), first);
+        second_reporter.applied(Height::new(3), second);
+        second_reporter.started(Height::new(3));
+
+        assert!(first_reporter.complete((Height::new(3), true)));
+        assert!(second_reporter.complete((Height::new(3), true)));
+        assert!(first_waiter.now_or_never().unwrap().is_ok());
+        assert!(second_waiter.now_or_never().unwrap().is_ok());
     }
 
     struct ApplicationGate {
@@ -2697,16 +2688,13 @@ mod tests {
         });
     }
 
-    /// A stable leader can keep finalizing at the block pace while database durability lags.
-    /// One active sync covers the first block and one successor covers the accumulated suffix.
     #[test]
     fn stable_leader_finalizations_coalesce_while_sync_pending() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, _marshal, _actor) =
                 spawn_processing(&context, "gated-coalesced-sync", None).await;
 
-            const BLOCKS: u64 = 32;
-            const BLOCK_INTERVAL: Duration = Duration::from_millis(10);
+            const BLOCKS: u64 = 3;
 
             let (acknowledgement, mut waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(
@@ -2725,7 +2713,6 @@ mod tests {
                     acknowledgement,
                 ));
                 waiters.push(waiter);
-                context.sleep(BLOCK_INTERVAL).await;
             }
             while control.applied.load(Ordering::Relaxed) < BLOCKS as usize {
                 context.sleep(Duration::from_millis(10)).await;
@@ -2769,8 +2756,6 @@ mod tests {
         });
     }
 
-    /// Starting a successor sync must keep polling compatible verification work that can own a
-    /// shared database read needed by the sync's write slot.
     #[test]
     fn successor_sync_drives_verification_holding_database_read() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {

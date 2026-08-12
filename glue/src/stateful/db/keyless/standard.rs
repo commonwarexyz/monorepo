@@ -299,12 +299,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -388,12 +388,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_keyless_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -569,12 +569,10 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
-                let (database, sync) = <FixedDb as ManagedDb<_>>::start_sync(database)
-                    .await
-                    .unwrap();
+                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
                 sync.await.expect("database sync failed");
             }

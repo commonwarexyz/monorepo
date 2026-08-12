@@ -548,12 +548,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -653,12 +653,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -836,12 +836,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -946,12 +946,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -1197,11 +1197,13 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    /// Finalize `batch` into `db` and wait for the database sync.
     #[boxed]
-    async fn finalize<D: ManagedDb<deterministic::Context>>(db: D, batch: D::Merkleized) -> D {
-        let db = D::finalize(db, batch).await.unwrap();
-        let (db, sync) = D::start_sync(db).await.unwrap();
+    async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
+        db: D,
+        batch: D::Merkleized,
+    ) -> D {
+        let db = D::apply(db, batch).await.unwrap();
+        let (db, sync) = D::finalize(db).await.unwrap();
         sync.await.expect("database sync failed");
         db
     }
@@ -1316,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_fixed_managed_db_finalizes_batch_and_proves_exclusion() {
+    fn ordered_fixed_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-fixed-managed-db", &context);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -1340,7 +1342,7 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                slot.put(finalize::<OrderedFixedDb>(database, merkleized).await);
+                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized).await);
             }
 
             let guard = db.read().await;
@@ -1374,7 +1376,7 @@ mod tests {
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            // Seed keys 0..50 and finalize.
+            // Seed keys 0..50 and persist them.
             let mut seed = db.new_batch_for_test::<_>().await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -1384,7 +1386,7 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                slot.put(finalize::<OrderedFixedDb>(database, merkleized).await);
+                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized).await);
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
@@ -1439,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_variable_managed_db_finalizes_batch_and_proves_exclusion() {
+    fn ordered_variable_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let config = variable_config("ordered-variable-managed-db", &context);
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -1463,7 +1465,7 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                slot.put(finalize::<OrderedVariableDb>(database, merkleized).await);
+                slot.put(apply_and_finalize::<OrderedVariableDb>(database, merkleized).await);
             }
 
             let guard = db.read().await;
@@ -1556,7 +1558,7 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                slot.put(finalize::<OrderedFixedDb>(database, merkleized1).await);
+                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized1).await);
             }
             let target_after_first = {
                 let guard = db.read().await;
@@ -1576,7 +1578,7 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                slot.put(finalize::<OrderedFixedDb>(database, merkleized2).await);
+                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized2).await);
             }
 
             {

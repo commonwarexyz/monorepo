@@ -310,7 +310,7 @@ where
     /// Once the database set is ready, the wrapper calls this for every
     /// finalized block it receives from marshal before releasing that block's
     /// marshal acknowledgement. Blocks applied through normal processing are
-    /// reported after [`DatabaseSet::finalize`] succeeds: the block's state is
+    /// reported after [`DatabaseSet::apply`] succeeds: the block's state is
     /// readable from the databases, but durability through that block may still
     /// be pending. When an earlier database sync is active, the sync covering
     /// this block may not have started yet. Blocks already reflected by startup

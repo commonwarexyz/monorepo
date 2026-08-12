@@ -480,8 +480,6 @@ where
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// applied state.
 ///
-/// `finalize` applies the merkleized batch's changeset, while `start_sync`
-/// starts persisting applied state and reports durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -550,12 +548,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -658,12 +656,12 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
-    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
 
@@ -855,10 +853,10 @@ mod tests {
                 .unwrap();
 
             let (slot, database) = db.write().await;
-            let database = <UnorderedFixedDb as ManagedDb<_>>::finalize(database, winner)
+            let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, winner)
                 .await
                 .unwrap();
-            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::start_sync(database)
+            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
                 .await
                 .unwrap();
             slot.put(database);
@@ -887,7 +885,7 @@ mod tests {
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            // Seed keys 0..50 and finalize.
+            // Seed keys 0..50 and persist them.
             let mut seed = db.new_batch_for_test::<_>().await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -897,10 +895,10 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                let database = <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
-                let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::start_sync(database)
+                let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
                     .await
                     .unwrap();
                 slot.put(database);
@@ -968,11 +966,8 @@ mod tests {
         Sequential,
     >;
 
-    /// `finalize` must return with the batch readable through the shared handle
-    /// without starting durability. `start_sync` starts the flush and reports
-    /// durability on the returned handle.
     #[test]
-    fn finalize_does_not_start_sync() {
+    fn apply_does_not_finalize() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -997,29 +992,25 @@ mod tests {
 
             let starts = pending.starts();
             let (slot, database) = db.write().await;
-            let database = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+            let database = <DelayedFixedDb as ManagedDb<_>>::apply(database, merkleized)
                 .await
                 .unwrap();
             slot.put(database);
 
-            assert_eq!(
-                pending.starts(),
-                starts,
-                "finalize must not start durability",
-            );
+            assert_eq!(pending.starts(), starts, "apply must not start durability");
             {
                 let guard = db.read().await;
                 assert_eq!(guard.get(&key).await.unwrap(), Some(value));
             }
 
             let (slot, database) = db.write().await;
-            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::start_sync(database)
+            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database)
                 .await
                 .unwrap();
             slot.put(database);
             assert!(
                 pending.starts() > pending.completions(),
-                "start_sync must leave its flush parked",
+                "finalize must leave its flush parked",
             );
 
             release_pending_syncs(&pending);

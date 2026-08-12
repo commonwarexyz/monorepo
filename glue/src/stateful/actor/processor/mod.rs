@@ -931,9 +931,9 @@ where
         if let Some(owner) = reconstruction {
             owner.finish(Ok(()));
         }
-        self.execution.databases.finalize(batch).await;
+        self.execution.databases.apply(batch).await;
         let barrier = if start_sync {
-            Some(self.execution.databases.start_sync().await)
+            Some(self.execution.databases.finalize().await)
         } else {
             None
         };
