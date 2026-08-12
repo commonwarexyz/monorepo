@@ -246,9 +246,13 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -312,9 +316,13 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -570,11 +578,14 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                let database = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                    .await
+                    .unwrap();
+                let (database, sync) = <FixedDb as ManagedDb<_>>::start_sync(database)
                     .await
                     .unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             let guard = db.read().await;

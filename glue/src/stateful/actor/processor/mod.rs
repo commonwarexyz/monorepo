@@ -14,9 +14,9 @@
 //!   inserting each intermediate result into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
-//!   databases and start flushing them (durability is reported via
-//!   [`Barrier`]), retaining only pending descendants of the finalized
-//!   winner.
+//!   databases, retaining only pending descendants of the finalized winner.
+//!   The actor coordinates durability separately so multiple finalizations
+//!   can be covered by one storage sync.
 //!
 //! Verification jobs are polled independently and scoped to their callers.
 //! Verification-owned lazy recovery shares [`Application::apply`] by block
@@ -479,8 +479,8 @@ impl Cancellation for Verification {
 
 /// State applied for a newly finalized block.
 pub(super) struct Applied<T> {
-    /// Deferred flush for the applied batch (see [`Barrier`]).
-    pub(super) barrier: Barrier,
+    /// Durability started for this block, when no earlier sync was active.
+    pub(super) barrier: Option<Barrier>,
 
     /// Prune made due by this finalization.
     pub(super) prune: DeferredPrune<T>,
@@ -497,8 +497,9 @@ pub(super) struct Prune<T> {
 impl<T> Prune<T> {
     /// Run database and marshal pruning.
     ///
-    /// Every finalize barrier through `barrier_height` is durable before this runs. The marshal
-    /// prune that follows retains every later block a restart could replay.
+    /// A completed database sync covers `barrier_height`, and no database sync remains active,
+    /// before this runs. The marshal prune that follows retains every later block a restart could
+    /// replay.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
     where
         E: Rng + Spawner + Metrics + Clock,
@@ -685,8 +686,7 @@ where
         &self.execution.databases
     }
 
-    #[cfg(test)]
-    fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
+    pub(super) fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
         self.execution.last_processed()
     }
 
@@ -848,7 +848,7 @@ where
             .await
     }
 
-    /// Apply finalized state, start persisting it, and prune dead in-memory forks.
+    /// Apply finalized state and prune dead in-memory forks.
     ///
     /// Returns [`None`] when the block was already processed (a duplicate
     /// report).
@@ -856,6 +856,7 @@ where
         &mut self,
         context: &E,
         block: &A::Block,
+        start_sync: bool,
     ) -> Option<Applied<PendingSyncTargets<A, E>>> {
         let finalized = Anchor::from(block);
         let (height, digest) = (finalized.height, finalized.digest);
@@ -930,7 +931,12 @@ where
         if let Some(owner) = reconstruction {
             owner.finish(Ok(()));
         }
-        let barrier = self.execution.databases.finalize(batch).await;
+        self.execution.databases.finalize(batch).await;
+        let barrier = if start_sync {
+            Some(self.execution.databases.start_sync().await)
+        } else {
+            None
+        };
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -1521,7 +1527,7 @@ mod tests {
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
+        db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -1559,6 +1565,16 @@ mod tests {
         },
         time::Duration,
     };
+
+    async fn assert_durable(barrier: Option<Barrier>) {
+        assert!(
+            barrier
+                .expect("finalization must start durability")
+                .durable()
+                .await,
+            "database sync must complete",
+        );
+    }
 
     type TestContext = ConsensusContext<Digest, ed25519::PublicKey>;
 
@@ -2085,19 +2101,19 @@ mod tests {
             block
         }
 
-        /// Finalize `block` and wait for its deferred flush.
+        /// Finalize `block` and wait for its database sync.
         /// Returns whether the block was newly applied (`false` for a
         /// duplicate report).
         #[boxed]
         async fn finalize(&mut self, block: Block) -> bool {
             let Some(Applied { barrier, .. }) = self
                 .processor
-                .finalize(self.context_cell.as_present(), &block)
+                .finalize(self.context_cell.as_present(), &block, true)
                 .await
             else {
                 return false;
             };
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             true
         }
 
@@ -2112,10 +2128,10 @@ mod tests {
         > {
             let Applied { barrier, prune } = self
                 .processor
-                .finalize(self.context_cell.as_present(), &block)
+                .finalize(self.context_cell.as_present(), &block, true)
                 .await
                 .expect("finalized block must apply");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             prune
         }
 
@@ -2426,11 +2442,11 @@ mod tests {
                 Some(ApplicationProbe::new(winner.digest(), [gate]));
             let execution = harness.processor.execution.clone();
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             assert!(futures::poll!(&mut finalize).is_pending());
             started.await.expect("finalized hook should start");
 
@@ -2444,7 +2460,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 
@@ -2458,11 +2474,11 @@ mod tests {
             let read = databases.read().await;
             let execution = harness.processor.execution.clone();
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             assert!(futures::poll!(&mut finalize).is_pending());
 
             let winner_digest = winner.digest();
@@ -2479,7 +2495,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 
@@ -2504,11 +2520,11 @@ mod tests {
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(winner.digest(), [gate]));
             let execution = harness.processor.execution.clone();
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             assert!(futures::poll!(&mut finalize).is_pending());
             started.await.expect("finalized hook should start");
 
@@ -2526,7 +2542,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
 
             assert!(execution.cache_pending(
                 winner.digest(),
@@ -2596,11 +2612,11 @@ mod tests {
             assert_eq!(boundary.disposition(&owner_progress), Disposition::Retain,);
             assert_eq!(boundary.disposition(&waiter_progress), Disposition::Retain,);
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &parent),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &parent,
+                true,
+            ));
             assert!(futures::poll!(&mut finalize).is_pending());
             finalized_started
                 .await
@@ -2629,7 +2645,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 
@@ -2689,11 +2705,11 @@ mod tests {
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &parent),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &parent,
+                true,
+            ));
             assert!(futures::poll!(&mut finalize).is_pending());
             finalized_started
                 .await
@@ -2717,7 +2733,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             assert_eq!(finalized_values.lock().as_slice(), [1]);
 
             retry_release
@@ -2759,11 +2775,11 @@ mod tests {
             assert!(futures::poll!(&mut owner).is_pending());
             owner_started.await.expect("winner replay should start");
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             assert!(
                 futures::poll!(&mut finalize).is_pending(),
                 "finalization should wait on the active winner replay",
@@ -2776,7 +2792,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             assert_eq!(
                 probe.calls(),
                 2,
@@ -2824,11 +2840,11 @@ mod tests {
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             assert!(
                 futures::poll!(&mut finalize).is_pending(),
                 "finalization should wait on the active winner replay",
@@ -2843,7 +2859,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
             assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
             assert_eq!(harness.processor.last_processed().digest, winner.digest());
             assert!(harness.processor.replays_idle());
@@ -2875,11 +2891,11 @@ mod tests {
             let (gate, mut started, release) = apply_gate();
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(winner.digest(), [gate]));
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
 
             select! {
                 _ = &mut finalize => {
@@ -2907,7 +2923,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 
@@ -2962,11 +2978,11 @@ mod tests {
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
 
-            let mut finalize = Box::pin(
-                harness
-                    .processor
-                    .finalize(harness.context_cell.as_present(), &winner),
-            );
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                &winner,
+                true,
+            ));
             assert!(futures::poll!(&mut finalize).is_pending());
 
             replay_release
@@ -2995,7 +3011,7 @@ mod tests {
             let Applied { barrier, .. } = finalize
                 .await
                 .expect("finalized block should be newly applied");
-            assert!(barrier.durable().await, "finalize flush must complete");
+            assert_durable(barrier).await;
         });
     }
 

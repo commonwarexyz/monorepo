@@ -548,9 +548,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -649,9 +653,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -828,9 +836,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -934,9 +946,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -1181,12 +1197,12 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    /// Finalize `batch` into `db` and wait for the deferred flush, boxing the future
-    /// ([`ManagedDb::finalize`] embeds the database in its state machine).
+    /// Finalize `batch` into `db` and wait for the deferred flush.
     #[boxed]
     async fn finalize<D: ManagedDb<deterministic::Context>>(db: D, batch: D::Merkleized) -> D {
-        let (db, sync) = D::finalize(db, batch).await.unwrap();
-        sync.await.expect("finalize flush failed");
+        let db = D::finalize(db, batch).await.unwrap();
+        let (db, sync) = D::start_sync(db).await.unwrap();
+        sync.await.expect("database sync failed");
         db
     }
 

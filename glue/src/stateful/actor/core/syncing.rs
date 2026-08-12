@@ -339,9 +339,10 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     let Applied { barrier, prune } = processor
-                        .finalize(self.context.as_present(), block.as_ref())
+                        .finalize(self.context.as_present(), block.as_ref(), true)
                         .await
                         .expect("sync handoff block cannot be a duplicate");
+                    let barrier = barrier.expect("sync handoff must start durability");
 
                     // The processing loop's flush pool does not exist yet, so observe the
                     // deferred flush inline. Keep state-sync metadata in progress until every
@@ -805,7 +806,7 @@ mod tests {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let databases = Shared::new(
                 "test",
-                TestDb::with_finalize(Handle::ready(Err(RuntimeError::Aborted))),
+                TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
             );
             harness
                 .syncing
