@@ -882,6 +882,9 @@ pub trait WithBackend {
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
 
+// Scalar multiplication on the Montgomery form of the curve, for X25519.
+pub mod montgomery;
+
 // Now, a module for each backend.
 #[cfg(target_arch = "x86_64")]
 mod avx512;
