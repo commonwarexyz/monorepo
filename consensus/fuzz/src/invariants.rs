@@ -26,6 +26,14 @@ use std::{
     hash::Hash,
 };
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ExactVoteScope {
+    Own(u32),
+    Peer,
+}
+
+type ExactVotes = BTreeMap<(ExactVoteScope, Round, Vec<u8>), BTreeSet<Proposal<Sha256Digest>>>;
+
 /// Safety-observation forms accepted by [`check`].
 ///
 /// Extracted replica states and consensus mock Reporter slices run the basic
@@ -157,6 +165,24 @@ fn entered_round_via_nullification(
                 ..Round::new(epoch, View::new(view)),
         )
         .any(|nullified| next_term_start(nullified.view().get(), term_length) == view)
+}
+
+fn timeout_trigger_exempted(
+    round: Round,
+    term_length: TermLength,
+    observed_nullifications: &BTreeSet<Round>,
+    observed_finalizations: &BTreeSet<Round>,
+    successful_certifications: &BTreeSet<Round>,
+) -> bool {
+    observed_nullifications.iter().any(|nullified| {
+        nullified.epoch() == round.epoch()
+            && next_term_start(nullified.view().get(), term_length) > round.view().get()
+    }) || observed_finalizations
+        .iter()
+        .any(|finalized| finalized >= &round)
+        || successful_certifications
+            .iter()
+            .any(|certified| certified >= &round)
 }
 
 fn check_basic_invariants(term_length: TermLength, replicas: Vec<ReplicaState>) {
@@ -1149,7 +1175,11 @@ fn check_fuzz_invariants<E, S, L>(
     L: Elector<S>,
     L::Elector: Clone,
 {
-    type ExactVotes = BTreeMap<(Round, Vec<u8>), BTreeSet<Proposal<Sha256Digest>>>;
+    // A reporter's own exact votes are incarnation-scoped because the batcher
+    // can report a constructed vote before the voter has durably synced it.
+    // Peer votes are durable before broadcast and remain comparable across
+    // observer generations. The summary reporter has no generation metadata
+    // and retains the rare own-vote false-positive window across restarts.
     type ApplicationProposal = (Round, (View, Sha256Digest), Sha256Digest);
     type CertificateBacking = BTreeSet<(Proposal<Sha256Digest>, Option<Vec<Vec<u8>>>)>;
     type CertifyEvidence = BTreeMap<Vec<u8>, BTreeSet<(Round, Sha256Digest)>>;
@@ -1195,8 +1225,17 @@ fn check_fuzz_invariants<E, S, L>(
         let mut certified_parents: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut certified_activity_views: BTreeSet<u64> = BTreeSet::new();
         let mut predecessor_evidence: BTreeSet<u64> = BTreeSet::new();
-        let mut own_nullified: BTreeSet<Round> = BTreeSet::new();
+        let mut own_nullified: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        // Finalization observations are durable, order-independent healing
+        // evidence. Own Nullify reports are not durability-gated, so the
+        // healing gate uses the incarnation-scoped `own_nullified` set.
         let mut observed_finalizations: BTreeSet<Round> = BTreeSet::new();
+        let mut timeout_triggers: BTreeMap<u32, BTreeMap<Round, BTreeSet<&'static str>>> =
+            BTreeMap::new();
+        let mut trigger_observed_nullifications: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        let mut trigger_observed_finalizations: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        let mut trigger_successful_certifications: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
+        let mut trigger_own_votes: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
         let mut accepted_signed: BTreeSet<(Round, View, Sha256Digest)> = BTreeSet::new();
 
         // Resolves an attributable certificate's signer bitmap to participant
@@ -1267,6 +1306,24 @@ fn check_fuzz_invariants<E, S, L>(
             };
 
         for recorded in &events {
+            // A durable restart re-reports journaled activities in their
+            // original order under a new generation. Scope order-sensitive
+            // state to that incarnation so replay does not appear to reverse
+            // prior activity.
+            let incarnation_own_nullified = own_nullified.entry(recorded.generation).or_default();
+            let incarnation_timeout_triggers =
+                timeout_triggers.entry(recorded.generation).or_default();
+            let incarnation_trigger_observed_nullifications = trigger_observed_nullifications
+                .entry(recorded.generation)
+                .or_default();
+            let incarnation_trigger_observed_finalizations = trigger_observed_finalizations
+                .entry(recorded.generation)
+                .or_default();
+            let incarnation_trigger_successful_certifications = trigger_successful_certifications
+                .entry(recorded.generation)
+                .or_default();
+            let incarnation_trigger_own_votes =
+                trigger_own_votes.entry(recorded.generation).or_default();
             match &recorded.event {
                 Event::Activity { valid: false, .. } => {}
                 Event::Activity {
@@ -1282,6 +1339,16 @@ fn check_fuzz_invariants<E, S, L>(
                         }
                         Activity::Nullification(certificate) => {
                             observed_nullifications.insert(certificate.round());
+                            incarnation_trigger_observed_nullifications.insert(certificate.round());
+                        }
+                        Activity::Notarize(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.proposal.round);
+                        }
+                        Activity::Nullify(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.round);
+                        }
+                        Activity::Finalize(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.proposal.round);
                         }
                         _ => {}
                     }
@@ -1307,6 +1374,8 @@ fn check_fuzz_invariants<E, S, L>(
                             if correct_observers.contains(public_key.as_ref()) {
                                 record_exact_proposal(
                                     &mut exact_notarizes,
+                                    recorded.generation,
+                                    observer,
                                     vote.proposal.round,
                                     public_key,
                                     &vote.proposal,
@@ -1329,6 +1398,8 @@ fn check_fuzz_invariants<E, S, L>(
                                     if correct_observers.contains(public_key.as_ref()) {
                                         record_exact_proposal(
                                             &mut exact_notarizes,
+                                            recorded.generation,
+                                            observer,
                                             certificate.proposal.round,
                                             public_key,
                                             &certificate.proposal,
@@ -1344,6 +1415,8 @@ fn check_fuzz_invariants<E, S, L>(
                             if correct_observers.contains(public_key.as_ref()) {
                                 record_exact_proposal(
                                     &mut exact_finalizes,
+                                    recorded.generation,
+                                    observer,
                                     vote.proposal.round,
                                     public_key,
                                     &vote.proposal,
@@ -1365,6 +1438,8 @@ fn check_fuzz_invariants<E, S, L>(
                                     if correct_observers.contains(public_key.as_ref()) {
                                         record_exact_proposal(
                                             &mut exact_finalizes,
+                                            recorded.generation,
+                                            observer,
                                             certificate.proposal.round,
                                             public_key,
                                             &certificate.proposal,
@@ -1494,7 +1569,7 @@ fn check_fuzz_invariants<E, S, L>(
                             // permanently refuses notarize construction once
                             // broadcast_nullify is set.
                             assert!(
-                                !own_nullified.contains(&vote.proposal.round),
+                                !incarnation_own_nullified.contains(&vote.proposal.round),
                                 "Invariant violation: local notarize after own nullify: observer {observer_bytes:?}, proposal {:?}",
                                 vote.proposal
                             );
@@ -1548,7 +1623,7 @@ fn check_fuzz_invariants<E, S, L>(
                                     vote.round
                                 );
                             }
-                            own_nullified.insert(vote.round);
+                            incarnation_own_nullified.insert(vote.round);
                         }
                         Activity::Finalize(vote) if vote.signer() == observer_idx => {
                             // Invariant: own_nullify_gates_same_term_finalize
@@ -1565,8 +1640,9 @@ fn check_fuzz_invariants<E, S, L>(
                             // evidence.
                             let view = vote.proposal.round.view().get();
                             let epoch = vote.proposal.round.epoch();
+
                             if view >= 1
-                                && let Some(nullified) = own_nullified
+                                && let Some(nullified) = incarnation_own_nullified
                                     .range(
                                         Round::new(epoch, View::new(term_start(view, term_length)))
                                             ..Round::new(epoch, View::new(view)),
@@ -1608,6 +1684,8 @@ fn check_fuzz_invariants<E, S, L>(
                             certified_parents
                                 .insert((certificate.proposal.round, certificate.proposal.payload));
                             observed_finalizations.insert(certificate.proposal.round);
+                            incarnation_trigger_observed_finalizations
+                                .insert(certificate.proposal.round);
                             finalization_backing.insert((
                                 certificate.proposal.clone(),
                                 signer_keys(&certificate.certificate),
@@ -1642,6 +1720,12 @@ fn check_fuzz_invariants<E, S, L>(
                             // section states that a false result causes nullification
                             // and that the participant refuses to build on the rejected
                             // proposal.
+                            //
+                            // Reachability caveat: a finalization alone can make a
+                            // round eligible for find_parent, so this implication is
+                            // not protocol-general. Current audit targets cannot pair
+                            // a local false certification with that finalization-only
+                            // parent path; revisit this assertion if they gain one.
                             assert!(
                                 !failed_certifications.contains(&parent),
                                 "Invariant violation: failed certification used as parent: observer {observer_bytes:?}, parent {parent:?}, child round {:?}",
@@ -1676,6 +1760,15 @@ fn check_fuzz_invariants<E, S, L>(
                         } => {
                             accepted_proposals.insert((context.round, context.parent, *payload));
                         }
+                        AutomatonEvent::ProposeCompleted {
+                            context,
+                            outcome: Completion::Closed,
+                        } => {
+                            incarnation_timeout_triggers
+                                .entry(context.round)
+                                .or_default()
+                                .insert("dropped propose");
+                        }
                         AutomatonEvent::VerifyCompleted {
                             context,
                             payload,
@@ -1686,6 +1779,10 @@ fn check_fuzz_invariants<E, S, L>(
                                 accepted_proposals.insert(key);
                             } else {
                                 rejected_proposals.insert(key);
+                                incarnation_timeout_triggers
+                                    .entry(context.round)
+                                    .or_default()
+                                    .insert("verify false");
                             }
                         }
                         AutomatonEvent::CertifyCompleted {
@@ -1696,8 +1793,13 @@ fn check_fuzz_invariants<E, S, L>(
                             let key = (*round, *payload);
                             if *result {
                                 successful_certifications.insert(key);
+                                incarnation_trigger_successful_certifications.insert(*round);
                             } else {
                                 failed_certifications.insert(key);
+                                incarnation_timeout_triggers
+                                    .entry(*round)
+                                    .or_default()
+                                    .insert("certify false");
                             }
                         }
                         _ => {}
@@ -1712,7 +1814,7 @@ fn check_fuzz_invariants<E, S, L>(
                             // abandoned with its own nullify vote. Certification
                             // is exempt: it legally continues after a nullify.
                             assert!(
-                                !own_nullified.contains(&context.round),
+                                !incarnation_own_nullified.contains(&context.round),
                                 "Invariant violation: application request after own nullify: observer {observer_bytes:?}, round {:?}",
                                 context.round
                             );
@@ -1853,6 +1955,50 @@ fn check_fuzz_invariants<E, S, L>(
             }
         }
 
+        // Invariant: timeout_triggers_make_progress
+        // A dropped proposal, rejected verification, or rejected
+        // certification arms a timeout for its view. Once same-incarnation
+        // evidence proves the node advanced, it must have emitted its own
+        // nullify vote unless a certificate moved it out of the view. A trigger
+        // in the run's final active view remains a legal prefix; bounded
+        // liveness checks detect a node that stays silent there. A restart
+        // terminates the prior incarnation, so only triggers from the latest
+        // generation remain actionable.
+        if let Some(generation) = events.last().map(|recorded| recorded.generation)
+            && let Some(triggers) = timeout_triggers.get(&generation)
+        {
+            let empty = BTreeSet::new();
+            let incarnation_own_nullified = own_nullified.get(&generation).unwrap_or(&empty);
+            let incarnation_observed_nullifications = trigger_observed_nullifications
+                .get(&generation)
+                .unwrap_or(&empty);
+            let incarnation_observed_finalizations = trigger_observed_finalizations
+                .get(&generation)
+                .unwrap_or(&empty);
+            let incarnation_successful_certifications = trigger_successful_certifications
+                .get(&generation)
+                .unwrap_or(&empty);
+            let incarnation_own_votes = trigger_own_votes.get(&generation).unwrap_or(&empty);
+
+            for (round, reasons) in triggers {
+                let exempted = timeout_trigger_exempted(
+                    *round,
+                    term_length,
+                    incarnation_observed_nullifications,
+                    incarnation_observed_finalizations,
+                    incarnation_successful_certifications,
+                );
+                let advanced = incarnation_own_votes.iter().any(|voted| voted > round);
+                if !advanced {
+                    continue;
+                }
+                assert!(
+                    incarnation_own_nullified.contains(round) || exempted,
+                    "Invariant violation: advanced past timeout trigger without nullify: observer {observer_bytes:?}, generation {generation}, round {round:?}, triggers {reasons:?}"
+                );
+            }
+        }
+
         // Invariant: certification_finalize_exact_proposal_coherence
         // When a correct reporter retains both its successful Certification
         // activity and its own finalize vote for a round, the full proposals
@@ -1878,20 +2024,20 @@ fn check_fuzz_invariants<E, S, L>(
         acceptance_evidence.insert(observer_bytes, accepted_signed);
     }
 
-    if let Some(((round, signer), proposals)) = exact_notarizes
+    if let Some(((scope, round, signer), proposals)) = exact_notarizes
         .iter()
         .find(|(_, proposals)| proposals.len() > 1)
     {
         panic!(
-            "Invariant violation: correct signer notarized multiple exact proposals in round {round:?}: signer {signer:?}, proposals {proposals:?}"
+            "Invariant violation: correct signer notarized multiple exact proposals in scope {scope:?}, round {round:?}: signer {signer:?}, proposals {proposals:?}"
         );
     }
-    if let Some(((round, signer), proposals)) = exact_finalizes
+    if let Some(((scope, round, signer), proposals)) = exact_finalizes
         .iter()
         .find(|(_, proposals)| proposals.len() > 1)
     {
         panic!(
-            "Invariant violation: correct signer finalized multiple exact proposals in round {round:?}: signer {signer:?}, proposals {proposals:?}"
+            "Invariant violation: correct signer finalized multiple exact proposals in scope {scope:?}, round {round:?}: signer {signer:?}, proposals {proposals:?}"
         );
     }
 
@@ -2192,14 +2338,21 @@ pub fn check_notarization_unlocks_finalize_quorum<E, S, L>(
     }
 }
 
-fn record_exact_proposal<P: AsRef<[u8]>>(
-    votes: &mut BTreeMap<(Round, Vec<u8>), BTreeSet<Proposal<Sha256Digest>>>,
+fn record_exact_proposal<P: AsRef<[u8]> + PartialEq>(
+    votes: &mut ExactVotes,
+    observer_generation: u32,
+    observer: &P,
     round: Round,
     signer: &P,
     proposal: &Proposal<Sha256Digest>,
 ) {
+    let scope = if signer == observer {
+        ExactVoteScope::Own(observer_generation)
+    } else {
+        ExactVoteScope::Peer
+    };
     votes
-        .entry((round, signer.as_ref().to_vec()))
+        .entry((scope, round, signer.as_ref().to_vec()))
         .or_default()
         .insert(proposal.clone());
 }
@@ -3385,6 +3538,159 @@ mod tests {
         );
     }
 
+    fn record_later_own_vote(reporter: &mut AuditReporter, schemes: &[id_mock::Scheme]) {
+        // Advance without adding any certificate exit that would exempt the trigger.
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(Epoch::new(1), View::new(1)))
+                .unwrap(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn dropped_proposal_must_make_progress() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_automaton(
+            &reporter,
+            AutomatonEvent::ProposeCompleted {
+                context: automaton_context(participants[0].clone(), &proposal),
+                outcome: Completion::Closed,
+            },
+        );
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn rejected_verification_must_make_progress() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn rejected_certification_must_make_progress() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        record_certify_result(&reporter, &proposal(1, 0, 0xA), false);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn timeout_trigger_exemptions_are_exact() {
+        let round = proposal(7, 6, 0xA).round;
+        let higher = proposal(8, 7, 0xB).round;
+        let lower = proposal(6, 5, 0xC).round;
+        let stale = proposal(5, 4, 0xD).round;
+        let term_length = TermLength::new(NZU32!(5));
+        let empty = BTreeSet::new();
+        let exempted = |nullifications: &BTreeSet<Round>,
+                        finalizations: &BTreeSet<Round>,
+                        certifications: &BTreeSet<Round>| {
+            timeout_trigger_exempted(
+                round,
+                term_length,
+                nullifications,
+                finalizations,
+                certifications,
+            )
+        };
+
+        assert!(exempted(&BTreeSet::from([lower]), &empty, &empty));
+        assert!(exempted(&BTreeSet::from([higher]), &empty, &empty));
+        assert!(exempted(&empty, &BTreeSet::from([higher]), &empty));
+        assert!(exempted(&empty, &empty, &BTreeSet::from([round])));
+        assert!(exempted(&empty, &empty, &BTreeSet::from([higher])));
+        assert!(!exempted(
+            &BTreeSet::from([stale]),
+            &BTreeSet::from([lower]),
+            &BTreeSet::from([lower])
+        ));
+    }
+
+    #[test]
+    fn higher_nullification_advancing_past_trigger_is_exempt() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let trigger = proposal(4, 3, 0xA);
+        record_certify_result(&reporter, &trigger, false);
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 5)));
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round(6)).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::new(NZU32!(5)), std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn higher_successful_certification_exempts_timeout_trigger() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        record_certify_result(&reporter, &proposal(1, 0, 0xA), false);
+        record_certify_result(&reporter, &proposal(2, 1, 0xB), true);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn timeout_trigger_is_satisfied_by_own_nullify() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], proposal.round).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn timeout_trigger_from_prior_generation_is_exempt() {
+        let (participants, schemes) = vote_fixture();
+        let reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        reporter.set_generation(1);
+        record_automaton(
+            &reporter,
+            AutomatonEvent::ProposeCompleted {
+                context: automaton_context(participants[0].clone(), &proposal),
+                outcome: Completion::Canceled,
+            },
+        );
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "advanced past timeout trigger without nullify")]
+    fn prior_generation_nullify_does_not_exempt_live_trigger() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(1, 0, 0xA);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], proposal.round).unwrap(),
+        ));
+        reporter.set_generation(1);
+        record_verify_result(&reporter, participants[1].clone(), &proposal, false);
+        record_later_own_vote(&mut reporter, &schemes);
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
     fn record_finalize_votes(
         reporter: &mut AuditReporter,
         schemes: &[id_mock::Scheme],
@@ -3486,6 +3792,44 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "notarized multiple exact proposals")]
+    fn peer_exact_proposal_non_equivocation_spans_observer_generations() {
+        let (participants, schemes) = vote_fixture();
+        let reporter_a = audit_reporter(0, &participants, &schemes);
+        let mut reporter_b = audit_reporter(1, &participants, &schemes);
+        reporter_b.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal(5, 3, 0xA)).unwrap(),
+        ));
+        reporter_b.set_generation(1);
+        reporter_b.report(Activity::Notarize(
+            Notarize::sign(&schemes[0], proposal(5, 4, 0xA)).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::ONE, &[reporter_a, reporter_b]);
+    }
+
+    #[test]
+    fn own_exact_proposal_non_equivocation_is_scoped_to_signer_generation() {
+        let (participants, _) = vote_fixture();
+        let observer = &participants[0];
+        let mut votes = ExactVotes::new();
+        for (generation, parent) in [(0, 3), (1, 4)] {
+            let proposal = proposal(5, parent, 0xA);
+            record_exact_proposal(
+                &mut votes,
+                generation,
+                observer,
+                proposal.round,
+                observer,
+                &proposal,
+            );
+        }
+
+        assert_eq!(votes.len(), 2);
+        assert!(votes.values().all(|proposals| proposals.len() == 1));
+    }
+
+    #[test]
     #[should_panic(expected = "conflicting notarization history")]
     fn complete_history_rejects_overwritten_conflicting_notarizations() {
         let (participants, schemes) = vote_fixture();
@@ -3562,6 +3906,9 @@ mod tests {
         reporter.report(Activity::Notarize(
             Notarize::sign(&schemes[1], proposal).unwrap(),
         ));
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[1], round(5)).unwrap(),
+        ));
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
@@ -3588,7 +3935,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_certification_at_the_end_of_a_prefix_is_allowed() {
+    fn timeout_trigger_without_advancement_is_allowed() {
         let (participants, schemes) = vote_fixture();
         let reporter = audit_reporter(0, &participants, &schemes);
         record_certify_result(&reporter, &proposal(5, 4, 0xA), false);
@@ -4198,6 +4545,114 @@ mod tests {
     }
 
     #[test]
+    fn pre_restart_healing_survives_pruned_replay() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round(1)).unwrap(),
+        ));
+        reporter.report(Activity::Finalization(finalization_activity_from(
+            &schemes,
+            &[1, 2, 3],
+            1,
+            0,
+            0xB,
+        )));
+
+        reporter.set_generation(1);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round(1)).unwrap(),
+        ));
+        let proposal = proposal(2, 1, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity_from(
+            &schemes,
+            &[1, 2, 3],
+            2,
+            1,
+            0xA,
+        )));
+        record_certify_result(&reporter, &proposal, true);
+        reporter.report(Activity::Finalize(
+            Finalize::sign(&schemes[0], proposal).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::new(NZU32!(5)), std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn unreplayed_pre_restart_nullify_does_not_gate_live_finalize() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        reporter.report(Activity::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], round(1)).unwrap(),
+        ));
+
+        reporter.set_generation(1);
+        let proposal = proposal(2, 1, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity_from(
+            &schemes,
+            &[1, 2, 3],
+            2,
+            1,
+            0xA,
+        )));
+        record_certify_result(&reporter, &proposal, true);
+        reporter.report(Activity::Finalize(
+            Finalize::sign(&schemes[0], proposal).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::new(NZU32!(5)), std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn peer_exact_vote_bucket_does_not_alias_signer_generation_zero() {
+        let (participants, _) = vote_fixture();
+        let signer = &participants[0];
+        let peer_observer = &participants[1];
+        let round = round(5);
+        let mut votes = ExactVotes::new();
+
+        record_exact_proposal(&mut votes, 0, signer, round, signer, &proposal(5, 4, 0xA));
+        record_exact_proposal(
+            &mut votes,
+            1,
+            peer_observer,
+            round,
+            signer,
+            &proposal(5, 4, 0xB),
+        );
+
+        assert_eq!(votes.len(), 2);
+    }
+
+    #[test]
+    fn finalization_reported_before_queued_local_finalize_is_legal() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        let proposal = proposal(5, 4, 0xA);
+        reporter.report(Activity::Notarization(notarization_activity_from(
+            &schemes,
+            &[1, 2, 3],
+            5,
+            4,
+            0xA,
+        )));
+        record_certify_result(&reporter, &proposal, true);
+        reporter.report(Activity::Finalization(finalization_activity_from(
+            &schemes,
+            &[1, 2, 3],
+            5,
+            4,
+            0xA,
+        )));
+        reporter.report(Activity::Finalize(
+            Finalize::sign(&schemes[0], proposal).unwrap(),
+        ));
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
     fn certified_predecessor_authorizes_own_vote() {
         let (participants, schemes) = vote_fixture();
         let mut reporter = audit_reporter(0, &participants, &schemes);
@@ -4237,6 +4692,46 @@ mod tests {
         reporter.report(Activity::Nullify(
             Nullify::sign::<Sha256Digest>(&schemes[0], round(5)).unwrap(),
         ));
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn replayed_notarize_after_prior_generation_nullify_is_legal() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
+        let vote = proposal(5, 4, 0xA);
+        record_propose_success(&reporter, &vote);
+        let notarize = Notarize::sign(&schemes[0], vote).unwrap();
+        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round(5)).unwrap();
+        reporter.report(Activity::Notarize(notarize.clone()));
+        reporter.report(Activity::Nullify(nullify.clone()));
+
+        reporter.set_generation(1);
+        reporter.report(Activity::Notarize(notarize));
+        reporter.report(Activity::Nullify(nullify));
+
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "local notarize after own nullify")]
+    fn live_notarize_after_replayed_nullify_is_rejected() {
+        let (participants, schemes) = vote_fixture();
+        let mut reporter = audit_reporter(0, &participants, &schemes);
+        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
+        let vote = proposal(5, 4, 0xA);
+        record_propose_success(&reporter, &vote);
+        let notarize = Notarize::sign(&schemes[0], vote).unwrap();
+        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round(5)).unwrap();
+        reporter.report(Activity::Notarize(notarize.clone()));
+        reporter.report(Activity::Nullify(nullify.clone()));
+
+        reporter.set_generation(1);
+        reporter.report(Activity::Notarize(notarize.clone()));
+        reporter.report(Activity::Nullify(nullify));
+        reporter.report(Activity::Notarize(notarize));
+
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 

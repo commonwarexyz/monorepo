@@ -6,8 +6,8 @@
 
 use super::BYZANTINE_IDX;
 use crate::{
-    CertifyChoice, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, POST_GST_WINDOW, PublicKeyOf,
-    SniffChannel, SniffingReceiver,
+    CertifyChoice, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, PublicKeyOf, SniffChannel,
+    SniffingReceiver,
     byzzfuzz::{
         ByzzFuzz,
         fault::ProcessFault,
@@ -43,6 +43,9 @@ use tracing::{Dispatch, dispatcher};
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+
+/// ByzzFuzz's post-GST recovery budget on the ordinary simulated links.
+const BYZZFUZZ_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 
 /// Sample a per-iteration [`CertifyChoice`] for ByzzFuzz. `SingleCancel` and
 /// `SinglePending` always target [`BYZANTINE_IDX`]: ByzzFuzz keeps Byzantine
@@ -442,7 +445,7 @@ async fn reach_gst_and_check_liveness<P: Simplex>(
         results = join_all(watchers) => {
             results.iter().all(|r| matches!(r, Ok(true)))
         },
-        _ = context.sleep(POST_GST_WINDOW) => false,
+        _ = context.sleep(BYZZFUZZ_LIVENESS_WINDOW) => false,
     };
 
     if !phase2_complete {
@@ -457,7 +460,7 @@ async fn reach_gst_and_check_liveness<P: Simplex>(
         }
         panic!(
             "byzzfuzz: no post-GST progress within {:?};{diag}",
-            POST_GST_WINDOW,
+            BYZZFUZZ_LIVENESS_WINDOW,
         );
     }
 }

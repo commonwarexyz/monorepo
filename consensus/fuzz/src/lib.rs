@@ -117,17 +117,31 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
 pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
+const FUZZ_RUNTIME_TIMEOUT_FLOOR: Duration = Duration::from_secs(360);
+const FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER: Duration = Duration::from_secs(4);
 /// Bounded pre-GST fault phase: how long network faults stay active before a
 /// run that has not already finished is given a GST transition. Shared by the
 /// ByzzFuzz runner and the marshal multi-node liveness runner.
 pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
-/// Bounded post-GST window: how long honest nodes have to recover once the
-/// network heals (process/byzantine faults stay active). Shared by the ByzzFuzz
-/// runner and the marshal multi-node liveness runner.
-pub(crate) const POST_GST_WINDOW: Duration = Duration::from_secs(360);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
+
+fn fuzz_runtime_timeout(required_containers: u64) -> Duration {
+    let work = u32::try_from(required_containers).unwrap_or(u32::MAX);
+    FUZZ_RUNTIME_TIMEOUT_PER_CONTAINER
+        .saturating_mul(work)
+        .max(FUZZ_RUNTIME_TIMEOUT_FLOOR)
+}
+
+fn bounded_fuzz_runtime_config(
+    raw_bytes: &[u8],
+    required_containers: u64,
+) -> deterministic::Config {
+    deterministic::Config::new()
+        .with_rng(Box::new(FuzzRng::new(raw_bytes.to_vec())))
+        .with_timeout(Some(fuzz_runtime_timeout(required_containers)))
+}
 
 pub(crate) fn fuzz_mailbox_size(
     u: &mut arbitrary::Unstructured<'_>,
@@ -406,6 +420,10 @@ pub struct FuzzInput {
     /// Per-iteration reporter wiring threaded into every honest engine
     /// the harness spawns.
     pub reporting: ReporterWiring,
+}
+
+fn should_bound_standard_liveness(input: &FuzzInput) -> bool {
+    input.partition.is_connected() && input.configuration.is_valid()
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -1839,8 +1857,7 @@ fn run_standard_once<P: simplex::Simplex>(
     happens_before: bool,
     warn_dispatch: Option<Dispatch>,
 ) -> Option<RunAudit> {
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -1981,7 +1998,7 @@ fn run_standard_once<P: simplex::Simplex>(
         )
         .await;
 
-        if input.partition.is_connected() && config.is_valid() {
+        if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -2080,8 +2097,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
     mut input: FuzzInput,
     notarize_omission: Option<NotarizeOmission>,
 ) -> (bool, bool) {
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(move |mut context| async move {
@@ -2230,7 +2246,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         )
         .await;
 
-        if input.partition.is_connected() && config.is_valid() {
+        if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             let omitted_validator = notarize_omission
                 .as_ref()
@@ -2286,8 +2302,14 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             })
         });
         invariants::check_no_invalid_reports_if_no_faults(config.faults, &summary_reporters);
-        invariants::check_vote_invariants(
-            config.faults as usize,
+        let byzantine: HashSet<usize> = if matches!(input.certify, CertifyChoice::RejectView { .. })
+        {
+            HashSet::new()
+        } else {
+            (0..config.faults as usize).collect()
+        };
+        invariants::check_vote_invariants_with_byzantine(
+            &byzantine,
             P::elector(term_length),
             Epoch::new(EPOCH),
             term_length,
@@ -2335,8 +2357,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
     // Three honest certifiers are exactly the finalize quorum here.
     input.certify = CertifyChoice::Always;
 
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
@@ -2570,6 +2591,7 @@ pub(crate) struct TwinsDisrupter {
 pub(crate) trait TwinsBackend<P: simplex::Simplex> {
     type State;
     type Case;
+    type Digest: commonware_cryptography::Digest;
 
     fn setup(
         &mut self,
@@ -2727,21 +2749,21 @@ pub(crate) async fn run_twins_with_backend<P, B>(
         let (resolver_sender, resolver_receiver) = resolver_network;
 
         let (vote_sender_primary, vote_sender_secondary) =
-            vote_sender.split_with(twins_network::vote_forwarder::<P>(
+            vote_sender.split_with(twins_network::vote_forwarder::<P, B::Digest>(
                 participants.clone(),
                 topology.scenario.clone(),
                 term_length,
             ));
         let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
             node_context.child("vote_split"),
-            twins_network::vote_router::<P>(
+            twins_network::vote_router::<P, B::Digest>(
                 participants.clone(),
                 topology.scenario.clone(),
                 term_length,
             ),
         );
         let (certificate_sender_primary, certificate_sender_secondary) = certificate_sender
-            .split_with(twins_network::certificate_forwarder::<P>(
+            .split_with(twins_network::certificate_forwarder::<P, B::Digest>(
                 participants.clone(),
                 topology.scenario.clone(),
                 term_length,
@@ -2750,7 +2772,7 @@ pub(crate) async fn run_twins_with_backend<P, B>(
         let (certificate_receiver_primary, certificate_receiver_secondary) = certificate_receiver
             .split_with(
                 node_context.child("certificate_split"),
-                twins_network::certificate_router::<P>(
+                twins_network::certificate_router::<P, B::Digest>(
                     participants.clone(),
                     topology.scenario.clone(),
                     term_length,
@@ -2758,7 +2780,7 @@ pub(crate) async fn run_twins_with_backend<P, B>(
                 ),
             );
         let (resolver_sender_primary, resolver_sender_secondary) =
-            resolver_sender.split_with(twins_network::resolver_forwarder::<P>(
+            resolver_sender.split_with(twins_network::resolver_forwarder::<P, B::Digest>(
                 participants.clone(),
                 topology.scenario.clone(),
                 term_length,
@@ -2767,7 +2789,7 @@ pub(crate) async fn run_twins_with_backend<P, B>(
         let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
             .split_with(
                 node_context.child("resolver_split"),
-                twins_network::resolver_router::<P>(
+                twins_network::resolver_router::<P, B::Digest>(
                     participants.clone(),
                     topology.scenario.clone(),
                     term_length,
@@ -2992,6 +3014,7 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
 impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
     type State = MockTwinsState<P>;
     type Case = ();
+    type Digest = Sha256Digest;
 
     async fn setup(&mut self, context: &mut deterministic::Context) -> TwinsSetup<P, Self::State> {
         let (mut oracle, participants, schemes, registrations) =
@@ -3401,8 +3424,7 @@ fn run_twins<P: simplex::Simplex>(
     // all-honest configuration would stall this quorum-tight one.
     input.certify = CertifyChoice::Always;
 
-    let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before.then(happens_before::capture::EventLog::new);
 
@@ -3985,6 +4007,12 @@ pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: Node
 mod tests {
     use super::*;
 
+    #[test]
+    fn fuzz_runtime_timeout_scales_for_large_in_tree_runs() {
+        assert_eq!(fuzz_runtime_timeout(30), FUZZ_RUNTIME_TIMEOUT_FLOOR);
+        assert_eq!(fuzz_runtime_timeout(1_000), Duration::from_secs(4_000));
+    }
+
     fn audit_input() -> FuzzInput {
         FuzzInput {
             raw_bytes: 0u64.to_be_bytes().to_vec(),
@@ -4023,6 +4051,11 @@ mod tests {
     fn audited_standard_checks_simplex_id_and_certificate_mock() {
         assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
         assert!(run_audited_standard_once::<simplex::SimplexCertificateMock>(audit_input()).0);
+    }
+
+    #[test]
+    fn audited_standard_progress_wait_accepts_normal_input() {
+        assert!(run_audited_standard_once::<simplex::SimplexId>(audit_input()).0);
     }
 
     #[test]

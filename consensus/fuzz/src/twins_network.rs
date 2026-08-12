@@ -15,7 +15,7 @@ use commonware_consensus::{
     },
     types::{TermLength, View},
 };
-use commonware_cryptography::{certificate::Verifier, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{Digest, certificate::Verifier};
 use commonware_p2p::{
     Recipients,
     simulated::{SplitOrigin, SplitTarget},
@@ -29,7 +29,7 @@ type PublicKey<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
 type TwinRecipients<P> = Recipients<PublicKey<P>>;
 type ForwardedRecipients<P> = Option<TwinRecipients<P>>;
 
-pub(crate) fn resolver_view<P: simplex::Simplex>(
+pub(crate) fn resolver_view<P: simplex::Simplex, D: Digest>(
     message: &IoBuf,
     codec: &<<P::Scheme as Verifier>::Certificate as Read>::Cfg,
 ) -> Option<View> {
@@ -38,15 +38,14 @@ pub(crate) fn resolver_view<P: simplex::Simplex>(
         ResolverPayload::Request(key) => Some(View::new(u64::from(key))),
         ResolverPayload::Response(bytes) => {
             let certificate =
-                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut bytes.as_ref(), codec)
-                    .ok()?;
+                Certificate::<P::Scheme, D>::decode_cfg(&mut bytes.as_ref(), codec).ok()?;
             Some(certificate.view())
         }
         ResolverPayload::Error => None,
     }
 }
 
-pub(crate) fn vote_forwarder<P: simplex::Simplex>(
+pub(crate) fn vote_forwarder<P: simplex::Simplex, D: Digest>(
     participants: Arc<[<P::Scheme as Verifier>::PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -56,7 +55,7 @@ pub(crate) fn vote_forwarder<P: simplex::Simplex>(
 + Clone
 + 'static {
     move |origin, _, message| {
-        let vote = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()).ok()?;
+        let vote = Vote::<P::Scheme, D>::decode(message.clone()).ok()?;
         let (primary, secondary) =
             scenario.partitions(vote.view(), term_length, participants.as_ref());
         match origin {
@@ -66,7 +65,7 @@ pub(crate) fn vote_forwarder<P: simplex::Simplex>(
     }
 }
 
-pub(crate) fn certificate_forwarder<P: simplex::Simplex>(
+pub(crate) fn certificate_forwarder<P: simplex::Simplex, D: Digest>(
     participants: Arc<[<P::Scheme as Verifier>::PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -79,8 +78,7 @@ pub(crate) fn certificate_forwarder<P: simplex::Simplex>(
     let codec = scheme.certificate_codec_config();
     move |origin, _, message| {
         let certificate =
-            Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut message.as_ref(), &codec)
-                .ok()?;
+            Certificate::<P::Scheme, D>::decode_cfg(&mut message.as_ref(), &codec).ok()?;
         let (primary, secondary) =
             scenario.partitions(certificate.view(), term_length, participants.as_ref());
         match origin {
@@ -90,20 +88,20 @@ pub(crate) fn certificate_forwarder<P: simplex::Simplex>(
     }
 }
 
-pub(crate) fn vote_router<P: simplex::Simplex>(
+pub(crate) fn vote_router<P: simplex::Simplex, D: Digest>(
     participants: Arc<[<P::Scheme as Verifier>::PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
 ) -> impl Fn(&(<P::Scheme as Verifier>::PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
     move |(sender, message)| {
-        let Ok(vote) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
+        let Ok(vote) = Vote::<P::Scheme, D>::decode(message.clone()) else {
             return SplitTarget::None;
         };
         scenario.route(vote.view(), term_length, sender, participants.as_ref())
     }
 }
 
-pub(crate) fn certificate_router<P: simplex::Simplex>(
+pub(crate) fn certificate_router<P: simplex::Simplex, D: Digest>(
     participants: Arc<[<P::Scheme as Verifier>::PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -112,7 +110,7 @@ pub(crate) fn certificate_router<P: simplex::Simplex>(
     let codec = scheme.certificate_codec_config();
     move |(sender, message)| {
         let Ok(certificate) =
-            Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut message.as_ref(), &codec)
+            Certificate::<P::Scheme, D>::decode_cfg(&mut message.as_ref(), &codec)
         else {
             return SplitTarget::None;
         };
@@ -125,7 +123,7 @@ pub(crate) fn certificate_router<P: simplex::Simplex>(
     }
 }
 
-pub(crate) fn resolver_forwarder<P: simplex::Simplex>(
+pub(crate) fn resolver_forwarder<P: simplex::Simplex, D: Digest>(
     participants: Arc<[<P::Scheme as Verifier>::PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -137,7 +135,7 @@ pub(crate) fn resolver_forwarder<P: simplex::Simplex>(
 + 'static {
     let codec = scheme.certificate_codec_config();
     move |origin, _, message| {
-        let view = resolver_view::<P>(message, &codec)?;
+        let view = resolver_view::<P, D>(message, &codec)?;
         let (primary, secondary) = scenario.partitions(view, term_length, participants.as_ref());
         match origin {
             SplitOrigin::Primary => Some(Recipients::Some(primary)),
@@ -146,7 +144,7 @@ pub(crate) fn resolver_forwarder<P: simplex::Simplex>(
     }
 }
 
-pub(crate) fn resolver_router<P: simplex::Simplex>(
+pub(crate) fn resolver_router<P: simplex::Simplex, D: Digest>(
     participants: Arc<[<P::Scheme as Verifier>::PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -154,7 +152,7 @@ pub(crate) fn resolver_router<P: simplex::Simplex>(
 ) -> impl Fn(&(<P::Scheme as Verifier>::PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
     let codec = scheme.certificate_codec_config();
     move |(sender, message)| {
-        let Some(view) = resolver_view::<P>(message, &codec) else {
+        let Some(view) = resolver_view::<P, D>(message, &codec) else {
             return SplitTarget::None;
         };
         scenario.route(view, term_length, sender, participants.as_ref())

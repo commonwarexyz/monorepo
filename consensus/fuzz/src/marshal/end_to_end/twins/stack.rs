@@ -12,7 +12,7 @@ use super::{
     B, Ctx, PublicKeyOf, SchemeOf,
 };
 use crate::{
-    NetworkChannels, POST_GST_WINDOW,
+    NetworkChannels,
     network::{WedgeChannel, WedgeNode, WedgeReceiver},
     simplex::Simplex,
 };
@@ -25,16 +25,21 @@ use commonware_consensus::{
         core::{Actor, Mailbox},
         mocks::{
             application::Application,
+            block::Block as MockBlock,
             harness::{BLOCKS_PER_EPOCH, LINK, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA},
         },
         resolver::{handler, p2p as resolver},
         standard::{Deferred, Inline, Standard},
     },
-    simplex::{Engine, Floor, Plan, config, elector::Config as ElectorConfig, types::Finalization},
+    simplex::{
+        Engine, Floor, Plan, config,
+        elector::Config as ElectorConfig,
+        types::{Context as SimplexContext, Finalization},
+    },
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Hasher as _, Sha256,
+    Digest, Hasher as _, PublicKey, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
@@ -53,6 +58,8 @@ use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 const POLL: Duration = Duration::from_millis(50);
+/// Marshal Twins' budget includes its scripted prefix and slower links.
+const MARSHAL_TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
 const CERTIFICATION_TIMEOUT_MILLIS: u64 = 2_000;
 const ATTACK_TIMING_MARGIN_MILLIS: u64 = 250;
@@ -314,6 +321,7 @@ type MarshalResolver<P> = (
     handler::Receiver<Sha256Digest>,
     resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>,
 );
+type AuditedApplication<D, K> = Application<MockBlock<Sha256Digest, SimplexContext<D, K>>>;
 
 pub(crate) struct Validator<P: Simplex> {
     pub(crate) mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
@@ -393,19 +401,13 @@ pub(crate) async fn setup_validator<P: Simplex>(
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
 ) -> Validator<P> {
-    let application = if max_pending_acks <= NZUsize!(2) {
-        Application::<B<P>>::manual_ack()
-    } else {
-        Application::<B<P>>::default()
-    };
-    if max_pending_acks <= NZUsize!(2) {
-        let acknowledger = application.clone();
-        context.child("acknowledger").spawn(move |_| async move {
-            loop {
-                acknowledger.acknowledged().await;
-            }
-        });
-    }
+    let application = Application::<B<P>>::manual_ack();
+    let acknowledger = application.clone();
+    context.child("acknowledger").spawn(move |_| async move {
+        loop {
+            acknowledger.acknowledged().await;
+        }
+    });
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -633,7 +635,10 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
     engine.start(vote, certificate, resolver);
 }
 
-fn trailing_blocks<P: Simplex>(application: &Application<B<P>>, prefix_end: View) -> usize {
+fn trailing_blocks<D: Digest, K: PublicKey>(
+    application: &AuditedApplication<D, K>,
+    prefix_end: View,
+) -> usize {
     application
         .blocks()
         .values()
@@ -641,19 +646,19 @@ fn trailing_blocks<P: Simplex>(application: &Application<B<P>>, prefix_end: View
         .count()
 }
 
-pub(crate) async fn wait_for_liveness<P: Simplex>(
+pub(crate) async fn wait_for_liveness<D: Digest, K: PublicKey>(
     context: &deterministic::Context,
-    honest: &[(usize, Application<B<P>>)],
+    honest: &[(usize, AuditedApplication<D, K>)],
     prefix_end: View,
     required: usize,
     stack: Arc<str>,
 ) {
     select! {
-        _ = context.sleep(POST_GST_WINDOW) => {
+        _ = context.sleep(MARSHAL_TWINS_LIVENESS_WINDOW) => {
             let progress = honest
                 .iter()
                 .map(|(idx, application)| {
-                    (*idx, trailing_blocks::<P>(application, prefix_end))
+                    (*idx, trailing_blocks(application, prefix_end))
                 })
                 .collect::<Vec<_>>();
             panic!(
@@ -666,7 +671,7 @@ pub(crate) async fn wait_for_liveness<P: Simplex>(
                 if honest
                     .iter()
                     .all(|(_, application)| {
-                        trailing_blocks::<P>(application, prefix_end) >= required
+                        trailing_blocks(application, prefix_end) >= required
                     })
                 {
                     return;

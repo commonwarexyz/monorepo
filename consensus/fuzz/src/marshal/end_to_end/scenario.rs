@@ -644,7 +644,7 @@ pub fn run_scenario<P: Simplex>(
             .filter(|(idx, _, _)| Role::from_index(*idx).is_correct())
             .map(|(idx, _, app)| (*idx, app.clone()))
             .collect();
-        invariants::check_all_blocks(&correct, Some("marshal-scenario"));
+        invariants::check_all_blocks(&correct, genesis_commitment, Some("marshal-scenario"));
 
         ScenarioOutcome {
             template,

@@ -25,7 +25,7 @@ use commonware_consensus::{
         ancestry::Ancestry,
         mocks::{application::Application as SinkApplication, block::Block},
     },
-    types::View,
+    types::{Height, Round, View},
 };
 use commonware_cryptography::{
     Digestible, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
@@ -45,6 +45,7 @@ where
 {
     validator: usize,
     application: SinkApplication<Block<Sha256Digest, C>>,
+    tips: Arc<Mutex<Vec<(Round, Height, Sha256Digest)>>>,
     max_pending_acks: Option<NonZeroUsize>,
     stack: Arc<str>,
 }
@@ -62,9 +63,88 @@ where
         Self {
             validator,
             application,
+            tips: Arc::new(Mutex::new(Vec::new())),
             max_pending_acks,
             stack,
         }
+    }
+}
+
+impl<C> Reporter for DeliveryReporter<C>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+{
+    type Activity = Update<Block<Sha256Digest, C>>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        match &activity {
+            Update::Tip(round, height, digest) => {
+                let mut tips = self.tips.lock();
+                if let Some((last_round, last_height, _)) = tips.last() {
+                    assert!(
+                        height > last_height,
+                        "marshal tip height did not increase: node{} previous_height={} \
+                         next_height={}; tips={tips:?}; stack={}",
+                        self.validator,
+                        last_height.get(),
+                        height.get(),
+                        self.stack,
+                    );
+                    assert!(
+                        round >= last_round,
+                        "marshal tip round regressed: node{} previous_round={} \
+                         next_round={}; tips={tips:?}; stack={}",
+                        self.validator,
+                        last_round,
+                        round,
+                        self.stack,
+                    );
+                }
+                for (delivered_height, delivered_digest) in self.application.delivered() {
+                    if delivered_height == *height {
+                        assert_eq!(
+                            delivered_digest,
+                            *digest,
+                            "marshal tip disagrees with delivery: node{} height={} \
+                             delivered_digest={} tip_digest={}; stack={}",
+                            self.validator,
+                            height.get(),
+                            delivered_digest,
+                            digest,
+                            self.stack,
+                        );
+                    }
+                }
+                tips.push((*round, *height, *digest));
+            }
+            Update::Block(block, _) => {
+                if let Some(max_pending_acks) = self.max_pending_acks {
+                    super::invariants::check_pending_acks(
+                        self.validator,
+                        &self.application,
+                        block.height(),
+                        max_pending_acks,
+                        &self.stack,
+                    );
+                }
+                for (_, tip_height, tip_digest) in &*self.tips.lock() {
+                    if *tip_height == block.height() {
+                        assert_eq!(
+                            *tip_digest,
+                            block.digest(),
+                            "marshal delivery disagrees with tip: node{} height={} \
+                             tip_digest={} delivered_digest={}; stack={}",
+                            self.validator,
+                            tip_height.get(),
+                            tip_digest,
+                            block.digest(),
+                            self.stack,
+                        );
+                    }
+                }
+            }
+        }
+        self.application.report(activity)
     }
 }
 
@@ -224,18 +304,7 @@ where
         let Some(reporter) = &mut self.reporter else {
             return Feedback::Ok;
         };
-        if let (Update::Block(block, _), Some(max_pending_acks)) =
-            (&activity, reporter.max_pending_acks)
-        {
-            super::invariants::check_pending_acks(
-                reporter.validator,
-                &reporter.application,
-                block.height(),
-                max_pending_acks,
-                &reporter.stack,
-            );
-        }
-        reporter.application.report(activity)
+        reporter.report(activity)
     }
 }
 
@@ -571,5 +640,76 @@ where
             Self::AlwaysAccept(application) => application.verify(context, ancestry).await,
             Self::Faulty(application) => application.verify(context, ancestry).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus::types::Epoch;
+    use commonware_utils::{Acknowledgement as _, acknowledgement::Exact};
+
+    fn digest(byte: u8) -> Sha256Digest {
+        Sha256Digest([byte; 32])
+    }
+
+    fn round(view: u64) -> Round {
+        Round::new(Epoch::zero(), View::new(view))
+    }
+
+    fn reporter() -> DeliveryReporter<u8> {
+        DeliveryReporter::new(0, SinkApplication::default(), None, "test".into())
+    }
+
+    #[test]
+    fn matching_tip_and_delivery_are_allowed() {
+        let mut reporter = reporter();
+        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
+        reporter.report(Update::Tip(round(1), Height::new(1), block.digest()));
+        let (ack, _waiter) = Exact::handle();
+        reporter.report(Update::Block(block, ack));
+    }
+
+    #[test]
+    #[should_panic(expected = "tip height did not increase")]
+    fn tip_heights_must_increase() {
+        let mut reporter = reporter();
+        reporter.report(Update::Tip(round(1), Height::new(2), digest(1)));
+        reporter.report(Update::Tip(round(2), Height::new(1), digest(2)));
+    }
+
+    #[test]
+    fn equal_tip_rounds_are_allowed() {
+        let mut reporter = reporter();
+        reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));
+        reporter.report(Update::Tip(round(1), Height::new(2), digest(2)));
+    }
+
+    #[test]
+    #[should_panic(expected = "tip round regressed")]
+    fn tip_rounds_must_not_regress() {
+        let mut reporter = reporter();
+        reporter.report(Update::Tip(round(2), Height::new(1), digest(1)));
+        reporter.report(Update::Tip(round(1), Height::new(2), digest(2)));
+    }
+
+    #[test]
+    #[should_panic(expected = "delivery disagrees with tip")]
+    fn tip_and_delivery_must_agree() {
+        let mut reporter = reporter();
+        reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));
+        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
+        let (ack, _waiter) = Exact::handle();
+        reporter.report(Update::Block(block, ack));
+    }
+
+    #[test]
+    #[should_panic(expected = "tip disagrees with delivery")]
+    fn delivered_block_and_later_tip_must_agree() {
+        let mut reporter = reporter();
+        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
+        let (ack, _waiter) = Exact::handle();
+        reporter.report(Update::Block(block, ack));
+        reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));
     }
 }
