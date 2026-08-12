@@ -1,6 +1,7 @@
 //! X25519 scalar multiplication on the Montgomery form of curve25519.
 
 use super::F;
+use subtle::{Choice, ConditionallySelectable};
 use zeroize::Zeroizing;
 
 /// `(A - 2) / 4 = 121665`, where `A = 486662` is the coefficient of the Montgomery curve
@@ -33,16 +34,13 @@ pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     // Each step conditionally swaps (x2, z2) with (x3, z3) so that the pair holding k*P for the
     // scalar's processed prefix k is always the one the formulas expect. Tracking the XOR of
     // consecutive bits performs one swap per iteration instead of two.
-    let mut swap = false;
+    let mut swap = Choice::from(0);
     // A clamped scalar has bit 255 clear, so 255 iterations cover every bit that can be set.
     for t in (0..255).rev() {
-        let bit = (scalar[t / 8] >> (t % 8)) & 1 == 1;
+        let bit = Choice::from((scalar[t / 8] >> (t % 8)) & 1);
         swap ^= bit;
-        let (tx, tz) = (x2, z2);
-        x2 = x2.select(x3, swap);
-        z2 = z2.select(z3, swap);
-        x3 = x3.select(tx, swap);
-        z3 = z3.select(tz, swap);
+        F::conditional_swap(&mut x2, &mut x3, swap);
+        F::conditional_swap(&mut z2, &mut z3, swap);
         swap = bit;
 
         // One combined doubling of (x2, z2) and differential addition of (x2, z2) and (x3, z3),
@@ -62,8 +60,8 @@ pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
         z2 = e.mul(aa.add(A24.mul(e)));
     }
 
-    let x2 = x2.select(x3, swap);
-    let z2 = z2.select(z3, swap);
+    let x2 = F::conditional_select(&x2, &x3, swap);
+    let z2 = F::conditional_select(&z2, &z3, swap);
     // When the result is the identity, z2 is zero, and so is its "inverse" z2^(p - 2), making
     // the output all zeros.
     x2.mul(z2.invert()).to_bytes()

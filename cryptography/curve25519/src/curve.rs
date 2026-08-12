@@ -1,4 +1,5 @@
 use core::array;
+use subtle::{Choice, ConditionallySelectable};
 
 /// How many parallel operations we try and do via SIMD.
 ///
@@ -29,18 +30,20 @@ const BIAS_16P: [u64; 5] = [
 #[derive(Clone, Copy, Debug)]
 pub struct F(pub [u64; 5]);
 
+// Secret-dependent selection goes through `subtle`, whose `Choice` sits behind an optimization
+// barrier so the compiler cannot prove the mask is 0/-1 and lower the select to a branch.
+impl ConditionallySelectable for F {
+    #[inline]
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        Self(array::from_fn(|i| {
+            u64::conditional_select(&a.0[i], &b.0[i], choice)
+        }))
+    }
+}
+
 impl F {
     pub const ZERO: Self = Self([0, 0, 0, 0, 0]);
     pub const ONE: Self = Self([1, 0, 0, 0, 0]);
-
-    /// Selects `other` when `select_other` is true without branching.
-    #[inline]
-    fn select(self, other: Self, select_other: bool) -> Self {
-        let mask = 0u64.wrapping_sub(select_other as u64);
-        Self(array::from_fn(|i| {
-            (self.0[i] & !mask) | (other.0[i] & mask)
-        }))
-    }
 
     /// The curve25519 twisted-Edwards curve constant `d = -121665/121666 mod p`.
     pub const EDWARDS_D: Self = Self([
@@ -377,6 +380,18 @@ pub struct G {
     z: F,
 }
 
+impl ConditionallySelectable for G {
+    #[inline]
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        Self {
+            x: F::conditional_select(&a.x, &b.x, choice),
+            y: F::conditional_select(&a.y, &b.y, choice),
+            t: F::conditional_select(&a.t, &b.t, choice),
+            z: F::conditional_select(&a.z, &b.z, choice),
+        }
+    }
+}
+
 impl G {
     /// The neutral element, `(0, 1)` in affine coordinates.
     pub const IDENTITY: Self = Self {
@@ -385,17 +400,6 @@ impl G {
         t: F::ZERO,
         z: F::ONE,
     };
-
-    /// Selects `other` when `select_other` is true without branching.
-    #[inline]
-    fn select(self, other: Self, select_other: bool) -> Self {
-        Self {
-            x: self.x.select(other.x, select_other),
-            y: self.y.select(other.y, select_other),
-            t: self.t.select(other.t, select_other),
-            z: self.z.select(other.z, select_other),
-        }
-    }
 
     /// Compresses this point to its canonical Ed25519 encoding.
     pub fn to_bytes(self) -> [u8; 32] {
@@ -505,8 +509,8 @@ impl G {
         for i in (0..256).rev() {
             let doubled = result.double();
             let added = doubled.add(self);
-            let bit = scalar[i / 8] >> (i % 8) & 1 == 1;
-            result = doubled.select(added, bit);
+            let bit = Choice::from(scalar[i / 8] >> (i % 8) & 1);
+            result = Self::conditional_select(&doubled, &added, bit);
         }
         result
     }
