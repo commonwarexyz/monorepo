@@ -45,6 +45,8 @@ path = "benches/batch_verify.rs"
 default = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-math/arbitrary",
+	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
 std = [
