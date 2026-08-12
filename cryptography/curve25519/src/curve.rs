@@ -880,7 +880,7 @@ pub trait WithBackend {
 pub mod montgomery;
 
 // Now, a module for each backend.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
 mod avx512;
 #[cfg(target_arch = "aarch64")]
 mod neon;
@@ -953,7 +953,7 @@ fn test_neon_against_portable() {
 /// AArch64 includes NEON in its baseline ISA. Every use is forced through this single gate so an
 /// accelerated backend is only constructed where its instructions are guaranteed to be available.
 pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
     {
         if let Some(backend) = avx512::Backend::new() {
             // SAFETY: constructing `backend` confirmed that the CPU supports every target
