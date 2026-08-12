@@ -2863,7 +2863,9 @@ where
 
         // The journal append and the in-memory index application touch disjoint state (the log vs
         // the snapshot and bitmap), so run them concurrently. The index application is spawned as a
-        // job on the strategy while the journal append proceeds on this task.
+        // job on the strategy while the journal append proceeds on this task. A journal failure
+        // leaves the instance unusable either way (mutable storage failures are fatal and consume
+        // the database), so the index job's effects on error do not need to be rolled back.
         let strategy = self.strategy().clone();
         let log = self.log;
         let snapshot = self.snapshot;
