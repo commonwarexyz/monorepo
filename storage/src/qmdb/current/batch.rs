@@ -161,7 +161,7 @@ struct BatchStorageAdapter<
     'a,
     F: Graftable,
     D: Digest,
-    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    R: Readable<Family = F, Digest = D>,
     S: MerkleStorage<F, Digest = D>,
 > {
     batch: &'a R,
@@ -173,7 +173,7 @@ impl<
     'a,
     F: Graftable,
     D: Digest,
-    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
+    R: Readable<Family = F, Digest = D>,
     S: MerkleStorage<F, Digest = D>,
 > BatchStorageAdapter<'a, F, D, R, S>
 {
@@ -186,12 +186,8 @@ impl<
     }
 }
 
-impl<
-    F: Graftable,
-    D: Digest,
-    R: Readable<Family = F, Digest = D, Error = merkle::Error<F>>,
-    S: MerkleStorage<F, Digest = D>,
-> MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
+impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStorage<F, Digest = D>>
+    MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
 {
     type Digest = D;
 
@@ -218,7 +214,6 @@ struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy> {
 impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S> {
     type Family = F;
     type Digest = D;
-    type Error = merkle::Error<F>;
 
     fn size(&self) -> Position<F> {
         self.batch.size()
@@ -229,10 +224,6 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
             return Some(d);
         }
         self.mem.get_node(pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        self.batch.pruning_boundary()
     }
 }
 

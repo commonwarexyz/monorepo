@@ -569,7 +569,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             parent_size: mem.size(),
             base_size: mem.size(),
             ancestor_base_size: mem.size(),
-            pruning_boundary: Readable::pruning_boundary(mem),
+            pruning_boundary: mem.pruning_boundary(),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
             strategy,
@@ -699,7 +699,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
     type Family = F;
     type Digest = D;
-    type Error = Error<F>;
 
     fn size(&self) -> Position<F> {
         Self::size(self)
@@ -707,10 +706,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         Self::get_node(self, pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        Self::pruning_boundary(self)
     }
 }
 
