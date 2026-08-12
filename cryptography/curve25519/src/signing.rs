@@ -108,6 +108,14 @@ impl Read for SigningKey {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for SigningKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let seed: Zeroizing<[u8; Self::SIZE]> = Zeroizing::new(u.arbitrary()?);
+        Ok(Self::from_seed(*seed))
+    }
+}
+
 // Public methods.
 impl SigningKey {
     /// The verifying key associated with this signing key.
@@ -157,7 +165,7 @@ impl SigningKey {
 /// A public key used to check signatures.
 #[derive(Clone)]
 pub struct VerifyingKey {
-    /// The canonical encoding of the point.
+    /// The encoded point.
     ///
     /// When deserializing, we just have the bytes, deferring parsing of them until
     /// signature verification, so that we can more efficiently parse them in batch.
@@ -194,6 +202,16 @@ impl Read for VerifyingKey {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
+            point: None,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for VerifyingKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            bytes: u.arbitrary()?,
             point: None,
         })
     }
@@ -426,10 +444,12 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::Signature;
+        use super::super::{Signature, SigningKey, VerifyingKey};
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
+            CodecConformance<SigningKey> => 1024,
+            CodecConformance<VerifyingKey>,
             CodecConformance<Signature>,
         }
     }
