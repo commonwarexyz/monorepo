@@ -176,7 +176,9 @@ Chou</a></div>
         did not equivocate, so it can begin building and distributing
         the next proposal’s data early. This cuts the wait between views
         from two network hops to one: the hop that forms the parent
-        notarization.</p>
+        notarization. This stable-leader variant was introduced in <a
+        href="https://eprint.iacr.org/2023/1916">Sing a Song of
+        Simplex</a>.</p>
         <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders over the same time span. Round-robin rotates among three leaders every view, with views spaced two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term, while term-boundary handoffs still take two hops. The timeline shows three complete stable-leader terms and two term boundaries.">
           <noscript>Over the same time span, round-robin changes leaders every view and spaces views two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term and two hops apart at leader handoffs. The timeline shows three complete stable-leader terms.</noscript>
         </div>
