@@ -152,7 +152,8 @@ Chou</a></div>
         <p>Figure 1: Each square represents one 5ms target interval.
         Alto sustained about 200 blocks per second.</p>
         </div>
-        <h2 id="two-waits-between-views">Two Waits Between Views</h2>
+        <h2 id="two-network-waits-between-views">Two Network Waits
+        Between Views</h2>
         <p>A <em>view</em> is one opportunity for a leader to propose a
         block. Validators verify the proposal and vote. Once a quorum
         votes for the same proposal, it is <em>notarized</em>.</p>
@@ -161,14 +162,19 @@ Chou</a></div>
         must cross the network to form its notarization. Within a term,
         Stable Leader removes the first wait from the critical path.
         Optimistic Validation removes the second.</p>
-        <h2 id="wait-one-the-proposer-handoff">Wait One: The Proposer
-        Handoff</h2>
+        <h3 id="wait-one-the-proposer-handoff">Wait One: The Proposer
+        Handoff</h3>
         <p>With rotating leadership, each view has a new proposer. The
         next proposer must first receive the previous proposal. Even
         then, the next proposer cannot safely build until a notarization
         forms: a Byzantine leader may have sent conflicting
         proposals.</p>
-        <p>Stable Leader groups consecutive views into a <em>term</em>.
+        <p>Stable Leader groups consecutive views into a <em>term</em>,
+        an approach described in <a
+        href="https://eprint.iacr.org/2023/1916">Sing a Song of
+        Simplex</a> and referred to as <em>multi-view leadership</em> in
+        <a href="https://arxiv.org/abs/2603.11797">The Carnot Bound:
+        Limits and Possibilities for Bandwidth-Efficient Consensus</a>.
         One leader proposes throughout the term, reducing proposer
         handoffs from one per view to one per term. Within the term, the
         leader already knows the previous block and its ancestry before
@@ -176,9 +182,7 @@ Chou</a></div>
         did not equivocate, so it can begin building and distributing
         the next proposal’s data early. This cuts the wait between views
         from two network hops to one: the hop that forms the parent
-        notarization. This stable-leader variant was introduced in <a
-        href="https://eprint.iacr.org/2023/1916">Sing a Song of
-        Simplex</a>.</p>
+        notarization.</p>
         <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders over the same time span. Round-robin rotates among three leaders every view, with views spaced two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term, while term-boundary handoffs still take two hops. The timeline shows three complete stable-leader terms and two term boundaries.">
           <noscript>Over the same time span, round-robin changes leaders every view and spaces views two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term and two hops apart at leader handoffs. The timeline shows three complete stable-leader terms.</noscript>
         </div>
@@ -187,8 +191,8 @@ Chou</a></div>
         With four-view terms, Stable Leader spaces them one hop apart
         within each term and two hops apart at each leader handoff.</p>
         </div>
-        <h2 id="wait-two-the-parent-notarization">Wait Two: The Parent
-        Notarization</h2>
+        <h3 id="wait-two-the-parent-notarization">Wait Two: The Parent
+        Notarization</h3>
         <p>Without Optimistic Validation, validators wait for the parent
         to be notarized before voting to notarize its child. Network
         latency still paces each view.</p>
@@ -213,11 +217,11 @@ Chou</a></div>
         Validation starts three views during the same network
         interval.</p>
         </div>
-        <h2 id="how-optimism-stays-safe">How Optimism Stays Safe</h2>
+        <h2 id="same-evidence-earlier-work">Same Evidence, Earlier
+        Work</h2>
         <p><em>Optimistic</em> means a participant can vote to notarize
         a proposal before it receives notarizations for every ancestor
-        in the term. It does not weaken the evidence required for
-        finalization.</p>
+        in the term.</p>
         <p>Notarization is not finalization. After a block is notarized,
         each validator asks its application whether the payload is safe
         to commit. This decision is called <em>certification</em> and
@@ -238,7 +242,9 @@ Chou</a></div>
         path.</p>
         <p>The term boundary is also a leader handoff, so optimistic
         work stops there. The first view of a new term must start from
-        certified ancestry.</p>
+        certified ancestry. Together, these rules let Simplex views
+        pipeline without changing the evidence required for
+        finalization.</p>
         <p>Lastly, the consensus configuration sets a bound on how many
         views validators can work ahead at once. A value of zero
         disables Optimistic Validation. A larger bound can keep the
@@ -277,7 +283,7 @@ Chou</a></div>
         enough CPU and memory for many in-flight views. Networks that
         prioritize proposer rotation as a censorship defense may prefer
         shorter terms.</p>
-        <h2 id="the-next-block">The Next Block</h2>
+        <h2 id="a-finer-ordering-clock">A Finer Ordering Clock</h2>
         <p>Each 5ms view gives applications another opportunity to order
         new data. That finer schedule can help orderbooks, batchers, and
         games respond to new input sooner.</p>

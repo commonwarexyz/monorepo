@@ -156,7 +156,7 @@ const makeSvg = (mount, height) => {
 function buildCadence(mount) {
   const svg = makeSvg(mount, 400);
   const squares = [];
-  addText(svg, 20, 38, '5ms view intervals', { 'font-size': 20, 'font-weight': 700 });
+  addText(svg, 20, 38, '5ms Views', { 'font-size': 20, 'font-weight': 700 });
   const counter = addText(svg, 1004, 38, '000 / 200', {
     'font-size': 20,
     'font-weight': 700,
@@ -237,8 +237,8 @@ function buildLeaders(mount) {
     const midX = (x1 + x2) / 2;
     const midY = (y1 + y2) / 2;
     const style = { strokeWidth: 1.6, headSize: 6.5 };
-    animated.push(addArrow(svg, x1, y1, midX - 4, midY, color, delay, 0.035, style));
-    animated.push(addArrow(svg, midX + 4, midY, x2, y2, color, delay + 0.04, 0.035, style));
+    animated.push(addArrow(svg, x1, y1, midX, midY, color, delay, 0.035, style));
+    animated.push(addArrow(svg, midX, midY, x2, y2, color, delay + 0.04, 0.035, style));
   };
 
   const rotatingOwners = Array.from({ length: rotatingViewCount }, (_, index) => leaders[index % leaders.length]);
@@ -398,34 +398,21 @@ function buildValidation(mount) {
   addCadenceArrows(sequentialCount, sequentialGap, topY, 0.05, 0.15);
   addCadenceArrows(optimisticCount, optimisticGap, bottomY, 0.05, 0.05);
 
-  const addNetworkRounds = (x, y, proposedAt, linksNextProposal) => {
+  const addNetworkRounds = (x, y, proposedAt) => {
     animated.push(addArrow(
       svg,
       x + arrowInset,
       y,
-      x + networkHop - arrowInset,
+      x + networkHop,
       y + laneGap,
       ARROW,
       proposedAt + 0.01,
       0.13,
       { strokeWidth: 1.4, headSize: 6, opacity: 0.8 },
     ));
-    if (linksNextProposal) {
-      animated.push(addArrow(
-        svg,
-        x + networkHop,
-        y + laneGap - 6,
-        x + networkHop,
-        y + 17,
-        ARROW,
-        proposedAt + 0.14,
-        0.01,
-        { strokeWidth: 1.4, headSize: 6, opacity: 0.8 },
-      ));
-    }
     animated.push(addArrow(
       svg,
-      x + networkHop + arrowInset,
+      x + networkHop,
       y + laneGap,
       x + networkHop * 2 - arrowInset,
       y + laneGap * 2,
@@ -484,7 +471,7 @@ function buildValidation(mount) {
 
   for (let index = 0; index < sequentialCount; index++) {
     const proposedAt = 0.05 + index * 0.15;
-    addNetworkRounds(x0 + index * sequentialGap, topY, proposedAt, true);
+    addNetworkRounds(x0 + index * sequentialGap, topY, proposedAt);
     addBlock(
       x0 + index * sequentialGap,
       topY,
@@ -497,7 +484,7 @@ function buildValidation(mount) {
 
   for (let index = 0; index < optimisticCount; index++) {
     const proposedAt = 0.05 + index * 0.05;
-    addNetworkRounds(x0 + index * optimisticGap, bottomY, proposedAt, false);
+    addNetworkRounds(x0 + index * optimisticGap, bottomY, proposedAt);
     addBlock(
       x0 + index * optimisticGap,
       bottomY,
@@ -520,7 +507,7 @@ function buildRecovery(mount) {
   const nextView = 875;
   const continuationView = 965;
 
-  addText(svg, 20, 32, 'A timeout ends the optimistic pipeline', {
+  addText(svg, 20, 32, 'Failing Term', {
     'font-size': 18,
     'font-weight': 700,
   });
