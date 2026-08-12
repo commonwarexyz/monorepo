@@ -1,6 +1,6 @@
 ---
 title: "The Long and Short of It"
-description: "Blockchains will not be widely used until they feel as responsive as the rest of the internet. Stable Leader and Optimistic Validation move Simplex toward that goal, sustaining about 200 blocks per second with 5ms median spacing in Alto."
+description: "Stable Leader and Optimistic Validation shorten the wait between Simplex proposals, sustaining about 200 blocks per second with 5ms median spacing in Alto."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
 modified-time: "2026-08-12T00:00:00Z"
@@ -10,9 +10,9 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-Blockchains will not be widely used until they feel as responsive as the rest of the internet. For users, submitting a transaction and seeing it finalize should feel like clicking a button and getting a response.
+Submitting a transaction and seeing it finalize should feel like clicking a button and getting a response.
 
-Getting there means shrinking both consensus components of transaction latency: the wait for the next proposal and the two rounds of voting that finalize it. Even fast consensus can be slow when proposals remain far apart. Simplex normally waits two network hops before starting the next view. Optimistic proposals can cut that to one hop even as leaders rotate. What if a leader could start the next proposal without waiting on the network and still know how each transaction would execute?
+Consensus contributes two delays to that experience: the wait for the next proposal and the two rounds of voting that finalize it. This pipeline tackles the first. Even fast consensus can be slow when proposals remain far apart. Simplex normally waits two network hops before starting the next view. Optimistic proposals can cut that to one hop even as leaders rotate. What if a leader could start the next proposal without waiting on the network and still know how each transaction would execute?
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoffs. Optimistic Validation lets that leader keep proposing and validators keep voting while the previous view's notarization forms. Together, they start new blocks while earlier ones continue toward finality.
 

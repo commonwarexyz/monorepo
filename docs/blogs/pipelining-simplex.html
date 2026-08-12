@@ -9,11 +9,9 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > The Long and Short of It</title>
-    <meta name="description" content="Blockchains will not be widely
-used until they feel as responsive as the rest of the internet. Stable
-Leader and Optimistic Validation move Simplex toward that goal,
-sustaining about 200 blocks per second with 5ms median spacing in
-Alto.">
+    <meta name="description" content="Stable Leader and Optimistic
+Validation shorten the wait between Simplex proposals, sustaining about
+200 blocks per second with 5ms median spacing in Alto.">
     <meta name="author" content="Brendan Chou">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -22,9 +20,8 @@ Alto.">
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/pipelining-simplex.png" />
     <meta property="og:title" content="The Long and Short of It" />
-    <meta property="og:description" content="Blockchains will not be
-widely used until they feel as responsive as the rest of the internet.
-Stable Leader and Optimistic Validation move Simplex toward that goal,
+    <meta property="og:description" content="Stable Leader and
+Optimistic Validation shorten the wait between Simplex proposals,
 sustaining about 200 blocks per second with 5ms median spacing in
 Alto." />
     <meta property="article:author" content="Brendan Chou" />
@@ -37,11 +34,10 @@ Alto." />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/pipelining-simplex" />
     <meta property="twitter:title" content="The Long and Short of It" />
-    <meta property="twitter:description" content="Blockchains will not
-be widely used until they feel as responsive as the rest of the
-internet. Stable Leader and Optimistic Validation move Simplex toward
-that goal, sustaining about 200 blocks per second with 5ms median
-spacing in Alto." />
+    <meta property="twitter:description" content="Stable Leader and
+Optimistic Validation shorten the wait between Simplex proposals,
+sustaining about 200 blocks per second with 5ms median spacing in
+Alto." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/pipelining-simplex.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/B_Chou" />
@@ -98,13 +94,11 @@ spacing in Alto." />
 Chou</a></div>
                         <div class="date">August 12th, 2026</div>
         </div>
-        <p>Blockchains will not be widely used until they feel as
-        responsive as the rest of the internet. For users, submitting a
-        transaction and seeing it finalize should feel like clicking a
-        button and getting a response.</p>
-        <p>Getting there means shrinking both consensus components of
-        transaction latency: the wait for the next proposal and the two
-        rounds of voting that finalize it. Even fast consensus can be
+        <p>Submitting a transaction and seeing it finalize should feel
+        like clicking a button and getting a response.</p>
+        <p>Consensus contributes two delays to that experience: the wait
+        for the next proposal and the two rounds of voting that finalize
+        it. This pipeline tackles the first. Even fast consensus can be
         slow when proposals remain far apart. Simplex normally waits two
         network hops before starting the next view. Optimistic proposals
         can cut that to one hop even as leaders rotate. What if a leader
