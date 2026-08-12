@@ -21,10 +21,15 @@ mod core;
 
 use self::core::Scalar;
 use crate::curve::{G, GAffine};
+use ::core::{
+    fmt::{self, Debug, Display},
+    hash::{Hash, Hasher},
+};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::union_unique;
@@ -202,6 +207,38 @@ impl PartialEq for VerifyingKey {
     }
 }
 
+impl Eq for VerifyingKey {}
+
+impl PartialOrd for VerifyingKey {
+    fn partial_cmp(&self, other: &Self) -> Option<::core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VerifyingKey {
+    fn cmp(&self, other: &Self) -> ::core::cmp::Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl Hash for VerifyingKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
+
+impl Debug for VerifyingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl Display for VerifyingKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
 impl AsRef<[u8]> for VerifyingKey {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
@@ -281,9 +318,27 @@ impl VerifyingKey {
 }
 
 /// An object demonstrating that the owner of a [`VerifyingKey`] approved a message.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature {
     bytes: [u8; 64],
+}
+
+impl Debug for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl Write for Signature {

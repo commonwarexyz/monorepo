@@ -17,6 +17,7 @@ workspace = true
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
@@ -29,7 +30,6 @@ zeroize = { workspace = true, features = [ "zeroize_derive" ] }
 [dev-dependencies]
 arbitrary.workspace = true
 commonware-conformance.workspace = true
-commonware-formatting.workspace = true
 commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = [ "std" ] }
 commonware-utils = { workspace = true, features = [ "std" ] }
@@ -56,6 +56,7 @@ arbitrary = [
 std = [
 	"bytes/std",
 	"commonware-codec/std",
+	"commonware-formatting/std",
 	"commonware-macros/std",
 	"commonware-math/std",
 	"commonware-parallel/std",
