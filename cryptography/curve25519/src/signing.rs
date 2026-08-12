@@ -1,4 +1,21 @@
 //! Ed25519 signing keys, signatures, and verification.
+//!
+//! # Validation criteria (ZIP215)
+//!
+//! Signature validation follows [ZIP215], the criteria that make Ed25519 safe for consensus:
+//!
+//! - The point encodings of the verifying key `A` and the signature component `R` are accepted
+//!   even when non-canonical (a `y` coordinate at or above `p`, or a negative-zero `x`), as long
+//!   as they decode to a curve point.
+//! - The scalar component `s` must be canonical (`s < L`), ruling out signature malleability.
+//! - The verification equation is cofactored: `[8](s·B - R - H(R || A || M)·A) == identity`.
+//!
+//! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply exactly the same criteria, so
+//! batch and individual verification agree on every signature: a batch is valid precisely when
+//! each of its signatures verifies individually. See [this
+//! post](https://hdevalence.ca/blog/2020-10-04-its-25519am) for why these criteria matter.
+//!
+//! [ZIP215]: https://zips.z.cash/zip-0215
 
 mod core;
 
@@ -128,6 +145,11 @@ impl SigningKey {
     /// Signs a namespaced message using deterministic Ed25519.
     ///
     /// The namespace is committed to the signature to prevent its reuse in another context.
+    /// Signing is deterministic per [RFC 8032]: the nonce is derived from the key and the
+    /// message, so signing the same message twice yields the same signature and no randomness
+    /// is consumed.
+    ///
+    /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let msg = union_unique(namespace, msg);
 
@@ -219,7 +241,8 @@ impl arbitrary::Arbitrary<'_> for VerifyingKey {
 
 // Public methods.
 impl VerifyingKey {
-    /// Verifies `sig` over the namespaced message.
+    /// Verifies `sig` over the namespaced message, per the [module's validation
+    /// criteria](self).
     #[must_use]
     pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
         let r_bytes: [u8; 32] = sig.bytes[..32].try_into().expect("signature is 64 bytes");
@@ -322,7 +345,10 @@ impl BatchVerifier {
 
     /// Check all the signatures in the batch.
     ///
-    /// This returns true precisely when all the signatures in the batch are valid.
+    /// This returns true precisely when all the signatures in the batch are valid under the
+    /// [module's validation criteria](self), matching [`VerifyingKey::verify`] on every
+    /// signature: an invalid batch is only ever accepted if the random coefficients drawn from
+    /// `rng` collide, an event of negligible probability (about `2^-128`).
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self.items.iter().map(|(message, public_key, signature)| {
