@@ -50,7 +50,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.inner.leaves()
     }
 
-    /// Retain the live ancestor chain while consuming this batch in a multi-step operation.
+    /// Retain the live parent chain up to the first dropped weak link.
+    ///
+    /// Nodes beyond that link are read from committed state.
     pub(crate) fn retain_ancestors(&self) -> Vec<Arc<batch::MerkleizedBatch<F, D, S>>> {
         self.inner.retain_ancestors()
     }
