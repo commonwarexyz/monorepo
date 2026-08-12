@@ -227,7 +227,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
 {
     type Family = F;
     type Digest = D;
-    type Error = merkle::Error<F>;
 
     fn size(&self) -> Position<F> {
         self.inner.size()
@@ -235,10 +234,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         self.inner.get_node(pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        self.inner.pruning_boundary()
     }
 }
 
