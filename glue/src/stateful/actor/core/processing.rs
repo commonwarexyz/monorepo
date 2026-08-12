@@ -136,9 +136,18 @@ where
         return true;
     }
     let height = durability.applied;
+    let start_sync = databases.start_sync();
+    futures::pin_mut!(start_sync);
     let barrier = select! {
-        _ = context.stopped() => return false,
-        barrier = verifications.drive(databases.start_sync()) => barrier,
+        _ = context.stopped() => None,
+        barrier = verifications.drive(start_sync.as_mut()) => Some(barrier),
+    };
+    let Some(barrier) = barrier else {
+        // The initiation future may have taken databases from their shared cells. Quiescing
+        // verification readers lets that same future restore every cell before shutdown.
+        drop(verifications.quiesce().await);
+        let _barrier = start_sync.await;
+        return false;
     };
     durability.started(height);
     syncs.push(async move { (height, barrier.durable().await) });
@@ -2904,6 +2913,66 @@ mod tests {
                 waiter2.await.is_err(),
                 "shutdown must cancel the dirty acknowledgement",
             );
+        });
+    }
+
+    #[test]
+    fn shutdown_restores_database_after_successor_sync_initiation_starts() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal, actor) =
+                spawn_processing(&context, "successor-sync-started-shutdown", None).await;
+            let databases = mailbox.subscribe_databases().await;
+
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                Arc::new(TestBlock::new(2, 2)),
+                acknowledgement,
+            ));
+            while control.applied.load(Ordering::Relaxed) < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let (successor_started, successor_release) = control.gate_start_sync();
+            control
+                .flushes
+                .lock()
+                .remove(0)
+                .send(Ok(()))
+                .expect("first sync should remain pending");
+            waiter1.await.expect("first block acknowledgement");
+            successor_started
+                .await
+                .expect("successor initiation should take the database");
+
+            context
+                .child("release_successor")
+                .spawn(move |task_context| async move {
+                    let _ = task_context.stopped().await;
+                    let _ = successor_release.send(());
+                });
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must finish an in-progress sync initiation",
+            );
+            actor.await.expect("processing actor should stop cleanly");
+            assert!(
+                waiter2.await.is_err(),
+                "shutdown must cancel the dirty acknowledgement",
+            );
+            drop(databases.read().await);
         });
     }
 

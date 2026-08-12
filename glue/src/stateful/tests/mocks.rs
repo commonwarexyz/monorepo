@@ -57,8 +57,8 @@ impl Merkleized for TestMerkleized {
 /// Completes one parked flush when released by the test.
 pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
 
-/// Signals that pruning has started, then blocks it until the test releases it.
-struct PruneGate {
+/// Signals that an operation has started, then blocks it until the test releases it.
+struct OperationGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
@@ -70,10 +70,29 @@ pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
     pub(crate) applied: Arc<AtomicUsize>,
-    prune_gate: Arc<Mutex<Option<PruneGate>>>,
+    prune_gate: Arc<Mutex<Option<OperationGate>>>,
+    start_sync_gate: Arc<Mutex<Option<OperationGate>>>,
 }
 
 impl FlushControl {
+    /// Gates the next sync initiation. The receiver reports entry, and sending on the
+    /// returned sender lets initiation continue. Only one gate may be active.
+    pub(crate) fn gate_start_sync(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        assert!(
+            self.start_sync_gate
+                .lock()
+                .replace(OperationGate {
+                    started,
+                    release: release_rx,
+                })
+                .is_none(),
+            "sync initiation gate already installed",
+        );
+        (started_rx, release)
+    }
+
     /// Gates the next prune. The receiver reports entry, and sending on the
     /// returned sender lets pruning continue. Only one gate may be active.
     pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -82,7 +101,7 @@ impl FlushControl {
         assert!(
             self.prune_gate
                 .lock()
-                .replace(PruneGate {
+                .replace(OperationGate {
                     started,
                     release: release_rx,
                 })
@@ -148,6 +167,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
         if let Some(control) = &self.control {
+            let gate = control.start_sync_gate.lock().take();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
             return Ok((self, Handle::from_receiver(released)));
