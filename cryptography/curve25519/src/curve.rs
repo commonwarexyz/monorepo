@@ -3,7 +3,7 @@ use subtle::{Choice, ConditionallySelectable};
 
 /// How many parallel operations we try and do via SIMD.
 ///
-/// This is set to the highest realistic number, targetting AVX-512.
+/// This is set to the highest realistic number, targeting AVX-512.
 /// On other backends, this is larger than necessary.
 ///
 /// This should not be harmful to performance, because a larger lane count

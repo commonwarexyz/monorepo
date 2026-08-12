@@ -192,8 +192,12 @@ fn reduce_columns(mut c: [uint64x2_t; 10]) -> Regs {
         c[7] = vandq_u64(c[7], mask25);
         c[9] = vaddq_u64(c[9], vshrq_n_u64(c[8], 26));
         c[8] = vandq_u64(c[8], mask26);
-        // The multiplication column bounds keep this carry below `2^31`, so narrowing is lossless
-        // and enables one widening multiply instead of the longer packed-u64 shift/add sequence.
+        // Narrowing this carry is lossless, which needs a tighter bound than the worst-case
+        // column (`267 * (2^26 - 1)^2 < 2^61`): column 9 is where terms fold *from*, never
+        // *into*, so it accumulates at most ten unscaled products plus column 8's carry,
+        // `c[9] < 10 * (2^26 - 1)^2 + 2^32 < 2^56`, making the carry `c[9] >> 25` less than
+        // `2^31`. Narrowing enables one widening multiply instead of the longer packed-u64
+        // shift/add sequence.
         let top = vmovn_u64(vshrq_n_u64(c[9], 25));
         c[0] = vaddq_u64(c[0], vmull_n_u32(top, 19));
         c[9] = vandq_u64(c[9], mask25);
