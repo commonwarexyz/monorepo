@@ -1,6 +1,6 @@
 ---
 title: "Simplex, Pipelined"
-description: "Stable Leader and Optimistic Validation shorten the wait between Simplex proposals. In a 50-validator Alto deployment, the pipeline sustained about 200 blocks per second with 5ms median spacing."
+description: "Simplex can now produce blocks as fast as its leader can build them. In a global deployment of 50 validators, it sustained 200 blocks per second with 300ms finality to your browser."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
 modified-time: "2026-08-12T00:00:00Z"
@@ -10,11 +10,11 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-New blocks no longer have to wait for network round trips.
+Simplex can now produce blocks as fast as its leader can build them.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once. For users, more frequent proposals mean less time waiting for a transaction to enter the next block.
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they turn Simplex into a high-frequency decentralized sequencer, with several views moving through the network at once. For users, more frequent proposals mean less time waiting for a transaction to enter the next block.
 
-In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms. For an external observer, median finality was 300ms from the leader's block timestamp to delivery through the indexer and WebSocket. At that cadence, about 60 newer blocks could be in flight while the first finalized.
+In a global deployment with 50 validators, this Simplex variant sustained 200 blocks per second with 300ms finality to your browser. At 5ms per block, Simplex moves faster than most monitors refresh.
 
 ```{=html}
 <style>
@@ -53,7 +53,7 @@ In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread a
 ```
 
 ::: {.image-caption}
-Figure 1: Each square represents one 5ms target interval. Alto sustained about 200 blocks per second.
+Figure 1: Each square represents one 5ms target interval. Alto sustained 200 blocks per second.
 :::
 
 ## Two Network Waits Between Views
@@ -66,7 +66,7 @@ Traditionally, two network hops separate consecutive views: the next leader must
 
 With rotating leaders, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
-Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term, reducing proposer handoffs from one per view to one per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives. An honest leader also knows it did not equivocate, so it can begin building and distributing the next proposal's data early. This cuts the wait between views from two network hops to one: the hop that forms the parent notarization. This stable-leader variant was introduced in [Sing a Song of Simplex](https://eprint.iacr.org/2023/1916).
+Stable Leader groups consecutive views into a *term*, as explored in both [Sing a Song of Simplex](https://eprint.iacr.org/2023/1916) and Commonware's [Carnot](https://arxiv.org/abs/2603.11797). One leader proposes throughout the term, reducing proposer handoffs from one per view to one per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives. An honest leader also knows it did not equivocate, so it can begin building and distributing the next proposal's data early. This cuts the wait between views from two network hops to one: the hop that forms the parent notarization.
 
 ```{=html}
 <div id="simplex-fig-leaders" class="simplex-loop" role="img" aria-label="A comparison of round-robin and stable leaders over the same time span. Round-robin rotates among three leaders every view, with views spaced two network hops apart. With a term length of four, Stable Leader spaces views one hop apart within each term, while term-boundary handoffs still take two hops. The timeline shows three complete stable-leader terms and two term boundaries.">
@@ -120,18 +120,20 @@ Figure 4: When v3 times out, validators nullify it. Later proposals are discarde
 
 ## Where the Pipeline Fits
 
+The benchmark used header-only blocks with no transactions or execution, so it measured consensus cadence rather than transaction throughput. The 300ms measurement includes indexer and WebSocket delivery.
+
 Pipelining overlaps network waits, but every validator still performs the verification, execution, and storage required for each block. A higher block rate therefore puts more pressure on validator compute, storage, and network bandwidth. Pipelining does not shorten the time from proposal to finalization, but it does shorten the wait before a transaction can enter the next proposal.
 
-Longer terms reduce handoff overhead but give one leader more consecutive proposals. At Alto's measured cadence, a 10,000-view term lasted roughly 50 seconds. If a leader goes offline, nullifying its first stalled view skips the rest of the term and rotates to the next leader. One timeout therefore covers the offline leader's entire term.
+Longer terms reduce handoff overhead but give one leader more consecutive proposals. With 5ms views, a 10,000-view term lasts roughly 50 seconds. If a leader goes offline, nullifying its first stalled view skips the rest of the term and rotates to the next leader. One timeout therefore covers the offline leader's entire term.
 
 A Byzantine leader could still finalize blocks while selectively censoring transactions. This risk also exists with rotating leaders, but longer terms can increase inclusion delay because the same leader proposes more consecutive blocks. Selective censorship can be difficult to detect when the leader otherwise performs well.
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
-## A Finer Ordering Clock
+## A High-Frequency Decentralized Sequencer
 
-Each 5ms view gives applications another opportunity to order new data. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
+Each 5ms view gives applications another opportunity to order new data. That finer schedule means orderbooks, batchers, and games respond to new input as fast as a traditional web page.
 
-This pipeline lets one ordering leader publish new blocks as quickly as local work and network capacity allow. To carry larger payloads efficiently, [Carnot](https://arxiv.org/abs/2603.11797) combines multi-view leaders with bandwidth-efficient dissemination. For multiple concurrent producers, [Multimmit](/blogs/multimmit) separates parallel transaction production from the single ordering leader.
+This design maintains a single proposal chain. Within a stable term, the leader knows the parent it is extending, so applications can evaluate stateful transitions against a predictable pending state. Multiple Concurrent Proposer constructions address a different bottleneck. [Multimmit](/blogs/multimmit) lets many producers disseminate transactions in parallel, then derives one order across their chains. The two designs offer different tradeoffs between predictable state and concurrent production.
 
-Stable Leader and Optimistic Validation will be available in the next `commonware-consensus` release.
+Stable Leader and Optimistic Validation are part of Simplex and will be available in the next `commonware-consensus` release.
