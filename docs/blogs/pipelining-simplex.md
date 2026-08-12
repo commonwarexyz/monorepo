@@ -1,9 +1,9 @@
 ---
 title: "Simplex, Pipelined"
 description: "In a 50-validator Alto deployment, Stable Leader and Optimistic Validation sustained about 200 blocks per second, with a median of 5ms between blocks."
-date: "August 10th, 2026"
-published-time: "2026-08-10T00:00:00Z"
-modified-time: "2026-08-10T00:00:00Z"
+date: "August 12th, 2026"
+published-time: "2026-08-12T00:00:00Z"
+modified-time: "2026-08-12T00:00:00Z"
 author: "Brendan Chou"
 author_twitter: "https://x.com/B_Chou"
 url: "https://commonware.xyz/blogs/pipelining-simplex"
