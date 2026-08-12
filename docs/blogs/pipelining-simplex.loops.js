@@ -345,6 +345,8 @@ function buildValidation(mount) {
   const sequentialGap = 186;
   const optimisticGap = 62;
   const networkHop = sequentialGap;
+  const laneGap = 40;
+  const arrowInset = 9;
   const topY = 80;
   const bottomY = 265;
 
@@ -354,8 +356,8 @@ function buildValidation(mount) {
   const addLanes = proposalY => {
     const lanes = [
       ['propose', proposalY],
-      ['notarize', proposalY + 45],
-      ['finalize', proposalY + 80],
+      ['notarize', proposalY + laneGap],
+      ['finalize', proposalY + laneGap * 2],
     ];
     lanes.forEach(([label, y]) => {
       addText(svg, 125, y + 5, label, {
@@ -397,10 +399,10 @@ function buildValidation(mount) {
   const addNetworkRounds = (x, y, proposedAt, linksNextProposal) => {
     animated.push(addArrow(
       svg,
-      x + 4,
-      y + 17,
-      x + networkHop,
-      y + 45,
+      x + arrowInset,
+      y,
+      x + networkHop - arrowInset,
+      y + laneGap,
       ARROW,
       proposedAt + 0.01,
       0.13,
@@ -410,7 +412,7 @@ function buildValidation(mount) {
       animated.push(addArrow(
         svg,
         x + networkHop,
-        y + 39,
+        y + laneGap - 6,
         x + networkHop,
         y + 17,
         ARROW,
@@ -421,10 +423,10 @@ function buildValidation(mount) {
     }
     animated.push(addArrow(
       svg,
-      x + networkHop + 9,
-      y + 45,
-      x + networkHop * 2 - 9,
-      y + 80,
+      x + networkHop + arrowInset,
+      y + laneGap,
+      x + networkHop * 2 - arrowInset,
+      y + laneGap * 2,
       GREEN,
       proposedAt + 0.16,
       0.13,
