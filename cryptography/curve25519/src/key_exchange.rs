@@ -21,6 +21,7 @@ use crate::curve::montgomery;
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_math::algebra::Random;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// The u-coordinate of the X25519 base point.
 const BASEPOINT_U: [u8; 32] = {
@@ -33,16 +34,18 @@ const BASEPOINT_U: [u8; 32] = {
 ///
 /// Keys can only be generated freshly at random, and [`Self::exchange`] consumes the key, so a
 /// key cannot be used across sessions. There is deliberately no way to serialize one: forward
-/// secrecy relies on secret keys not outliving their exchange.
+/// secrecy relies on secret keys not outliving their exchange. Secret material is zeroized when
+/// the key is dropped.
+#[derive(ZeroizeOnDrop)]
 pub struct SecretKey {
     bytes: [u8; 32],
 }
 
 impl Random for SecretKey {
     fn random(mut rng: impl rand_core::CryptoRng) -> Self {
-        let mut bytes = [0u8; 32];
-        rng.fill_bytes(&mut bytes);
-        Self { bytes }
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(&mut bytes[..]);
+        Self { bytes: *bytes }
     }
 }
 
@@ -61,11 +64,11 @@ impl SecretKey {
     /// the result to a value everybody can compute. An honestly generated public key fails
     /// with negligible probability, so a failure means the other party misbehaved.
     pub fn exchange(self, other: &PublicKey) -> Option<SharedSecret> {
-        let bytes = montgomery::x25519(&self.bytes, &other.bytes);
-        if bytes == [0; 32] {
+        let bytes = Zeroizing::new(montgomery::x25519(&self.bytes, &other.bytes));
+        if *bytes == [0; 32] {
             return None;
         }
-        Some(SharedSecret { bytes })
+        Some(SharedSecret { bytes: *bytes })
     }
 }
 
@@ -118,7 +121,8 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 ///
 /// The bytes are a curve point coordinate, not a uniformly random string: feed them into a
 /// key-derivation function bound to the protocol context rather than using them directly as
-/// a cipher key.
+/// a cipher key. The bytes are zeroized when the shared secret is dropped.
+#[derive(ZeroizeOnDrop)]
 pub struct SharedSecret {
     bytes: [u8; 32],
 }
@@ -132,7 +136,7 @@ impl SharedSecret {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicKey, SecretKey};
+    use super::{PublicKey, SecretKey, SharedSecret};
     use commonware_formatting::hex;
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
@@ -184,6 +188,16 @@ mod tests {
             let bob_shared = bob.exchange(&alice_public).expect("contributory");
             assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
         }
+    }
+
+    #[test]
+    fn secret_types_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<SecretKey>();
+        assert_zeroize_on_drop::<SharedSecret>();
+        assert!(core::mem::needs_drop::<SecretKey>());
+        assert!(core::mem::needs_drop::<SharedSecret>());
     }
 
     #[test]

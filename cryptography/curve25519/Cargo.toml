@@ -22,7 +22,8 @@ commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
 rand_core.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, features = [ "zeroize" ] }
+zeroize = { workspace = true, features = [ "zeroize_derive" ] }
 
 [dev-dependencies]
 arbitrary.workspace = true

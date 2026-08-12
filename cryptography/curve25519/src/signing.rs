@@ -16,8 +16,12 @@ use sha2::{
     Digest,
     digest::{FixedOutput, Update},
 };
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An Ed25519 signing key.
+///
+/// Secret material is zeroized when the key is dropped.
+#[derive(ZeroizeOnDrop)]
 pub struct SigningKey {
     /// When serializing, we want to just write the seed, so we keep it around.
     seed: [u8; 32],
@@ -26,18 +30,23 @@ pub struct SigningKey {
     /// The pruned secret scalar, reduced modulo the basepoint order.
     scalar: Scalar,
     /// The verifying key derived from the secret scalar.
+    #[zeroize(skip)]
     verifying_key: VerifyingKey,
 }
 
 // Private methods.
 impl SigningKey {
     fn from_seed(seed: [u8; 32]) -> Self {
+        let seed = Zeroizing::new(seed);
         // Following: https://www.rfc-editor.org/rfc/rfc8032.html#section-5.1.5.
         // The first half becomes our secret scalar material, while the second half
         // is the private prefix we use to derive deterministic nonces.
-        let h: [u8; 64] = sha2::Sha512::new().chain(seed).finalize_fixed().into();
-        let mut scalar_le_bytes: [u8; 32] = h[..32].try_into().expect("h is 64 bytes");
-        let prefix: [u8; 32] = h[32..].try_into().expect("h is 64 bytes");
+        let h: Zeroizing<[u8; 64]> =
+            Zeroizing::new(sha2::Sha512::new().chain(&seed[..]).finalize_fixed().into());
+        let mut scalar_le_bytes: Zeroizing<[u8; 32]> =
+            Zeroizing::new(h[..32].try_into().expect("h is 64 bytes"));
+        let prefix: Zeroizing<[u8; 32]> =
+            Zeroizing::new(h[32..].try_into().expect("h is 64 bytes"));
         // We want the integer represented by these little-endian bytes to be a
         // multiple of the curve's cofactor, 8, so we "clamp" it by zeroing its
         // three least-significant bits. This is part of Ed25519 key derivation too,
@@ -52,9 +61,9 @@ impl SigningKey {
         // that start at the highest set bit to use the same number of iterations. It
         // doesn't make a variable-time implementation safe by itself.
         scalar_le_bytes[31] |= 0b0100_0000;
-        let mut wide_scalar = [0u8; 64];
-        wide_scalar[..32].copy_from_slice(&scalar_le_bytes);
-        let scalar = Scalar::from_bytes_mod_order_wide(&wide_scalar);
+        let mut wide_scalar = Zeroizing::new([0u8; 64]);
+        wide_scalar[..32].copy_from_slice(&scalar_le_bytes[..]);
+        let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
         let point = GAffine::BASEPOINT
             .to_extended()
             .scalar_mul_secret(&scalar_le_bytes);
@@ -64,9 +73,9 @@ impl SigningKey {
         };
 
         Self {
-            seed,
-            prefix,
-            scalar,
+            seed: *seed,
+            prefix: *prefix,
+            scalar: *scalar,
             verifying_key,
         }
     }
@@ -74,9 +83,9 @@ impl SigningKey {
 
 impl Random for SigningKey {
     fn random(mut rng: impl rand_core::CryptoRng) -> Self {
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
-        Self::from_seed(seed)
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(&mut seed[..]);
+        Self::from_seed(*seed)
     }
 }
 
@@ -94,7 +103,8 @@ impl Read for SigningKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::from_seed(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?))
+        let seed = Zeroizing::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?);
+        Ok(Self::from_seed(*seed))
     }
 }
 
@@ -113,15 +123,18 @@ impl SigningKey {
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let msg = union_unique(namespace, msg);
 
-        let nonce_digest: [u8; 64] = sha2::Sha512::new()
-            .chain(self.prefix)
-            .chain(&msg)
-            .finalize_fixed()
-            .into();
-        let nonce = Scalar::from_bytes_mod_order_wide(&nonce_digest);
+        let nonce_digest: Zeroizing<[u8; 64]> = Zeroizing::new(
+            sha2::Sha512::new()
+                .chain(self.prefix.as_slice())
+                .chain(&msg)
+                .finalize_fixed()
+                .into(),
+        );
+        let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
+        let nonce_bytes = Zeroizing::new(nonce.to_bytes());
         let r_bytes = GAffine::BASEPOINT
             .to_extended()
-            .scalar_mul_secret(&nonce.to_bytes())
+            .scalar_mul_secret(&nonce_bytes)
             .to_bytes();
 
         let challenge_digest: [u8; 64] = sha2::Sha512::new()
@@ -131,9 +144,8 @@ impl SigningKey {
             .finalize_fixed()
             .into();
         let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
-        let s_bytes = nonce
-            .add_mod_l(&challenge.mul_mod_l(&self.scalar))
-            .to_bytes();
+        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
+        let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
 
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&r_bytes);
@@ -355,6 +367,14 @@ mod tests {
             );
         }
         assert!(verifier.verify(&mut rng, &Sequential));
+    }
+
+    #[test]
+    fn signing_key_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<SigningKey>();
+        assert!(core::mem::needs_drop::<SigningKey>());
     }
 
     #[test]

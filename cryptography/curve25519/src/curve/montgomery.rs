@@ -1,23 +1,11 @@
 //! X25519 scalar multiplication on the Montgomery form of curve25519.
 
 use super::F;
+use zeroize::Zeroizing;
 
 /// `(A - 2) / 4 = 121665`, where `A = 486662` is the coefficient of the Montgomery curve
 /// `v^2 = u^3 + A*u^2 + u`.
 const A24: F = F([121665, 0, 0, 0, 0]);
-
-/// Clamps a scalar as required by X25519.
-///
-/// Clearing the three low bits makes the scalar a multiple of the cofactor, 8, so that the
-/// low-order component of any input point is annihilated. Forcing bit 254 on and bit 255 off
-/// gives every scalar the same bit length, so implementations that iterate from the highest
-/// set bit perform the same number of steps.
-const fn clamp(mut scalar: [u8; 32]) -> [u8; 32] {
-    scalar[0] &= 0b1111_1000;
-    scalar[31] &= 0b0111_1111;
-    scalar[31] |= 0b0100_0000;
-    scalar
-}
 
 /// The X25519 function of [RFC 7748]: multiplies the point with u-coordinate `u` by `scalar`.
 ///
@@ -30,7 +18,12 @@ const fn clamp(mut scalar: [u8; 32]) -> [u8; 32] {
 ///
 /// [RFC 7748]: https://www.rfc-editor.org/rfc/rfc7748#section-5
 pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
-    let scalar = clamp(*scalar);
+    let mut scalar = Zeroizing::new(*scalar);
+    // Clearing the three low bits makes the scalar a multiple of the cofactor, 8. Forcing bit
+    // 254 on and bit 255 off gives every scalar the same bit length.
+    scalar[0] &= 0b1111_1000;
+    scalar[31] &= 0b0111_1111;
+    scalar[31] |= 0b0100_0000;
     let x1 = F::from_bytes(u);
     let mut x2 = F::ONE;
     let mut z2 = F::ZERO;
