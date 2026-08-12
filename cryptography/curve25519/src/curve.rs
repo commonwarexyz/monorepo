@@ -589,9 +589,6 @@ impl GAffine {
             return None;
         }
 
-        if x.is_zero() && sign == 1 {
-            return None;
-        }
         if x.is_odd() != (sign == 1) {
             x = x.neg();
         }
@@ -665,9 +662,6 @@ impl GAffine {
 
         array::from_fn(|i| {
             factors[i]?;
-            if x_lanes[i].is_zero() && signs[i] == 1 {
-                return None;
-            }
             Some(Self {
                 x: final_x[i],
                 y: ys[i],

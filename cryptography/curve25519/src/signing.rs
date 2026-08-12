@@ -304,11 +304,13 @@ impl BatchVerifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchVerifier, SigningKey};
+    use super::{BatchVerifier, Signature, SigningKey, VerifyingKey};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, union_unique};
-    use ed25519_consensus::SigningKey as RefSigningKey;
+    use ed25519_consensus::{
+        Signature as RefSignature, SigningKey as RefSigningKey, VerificationKey as RefVerifyingKey,
+    };
     use rand_core::Rng;
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
@@ -353,6 +355,53 @@ mod tests {
             );
         }
         assert!(verifier.verify(&mut rng, &Sequential));
+    }
+
+    #[test]
+    fn zip215_accepts_negative_zero_encodings() {
+        let mut positive_identity = [0u8; 32];
+        positive_identity[0] = 1;
+        positive_identity[31] = 0x80;
+
+        let mut negative_identity = [0xff; 32];
+        negative_identity[0] = 0xec;
+
+        let mut non_canonical_positive_identity = [0xff; 32];
+        non_canonical_positive_identity[0] = 0xee;
+
+        let encodings = [
+            positive_identity,
+            negative_identity,
+            non_canonical_positive_identity,
+        ];
+        let message = b"negative-zero encoding";
+        let namespaced_message = union_unique(NAMESPACE, message);
+        let mut rng = test_rng();
+        let mut batch = BatchVerifier::new(encodings.len());
+
+        for encoding in encodings {
+            let verifying_key = VerifyingKey {
+                bytes: encoding,
+                point: None,
+            };
+            let mut signature_bytes = [0u8; 64];
+            signature_bytes[..32].copy_from_slice(&encoding);
+            let signature = Signature {
+                bytes: signature_bytes,
+            };
+
+            let reference_key = RefVerifyingKey::try_from(encoding).unwrap();
+            let reference_signature = RefSignature::from(signature_bytes);
+            assert!(
+                reference_key
+                    .verify(&reference_signature, &namespaced_message)
+                    .is_ok()
+            );
+            assert!(verifying_key.verify(NAMESPACE, message, &signature));
+            batch.add(NAMESPACE, message, &verifying_key, &signature);
+        }
+
+        assert!(batch.verify(&mut rng, &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]
