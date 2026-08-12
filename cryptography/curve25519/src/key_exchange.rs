@@ -17,7 +17,7 @@
 //! assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
 //! ```
 
-use crate::curve::montgomery;
+use crate::curve::{F, montgomery};
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_math::algebra::Random;
@@ -73,7 +73,10 @@ impl SecretKey {
 }
 
 /// A public key another party can use to perform a key exchange.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Equality compares decoded u-coordinates. Distinct encodings that X25519 processes as the same
+/// field element therefore compare equal, while serialization preserves the original bytes.
+#[derive(Clone)]
 pub struct PublicKey {
     /// The little-endian u-coordinate of a point on the Montgomery form of the curve.
     ///
@@ -81,6 +84,14 @@ pub struct PublicKey {
     /// surfaces as a failed [`SecretKey::exchange`] rather than a decoding error.
     bytes: [u8; 32],
 }
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        F::from_bytes(&self.bytes).eq(&F::from_bytes(&other.bytes))
+    }
+}
+
+impl Eq for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -136,7 +147,7 @@ impl SharedSecret {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicKey, SecretKey, SharedSecret};
+    use super::{BASEPOINT_U, PublicKey, SecretKey, SharedSecret};
     use commonware_formatting::hex;
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
@@ -198,6 +209,47 @@ mod tests {
         assert_zeroize_on_drop::<SharedSecret>();
         assert!(core::mem::needs_drop::<SecretKey>());
         assert!(core::mem::needs_drop::<SharedSecret>());
+    }
+
+    #[test]
+    fn public_key_equality_uses_decoded_coordinates() {
+        let mut basepoint_with_high_bit = BASEPOINT_U;
+        basepoint_with_high_bit[31] |= 0x80;
+        let mut one = [0u8; 32];
+        one[0] = 1;
+
+        let aliases = [
+            (BASEPOINT_U, basepoint_with_high_bit),
+            (
+                [0; 32],
+                hex!("0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+            ),
+            (
+                one,
+                hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+            ),
+        ];
+
+        for (canonical_bytes, alias_bytes) in aliases {
+            let canonical = PublicKey {
+                bytes: canonical_bytes,
+            };
+            let alias = PublicKey { bytes: alias_bytes };
+            assert!(canonical == alias);
+            assert_ne!(canonical.as_ref(), alias.as_ref());
+
+            let canonical_shared = SecretKey { bytes: [42; 32] }.exchange(&canonical);
+            let alias_shared = SecretKey { bytes: [42; 32] }.exchange(&alias);
+            match (canonical_shared, alias_shared) {
+                (Some(canonical), Some(alias)) => {
+                    assert_eq!(canonical.as_bytes(), alias.as_bytes());
+                }
+                (None, None) => {}
+                _ => panic!("equivalent coordinates must produce equivalent exchanges"),
+            }
+        }
+
+        assert!(PublicKey { bytes: [0; 32] } != PublicKey { bytes: one });
     }
 
     #[test]
