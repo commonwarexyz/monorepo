@@ -1,6 +1,6 @@
 ---
 title: "Simplex, Pipelined"
-description: "In a 50-validator Alto deployment, Stable Leader and Optimistic Validation sustained about 200 blocks per second, with a median of 5ms between blocks."
+description: "Stable Leader and Optimistic Validation pipeline Simplex views to shorten the wait before a transaction can enter the next proposal. In a 50-validator Alto deployment, the pipeline sustained about 200 blocks per second with 5ms median spacing."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
 modified-time: "2026-08-12T00:00:00Z"
@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-New blocks no longer have to wait for network round trips.
+A transaction cannot finalize until a leader includes it in a proposal. Pipelining Simplex shortens the wait for that opportunity by starting new blocks while earlier ones continue toward finality. In Alto, the median interval between blocks was 5ms.
 
 Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once.
 
@@ -98,7 +98,7 @@ Figure 3: Without optimism, validators wait for the parent notarization before v
 
 ## Same Evidence, Earlier Work
 
-*Optimistic* means a participant can vote to notarize a proposal before it receives notarizations for every ancestor in the term.
+*Optimistic* means a participant can vote to notarize a proposal before receiving notarizations for every ancestor in the term.
 
 Notarization is not finalization. After a block is notarized, each validator asks its application whether the payload is safe to commit. This decision is called *certification* and happens before the validator votes to finalize the block. Certification lets an application finish any checks required before commit, such as confirming data availability or validating application-specific block and transaction rules.
 
@@ -106,7 +106,7 @@ A participant only votes optimistically when every earlier proposal in the term 
 
 The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry. Together, these rules let Simplex views pipeline without changing the evidence required for finalization.
 
-Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
+The consensus configuration also sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, at the cost of more CPU and memory for work that could be discarded if an earlier view fails.
 
 ```{=html}
 <div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Validators nullify view three. Optimistic proposals in views four and five are discarded, and views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues offscreen.">

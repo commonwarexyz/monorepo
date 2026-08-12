@@ -181,7 +181,7 @@ function buildCadence(mount) {
     squares.push(square);
   }
 
-  addText(svg, 512, 378, 'A 5ms interval is shorter than a typical screen refresh', {
+  addText(svg, 512, 378, 'A 5ms view cadence (200Hz) is faster than a typical screen refresh', {
     'text-anchor': 'middle',
     fill: GRAY,
   });
