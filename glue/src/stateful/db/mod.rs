@@ -414,7 +414,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
-    /// Return the sync target for this database's current applied state.
+    /// Return the database's current recovery target.
+    ///
+    /// Implementations may report a target that lags live applied state until
+    /// [`Self::start_sync`] publishes it. Returning a target does not by itself
+    /// prove that target durable.
     fn sync_target(&self) -> Self::SyncTarget;
 
     /// Rewind applied state to `target`.
@@ -571,8 +575,14 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Begin persisting the current applied state of every database.
     ///
-    /// The returned [`Barrier`] resolves once every database is durable and
-    /// must be observed before another set-wide sync is started.
+    /// The returned [`Barrier`] resolves once the captured state is durable in
+    /// every database. Later finalization may proceed while the barrier is
+    /// pending, but that dirty suffix needs a subsequent sync. The barrier must
+    /// be observed before another set-wide sync is started.
+    ///
+    /// Do not race sync initiation with another set-wide mutation. Cancelling
+    /// this future mid-flight loses the databases whose sync initiation was in
+    /// progress (see [Shared]); every later access panics.
     fn start_sync(&self) -> impl Future<Output = Barrier> + Send;
 
     /// Prune each database to the provided per-database targets.
@@ -584,7 +594,10 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// were in progress (see [Shared]); every later access panics.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return sync targets for the set's current applied state.
+    /// Return the recovery targets currently reported by the database set.
+    ///
+    /// A target may lag live applied state until [`DatabaseSet::start_sync`]
+    /// publishes it, and does not by itself prove durability.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Rewind the set to the provided per-database targets.

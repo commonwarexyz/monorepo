@@ -32,8 +32,7 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
-/// A single unit of work for the processing loop: either a mailbox message to
-/// handle or a deferred prune to run while the mailbox is idle.
+/// A single unit of work selected by the processing loop.
 enum Step<M, P> {
     Message(M),
     Prune(P),
@@ -45,6 +44,7 @@ struct Durability {
     applied: Height,
     durable: Height,
     active: Option<Height>,
+    /// Marshal's pending-acknowledgement window bounds this queue.
     acknowledgements: VecDeque<(Height, Exact)>,
 }
 
@@ -89,15 +89,26 @@ impl Durability {
         }
         assert!(height > self.durable && height <= self.applied);
         self.durable = height;
-        while self
+        let covered = self
             .acknowledgements
-            .front()
-            .is_some_and(|(height, _)| *height <= self.durable)
-        {
-            let (_, acknowledgement) = self
-                .acknowledgements
-                .pop_front()
-                .expect("front acknowledgement must exist");
+            .iter()
+            .take_while(|(height, _)| *height <= self.durable)
+            .count();
+        // Marshal acknowledgements can be cloned by fan-out reporters. Chain the captured prefix
+        // so its FIFO head resolves only after every clone of every covered successor resolves.
+        let mut acknowledgements = self
+            .acknowledgements
+            .iter()
+            .take(covered)
+            .map(|(_, acknowledgement)| acknowledgement);
+        if let Some(mut previous) = acknowledgements.next() {
+            for acknowledgement in acknowledgements {
+                previous.defer_until(acknowledgement);
+                previous = acknowledgement;
+            }
+        }
+        // Release local handles newest-first so a sole reporter also exposes one ready prefix.
+        for (_, acknowledgement) in self.acknowledgements.drain(..covered).rev() {
             acknowledgement.acknowledge();
         }
         true
@@ -204,14 +215,15 @@ where
         }
 
         // One database sync stays active while later finalized state accumulates behind it.
-        // Its successor starts immediately after completion and covers that accumulated suffix.
+        // Completion starts a successor for that suffix unless a pending prune must establish
+        // the next storage-mutation boundary first.
         let mut syncs = Pool::<(Height, bool)>::default();
         let mut durability = Durability::new(self.processor.last_processed().height);
         select_loop! {
             self.context,
             on_start => {
-                // Observe completed durability before taking more work. A queued prune owns the
-                // next cancellation boundary and starts any successor after releasing readers.
+                // Observe completed durability before taking more work. A queued prune suppresses
+                // an automatic dirty-suffix successor until it has released database readers.
                 while let Some(completion) = syncs.next_completed().now_or_never() {
                     if !durability.complete(completion) {
                         return;
@@ -244,8 +256,8 @@ where
                     }
                 };
 
-                // Pruning remains idle work, but a queued prune owns the next sync-initiation
-                // boundary so it can quiesce database readers before starting a successor.
+                // Pruning remains idle work. When a completed sync leaves a dirty suffix, run the
+                // queued prune before its successor can reacquire the database writer.
                 let next = match message {
                     Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
                     Err(TryRecvError::Empty) => {
@@ -487,12 +499,6 @@ where
                     if !durability.complete(completion) {
                         return;
                     }
-                    start_sync_if_needed::<E, A, S, V>(
-                        &mut durability,
-                        &mut syncs,
-                        &mut verifications,
-                        self.processor.databases(),
-                    ).await;
                 }
             },
         }
@@ -515,7 +521,7 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, Processing, VerificationRequest, skip_finalized_block};
+    use super::{Durability, Message, Processing, VerificationRequest, skip_finalized_block};
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
@@ -549,19 +555,78 @@ mod tests {
     };
     use commonware_utils::{
         NZUsize,
-        acknowledgement::{Acknowledgement as _, Exact},
+        acknowledgement::{Acknowledgement as _, Exact, ExactWaiter},
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{StreamExt as _, poll};
+    use futures::{StreamExt as _, poll, task::noop_waker_ref};
     use std::{
         collections::VecDeque,
+        future::Future as _,
+        pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
+        task::{Context, Poll, Wake, Waker},
         time::Duration,
     };
+
+    struct LaterAcknowledgementObserver {
+        waiter: Mutex<ExactWaiter>,
+        observed: AtomicBool,
+    }
+
+    impl LaterAcknowledgementObserver {
+        fn observe(&self) {
+            let mut waiter = self.waiter.lock();
+            let mut context = Context::from_waker(noop_waker_ref());
+            assert!(
+                matches!(
+                    Pin::new(&mut *waiter).poll(&mut context),
+                    Poll::Ready(Ok(()))
+                ),
+                "waking the FIFO head must expose the entire covered prefix",
+            );
+            self.observed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    impl Wake for LaterAcknowledgementObserver {
+        fn wake(self: Arc<Self>) {
+            self.observe();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe();
+        }
+    }
+
+    #[test]
+    fn coalesced_acknowledgements_wait_for_later_clones() {
+        let (first, mut first_waiter) = Exact::handle();
+        let (second, second_waiter) = Exact::handle();
+        let first_clone = first.clone();
+        let second_clone = second.clone();
+        let observer = Arc::new(LaterAcknowledgementObserver {
+            waiter: Mutex::new(second_waiter),
+            observed: AtomicBool::new(false),
+        });
+        let waker = Waker::from(observer.clone());
+        let mut context = Context::from_waker(&waker);
+        assert!(Pin::new(&mut first_waiter).poll(&mut context).is_pending());
+        first_clone.acknowledge();
+
+        let mut durability = Durability::new(Height::new(1));
+        durability.applied(Height::new(2), first);
+        durability.applied(Height::new(3), second);
+        durability.started(Height::new(3));
+        assert!(durability.complete((Height::new(3), true)));
+        assert!(!observer.observed.load(Ordering::Relaxed));
+
+        second_clone.acknowledge();
+        assert!(observer.observed.load(Ordering::Relaxed));
+    }
 
     struct ApplicationGate {
         started: oneshot::Sender<()>,

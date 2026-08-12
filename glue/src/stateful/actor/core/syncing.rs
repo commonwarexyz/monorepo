@@ -344,8 +344,8 @@ where
                         .expect("sync handoff block cannot be a duplicate");
                     let barrier = barrier.expect("sync handoff must start durability");
 
-                    // The processing loop's flush pool does not exist yet, so observe the
-                    // deferred flush inline. Keep state-sync metadata in progress until every
+                    // The processing loop's sync pool does not exist yet, so observe the
+                    // deferred sync inline. Keep state-sync metadata in progress until every
                     // handoff block is durable.
                     if !barrier.durable().await {
                         return;
