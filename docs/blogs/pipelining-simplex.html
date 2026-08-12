@@ -105,11 +105,11 @@ Chou</a></div>
         href="https://eprint.iacr.org/2023/463">Simplex</a> views.
         Stable Leader keeps one proposer for many views in a row,
         reducing handoff overhead. Optimistic Validation enables that
-        leader keep proposing and validators keep voting without waiting
-        for the previous view’s notarization. Together, they keep
-        several views moving through the network at once. For users,
-        more frequent proposals means as little time as possible waiting
-        for a transaction to finalize (the sum of block time and
+        leader to keep proposing and validators to keep voting without
+        waiting for the previous view’s notarization. Together, they
+        keep several views moving through the network at once. For
+        users, more frequent proposals mean as little time as possible
+        waiting for a transaction to finalize (the sum of block time and
         finality latency).</p>
         <p>On a global deployment with 50 validators, this new Simplex
         variant sustained 200 blocks per second with a median external
@@ -171,15 +171,14 @@ Chou</a></div>
         forms: a Byzantine leader may have sent conflicting
         proposals.</p>
         <p>Stable Leader groups consecutive views into a <em>term</em>,
-        an approach described in <a
-        href="https://eprint.iacr.org/2023/1916">Sing a Song of
-        Simplex</a> and referred to as <em>multi-view leadership</em> in
-        <a href="https://arxiv.org/abs/2603.11797">The Carnot Bound:
-        Limits and Possibilities for Bandwidth-Efficient Consensus</a>.
-        One leader proposes throughout the term, reducing proposer
-        handoffs from one per view to one per term. Within the term, the
-        leader already knows the previous block and its ancestry before
-        a single network message arrives. An honest leader also knows it
+        as described in <a href="https://eprint.iacr.org/2023/1916">Sing
+        a Song of Simplex</a> and <a
+        href="https://arxiv.org/abs/2603.11797">The Carnot Bound: Limits
+        and Possibilities for Bandwidth-Efficient Consensus</a>. One
+        leader proposes throughout the term, reducing proposer handoffs
+        from one per view to one per term. Within the term, the leader
+        already knows the previous block and its ancestry before a
+        single network message arrives. An honest leader also knows it
         did not equivocate, so it can begin building and distributing
         the next proposal’s data early. This cuts the wait between views
         from two network hops to one: the hop that forms the parent
@@ -283,20 +282,26 @@ Chou</a></div>
         enough CPU and memory for many in-flight views. Networks that
         prioritize proposer rotation as a censorship defense may prefer
         shorter terms.</p>
-        <h2 id="a-finer-ordering-clock">A Finer Ordering Clock</h2>
+        <h2 id="decentralized-sequencing-in-a-box">Decentralized
+        Sequencing in a Box</h2>
         <p>Each 5ms view gives applications another opportunity to order
-        new data. That finer schedule can help orderbooks, batchers, and
-        games respond to new input sooner.</p>
-        <p>This pipeline lets one ordering leader publish new blocks as
-        quickly as local work and network capacity allow. To carry
-        larger payloads efficiently, <a
-        href="https://arxiv.org/abs/2603.11797">Carnot</a> combines
-        multi-view leaders with bandwidth-efficient dissemination. For
-        multiple concurrent producers, <a
-        href="/blogs/multimmit">Multimmit</a> separates parallel
-        transaction production from the single ordering leader.</p>
-        <p>Stable Leader and Optimistic Validation will be available in
-        the next <code>commonware-consensus</code> release.</p>
+        new data. That finer schedule means orderbooks, batchers, and
+        games respond to new input as fast as a traditional web
+        page.</p>
+        <p>Unlike consensus protocols where the order of transactions
+        (and thus the state of execution) is only known after
+        finalization, like <a href="/blogs/multimmit">Multimmit</a> and
+        other Multiple Concurrent Proposer constructions, the leader
+        here knows the state they are building on. They can run
+        traditional state transition functions (like the EVM) without
+        modification. Not to mention, participants can stream pending
+        blocks (and pending state) to issue another transaction long
+        before the block is ever finalized.</p>
+        <p>Stable Leader and Optimistic Validation are in
+        <code>main</code> and will be available in the next
+        <code>commonware-consensus</code> release. However, you can play
+        with them now in <a
+        href="https://github.com/commonwarexyz/alto/pull/202">Alto</a>.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

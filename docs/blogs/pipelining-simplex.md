@@ -12,7 +12,7 @@ image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 
 Simplex can now order blocks as fast as a validator can build them.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation enables that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once. For users, more frequent proposals means as little time as possible waiting for a transaction to finalize (the sum of block time and finality latency).
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation enables that leader to keep proposing and validators to keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once. For users, more frequent proposals mean as little time as possible waiting for a transaction to finalize (the sum of block time and finality latency).
 
 On a global deployment with 50 validators, this new Simplex variant sustained 200 blocks per second with a median external finality of 300ms (from the leader to WebSocket delivery in your browser). That's a faster refresh rate than the monitor you're probably reading this on.
 
@@ -128,7 +128,7 @@ A Byzantine leader could still finalize blocks while selectively censoring trans
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
-## Decentralized Sequencing in a Box 
+## Decentralized Sequencing in a Box
 
 Each 5ms view gives applications another opportunity to order new data. That finer schedule means orderbooks, batchers, and games respond to new input as fast as a traditional web page.
 
