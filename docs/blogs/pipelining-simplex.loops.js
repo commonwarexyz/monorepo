@@ -296,7 +296,7 @@ function buildLeaders(mount) {
           stableY[owner],
           stableX[index + 1] - 13,
           stableY[nextOwner],
-          BLUE,
+          ARROW,
           0.09 + index * 0.06,
         );
       } else {
@@ -306,7 +306,7 @@ function buildLeaders(mount) {
           stableY[owner],
           stableX[index + 1] - 13,
           stableY[nextOwner],
-          RED,
+          ARROW,
           0.09 + index * 0.06,
           0.05,
         ));
