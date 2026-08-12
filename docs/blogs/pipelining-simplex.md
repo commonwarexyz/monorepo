@@ -10,11 +10,11 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-New blocks no longer have to wait for network round trips.
+Simplex can now order blocks as fast as a validator can build them.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once. For users, more frequent proposals mean less time waiting for a transaction to enter the next block.
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation enables that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once. For users, more frequent proposals means as little time as possible waiting for a transaction to finalize (the sum of block time and finality latency).
 
-In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms. For an external observer, median finality was 300ms from the leader's block timestamp to delivery through the indexer and WebSocket. At that cadence, about 60 newer blocks could be in flight while the first finalized.
+On a global deployment with 50 validators, this new Simplex variant sustained 200 blocks per second with a median external finality of 300ms (from the leader to WebSocket delivery in your browser). That's a faster refresh rate than the monitor you're probably reading this on.
 
 ```{=html}
 <style>
