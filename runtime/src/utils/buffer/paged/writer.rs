@@ -1222,6 +1222,16 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             .await
     }
 
+    /// Flushes buffered data (including any partial page) to the blob without making it durable.
+    ///
+    /// Flushed bytes are not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [`Self::sync`]) completes.
+    /// Before writing, waits for any outstanding [`Self::start_sync`] and propagates its failure.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        self.flush_internal(true, false).await?;
+        Ok(())
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A newly flushed write can carry [`WriteOptions::SYNC`] when no earlier mutation is pending.
@@ -3101,6 +3111,78 @@ mod tests {
                 .unwrap();
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies flush writes buffered bytes (including a partial page) without any sync.
+    fn test_flush_writes_without_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = Arc::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE * 2, cache_ref)
+                .await
+                .unwrap();
+
+            // Flushing an empty writer performs no blob operations.
+            append.flush().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // A buffered partial page reaches the blob on flush, with no sync issued and no
+            // durability provided.
+            let data = vec![7; PAGE_SIZE.get() as usize + 11];
+            append.append(&data).await.unwrap();
+            append.flush().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(blob.size() > 0);
+            assert!(durable.is_empty());
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Flushed bytes remain readable.
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+
+            // Re-flushing an unchanged partial page writes nothing new.
+            append.flush().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // A later sync provides the durability barrier.
+            append.sync().await.unwrap();
+            let (_, _, full_syncs, range_syncs) = blob.snapshot();
+            assert!(full_syncs + range_syncs > 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_flush_waits_for_pending_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let inner = Arc::new(SyncTrackingBlob::new());
+            let (blob, pending) = DelayedSyncBlob::new(inner.clone());
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache).await.unwrap();
+            let handle = writer.start_sync().await;
+            let deferred = next_pending_sync(&pending);
+            writer.append(b"buffered").await.unwrap();
+
+            let mut flush = Box::pin(writer.flush());
+            assert!(flush.as_mut().now_or_never().is_none());
+            assert_eq!(inner.snapshot().1, 0);
+            deferred.release.send(Ok(())).unwrap();
+            flush.await.unwrap();
+            handle.await.unwrap();
+
+            // Only the earlier sync ran; flushing the new bytes did not start another one.
+            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert_eq!((writes, full_syncs, range_syncs), (1, 1, 0));
         });
     }
 

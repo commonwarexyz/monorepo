@@ -1911,6 +1911,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((self, handle))
     }
 
+    /// See [Journal::flush].
+    pub(crate) async fn flush(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.metrics.flush_calls.inc();
+        self.blobs.flush().await?;
+        self.offsets = self.offsets.flush().await?;
+        Ok(self)
+    }
+
     /// See [Journal::commit].
     pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
@@ -2443,6 +2451,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((self, pruned))
     }
 
+    /// Flush buffered appends to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. `sync()`) completes. Does not advance the recovery watermark.
+    pub async fn flush(mut self) -> Result<Self, Error> {
+        self.0 = self.0.flush().await?;
+        Ok(self)
+    }
+
     /// Persist data blobs so committed data survives a crash.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it.
@@ -2544,6 +2561,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
+    }
+
+    async fn flush(self) -> Result<Self, Error> {
+        Self::flush(self).await
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -7249,6 +7270,84 @@ mod tests {
         });
     }
 
+    /// A flush does not advance durability; a crash may retain or discard its writes.
+    #[test_traced]
+    fn test_variable_flush_crash() {
+        for retain in [false, true] {
+            let (_, checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let cfg = Config {
+                        partition: "variable-flush-crash".into(),
+                        items_per_section: NZU64!(128),
+                        compression: None,
+                        codec_config: (),
+                        page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(3)),
+                        write_buffer: NZUsize!(1024),
+                        replay_buffer: NZUsize!(1024),
+                    };
+                    let (recording, writes) = RecordingContext::new(context.child("recording"));
+                    let mut journal = Journal::<_, u64>::init(recording.child("first"), cfg)
+                        .await
+                        .unwrap();
+                    for i in 0..3 {
+                        (journal, _) = journal.append(&i).await.unwrap();
+                    }
+                    journal = journal.sync().await.unwrap();
+                    assert_eq!(journal.0.offsets.recovery_watermark(), 3);
+
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        write_rate: Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.0),
+                            retention_rate: if retain {
+                                probability!(1.0)
+                            } else {
+                                probability!(0.0)
+                            },
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        }),
+                        ..Default::default()
+                    };
+                    for i in 3..6 {
+                        (journal, _) = journal.append(&i).await.unwrap();
+                    }
+                    writes.clear();
+                    journal = journal.flush().await.unwrap();
+                    assert_eq!(journal.0.offsets.recovery_watermark(), 3);
+                    assert_eq!(journal.0.barrier.boundary(), 3);
+                    let writes = writes.snapshot().writes;
+                    assert_eq!(writes.len(), 2);
+                    assert!(
+                        writes
+                            .iter()
+                            .all(|options| !options.contains(WriteOptions::SYNC))
+                    );
+                    assert_eq!(journal.read(5).await.unwrap(), 5);
+                });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let cfg = Config {
+                    partition: "variable-flush-crash".into(),
+                    items_per_section: NZU64!(128),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(3)),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                };
+                let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                    .await
+                    .unwrap();
+                let end = if retain { 6 } else { 3 };
+                assert_eq!(journal.bounds(), 0..end);
+                for i in 0..end {
+                    assert_eq!(journal.read(i).await.unwrap(), i);
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
     /// Reopen at a page-aligned bound, append over the freed data pages, then crash with the
     /// appends retained and any unsynced resize lost. Recovery must not join the new frames with
     /// the discarded suffix.
@@ -9838,6 +9937,7 @@ mod tests {
             reader.read_many(&[1, 2]).await.unwrap();
             reader.try_read_sync(3).unwrap();
             drop(reader);
+            journal = journal.flush().await.unwrap();
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
@@ -9857,6 +9957,7 @@ mod tests {
                 "variable_metrics_read_many_calls_total 1",
                 "variable_metrics_items_read_total 4",
                 "variable_metrics_start_sync_calls_total 1",
+                "variable_metrics_flush_calls_total 1",
                 "variable_metrics_commit_calls_total 1",
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",
@@ -9869,6 +9970,7 @@ mod tests {
                 "variable_metrics_cache_misses_total 0",
                 "variable_metrics_data_tracked",
                 "variable_metrics_offsets_size 6",
+                "variable_metrics_offsets_flush_calls_total 1",
                 "variable_metrics_offsets_blobs_tracked",
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
