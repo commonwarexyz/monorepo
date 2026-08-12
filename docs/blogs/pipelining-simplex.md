@@ -1,6 +1,6 @@
 ---
-title: "Simplex, Pipelined"
-description: "Stable Leader and Optimistic Validation pipeline Simplex views to shorten the wait before a transaction can enter the next proposal. In a 50-validator Alto deployment, the pipeline sustained about 200 blocks per second with 5ms median spacing."
+title: "The Long and Short of It"
+description: "Blockchains will not be widely used until they feel as responsive as the rest of the internet. Stable Leader and Optimistic Validation move Simplex toward that goal, sustaining about 200 blocks per second with 5ms median spacing in Alto."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
 modified-time: "2026-08-12T00:00:00Z"
@@ -10,11 +10,13 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-A transaction cannot finalize until a leader includes it in a proposal. Pipelining Simplex shortens the wait for that opportunity by starting new blocks while earlier ones continue toward finality. In Alto, the median interval between blocks was 5ms.
+Blockchains will not be widely used until they feel as responsive as the rest of the internet. For users, submitting a transaction and seeing it finalize should feel like clicking a button and getting a response.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once.
+Getting there means shrinking both consensus components of transaction latency: the wait for the next proposal and the two rounds of voting that finalize it. Even fast consensus can be slow when proposals remain far apart. Simplex normally waits two network hops before starting the next view. Optimistic proposals can cut that to one hop even as leaders rotate. What if a leader could start the next proposal without waiting on the network and still know how each transaction would execute?
 
-In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms. For an external observer, median finality was 300ms from the leader's block timestamp to delivery through the indexer and WebSocket. At that cadence, about 60 newer blocks could be in flight while the first finalized. To reproduce the 5ms demo, run [`deploy.sh`](https://github.com/commonwarexyz/alto/pull/202).
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoffs. Optimistic Validation lets that leader keep proposing and validators keep voting while the previous view's notarization forms. Together, they start new blocks while earlier ones continue toward finality.
+
+In an [Alto](https://alto.commonware.xyz) deployment with 50 validators across ten AWS regions, the pipeline sustained about 200 blocks per second with a median interval of 5ms. Median finality for an external observer was 300ms from the leader's block timestamp through the indexer and WebSocket. At that cadence, roughly 60 newer blocks could be in flight before the first finalized. The demo uses headers-only blocks to isolate the cadence of consensus from transaction dissemination and execution. To reproduce the setup, run [`deploy.sh`](https://github.com/commonwarexyz/alto/pull/202).
 
 ```{=html}
 <style>
@@ -64,7 +66,7 @@ Traditionally, two network hops separate consecutive views: the next leader must
 
 ### Wait One: The Proposer Handoff
 
-With rotating leadership, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
+With rotating leaders, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
 Stable Leader groups consecutive views into a *term*, an approach described in [Sing a Song of Simplex](https://eprint.iacr.org/2023/1916) and referred to as *multi-view leadership* in [The Carnot Bound: Limits and Possibilities for Bandwidth-Efficient Consensus](https://arxiv.org/abs/2603.11797). One leader proposes throughout the term, reducing proposer handoffs from one per view to one per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives. An honest leader also knows it did not equivocate, so it can begin building and distributing the next proposal's data early. This cuts the wait between views from two network hops to one: the hop that forms the parent notarization.
 
@@ -82,7 +84,7 @@ Figure 2: Round-robin spaces views two network hops apart. With four-view terms,
 
 Without Optimistic Validation, validators wait for the parent to be notarized before voting to notarize its child. Network latency still paces each view.
 
-With Optimistic Validation, validators can vote to notarize the child as soon as its proposal arrives, provided they already voted for the parent. They do not need to receive the parent's notarization first.
+With Optimistic Validation, validators can vote to notarize the child as soon as its proposal arrives, provided they already voted for the parent. They do not need to receive the parent's notarization first. [Moonshot: Optimizing Chain-Based Rotating Leader BFT via Optimistic Proposals](https://arxiv.org/abs/2401.01791) shows that optimistic proposals can achieve the same one-hop block period with rotating leaders.
 
 The child can therefore be proposed and voted on while the parent's notarization is still forming. The same rule can carry the pipeline across several views within the stable-leader term. Consecutive proposals can begin less than one network round trip apart, limited by local work and network capacity rather than latency alone. These waits for network messages can overlap, but every validator still performs the local verification and application work for each block.
 
@@ -122,7 +124,11 @@ Figure 4: When v3 times out, validators nullify it. Later proposals are discarde
 
 Pipelining overlaps network waits, but every validator still performs the verification, execution, and storage required for each block. A higher block rate therefore puts more pressure on validator compute, storage, and network bandwidth. Pipelining does not shorten the time from proposal to finalization, but it does shorten the wait before a transaction can enter the next proposal.
 
-Longer terms reduce handoff overhead but give one leader more consecutive proposals. At Alto's measured cadence, a 10,000-view term lasted roughly 50 seconds. If a leader goes offline, nullifying its first stalled view skips the rest of the term and rotates to the next leader. One timeout therefore covers the offline leader's entire term.
+Sub-network-delay block cadence does not require a stable leader. [Gatling: Rapid-Fire Consensus from Parallel Composition](https://arxiv.org/abs/2606.18220) takes another route: it runs several rotating-leader consensus instances in parallel, staggers their proposal schedules, and deterministically interleaves their confirmed outputs. Each instance can retain a much slower cadence while the aggregate inter-proposal time becomes arbitrarily small. A delayed instance can still hold back later positions in the merged log.
+
+That composition changes the execution contract. At sub-network-delay cadence with rotating leaders, vanilla Gatling gives up *predictable validity*: a proposer may not know the state against which a transaction will eventually execute. Its variants recover that property with slowly rotating leaders, either by inserting gaps of empty proposals or by splitting block space into prime and state-independent subprime tiers whose execution order differs from consensus order. A conventional stateful execution layer would therefore have to defer balance, nonce, and fee checks until the merged prefix is confirmed, execute speculatively with rollback, or adopt one of those variants.
+
+This Simplex pipeline takes the other route. It keeps one chained consensus instance, and validators certify each parent before its child, so stateful verification can advance before finalization without a separate execution order. The cost is slower leader rotation: longer terms reduce handoff overhead but give one leader more consecutive proposals. At Alto's measured cadence, a 10,000-view term lasted roughly 50 seconds. If a leader goes offline, nullifying its first stalled view skips the rest of the term and rotates to the next leader. One timeout therefore covers the offline leader's entire term.
 
 A Byzantine leader could still finalize blocks while selectively censoring transactions. This risk also exists with rotating leaders, but longer terms can increase inclusion delay because the same leader proposes more consecutive blocks. Selective censorship can be difficult to detect when the leader otherwise performs well.
 
