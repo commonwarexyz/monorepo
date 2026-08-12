@@ -1,6 +1,6 @@
 ---
 title: "Simplex, Pipelined"
-description: "Stable Leader and Optimistic Validation shorten the wait between Simplex proposals. In a 50-validator Alto deployment, the pipeline sustained about 200 blocks per second with 5ms median spacing."
+description: "Simplex can now order blocks as fast as a validator can build them. On a global deployment with 50 validators, this new Simplex variant can sustain 200 blocks per second with finality of 300ms."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
 modified-time: "2026-08-12T00:00:00Z"
