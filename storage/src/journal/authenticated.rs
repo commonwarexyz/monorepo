@@ -3537,42 +3537,53 @@ mod tests {
         executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmb::Family>);
     }
 
-    /// Merkleization can consume the last strong handle to an uncommitted parent after an older
-    /// prefix has been committed.
-    async fn test_merkleize_with_retained_parent_inner<F: Family + PartialEq>(context: Context) {
+    /// Merkleization retains a speculative suffix after its committed prefix is released.
+    async fn test_merkleize_after_committed_prefix_dropped_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
         let mut journal =
-            create_empty_journal::<F>(context.child("storage"), "retained-parent").await;
+            create_empty_journal::<F>(context.child("storage"), "committed-prefix").await;
 
-        let a_items = (0..8u8).map(create_operation::<F>).collect();
-        let (a, _) = journal
-            .merkleize(journal.new_batch(), a_items, 0)
+        // Build a speculative suffix over a prefix that will be committed independently.
+        let prefix_items = (0..8u8).map(create_operation::<F>).collect();
+        let (prefix, _) = journal
+            .merkleize(journal.new_batch(), prefix_items, 0)
             .await
             .unwrap();
-        let b_items = (8..10u8).map(create_operation::<F>).collect();
-        let (b, _) = journal
-            .merkleize(a.new_batch::<Sha256>(), b_items, 0)
+        let pending_items = (8..10u8).map(create_operation::<F>).collect();
+        let (pending, _) = journal
+            .merkleize(prefix.new_batch::<Sha256>(), pending_items, 0)
             .await
             .unwrap();
 
-        journal = journal.apply_batch(&a).await.unwrap();
-        drop(a);
+        // Commit and release the prefix. Its Merkle nodes now resolve through the snapshot.
+        journal = journal.apply_batch(&prefix).await.unwrap();
+        drop(prefix);
 
-        let c_batch = b.new_batch::<Sha256>();
-        drop(b);
-        let (c, expected_root) = journal
-            .merkleize(c_batch, vec![create_operation::<F>(10)], 0)
+        // The child batch is the pending suffix's only remaining owner. Merkleization must retain
+        // that suffix through root computation.
+        let child_batch = pending.new_batch::<Sha256>();
+        drop(pending);
+        let (child, expected_root) = journal
+            .merkleize(child_batch, vec![create_operation::<F>(10)], 0)
             .await
             .unwrap();
-        journal = journal.apply_batch(&c).await.unwrap();
+        journal = journal.apply_batch(&child).await.unwrap();
 
         assert_eq!(journal_root(&journal), expected_root);
         assert_eq!(*journal.size(), 11);
     }
 
     #[test_traced("INFO")]
-    fn test_merkleize_with_retained_parent_mmb() {
+    fn test_merkleize_after_committed_prefix_dropped_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_merkleize_with_retained_parent_inner::<mmb::Family>);
+        executor.start(test_merkleize_after_committed_prefix_dropped_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_after_committed_prefix_dropped_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_after_committed_prefix_dropped_inner::<mmb::Family>);
     }
 
     /// A detached merkleization job owns the full ancestor chain after its waiter is dropped.

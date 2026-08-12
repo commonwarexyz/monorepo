@@ -58,7 +58,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::mmb,
+        merkle::{mmb, mmr},
         utils::detached::{DropMonitor, block_strategy},
     };
     use commonware_cryptography::Sha256;
@@ -68,32 +68,38 @@ mod tests {
     use commonware_utils::NZUsize;
     use std::time::Duration;
 
-    async fn test_merkleize_ops_with_retained_parent_inner<F: Family>() {
+    /// Merkleization retains a speculative suffix after its committed prefix is released.
+    async fn test_merkleize_ops_after_committed_prefix_dropped_inner<F: Family>() {
         let mut merkle =
             compact::Merkle::<F, <Sha256 as Hasher>::Digest, Sequential>::new(Sequential);
 
-        let (a, _) =
+        // Build a speculative suffix over a prefix that will be committed independently.
+        let (prefix, _) =
             merkleize_ops::<F, Sha256, _, _>(&merkle, merkle.new_batch(), (0..8u64).collect(), 0)
                 .await
                 .unwrap();
-        let (b, _) = merkleize_ops::<F, Sha256, _, _>(
+        let (pending, _) = merkleize_ops::<F, Sha256, _, _>(
             &merkle,
-            compact::UnmerkleizedBatch::wrap(a.new_batch()),
+            compact::UnmerkleizedBatch::wrap(prefix.new_batch()),
             vec![8u64, 9],
             0,
         )
         .await
         .unwrap();
 
-        merkle.apply_batch(&a).unwrap();
-        drop(a);
+        // Commit and release the prefix. Its Merkle nodes now resolve through the snapshot.
+        merkle.apply_batch(&prefix).unwrap();
+        drop(prefix);
 
-        let c_batch = compact::UnmerkleizedBatch::wrap(b.new_batch());
-        drop(b);
-        let (c, expected_root) = merkleize_ops::<F, Sha256, _, _>(&merkle, c_batch, vec![10u64], 0)
-            .await
-            .unwrap();
-        merkle.apply_batch(&c).unwrap();
+        // The child batch is the pending suffix's only remaining owner. Merkleization must retain
+        // that suffix through root computation.
+        let child_batch = compact::UnmerkleizedBatch::wrap(pending.new_batch());
+        drop(pending);
+        let (child, expected_root) =
+            merkleize_ops::<F, Sha256, _, _>(&merkle, child_batch, vec![10u64], 0)
+                .await
+                .unwrap();
+        merkle.apply_batch(&child).unwrap();
 
         assert_eq!(*merkle.leaves(), 11);
         assert_eq!(
@@ -103,9 +109,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_merkleize_ops_with_retained_parent_mmb() {
+    fn test_merkleize_ops_after_committed_prefix_dropped_mmr() {
         deterministic::Runner::default()
-            .start(|_| test_merkleize_ops_with_retained_parent_inner::<mmb::Family>());
+            .start(|_| test_merkleize_ops_after_committed_prefix_dropped_inner::<mmr::Family>());
+    }
+
+    #[test_traced]
+    fn test_merkleize_ops_after_committed_prefix_dropped_mmb() {
+        deterministic::Runner::default()
+            .start(|_| test_merkleize_ops_after_committed_prefix_dropped_inner::<mmb::Family>());
     }
 
     /// A detached merkleization job owns the full ancestor chain after its waiter is dropped.
