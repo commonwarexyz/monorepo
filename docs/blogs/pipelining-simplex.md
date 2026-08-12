@@ -128,10 +128,10 @@ A Byzantine leader could still finalize blocks while selectively censoring trans
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
-## A Finer Ordering Clock
+## Decentralized Sequencing in a Box 
 
-Each 5ms view gives applications another opportunity to order new data. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
+Each 5ms view gives applications another opportunity to order new data. That finer schedule means orderbooks, batchers, and games respond to new input as fast as a traditional web page.
 
-This pipeline lets one ordering leader publish new blocks as quickly as local work and network capacity allow. To carry larger payloads efficiently, [Carnot](https://arxiv.org/abs/2603.11797) combines multi-view leaders with bandwidth-efficient dissemination. For multiple concurrent producers, [Multimmit](/blogs/multimmit) separates parallel transaction production from the single ordering leader.
+Unlike consensus protocols where the order of transactions (and thus the state of execution) is only known after finalization, like [Multimmit](/blogs/multimmit) and other Multiple Concurrent Proposer constructions, the leader here knows the state they are building on. They can run traditional state transition functions (like the EVM) without modification. Not to mention, participants can stream pending blocks (and pending state) to issue another transaction long before the block is ever finalized.
 
-Stable Leader and Optimistic Validation will be available in the next `commonware-consensus` release.
+Stable Leader and Optimistic Validation are in `main` and will be available in the next `commonware-consensus` release. However, you can play with them now in [Alto](https://github.com/commonwarexyz/alto/pull/202).
