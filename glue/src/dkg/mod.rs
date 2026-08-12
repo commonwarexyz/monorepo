@@ -39,15 +39,20 @@
 //!
 //! # State Sync
 //!
-//! Reshare supports nodes that join through state sync. A syncing node can only
-//! participate in a future ceremony if it syncs while it is a `next_player`.
-//! Once the node becomes a `player`, it must already be online for the early
-//! ceremony traffic. Syncing during that epoch is too late to receive a private
-//! share, and the protocol will reveal that share instead.
+//! Reshare supports nodes that join through state sync. A node can participate in
+//! the synced epoch when its certified floor is at or before the epoch midpoint,
+//! because marshal replays the complete dealer-log inclusion window. A later floor
+//! has skipped part of that public history, so the actor follows the rest of the
+//! epoch instead.
+//!
+//! A `player` that missed private dealings may need public reveals to recover its
+//! share and must treat a revealed share as public. To preserve share privacy, a
+//! future player should state sync while it is still a `next_player` and be online
+//! before the early dealing window.
 //!
 //! This timing makes it safe for [`ParticipantsProvider`] to be backed by chain
 //! state (e.g., a staking contract). The chain can announce future players first,
-//! giving those nodes an epoch to state sync and enter the next ceremony normally.
+//! giving those nodes an epoch to state sync before their shares are needed.
 //!
 //! A node beginning state sync has no application state from which to resolve
 //! participant reachability. Everything required to connect to the active

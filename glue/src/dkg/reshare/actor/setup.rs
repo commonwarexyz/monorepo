@@ -93,18 +93,13 @@ fn state_sync_skips_inclusion_prefix(
 fn startup_height(
     epocher: &FixedEpocher,
     current_epoch: Option<Epoch>,
-    state_sync_epoch: Option<Epoch>,
+    state_sync_floor: Option<Height>,
     processed: Option<Height>,
 ) -> Height {
-    if let Some(epoch) = state_sync_epoch {
-        return processed.map_or_else(
-            || {
-                epocher
-                    .first(epoch)
-                    .expect("epocher must know synced epoch")
-            },
-            Height::next,
-        );
+    if let Some(floor) = state_sync_floor {
+        // A certified floor remains the lower bound when Marshal's processed
+        // height has not caught up to its resolved floor block.
+        return processed.map_or(floor, |height| height.next().max(floor));
     }
     if let Some(epoch) = current_epoch {
         return epocher
@@ -139,14 +134,13 @@ where
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
-        let state_sync_epoch = state_sync.as_ref().map(|start| start.info.epoch);
         let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
-        let processed = if state_sync_epoch.is_some() || current_epoch.is_none() {
+        let processed = if state_sync_floor.is_some() || current_epoch.is_none() {
             self.marshal.get_processed_height().await
         } else {
             None
         };
-        let height = startup_height(&self.epocher, current_epoch, state_sync_epoch, processed);
+        let height = startup_height(&self.epocher, current_epoch, state_sync_floor, processed);
         let bounds = self
             .epocher
             .containing(height)
@@ -315,17 +309,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::{startup_height, state_sync_skips_inclusion_prefix};
-    use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher};
+    use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height};
     use commonware_utils::NZU64;
 
     #[test]
-    fn state_sync_without_processed_height_starts_in_synced_epoch() {
+    fn state_sync_start_does_not_precede_certified_floor() {
         let epocher = FixedEpocher::new(NZU64!(64));
         let epoch = Epoch::new(3);
+        let floor = epocher.midpoint(epoch).expect("test epoch");
+        let older = floor
+            .previous()
+            .and_then(Height::previous)
+            .expect("test floor has earlier height");
 
         assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(epoch), None),
-            epocher.first(epoch).expect("test epoch")
+            startup_height(&epocher, Some(epoch), Some(floor), None),
+            floor
+        );
+        assert_eq!(
+            startup_height(&epocher, Some(epoch), Some(floor), Some(older)),
+            floor
+        );
+
+        let newer = floor.next();
+        assert_eq!(
+            startup_height(&epocher, Some(epoch), Some(floor), Some(newer)),
+            newer.next()
         );
     }
 
@@ -344,21 +353,5 @@ mod tests {
         ));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(midpoint)));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, None));
-    }
-
-    #[test]
-    fn late_restart_after_midpoint_state_sync_floor_keeps_inclusion_prefix() {
-        let epocher = FixedEpocher::new(NZU64!(64));
-        let epoch = Epoch::new(3);
-        let floor = epocher.midpoint(epoch).expect("test epoch");
-        let restart = floor.next();
-
-        assert_eq!(
-            epocher.containing(floor).expect("test floor").phase(),
-            EpochPhase::Midpoint
-        );
-        let restart_phase = epocher.containing(restart).expect("test restart").phase();
-        assert_eq!(restart_phase, EpochPhase::Late);
-        assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(floor)));
     }
 }

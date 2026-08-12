@@ -10,7 +10,10 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload},
 };
 use commonware_consensus::{
-    marshal::{ancestry::Ancestry as _, core::Variant as MarshalVariant},
+    marshal::{
+        ancestry::{Ancestry as _, BoxedAncestry},
+        core::Variant as MarshalVariant,
+    },
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
@@ -41,16 +44,12 @@ use std::{
     collections::{BTreeMap, VecDeque},
     num::{NonZeroU32, NonZeroU64},
     ops::ControlFlow,
-    pin::Pin,
     sync::Arc,
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, warn};
 
 /// The exact effective dealer-log view used for one verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
-
-/// Type-erased ancestry retained while a boundary request waits for verification.
-type ErasedAncestry<B> = Pin<Box<dyn Stream<Item = Arc<B>> + Send>>;
 
 /// Shared ownership of one log view across verification and artifact assembly.
 type LogView<V, P> = Arc<PendingLogs<V, P>>;
@@ -64,7 +63,7 @@ where
 {
     parent: B::Digest,
     span: Span,
-    ancestry: ErasedAncestry<B>,
+    ancestry: BoxedAncestry<B>,
     response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 }
 
@@ -106,7 +105,7 @@ where
         &mut self,
         parent: B::Digest,
         span: Span,
-        ancestry: ErasedAncestry<B>,
+        ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     ) {
         self.inner.push_back(ArtifactRequest {
@@ -140,17 +139,6 @@ where
             })
             .collect()
     }
-}
-
-/// The sole materialized speculative request.
-struct ArtifactWaiter<B, V, C>
-where
-    B: ReshareBlock<Variant = V, Signer = C>,
-    V: BlsVariant,
-    C: Signer,
-{
-    logs: LogView<V, C::PublicKey>,
-    response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 }
 
 /// A locally reconstructed boundary artifact and this node's matching share.
@@ -204,11 +192,6 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
     fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
         assert!(self.task.is_none(), "verification task already running");
         self.task = Some(task).into();
-    }
-
-    /// Marks the active task complete while its tagged result is processed.
-    fn finish(&mut self) {
-        self.task = None.into();
     }
 
     /// Retains one tagged result, preferring the current canonical view.
@@ -287,7 +270,7 @@ where
     C: Signer,
 {
     requests: ArtifactRequests<B, V, C>,
-    waiter: Option<ArtifactWaiter<B, V, C>>,
+    waiter: Option<oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>>,
     verification: Verification<V, C>,
     artifacts: ArtifactCache<V, C, B::Directory>,
 }
@@ -310,9 +293,9 @@ where
 
 /// Latest finalized block whose reporter effects are reflected in [`Store`].
 ///
-/// A recovered state-sync predecessor may be pruned before its floor is
-/// redispatched, so its digest can be unavailable. Blocks observed by this
-/// actor always carry the anchor needed to revalidate queued ancestries.
+/// A recovered processed height can outlive its locally available block, so its
+/// digest may be unavailable. Blocks observed by this actor carry the anchor
+/// needed to revalidate queued ancestries.
 #[derive(Clone, Copy)]
 struct FinalizedTip<D> {
     height: Height,
@@ -431,7 +414,7 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
 async fn pending_logs<B, V, C>(
     scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
     parent: B::Digest,
-    mut ancestry: ErasedAncestry<B>,
+    mut ancestry: impl Stream<Item = Arc<B>> + Send + Unpin,
     mut shutdown: signal::Signal,
     response: &mut oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 ) -> Option<PendingLogs<V, C::PublicKey>>
@@ -690,8 +673,7 @@ where
                             let _ = response.send_lossy(EpochInfoResponse::Unavailable);
                             continue;
                         };
-                        work.requests
-                            .push(parent, span, Box::pin(ancestry), response);
+                        work.requests.push(parent, span, ancestry, response);
                         self.advance_artifact_requests(
                             epoch,
                             info,
@@ -780,7 +762,7 @@ where
                                     let completed = (&mut work.verification.task)
                                         .await
                                         .expect("verification task failed");
-                                    work.verification.finish();
+                                    work.verification.task = None.into();
                                     assert_eq!(
                                         completed.logs.as_ref(),
                                         canonical_logs.as_ref(),
@@ -992,13 +974,8 @@ where
                 return;
             }
 
-            // A cache miss transfers the response to the sole active waiter.
-            // Sharing the log view tags the waiter and task with the same input.
             assert!(work.waiter.is_none(), "materialized waiter already active");
-            work.waiter = Some(ArtifactWaiter {
-                logs: logs.clone(),
-                response: request.response,
-            });
+            work.waiter = Some(request.response);
             self.start_verification(&mut work.verification, epoch, info, store, logs);
         }
         .instrument(process)
@@ -1013,23 +990,17 @@ where
         work: &mut ArtifactWork<B, V, C>,
         completed: VerifiedLogs<V, C>,
     ) {
-        // Every speculative task has exactly one materialized waiter tagged with
-        // the same log view.
-        work.verification.finish();
-        let waiter = work
+        // Every speculative task has exactly one materialized response.
+        work.verification.task = None.into();
+        let response = work
             .waiter
             .take()
-            .expect("completed speculative verification must own a waiter");
-        assert_eq!(
-            waiter.logs.as_ref(),
-            completed.logs.as_ref(),
-            "verification completed for a different materialized view"
-        );
+            .expect("completed speculative verification must own a response");
 
         // Requester cancellation suppresses speculative artifact assembly.
         // Verification retention is independent so a canonical result cannot be
         // displaced.
-        if !waiter.response.is_closed() {
+        if !response.is_closed() {
             let artifact = self
                 .artifact(
                     epoch,
@@ -1039,9 +1010,7 @@ where
                     &mut work.artifacts,
                 )
                 .await;
-            let _ = waiter
-                .response
-                .send_lossy(self.artifact_response(artifact.as_ref()));
+            let _ = response.send_lossy(self.artifact_response(artifact.as_ref()));
         }
 
         let canonical_logs = store.logs(epoch);
@@ -1475,8 +1444,8 @@ mod tests {
         .expect("valid info")
     }
 
-    fn stalled_ancestry() -> ErasedAncestry<TestBlock> {
-        Box::pin(stream::pending::<Arc<TestBlock>>())
+    fn empty_ancestry() -> BoxedAncestry<TestBlock> {
+        BoxedAncestry::new(marshal::ancestry::from_iter(Vec::<Arc<TestBlock>>::new()))
     }
 
     fn scan(
@@ -1778,7 +1747,7 @@ mod tests {
             let pending = pending_logs(
                 scan(&info),
                 mocks::genesis_block(signers()[0].public_key()).digest(),
-                stalled_ancestry(),
+                StalledAncestry,
                 context.stopped(),
                 &mut response_tx,
             );
@@ -1800,7 +1769,7 @@ mod tests {
             let pending = pending_logs(
                 scan(&info),
                 mocks::genesis_block(signers()[0].public_key()).digest(),
-                stalled_ancestry(),
+                StalledAncestry,
                 context.stopped(),
                 &mut response_tx,
             );
@@ -2035,7 +2004,7 @@ mod tests {
         let parent = mocks::genesis_block(signers()[0].public_key()).digest();
         let (response_tx, response_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
-        requests.push(parent, Span::none(), Box::pin(stream::empty()), response_tx);
+        requests.push(parent, Span::none(), empty_ancestry(), response_tx);
         drop(response_rx);
 
         assert!(requests.pop().is_none());
@@ -2055,25 +2024,9 @@ mod tests {
         let (earlier_tx, _earlier_rx) = oneshot::channel();
         let (later_tx, _later_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
-        requests.push(earlier, Span::none(), Box::pin(stream::empty()), earlier_tx);
-        requests.push(later, Span::none(), Box::pin(stream::empty()), later_tx);
+        requests.push(earlier, Span::none(), empty_ancestry(), earlier_tx);
+        requests.push(later, Span::none(), empty_ancestry(), later_tx);
 
         assert_eq!(requests.pop().map(|request| request.parent), Some(earlier));
-    }
-
-    #[test]
-    fn queued_requests_retain_lazy_ancestries() {
-        let genesis = mocks::genesis_block(signers()[0].public_key());
-        let first = genesis.digest();
-        let second =
-            TestBlock::new::<Sha256>(genesis.context().clone(), first, Height::new(1), 1).digest();
-        let (first_tx, _first_rx) = oneshot::channel();
-        let (second_tx, _second_rx) = oneshot::channel();
-        let mut requests = TestRequests::default();
-
-        requests.push(first, Span::none(), stalled_ancestry(), first_tx);
-        requests.push(second, Span::none(), stalled_ancestry(), second_tx);
-
-        assert_eq!(requests.inner.len(), 2);
     }
 }

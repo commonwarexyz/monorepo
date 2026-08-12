@@ -113,6 +113,7 @@
 //!        |
 //!        v
 //! boundary EpochInfo(N) unavailable locally
+//! or state-sync floor skipped inclusion blocks
 //!        |
 //!        v
 //! follower mode until final(N)

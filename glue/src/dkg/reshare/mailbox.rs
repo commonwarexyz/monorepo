@@ -251,11 +251,11 @@ where
     /// Request the final block's next-epoch artifact.
     ///
     /// The ancestry head must be either the final block being verified or the
-    /// parent of the final block being proposed. It must then yield a contiguous
-    /// parent chain through every inclusion block not yet finalized by the
-    /// reshare actor and remain attached to any prefix finalized before lazy
-    /// acquisition. During inclusion, a missing head, unexpected height, gap,
-    /// detached fork, or truncated chain is unavailable.
+    /// parent of the final block being proposed. When materialized, it must yield
+    /// every unfinalized inclusion block as one contiguous chain attached to the
+    /// finalized prefix; otherwise the request is unavailable. A queued request
+    /// whose parent becomes canonical can instead be answered from finalized
+    /// state without consuming the rest of its ancestry.
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Ancestry<B>,
