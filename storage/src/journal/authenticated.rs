@@ -397,6 +397,19 @@ where
         Ok((self, handle))
     }
 
+    /// Flush buffered state to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. `sync()`) completes.
+    pub async fn flush(mut self) -> Result<Self, Error<F>> {
+        (self.journal, self.merkle) = try_join!(
+            self.journal.flush().map_err(Error::Journal),
+            self.merkle.flush().map_err(Error::Merkle)
+        )?;
+
+        Ok(self)
+    }
+
     /// Durably persist the journal. This is faster than `sync()` but does not guarantee that the
     /// Merkle structure is durably persisted, meaning recovery may be required on startup in the
     /// event of a crash.
@@ -1009,6 +1022,10 @@ where
         Self::start_sync(self).await.map_err(Self::map_error)
     }
 
+    async fn flush(self) -> Result<Self, JournalError> {
+        Self::flush(self).await.map_err(Self::map_error)
+    }
+
     async fn commit(self) -> Result<Self, JournalError> {
         Self::commit(self).await.map_err(Self::map_error)
     }
@@ -1245,6 +1262,39 @@ mod tests {
                     .await
                     .unwrap()
                     .is_empty()
+            );
+        });
+    }
+
+    /// Flush preserves the root and reads, and a later sync makes everything durable.
+    #[test]
+    fn test_flush_preserves_state_and_usability() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut journal = create_empty_journal::<mmr::Family>(context, "flush").await;
+            for i in 0..5u8 {
+                let op = create_operation::<mmr::Family>(i);
+                (journal, _) = journal.append(&op).await.unwrap();
+            }
+            let root = journal.root(0).unwrap();
+
+            let mut journal = journal.flush().await.unwrap();
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert_eq!(*journal.size(), 5);
+            assert_eq!(
+                Contiguous::read(&journal, 0).await.unwrap(),
+                create_operation::<mmr::Family>(0)
+            );
+
+            // Appends continue after a flush and a later sync persists everything.
+            for i in 5..8u8 {
+                let op = create_operation::<mmr::Family>(i);
+                (journal, _) = journal.append(&op).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(*journal.size(), 8);
+            assert_eq!(
+                Contiguous::read(&journal, 7).await.unwrap(),
+                create_operation::<mmr::Family>(7)
             );
         });
     }
