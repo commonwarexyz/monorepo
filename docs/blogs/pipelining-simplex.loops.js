@@ -236,8 +236,9 @@ function buildLeaders(mount) {
   const addTwoHops = (x1, y1, x2, y2, color, delay) => {
     const midX = (x1 + x2) / 2;
     const midY = (y1 + y2) / 2;
-    animated.push(addArrow(svg, x1, y1, midX - 4, midY, color, delay, 0.035));
-    animated.push(addArrow(svg, midX + 4, midY, x2, y2, color, delay + 0.04, 0.035));
+    const style = { strokeWidth: 1.6, headSize: 6.5 };
+    animated.push(addArrow(svg, x1, y1, midX - 4, midY, color, delay, 0.035, style));
+    animated.push(addArrow(svg, midX + 4, midY, x2, y2, color, delay + 0.04, 0.035, style));
   };
 
   const rotatingOwners = Array.from({ length: rotatingViewCount }, (_, index) => leaders[index % leaders.length]);
@@ -309,6 +310,7 @@ function buildLeaders(mount) {
           ARROW,
           0.09 + index * 0.06,
           0.05,
+          { strokeWidth: 1.6, headSize: 6.5 },
         ));
       }
     }
