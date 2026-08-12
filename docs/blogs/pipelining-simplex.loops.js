@@ -345,8 +345,8 @@ function buildValidation(mount) {
   const sequentialGap = 186;
   const optimisticGap = 62;
   const networkHop = sequentialGap;
-  const topY = 75;
-  const bottomY = 260;
+  const topY = 80;
+  const bottomY = 265;
 
   addText(svg, 20, 30, 'Stable Leader', { 'font-size': 18, 'font-weight': 700 });
   addText(svg, 20, 215, 'Stable Leader + Optimistic Validation', { 'font-size': 18, 'font-weight': 700 });
