@@ -12,6 +12,7 @@ use subtle::{Choice, ConditionallySelectable};
 /// but given how small this value is, this shouldn't be an issue.
 pub const LANES: usize = 8;
 
+/// The low 51 bits: what a limb holds once carries have been propagated out of it.
 const MASK_51: u64 = (1 << 51) - 1;
 
 /// `16*p`, decomposed limb-wise at radix 51, used to make subtraction underflow-free.

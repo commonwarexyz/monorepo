@@ -1,20 +1,11 @@
 //! The AVX-512 backend: all eight lanes of an [`super::FVec`] limb row in one 512-bit register,
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
-use super::{F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, WithBackend};
+use super::{
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51,
+    WithBackend,
+};
 use core::arch::x86_64::*;
-
-/// The low 51 bits: what a limb holds once carries have been propagated out of it.
-const MASK_51: u64 = (1 << 51) - 1;
-
-/// `16*p` decomposed limb-wise at radix 51, used to make subtraction underflow-free.
-const SUB_BIAS: [u64; 5] = [
-    16 * ((1u64 << 51) - 19),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-];
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
 const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);

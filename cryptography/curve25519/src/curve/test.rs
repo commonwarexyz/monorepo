@@ -1,9 +1,8 @@
 //! Property suites shared by field and group backends.
 
-use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, WithBackend};
+use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend};
 use arbitrary::Unstructured;
 
-const MASK_51: u64 = (1 << 51) - 1;
 const MASK_52: u64 = (1 << 52) - 1;
 
 fn arbitrary_fvec(u: &mut Unstructured<'_>) -> arbitrary::Result<FVec> {
