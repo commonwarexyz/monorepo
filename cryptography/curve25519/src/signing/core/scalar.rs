@@ -22,7 +22,7 @@ const MU: [u64; 5] = [
 
 /// An integer modulo `L`, always canonically reduced (`< L`).
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct Scalar(pub(crate) [u64; 4]);
+pub struct Scalar(pub [u64; 4]);
 
 /// Returns `true` if `a < b`, comparing as 256-bit unsigned integers (little-endian limbs).
 fn limbs_lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
@@ -162,10 +162,10 @@ fn barrett_reduce(x: [u64; 8]) -> Scalar {
 }
 
 impl Scalar {
-    pub(crate) const ZERO: Self = Self([0, 0, 0, 0]);
+    pub const ZERO: Self = Self([0, 0, 0, 0]);
 
     /// Returns the additive inverse modulo `L`.
-    pub(crate) fn neg_mod_l(&self) -> Self {
+    pub fn neg_mod_l(&self) -> Self {
         if self.0 == Self::ZERO.0 {
             *self
         } else {
@@ -175,7 +175,7 @@ impl Scalar {
 
     /// Interprets `bytes` as a little-endian integer and rejects it unless it is already the
     /// canonical representative (`< L`), as required for the `s` component of a signature.
-    pub(crate) fn from_canonical_bytes(bytes: &[u8; 32]) -> Option<Self> {
+    pub fn from_canonical_bytes(bytes: &[u8; 32]) -> Option<Self> {
         let mut limbs = [0u64; 4];
         for (i, limb) in limbs.iter_mut().enumerate() {
             let mut chunk = [0u8; 8];
@@ -187,7 +187,7 @@ impl Scalar {
 
     /// Reduces a 64-byte little-endian integer (e.g. a SHA-512 digest) modulo `L`, via
     /// [`barrett_reduce`].
-    pub(crate) fn from_bytes_mod_order_wide(bytes: &[u8; 64]) -> Self {
+    pub fn from_bytes_mod_order_wide(bytes: &[u8; 64]) -> Self {
         let limbs = core::array::from_fn(|i| {
             let mut chunk = [0u8; 8];
             chunk.copy_from_slice(&bytes[i * 8..i * 8 + 8]);
@@ -197,14 +197,14 @@ impl Scalar {
     }
 
     /// Returns the bits of this scalar's canonical representative, most significant first.
-    pub(crate) fn bits_be(&self) -> impl Iterator<Item = bool> + '_ {
+    pub fn bits_be(&self) -> impl Iterator<Item = bool> + '_ {
         (0..256)
             .rev()
             .map(move |i| (self.0[i / 64] >> (i % 64)) & 1 == 1)
     }
 
     /// Returns the canonical little-endian encoding of this scalar.
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
+    pub fn to_bytes(self) -> [u8; 32] {
         let mut bytes = [0u8; 32];
         for (chunk, limb) in bytes.chunks_exact_mut(8).zip(self.0) {
             chunk.copy_from_slice(&limb.to_le_bytes());
@@ -214,13 +214,13 @@ impl Scalar {
 
     /// Constructs a scalar from a little-endian 128-bit value. Always canonical, since every
     /// 128-bit value is `< L` (`L > 2^252`).
-    pub(crate) const fn from_u128(value: u128) -> Self {
+    pub const fn from_u128(value: u128) -> Self {
         Self([value as u64, (value >> 64) as u64, 0, 0])
     }
 
     /// Returns the base-`2^width` digit at position `index`, i.e. bits `[index*width,
     /// index*width+width)` of this scalar's canonical representative, as an unsigned integer.
-    pub(crate) const fn window(&self, index: usize, width: u32) -> usize {
+    pub const fn window(&self, index: usize, width: u32) -> usize {
         let bit_start = index * width as usize;
         if bit_start >= 256 {
             return 0;
@@ -247,7 +247,7 @@ impl Scalar {
     /// 2^width * 2^(width*i)`, and that `2^width` term is exactly one unit of the next digit's
     /// weight. `N` must be large enough that the final carry (at most `1`) has a digit to land in;
     /// `256usize.div_ceil(width) + 1` unsigned windows' worth is always enough.
-    pub(crate) const fn signed_digits<const N: usize>(&self, width: u32) -> [i32; N] {
+    pub const fn signed_digits<const N: usize>(&self, width: u32) -> [i32; N] {
         let half = 1i64 << (width - 1);
         let full = 1i64 << width;
         let mut digits = [0i32; N];
@@ -268,7 +268,7 @@ impl Scalar {
     }
 
     /// Returns `(self + rhs) mod L`, assuming both operands are already `< L`.
-    pub(crate) fn add_mod_l(&self, rhs: &Self) -> Self {
+    pub fn add_mod_l(&self, rhs: &Self) -> Self {
         let sum = limbs_add(&self.0, &rhs.0);
         Self(limbs_conditional_sub(&sum, &L))
     }
@@ -277,19 +277,19 @@ impl Scalar {
     ///
     /// Computes the full 512-bit product via schoolbook multiplication, then reduces it via
     /// [`barrett_reduce`].
-    pub(crate) fn mul_mod_l(&self, rhs: &Self) -> Self {
+    pub fn mul_mod_l(&self, rhs: &Self) -> Self {
         barrett_reduce(limbs_mul_wide(&self.0, &rhs.0))
     }
 }
 
 /// Test-only helpers shared across this crate's test modules.
 #[cfg(test)]
-pub(crate) mod test_support {
+pub mod test_support {
     use super::Scalar;
     use rand_core::Rng;
 
     /// Returns a uniformly random canonical scalar, by reducing 64 random bytes mod `L`.
-    pub(crate) fn rand_scalar(rng: &mut impl Rng) -> Scalar {
+    pub fn rand_scalar(rng: &mut impl Rng) -> Scalar {
         let mut bytes = [0u8; 64];
         rng.fill_bytes(&mut bytes);
         Scalar::from_bytes_mod_order_wide(&bytes)

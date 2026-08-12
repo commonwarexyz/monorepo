@@ -9,7 +9,7 @@ use core::array;
 /// can be emulated with a smaller lane count.
 /// An exception to this would be if the memory pressure were particularly bad,
 /// but given how small this value is, this shouldn't be an issue.
-pub(crate) const LANES: usize = 8;
+pub const LANES: usize = 8;
 
 const MASK_51: u64 = (1 << 51) - 1;
 
@@ -27,11 +27,11 @@ const BIAS_16P: [u64; 5] = [
 /// The five limbs use radix `2^51`. The representation is redundant: values need not be
 /// canonical, but every arithmetic operation accepts and returns limbs less than `2^52`.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct F(pub(crate) [u64; 5]);
+pub struct F(pub [u64; 5]);
 
 impl F {
-    pub(crate) const ZERO: Self = Self([0, 0, 0, 0, 0]);
-    pub(crate) const ONE: Self = Self([1, 0, 0, 0, 0]);
+    pub const ZERO: Self = Self([0, 0, 0, 0, 0]);
+    pub const ONE: Self = Self([1, 0, 0, 0, 0]);
 
     /// Selects `other` when `select_other` is true without branching.
     #[inline]
@@ -43,7 +43,7 @@ impl F {
     }
 
     /// The curve25519 twisted-Edwards curve constant `d = -121665/121666 mod p`.
-    pub(crate) const EDWARDS_D: Self = Self([
+    pub const EDWARDS_D: Self = Self([
         0x0034dca135978a3,
         0x001a8283b156ebd,
         0x005e7a26001c029,
@@ -52,7 +52,7 @@ impl F {
     ]);
 
     /// `2 * EDWARDS_D`.
-    pub(crate) const EDWARDS_D2: Self = Self([
+    pub const EDWARDS_D2: Self = Self([
         2 * Self::EDWARDS_D.0[0],
         2 * Self::EDWARDS_D.0[1],
         2 * Self::EDWARDS_D.0[2],
@@ -61,7 +61,7 @@ impl F {
     ]);
 
     /// A fixed square root of `-1` in the field.
-    pub(crate) const SQRT_M1: Self = Self([
+    pub const SQRT_M1: Self = Self([
         0x0061b274a0ea0b0,
         0x000d5a5fc8f189d,
         0x007ef5e9cbd0c60,
@@ -70,7 +70,7 @@ impl F {
     ]);
 
     /// Parses a little-endian 255-bit value, ignoring bit 255.
-    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Self {
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
         let load8 = |offset: usize| -> u64 {
             let mut chunk = [0u8; 8];
             chunk.copy_from_slice(&bytes[offset..offset + 8]);
@@ -109,7 +109,7 @@ impl F {
     }
 
     /// Serializes the canonical representative as 255 little-endian bits.
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
+    pub fn to_bytes(self) -> [u8; 32] {
         let mut l = self.carry().0;
 
         // Adding 19 overflows bit 255 exactly when l >= p.
@@ -144,35 +144,35 @@ impl F {
     }
 
     /// Returns whether two canonical representatives are equal.
-    pub(crate) fn eq(&self, other: &Self) -> bool {
+    pub fn eq(&self, other: &Self) -> bool {
         self.to_bytes() == other.to_bytes()
     }
 
     /// Returns whether the canonical representative is zero.
-    pub(crate) fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.eq(&Self::ZERO)
     }
 
     /// Returns whether the canonical representative is odd.
-    pub(crate) fn is_odd(&self) -> bool {
+    pub fn is_odd(&self) -> bool {
         self.to_bytes()[0] & 1 == 1
     }
 
     /// Returns `self + rhs`.
     #[inline]
-    pub(crate) fn add(self, rhs: Self) -> Self {
+    pub fn add(self, rhs: Self) -> Self {
         Self::reduce(array::from_fn(|i| self.0[i] + rhs.0[i]))
     }
 
     /// Returns `self - rhs`.
     #[inline]
-    pub(crate) fn sub(self, rhs: Self) -> Self {
+    pub fn sub(self, rhs: Self) -> Self {
         Self::reduce(array::from_fn(|i| self.0[i] + BIAS_16P[i] - rhs.0[i]))
     }
 
     /// Returns `-self`.
     #[inline]
-    pub(crate) fn neg(self) -> Self {
+    pub fn neg(self) -> Self {
         Self::ZERO.sub(self)
     }
 
@@ -194,7 +194,7 @@ impl F {
 
     /// Returns `self * rhs`.
     #[inline]
-    pub(crate) fn mul(self, rhs: Self) -> Self {
+    pub fn mul(self, rhs: Self) -> Self {
         // Accumulate the nine schoolbook columns, then fold columns 5 through 8 down using
         // `2^255 = 19 (mod p)`. At the input bound, every folded column remains below `2^112`.
         let mut c = [0u128; 9];
@@ -212,7 +212,7 @@ impl F {
 
     /// Returns `self * self` using one product for each pair of distinct limbs.
     #[inline]
-    pub(crate) fn square(self) -> Self {
+    pub fn square(self) -> Self {
         let limbs = self.0;
         let mut limbs_19 = limbs;
         for limb in &mut limbs_19[3..] {
@@ -292,7 +292,7 @@ impl F {
 /// selected backend supports them.
 #[derive(Clone, Copy)]
 #[repr(align(64))]
-pub(crate) struct FVec {
+pub struct FVec {
     // We could have a dynamic number of lanes here, depending on the backend,
     // but it's easier to just have a fixed number, perhaps dispatching several
     // instructions for backends with fewer lanes.
@@ -301,7 +301,7 @@ pub(crate) struct FVec {
 
 impl FVec {
     /// Returns every lane set to `element`.
-    pub(crate) const fn splat(element: F) -> Self {
+    pub const fn splat(element: F) -> Self {
         Self {
             limbs: [
                 [element.0[0]; LANES],
@@ -314,7 +314,7 @@ impl FVec {
     }
 
     /// Transposes scalar field elements into limb rows.
-    pub(crate) fn transpose(lanes: [F; LANES]) -> Self {
+    pub fn transpose(lanes: [F; LANES]) -> Self {
         let mut limbs = [[0u64; LANES]; 5];
         for (i, lane) in lanes.iter().enumerate() {
             for (row, value) in limbs.iter_mut().zip(lane.0) {
@@ -325,7 +325,7 @@ impl FVec {
     }
 
     /// Untransposes limb rows into scalar field elements.
-    pub(crate) fn untranspose(self) -> [F; LANES] {
+    pub fn untranspose(self) -> [F; LANES] {
         array::from_fn(|i| F(array::from_fn(|limb| self.limbs[limb][i])))
     }
 
@@ -344,7 +344,7 @@ impl FVec {
 }
 
 /// Abstracts over base field operations.
-pub(crate) trait FBackend: Copy {
+pub trait FBackend: Copy {
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 
@@ -370,7 +370,7 @@ pub(crate) trait FBackend: Copy {
 /// This is the scalar representation used directly for individual point operations and as the
 /// array-of-structures representation between vector operations.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct G {
+pub struct G {
     x: F,
     y: F,
     t: F,
@@ -379,7 +379,7 @@ pub(crate) struct G {
 
 impl G {
     /// The neutral element, `(0, 1)` in affine coordinates.
-    pub(crate) const IDENTITY: Self = Self {
+    pub const IDENTITY: Self = Self {
         x: F::ZERO,
         y: F::ONE,
         t: F::ZERO,
@@ -398,7 +398,7 @@ impl G {
     }
 
     /// Compresses this point to its canonical Ed25519 encoding.
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
+    pub fn to_bytes(self) -> [u8; 32] {
         let z_inverse = self.z.invert();
         let x = self.x.mul(z_inverse);
         let mut bytes = self.y.mul(z_inverse).to_bytes();
@@ -407,7 +407,7 @@ impl G {
     }
 
     /// Negates this point.
-    pub(crate) fn negate(self) -> Self {
+    pub fn negate(self) -> Self {
         Self {
             x: self.x.neg(),
             y: self.y,
@@ -418,7 +418,7 @@ impl G {
 
     /// Adds two points using the complete unified formula for `a = -1`.
     #[inline]
-    pub(crate) fn add(self, rhs: Self) -> Self {
+    pub fn add(self, rhs: Self) -> Self {
         // Hisil-Wong-Carter-Dawson, "Twisted Edwards Curves Revisited",
         // add-2008-hwcd-3 specialized to a = -1:
         //
@@ -448,7 +448,7 @@ impl G {
 
     /// Adds an affine point using its precomputed `2d*x*y` coordinate.
     #[inline]
-    pub(crate) fn add_mixed(self, rhs: GAffine) -> Self {
+    pub fn add_mixed(self, rhs: GAffine) -> Self {
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
         let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
         let c = self.t.mul(rhs.t2d);
@@ -467,7 +467,7 @@ impl G {
 
     /// Doubles this point using the dedicated `dbl-2008-hwcd` formula.
     #[inline]
-    pub(crate) fn double(self) -> Self {
+    pub fn double(self) -> Self {
         let a = self.x.square();
         let b = self.y.square();
         let c = self.z.square();
@@ -485,7 +485,7 @@ impl G {
     }
 
     /// Multiplies this point by a public scalar bit sequence using variable-time double-and-add.
-    pub(crate) fn scalar_mul(self, bits: impl IntoIterator<Item = bool>) -> Self {
+    pub fn scalar_mul(self, bits: impl IntoIterator<Item = bool>) -> Self {
         let mut result = Self::IDENTITY;
         for bit in bits {
             result = result.double();
@@ -500,7 +500,7 @@ impl G {
     ///
     /// This performs one doubling and one addition per bit, selecting the result without
     /// secret-dependent branches or indexing.
-    pub(crate) fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
+    pub fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
         let mut result = Self::IDENTITY;
         for i in (0..256).rev() {
             let doubled = result.double();
@@ -512,7 +512,7 @@ impl G {
     }
 
     /// Multiplies this point by the curve's cofactor (8).
-    pub(crate) fn mul_by_cofactor(mut self) -> Self {
+    pub fn mul_by_cofactor(mut self) -> Self {
         for _ in 0..3 {
             self = self.double();
         }
@@ -520,7 +520,7 @@ impl G {
     }
 
     /// Returns whether this point represents the identity.
-    pub(crate) fn is_identity(&self) -> bool {
+    pub fn is_identity(&self) -> bool {
         self.x.is_zero() && self.y.eq(&self.z)
     }
 }
@@ -529,7 +529,7 @@ impl G {
 ///
 /// This stores individual affine points and their precomputed `2d*x*y` coordinate.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct GAffine {
+pub struct GAffine {
     x: F,
     y: F,
     t2d: F,
@@ -537,14 +537,14 @@ pub(crate) struct GAffine {
 
 impl GAffine {
     /// The neutral element, `(0, 1)`.
-    pub(crate) const IDENTITY: Self = Self {
+    pub const IDENTITY: Self = Self {
         x: F::ZERO,
         y: F::ONE,
         t2d: F::ZERO,
     };
 
     /// The standard Ed25519 base point, prepared for mixed addition.
-    pub(crate) const BASEPOINT: Self = Self {
+    pub const BASEPOINT: Self = Self {
         x: F([
             1738742601995546,
             1146398526822698,
@@ -569,7 +569,7 @@ impl GAffine {
     };
 
     /// Decompresses a point encoding, accepting non-canonical `y` values per ZIP215.
-    pub(crate) fn decompress(bytes: &[u8; 32]) -> Option<Self> {
+    pub fn decompress(bytes: &[u8; 32]) -> Option<Self> {
         let sign = bytes[31] >> 7;
         let y = F::from_bytes(bytes);
 
@@ -604,7 +604,7 @@ impl GAffine {
     }
 
     /// Converts this affine point to extended homogeneous representation.
-    pub(crate) fn to_extended(self) -> G {
+    pub fn to_extended(self) -> G {
         G {
             x: self.x,
             y: self.y,
@@ -615,7 +615,7 @@ impl GAffine {
 
     /// Decompresses eight point encodings with the square-root calculation performed lane-wise by
     /// the selected backend.
-    pub(crate) fn decompress_batch<B: FBackend>(
+    pub fn decompress_batch<B: FBackend>(
         backend: B,
         bytes: &[[u8; 32]; LANES],
     ) -> [Option<Self>; LANES] {
@@ -684,20 +684,20 @@ impl GAffine {
 /// `X*Y = T*Z`. Scaling all four coordinates by any nonzero factor represents the same point.
 /// The affine curve equation, scaled by `Z^2`, is `-X^2 + Y^2 = Z^2 + d*T^2`.
 #[derive(Clone, Copy)]
-pub(crate) struct GVec {
+pub struct GVec {
     /// The extended homogeneous X coordinate.
-    pub(crate) x: FVec,
+    pub x: FVec,
     /// The extended homogeneous Y coordinate.
-    pub(crate) y: FVec,
+    pub y: FVec,
     /// The extended homogeneous T coordinate.
-    pub(crate) t: FVec,
+    pub t: FVec,
     /// The extended homogeneous Z coordinate.
-    pub(crate) z: FVec,
+    pub z: FVec,
 }
 
 impl GVec {
     /// Transposes scalar points into backend lanes.
-    pub(crate) fn transpose(lanes: [G; LANES]) -> Self {
+    pub fn transpose(lanes: [G; LANES]) -> Self {
         Self {
             x: FVec::transpose(lanes.map(|point| point.x)),
             y: FVec::transpose(lanes.map(|point| point.y)),
@@ -707,7 +707,7 @@ impl GVec {
     }
 
     /// Untransposes backend lanes into scalar points.
-    pub(crate) fn untranspose(self) -> [G; LANES] {
+    pub fn untranspose(self) -> [G; LANES] {
         let x = self.x.untranspose();
         let y = self.y.untranspose();
         let t = self.t.untranspose();
@@ -721,7 +721,7 @@ impl GVec {
     }
 
     /// Returns every lane set to `point`.
-    pub(crate) const fn splat(point: G) -> Self {
+    pub const fn splat(point: G) -> Self {
         Self {
             x: FVec::splat(point.x),
             y: FVec::splat(point.y),
@@ -731,7 +731,7 @@ impl GVec {
     }
 
     /// Returns the identity in every lane.
-    pub(crate) const fn identity() -> Self {
+    pub const fn identity() -> Self {
         Self::splat(G::IDENTITY)
     }
 
@@ -749,7 +749,7 @@ impl GVec {
     }
 
     /// Sums all eight lanes with a vector addition tree.
-    pub(crate) fn sum_lanes<B: GBackend>(self, backend: B) -> G {
+    pub fn sum_lanes<B: GBackend>(self, backend: B) -> G {
         let sums = Self::add_pairs::<LANES>(self.untranspose(), backend);
         let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);
         Self::add_pairs::<{ LANES / 4 }>(sums, backend)[0]
@@ -762,15 +762,15 @@ impl GVec {
 /// Operations are faster taking this into account, so we want to make sure to
 /// exploit that when we can, by using [`GBackend::g_add_mixed`] and cousins.
 #[derive(Clone, Copy)]
-pub(crate) struct GAffineVec {
-    pub(crate) x: FVec,
-    pub(crate) y: FVec,
-    pub(crate) t2d: FVec,
+pub struct GAffineVec {
+    pub x: FVec,
+    pub y: FVec,
+    pub t2d: FVec,
 }
 
 impl GAffineVec {
     /// Transposes scalar affine points into backend lanes.
-    pub(crate) fn transpose(lanes: [GAffine; LANES]) -> Self {
+    pub fn transpose(lanes: [GAffine; LANES]) -> Self {
         Self {
             x: FVec::transpose(lanes.map(|point| point.x)),
             y: FVec::transpose(lanes.map(|point| point.y)),
@@ -780,7 +780,7 @@ impl GAffineVec {
 
     /// Untransposes backend lanes into scalar affine points.
     #[cfg(any(test, not(target_arch = "aarch64")))]
-    pub(crate) fn untranspose(self) -> [GAffine; LANES] {
+    pub fn untranspose(self) -> [GAffine; LANES] {
         let x = self.x.untranspose();
         let y = self.y.untranspose();
         let t2d = self.t2d.untranspose();
@@ -792,7 +792,7 @@ impl GAffineVec {
     }
 
     /// Packs affine points, negating the selected lanes.
-    pub(crate) fn from_signed_lanes<B: FBackend>(
+    pub fn from_signed_lanes<B: FBackend>(
         backend: B,
         lanes: &[GAffine; LANES],
         negative: &[bool; LANES],
@@ -841,7 +841,7 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
 }
 
 /// Abstracts over group operations.
-pub(crate) trait GBackend: FBackend {
+pub trait GBackend: FBackend {
     /// Add two points together.
     ///
     /// This method must work for all points, including the identity point, equal points, and a
@@ -861,7 +861,7 @@ pub(crate) trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub(crate) trait Backend: FBackend + GBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + Send + Sync + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -870,7 +870,7 @@ pub(crate) trait Backend: FBackend + GBackend + Send + Sync + 'static {}
 /// closures can't have generic call methods, so we use a trait instead:
 /// implement it on a struct capturing the computation's inputs, and return
 /// its results from [`Self::call`].
-pub(crate) trait WithBackend {
+pub trait WithBackend {
     /// The result of the computation.
     type Output;
 
@@ -894,7 +894,7 @@ mod test;
 
 /// Returns the portable backend for deterministic tests.
 #[cfg(test)]
-pub(crate) fn test_backend() -> impl Backend {
+pub fn test_backend() -> impl Backend {
     portable::Backend::new()
 }
 
@@ -955,7 +955,7 @@ fn test_neon_against_portable() {
 /// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection;
 /// AArch64 includes NEON in its baseline ISA. Every use is forced through this single gate so an
 /// accelerated backend is only constructed where its instructions are guaranteed to be available.
-pub(crate) fn with_backend<F: WithBackend>(f: F) -> F::Output {
+pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(target_arch = "x86_64")]
     {
         if let Some(backend) = avx512::Backend::new() {
