@@ -1,6 +1,6 @@
 ---
 title: "Simplex, Pipelined"
-description: "In a 50-validator Alto deployment, Stable Leader and Optimistic Validation sustained about 200 blocks per second, with a median of 5ms between blocks."
+description: "Stable Leader and Optimistic Validation shorten the wait between Simplex proposals. In a 50-validator Alto deployment, the pipeline sustained about 200 blocks per second with 5ms median spacing."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
 modified-time: "2026-08-12T00:00:00Z"
@@ -12,7 +12,7 @@ image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 
 New blocks no longer have to wait for network round trips.
 
-Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once.
+Today, we're introducing [Stable Leader](https://github.com/commonwarexyz/monorepo/pull/3352) and [Optimistic Validation](https://github.com/commonwarexyz/monorepo/pull/3416), two features that pipeline [Simplex](https://eprint.iacr.org/2023/463) views. Stable Leader keeps one proposer for many views in a row, reducing handoff overhead. Optimistic Validation lets that leader keep proposing and validators keep voting without waiting for the previous view's notarization. Together, they keep several views moving through the network at once. For users, more frequent proposals mean less time waiting for a transaction to enter the next block.
 
 In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread across ten AWS regions worldwide, this combination sustained about 200 blocks per second. The blocks contained headers only, with no transactions or execution, so this result measures consensus cadence rather than transaction throughput. The median time between blocks was 5ms. For an external observer, median finality was 300ms from the leader's block timestamp to delivery through the indexer and WebSocket. At that cadence, about 60 newer blocks could be in flight while the first finalized.
 
@@ -56,15 +56,15 @@ In an [Alto](https://alto.commonware.xyz) deployment with 50 validators spread a
 Figure 1: Each square represents one 5ms target interval. Alto sustained about 200 blocks per second.
 :::
 
-## Two Waits Between Views
+## Two Network Waits Between Views
 
 A *view* is one opportunity for a leader to propose a block. Validators verify the proposal and vote. Once a quorum votes for the same proposal, it is *notarized*.
 
 Traditionally, two network hops separate consecutive views: the next leader must receive the previous proposal, then votes must cross the network to form its notarization. Within a term, Stable Leader removes the first wait from the critical path. Optimistic Validation removes the second.
 
-## Wait One: The Proposer Handoff
+### Wait One: The Proposer Handoff
 
-With rotating leadership, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
+With rotating leaders, each view has a new proposer. The next proposer must first receive the previous proposal. Even then, the next proposer cannot safely build until a notarization forms: a Byzantine leader may have sent conflicting proposals.
 
 Stable Leader groups consecutive views into a *term*. One leader proposes throughout the term, reducing proposer handoffs from one per view to one per term. Within the term, the leader already knows the previous block and its ancestry before a single network message arrives. An honest leader also knows it did not equivocate, so it can begin building and distributing the next proposal's data early. This cuts the wait between views from two network hops to one: the hop that forms the parent notarization. This stable-leader variant was introduced in [Sing a Song of Simplex](https://eprint.iacr.org/2023/1916).
 
@@ -78,7 +78,7 @@ Stable Leader groups consecutive views into a *term*. One leader proposes throug
 Figure 2: Round-robin spaces views two network hops apart. With four-view terms, Stable Leader spaces them one hop apart within each term and two hops apart at each leader handoff.
 :::
 
-## Wait Two: The Parent Notarization
+### Wait Two: The Parent Notarization
 
 Without Optimistic Validation, validators wait for the parent to be notarized before voting to notarize its child. Network latency still paces each view.
 
@@ -98,15 +98,15 @@ Figure 3: Without optimism, validators wait for the parent notarization before v
 
 ## How Optimism Stays Safe
 
-*Optimistic* means a participant can vote to notarize a proposal before it receives notarizations for every ancestor in the term. It does not weaken the evidence required for finalization.
+*Optimistic* means a participant can vote to notarize a proposal before receiving notarizations for every ancestor in the term.
 
 Notarization is not finalization. After a block is notarized, each validator asks its application whether the payload is safe to commit. This decision is called *certification* and happens before the validator votes to finalize the block. Certification lets an application finish any checks required before commit, such as confirming data availability or validating application-specific block and transaction rules.
 
 A participant only votes optimistically when every earlier proposal in the term is consistent with the chain it has already supported. A validator still waits for the parent to be certified before certifying the child. Once the child is certified, the validator broadcasts its finalize vote. It can certify later views without waiting for the child to finalize, so certification and finalization continue in parallel. If any proposal fails to notarize or certify, later optimistic votes in the term cannot be used. Validators can then vote to abandon the rest of the term through Simplex's normal nullification path.
 
-The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry.
+The term boundary is also a leader handoff, so optimistic work stops there. The first view of a new term must start from certified ancestry. Together, these rules let Simplex views pipeline without changing the evidence required for finalization.
 
-Lastly, the consensus configuration sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, but uses more CPU and memory on work that could be discarded if an earlier view fails.
+The consensus configuration also sets a bound on how many views validators can work ahead at once. A value of zero disables Optimistic Validation. A larger bound can keep the pipeline full when notarizations fall behind, at the cost of more CPU and memory for work that could be discarded if an earlier view fails.
 
 ```{=html}
 <div id="simplex-fig-recovery" class="simplex-loop simplex-loop-recovery" role="img" aria-label="An optimistic term with eight views. View one is finalized, view two is notarized, and view three times out. Validators nullify view three. Optimistic proposals in views four and five are discarded, and views six through eight are skipped. View two then finalizes, and view nine builds on it in the next term before notarizing and finalizing. View ten follows, and the pipeline continues offscreen.">
@@ -128,10 +128,10 @@ A Byzantine leader could still finalize blocks while selectively censoring trans
 
 This pipeline fits networks with reliable connectivity and enough CPU and memory for many in-flight views. Networks that prioritize proposer rotation as a censorship defense may prefer shorter terms.
 
-## The Next Block
+## A Finer Ordering Clock
 
 Each 5ms view gives applications another opportunity to order new data. That finer schedule can help orderbooks, batchers, and games respond to new input sooner.
 
-This pipeline lets one ordering leader publish new blocks as quickly as local work and network capacity allow. [Multimmit](/blogs/multimmit) addresses a complementary bottleneck by separating parallel transaction production from the single ordering leader.
+This pipeline lets one ordering leader publish new blocks as quickly as local work and network capacity allow. To carry larger payloads efficiently, [Carnot](https://arxiv.org/abs/2603.11797) combines multi-view leaders with bandwidth-efficient dissemination. For multiple concurrent producers, [Multimmit](/blogs/multimmit) separates parallel transaction production from the single ordering leader.
 
 Stable Leader and Optimistic Validation will be available in the next `commonware-consensus` release.
