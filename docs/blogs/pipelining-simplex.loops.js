@@ -156,7 +156,7 @@ const makeSvg = (mount, height) => {
 function buildCadence(mount) {
   const svg = makeSvg(mount, 400);
   const squares = [];
-  addText(svg, 20, 38, '5ms view intervals', { 'font-size': 20, 'font-weight': 700 });
+  addText(svg, 20, 38, 'One view every 5ms', { 'font-size': 20, 'font-weight': 700 });
   const counter = addText(svg, 1004, 38, '000 / 200', {
     'font-size': 20,
     'font-weight': 700,
