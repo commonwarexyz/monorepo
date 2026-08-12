@@ -1,140 +1,23 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! A [`Freelist`] owns the allocation layout for one [`super::pool::BufferPool`]
-//! size class and is responsible for deallocating every tracked buffer created
-//! with that layout. Buffers that are not owned by pooled views and not held in
-//! a thread-local cache are parked in the freelist, making them available for
-//! reuse by any thread in the pool. Each tracked buffer has a stable slot id
-//! within its size class.
+//! Stable slots are partitioned across cache-isolated stripes. Each stripe owns
+//! packed authoritative leaf bits, stable owner records, and one advisory state
+//! word that bounds empty searches. Lazy creation uses a separate monotonic
+//! cursor per stripe and preserves the same probe phases used for reuse.
 //!
-//! A [`PooledBuffer`] does not carry its allocation layout. Any buffer created
-//! by this freelist, or taken from it, must eventually be returned to the same
-//! freelist before the freelist is finally dropped. [`Freelist::drain`] and
-//! [`Drop`] only release buffers currently parked here. **An outstanding buffer
-//! that is never returned will leak**.
-//!
-//! The buffer pool keeps this requirement by storing a live size-class lease in
-//! every pooled buffer outside the freelist, including buffers held in a
-//! thread-local cache. Those leases keep the owning size class, and therefore
-//! this freelist, alive until the buffer returns here.
-//!
-//! This is intentionally narrower than a general multi-producer, multi-consumer
-//! queue:
-//!
-//! - Capacity is fixed when the size class is created.
-//! - Callers only need to take any free slot, not preserve order.
-//! - Slot ownership is managed by the buffer pool.
-//! - Refill and spill paths naturally move buffers in batches.
-//!
-//! Each slot has three pieces of freelist state: a reservation bit, a
-//! side-table entry, and a free bit. The reservation bit records whether a
-//! stable slot id has been assigned to a created buffer. The side-table entry
-//! is stable for the lifetime of the size class and stores the data pointer,
-//! capacity, routing fields, refcount, and any live size-class lease. The free
-//! bit records whether that slot is globally available. Returning a buffer
-//! consumes its lease and sets the bit. Taking a buffer clears a set bit and
-//! then rebuilds a [`PooledBuffer`] handle from the side-table entry.
-//!
-//! Reservation and free bits are split across cache-line-padded atomic words.
-//! The pool passes its expected parallelism so the freelist can size these
-//! bitmaps for the expected contention level. The freelist rounds that target
-//! up to a power of two, caps it so every word can contain at least one slot,
-//! and grows it when needed so no bitmap word tracks more than 64 slots.
-//!
-//! Consecutive slot ids are not packed into the same word. Instead low slot-id
-//! bits choose the word and high slot-id bits choose the bit inside that word.
-//! With a power-of-two word count, the mapping is:
-//!
-//! - `word_mask = word_count - 1`
-//! - `word_shift = log2(word_count)`
-//! - `word_index = slot & word_mask`
-//! - `bit_index = slot >> word_shift`
-//! - `bit_mask = 1 << bit_index`
-//!
-//! For an eight-word freelist, slots are arranged like this:
-//!
-//! ```text
-//!            word 0   word 1   word 2   word 3   word 4   word 5   word 6   word 7
-//! bit 0:     slot 0   slot 1   slot 2   slot 3   slot 4   slot 5   slot 6   slot 7
-//! bit 1:     slot 8   slot 9   slot 10  slot 11  slot 12  slot 13  slot 14  slot 15
-//! bit 2:     slot 16  slot 17  slot 18  slot 19  slot 20  slot 21  slot 22  slot 23
-//! ...
-//! ```
-//!
-//! This gives concurrent threads more independent atomic words to target
-//! without changing the slot ids handed back to the pool.
-//!
-//! Lazy creation uses the same striped mapping. The slot id assigned at
-//! creation determines the word where that buffer will later be parked. If a
-//! single global counter assigns slot ids, a worker can create buffers that
-//! later publish on another worker's home word, then miss them when it starts a
-//! future take from its own home word. Reserving created slots with the same
-//! probe order keeps lazy growth aligned with later global reuse.
-//!
-//! Each thread also gets a stable probe id. The probe id uses the same
-//! power-of-two split as slot ids:
-//!
-//! - low id bits choose the thread's home word
-//! - higher id bits identify the home-word collision group
-//! - the low six bits of that group are reversed to choose the starting bit
-//!
-//! The first `word_count` long-lived workers therefore start on different
-//! bitmap words. Workers that already start on different words do not need
-//! distinct bit offsets. When more workers share the same home word, their bit
-//! offsets spread by halves, quarters, and so on.
-//!
-//! ```text
-//! word_count = 8
-//!
-//! thread id:       0  1  2  3  4  5  6  7 |  8  9 10 11 12 13 14 15
-//! home word:       0  1  2  3  4  5  6  7 |  0  1  2  3  4  5  6  7
-//! group:           0  0  0  0  0  0  0  0 |  1  1  1  1  1  1  1  1
-//! bit offset:      0  0  0  0  0  0  0  0 | 32 32 32 32 32 32 32 32
-//!
-//! home_word = thread_id & word_mask
-//! group     = thread_id >> word_shift
-//! offset    = reverse_low_6(group)
-//!
-//! home-word collision sequence:
-//!
-//! thread id:   0   8  16  24  32  40  48  56
-//! group:       0   1   2   3   4   5   6   7
-//! bit offset:  0  32  16  48   8  40  24  56
-//! ```
-//!
-//! The hot paths are fast for a few concrete reasons:
-//!
-//! - `try_create` starts from the same stable per-thread home word as `take`,
-//!   so lazy-created buffers tend to park where their creating thread will look
-//!   first when those buffers later return to the global freelist.
-//! - `put` is just one `fetch_or`, plus a double-return assert on the value
-//!   it returns.
-//! - `take` uses a stable per-thread home word before scanning others, so
-//!   threads tend to start from different stripes.
-//! - `take` and `take_batch` rotate bit selection inside each word, so threads
-//!   that share a word do not all probe bit 0 first.
-//! - `take` claims bits with `fetch_and` instead of a compare-and-swap loop.
-//!   Two threads removing different bits from the same word can both succeed
-//!   without one having to restart from scratch.
-//! - `put_batch` coalesces returned slots per word, turning many logical
-//!   inserts into one atomic `fetch_or` per touched stripe.
-//! - `take_batch` claims several bits from one word with one atomic operation,
-//!   which matches the refill behavior of the thread-local caches.
-//!
-//! The shared bitmap operations are lock-free, but the structure is not a
-//! standalone general-purpose container. It relies on the buffer pool's
-//! ownership discipline: a slot is either owned by a pooled backing, parked in a
-//! thread-local cache, or available in this freelist. Only the thread that owns
-//! a slot outside the freelist may mutate that slot's side-table entry.
+//! A set leaf bit exclusively owns its buffer. Summary state only navigates to
+//! leaves and may be stale. Returns publish leaves before summaries, while
+//! takes acquire leaf ownership before rebuilding a [`PooledBuffer`]. Drain and
+//! drop ignore summaries and reclaim directly from the authoritative leaves.
 
 use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::Cell,
-    mem::MaybeUninit,
+    mem::{MaybeUninit, size_of},
     num::{NonZeroU32, NonZeroUsize},
-    ptr,
+    ptr, slice,
     sync::atomic::Ordering,
 };
 
@@ -152,77 +35,476 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Number of slot bits tracked in each bitmap word.
-const SLOT_BITMAP_WORD_BITS: usize = u64::BITS as usize;
-/// Number of low-order bits needed to address bits within one bitmap word.
-const SLOT_BITMAP_WORD_SHIFT: u32 = SLOT_BITMAP_WORD_BITS.trailing_zeros();
-/// Number of word masks stored on the stack before falling back to heap scratch.
-const INLINE_PUT_BATCH_MASKS: usize = 128;
+const SLOT_WORD_BITS: usize = u64::BITS as usize;
+const SLOT_WORD_SHIFT: u32 = SLOT_WORD_BITS.trailing_zeros();
+const MAX_FREELIST_STRIPES: usize = 4096;
+const TARGET_MAX_SLOTS_PER_STRIPE: usize = 1 << 24;
+const AVAILABILITY_BITS: usize = 58;
+const CODE_SHIFT: u32 = AVAILABILITY_BITS as u32;
+const AVAILABILITY_MASK: u64 = (1u64 << CODE_SHIFT) - 1;
+const CODE_MASK: u64 = !AVAILABILITY_MASK;
+const CURSOR_NEXT_BITS: u32 = 25;
+const CURSOR_NEXT_MASK: u64 = (1u64 << CURSOR_NEXT_BITS) - 1;
+const PROBE_PHASE_BITS: u32 = 39;
+const PROBE_PHASE_MASK: u64 = (1u64 << PROBE_PHASE_BITS) - 1;
+const WORD_PHASE_BITS: u32 = 27;
+const WORD_PHASE_MASK: u64 = (1u64 << WORD_PHASE_BITS) - 1;
+const INLINE_LEAF_MASKS: usize = 128;
+const INLINE_PUT_RECORDS: usize = 128;
+const MAX_BYPASS_LEAF_BLOCKS: usize = 32;
 
-/// Bounded lock-free freelist of tracked buffers for one size class.
-///
-/// The freelist owns the [`Layout`] shared by every tracked buffer in the size
-/// class. Pooled backing values and thread-local caches may temporarily hold
-/// [`PooledBuffer`] handles, but those handles must eventually return here so
-/// they can be released with the correct layout. The buffer pool keeps the
-/// freelist alive for those outstanding handles with live leases stored in
-/// pooled slot entries. Draining or dropping the freelist only deallocates buffers
-/// currently parked in it.
-///
-/// The bitmap is intentionally striped over a power-of-two number of words.
-/// That makes the slot-to-word mapping cheap and keeps small freelists from
-/// degenerating into a single hot atomic word.
-pub struct Freelist {
-    /// Allocation layout shared by every tracked buffer.
-    layout: Layout,
-    /// Number of creation permits claimed.
-    ///
-    /// This is a monotonic capacity-admission counter. Winning an increment
-    /// gives a creator one permit to reserve a slot id from the reservation
-    /// bitmap. Draining globally-free buffers does not decrement it because
-    /// created slot ids may still be owned by a pooled backing or parked in
-    /// thread-local caches.
-    created: AtomicUsize,
-    /// Cache-line-padded striped bitmap of reserved slot ids.
-    ///
-    /// Creation uses the same striped slot mapping and per-thread probe order as
-    /// the free bitmap. This preserves probe affinity during lazy growth: the
-    /// slot chosen for a newly-created buffer determines the global word where
-    /// that buffer will later be parked.
-    reserved: Box<[CachePadded<AtomicU64>]>,
-    /// Cache-line-padded striped bitmap of free slots.
-    ///
-    /// Padding matters here because threads often target different words in
-    /// steady state. Without padding, different bitmap words could still share
-    /// a cache line even when they represent disjoint slot stripes.
-    words: Box<[CachePadded<AtomicU64>]>,
-    /// Per-slot pooled owner state.
-    ///
-    /// A slot is mutated only while its free bit is clear and the slot is owned
-    /// by exactly one buffer/cache path. Publishing a slot to the global
-    /// freelist is the bitmap bit's Release transition. Taking it is the
-    /// matching Acquire transition.
-    slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
-    /// Mask used to map a slot id to its striped bitmap word.
-    word_mask: usize,
-    /// Number of low slot-id bits consumed by the word index.
-    word_shift: u32,
+// Derive the packed block width from the production atomic representation.
+// Loom atomics deliberately have a different size, so Loom models retain the
+// production logical width while using Loom storage for each modeled word.
+const CACHE_PADDING_BYTES: usize = size_of::<CachePadded<std::sync::atomic::AtomicU64>>();
+const LEAF_WORDS_PER_BLOCK: usize = CACHE_PADDING_BYTES / size_of::<std::sync::atomic::AtomicU64>();
+
+type LeafBlock = CachePadded<[AtomicU64; LEAF_WORDS_PER_BLOCK]>;
+
+const _: () = assert!(LEAF_WORDS_PER_BLOCK.is_power_of_two());
+
+#[cfg(not(feature = "loom"))]
+const _: () = {
+    assert!(size_of::<LeafBlock>() == CACHE_PADDING_BYTES);
+    assert!(std::mem::align_of::<LeafBlock>() == std::mem::align_of::<CachePadded<AtomicU64>>());
+};
+
+#[derive(Clone, Copy)]
+struct Geometry {
+    capacity: usize,
+    stripe_count: usize,
+    stripe_mask: usize,
+    stripe_shift: u32,
+    max_logical_words: usize,
+    base_chunk_words: usize,
+    base_chunk_shift: u32,
+    total_leaf_blocks: usize,
 }
 
-// SAFETY: side-table entries are mutated only by the thread that currently owns
-// their slot id. Publication and removal from the global free set are
-// synchronized via bitmap bit transitions.
+impl Geometry {
+    fn new(capacity: usize, parallelism: usize) -> Self {
+        let parallelism_stripes = parallelism
+            .checked_next_power_of_two()
+            .unwrap_or(MAX_FREELIST_STRIPES)
+            .min(MAX_FREELIST_STRIPES);
+        let capacity_target = capacity.div_ceil(TARGET_MAX_SLOTS_PER_STRIPE);
+        let capacity_stripes = capacity_target
+            .checked_next_power_of_two()
+            .unwrap_or(MAX_FREELIST_STRIPES)
+            .min(MAX_FREELIST_STRIPES);
+        let capacity_ceiling = 1usize << capacity.ilog2();
+        let stripe_count = parallelism_stripes
+            .max(capacity_stripes)
+            .min(capacity_ceiling);
+        let stripe_shift = stripe_count.trailing_zeros();
+        let stripe_mask = stripe_count - 1;
+        let max_stripe_capacity = Self::stripe_capacity_for(capacity, stripe_shift, 0);
+        let max_logical_words = max_stripe_capacity.div_ceil(SLOT_WORD_BITS);
+        let base_chunk_words = max_logical_words
+            .div_ceil(64)
+            .checked_next_power_of_two()
+            .expect("base chunk width must be representable");
+        let base_chunk_shift = base_chunk_words.trailing_zeros();
+        let mut total_leaf_blocks = 0usize;
+
+        for stripe in 0..stripe_count {
+            let stripe_capacity = Self::stripe_capacity_for(capacity, stripe_shift, stripe);
+            let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
+            total_leaf_blocks = total_leaf_blocks
+                .checked_add(logical_words.div_ceil(LEAF_WORDS_PER_BLOCK))
+                .expect("leaf block count must be representable");
+        }
+
+        let geometry = Self {
+            capacity,
+            stripe_count,
+            stripe_mask,
+            stripe_shift,
+            max_logical_words,
+            base_chunk_words,
+            base_chunk_shift,
+            total_leaf_blocks,
+        };
+        geometry.validate();
+        geometry
+    }
+
+    #[inline(always)]
+    const fn stripe_capacity_for(capacity: usize, stripe_shift: u32, stripe: usize) -> usize {
+        ((capacity - 1 - stripe) >> stripe_shift) + 1
+    }
+
+    #[inline(always)]
+    const fn stripe_capacity(&self, stripe: usize) -> usize {
+        Self::stripe_capacity_for(self.capacity, self.stripe_shift, stripe)
+    }
+
+    #[inline(always)]
+    const fn slot(&self, stripe: usize, local: usize) -> usize {
+        (local << self.stripe_shift) | stripe
+    }
+
+    fn validate(&self) {
+        assert!(self.stripe_count.is_power_of_two());
+        assert!(self.stripe_count <= self.capacity.min(MAX_FREELIST_STRIPES));
+        assert!(self.max_logical_words <= 1 << 18);
+        assert!(self.base_chunk_words <= 1 << 12);
+        assert!(self.total_leaf_blocks > 0);
+
+        let mut total_capacity = 0usize;
+        for stripe in 0..self.stripe_count {
+            let stripe_capacity = self.stripe_capacity(stripe);
+            assert!(stripe_capacity <= TARGET_MAX_SLOTS_PER_STRIPE);
+            total_capacity = total_capacity
+                .checked_add(stripe_capacity)
+                .expect("stripe capacities must be representable");
+            let last = self.slot(stripe, stripe_capacity - 1);
+            assert!(last < self.capacity);
+            assert!(u32::try_from(last).is_ok());
+        }
+        assert_eq!(total_capacity, self.capacity);
+    }
+}
+
+struct Stripe {
+    summary: AtomicU64,
+    leaves: Box<[LeafBlock]>,
+    slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    capacity: usize,
+    logical_words: usize,
+    valid_group_mask: u64,
+    group_count: u32,
+    single_groups: u32,
+}
+
+impl Stripe {
+    #[inline(always)]
+    fn leaf(&self, logical_word: usize) -> &AtomicU64 {
+        let block = logical_word / LEAF_WORDS_PER_BLOCK;
+        let offset = logical_word & (LEAF_WORDS_PER_BLOCK - 1);
+        &self.leaves[block][offset]
+    }
+
+    #[inline(always)]
+    fn valid_leaf_mask(&self, logical_word: usize) -> u64 {
+        let remaining = self.capacity - logical_word * SLOT_WORD_BITS;
+        low_bits(remaining.min(SLOT_WORD_BITS))
+    }
+}
+
+#[cfg(not(feature = "loom"))]
+const _: () = assert!(size_of::<CachePadded<Stripe>>() == CACHE_PADDING_BYTES);
+
+struct CreationCursor {
+    state: AtomicU64,
+}
+
+impl CreationCursor {
+    #[inline(always)]
+    #[allow(clippy::missing_const_for_fn)]
+    fn new(state: u64) -> Self {
+        Self {
+            state: AtomicU64::new(state),
+        }
+    }
+
+    #[inline(always)]
+    fn claim(&self, probe_phase: u64, capacity: usize) -> Option<(u64, usize)> {
+        #[allow(deprecated)]
+        let previous = self
+            .state
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
+                if state == 0 {
+                    Some(encode_cursor(probe_phase, 1))
+                } else {
+                    let next = decode_cursor_next(state);
+                    if next < capacity {
+                        Some(encode_cursor(decode_cursor_phase(state), next + 1))
+                    } else {
+                        None
+                    }
+                }
+            })
+            .ok()?;
+
+        if previous == 0 {
+            Some((probe_phase, 0))
+        } else {
+            Some((decode_cursor_phase(previous), decode_cursor_next(previous)))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PutRecord<'a> {
+    stripe: usize,
+    word: usize,
+    mask: u64,
+    group_mask: u64,
+    leaf: &'a AtomicU64,
+    summary: &'a AtomicU64,
+}
+
+// The inline variant is intentionally stack-resident. Boxing it would add an
+// allocation to ordinary large-geometry spill batches.
+#[allow(clippy::large_enum_variant)]
+enum PutRecords<'a> {
+    Inline {
+        records: [MaybeUninit<PutRecord<'a>>; INLINE_PUT_RECORDS],
+        len: usize,
+    },
+    Heap(Vec<PutRecord<'a>>),
+}
+
+impl<'a> PutRecords<'a> {
+    #[inline(always)]
+    const fn new() -> Self {
+        Self::Inline {
+            records: [MaybeUninit::uninit(); INLINE_PUT_RECORDS],
+            len: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        if capacity <= INLINE_PUT_RECORDS {
+            Self::new()
+        } else {
+            Self::Heap(Vec::with_capacity(capacity))
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, record: PutRecord<'a>) {
+        match self {
+            Self::Inline { records, len } if *len < INLINE_PUT_RECORDS => {
+                records[*len].write(record);
+                *len += 1;
+            }
+            Self::Inline { records, len } => {
+                let mut heap = Vec::with_capacity(*len + 1);
+                for record in &records[..*len] {
+                    // SAFETY: every record before `len` was initialized by
+                    // `push`, and `PutRecord` has no drop glue.
+                    heap.push(unsafe { record.assume_init_read() });
+                }
+                heap.push(record);
+                *self = Self::Heap(heap);
+            }
+            Self::Heap(records) => records.push(record),
+        }
+    }
+
+    #[inline(always)]
+    const fn as_mut_slice(&mut self) -> &mut [PutRecord<'a>] {
+        match self {
+            Self::Inline { records, len } => {
+                // SAFETY: the initialized prefix contains `len` contiguous
+                // `PutRecord` values and the returned slice does not expose
+                // the uninitialized tail.
+                unsafe { slice::from_raw_parts_mut(records.as_mut_ptr().cast(), *len) }
+            }
+            Self::Heap(records) => records.as_mut_slice(),
+        }
+    }
+}
+
+#[inline(always)]
+const fn low_bits(bits: usize) -> u64 {
+    assert!(bits > 0 && bits <= SLOT_WORD_BITS);
+    if bits == SLOT_WORD_BITS {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+#[inline(always)]
+const fn group_mask(group: usize) -> u64 {
+    1u64 << group
+}
+
+#[inline(always)]
+const fn encode_code(group: usize) -> u64 {
+    ((group as u64) + 1) << CODE_SHIFT
+}
+
+#[inline(always)]
+const fn raw_code(state: u64) -> usize {
+    ((state & CODE_MASK) >> CODE_SHIFT) as usize
+}
+
+#[inline(always)]
+const fn decode_code(state: u64) -> Option<usize> {
+    let raw = raw_code(state);
+    assert!(raw <= AVAILABILITY_BITS);
+    if raw == 0 { None } else { Some(raw - 1) }
+}
+
+#[inline(always)]
+const fn encode_cursor(probe_phase: u64, next: usize) -> u64 {
+    (probe_phase << CURSOR_NEXT_BITS) | next as u64
+}
+
+#[inline(always)]
+const fn decode_cursor_next(state: u64) -> usize {
+    (state & CURSOR_NEXT_MASK) as usize
+}
+
+#[inline(always)]
+const fn decode_cursor_phase(state: u64) -> u64 {
+    (state >> CURSOR_NEXT_BITS) & PROBE_PHASE_MASK
+}
+
+#[inline(always)]
+const fn reduce_word_phase(word_phase: u32, words: usize) -> usize {
+    (((word_phase as u64) * (words as u64)) >> WORD_PHASE_BITS) as usize
+}
+
+#[inline(always)]
+const fn next_admission(created: usize, capacity: usize) -> Option<usize> {
+    if created < capacity {
+        Some(created + 1)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+const fn mix_probe_id(id: u64) -> u64 {
+    let mut mixed = id;
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
+fn assert_allocation<T>(len: usize) {
+    Layout::array::<T>(len).expect("freelist allocation must be representable");
+}
+
+fn group_geometry(
+    logical_words: usize,
+    base_chunk_words: usize,
+    max_groups: usize,
+) -> (u32, u32, u64) {
+    assert!(max_groups > 0 && max_groups <= AVAILABILITY_BITS);
+    let base_chunks = logical_words.div_ceil(base_chunk_words);
+    assert!(base_chunks <= max_groups * 2);
+    let paired = base_chunks.saturating_sub(max_groups);
+    let single = base_chunks - paired * 2;
+    let groups = single + paired;
+    assert!(groups > 0 && groups <= max_groups);
+    (groups as u32, single as u32, low_bits(groups))
+}
+
+#[inline(always)]
+const fn group_for_base(single_groups: usize, base: usize) -> usize {
+    if base < single_groups {
+        base
+    } else {
+        single_groups + ((base - single_groups) >> 1)
+    }
+}
+
+#[inline(always)]
+const fn group_base_range(single_groups: usize, group: usize) -> (usize, usize) {
+    if group < single_groups {
+        (group, 1)
+    } else {
+        (single_groups + (group - single_groups) * 2, 2)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ConstructionOptions {
+    force_summaries: bool,
+    max_groups: usize,
+}
+
+impl Default for ConstructionOptions {
+    fn default() -> Self {
+        Self {
+            force_summaries: false,
+            max_groups: AVAILABILITY_BITS,
+        }
+    }
+}
+
+struct CleanupGuard<'a> {
+    summary: &'a AtomicU64,
+    group_mask: u64,
+    armed: bool,
+}
+
+impl<'a> CleanupGuard<'a> {
+    #[inline(always)]
+    const fn new(summary: &'a AtomicU64, group_mask: u64) -> Self {
+        Self {
+            summary,
+            group_mask,
+            armed: true,
+        }
+    }
+
+    #[inline(always)]
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CleanupGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.summary.fetch_or(self.group_mask, Ordering::Release);
+        self.summary.fetch_and(AVAILABILITY_MASK, Ordering::Release);
+    }
+}
+
+struct TakeContext<'a, F> {
+    max: usize,
+    filled: usize,
+    on_entry: &'a mut F,
+}
+
+impl<F> TakeContext<'_, F> {
+    #[inline(always)]
+    const fn is_full(&self) -> bool {
+        self.filled == self.max
+    }
+}
+
+/// Bounded lock-free freelist of tracked buffers for one size class.
+pub struct Freelist {
+    layout: Layout,
+    capacity: usize,
+    created: CachePadded<AtomicUsize>,
+    stripes: Box<[CachePadded<Stripe>]>,
+    creation_cursors: Box<[CachePadded<CreationCursor>]>,
+    stripe_mask: usize,
+    stripe_shift: u32,
+    base_chunk_words: usize,
+    base_chunk_shift: u32,
+    summaries_enabled: bool,
+}
+
+// SAFETY: each owner entry is mutated only while its authoritative leaf bit is
+// clear and the slot is exclusively owned. Release publication and Acquire
+// claims synchronize ownership transfers.
 unsafe impl Send for Freelist {}
-// SAFETY: Same slot-ownership and bit-transition synchronization as above.
+// SAFETY: the same slot ownership and leaf synchronization apply to shared
+// access. Stripe-local owner pointees remain stable until the freelist drops.
 unsafe impl Sync for Freelist {}
 
 impl Freelist {
     /// Creates a new fixed-capacity freelist.
     ///
     /// `parallelism` is the expected number of threads contending for the
-    /// freelist. The actual word count is the parallelism target rounded to a
-    /// power of two, capped so every word can contain at least one slot, and
-    /// grown when needed so no word tracks more than 64 slots.
+    /// freelist. Capacity may raise the internal stripe count to keep each
+    /// search domain bounded.
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
@@ -232,85 +514,148 @@ impl Freelist {
         layout: Layout,
         prefill: bool,
     ) -> Self {
+        Self::new_inner(
+            capacity,
+            parallelism,
+            layout,
+            prefill,
+            ConstructionOptions::default(),
+        )
+    }
+
+    fn new_inner(
+        capacity: NonZeroU32,
+        parallelism: NonZeroUsize,
+        layout: Layout,
+        prefill: bool,
+        options: ConstructionOptions,
+    ) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
-        let slot_count = capacity.get();
-        let capacity = slot_count as usize;
+        let capacity = capacity.get() as usize;
+        let geometry = Geometry::new(capacity, parallelism.get());
+        let summaries_enabled = options.force_summaries
+            || !cfg!(target_arch = "x86_64")
+            || geometry.total_leaf_blocks > MAX_BYPASS_LEAF_BLOCKS;
 
-        // Keep the caller-facing knob as expected parallelism, then derive an
-        // implementation-friendly stripe count here. Capping at capacity avoids
-        // permanently empty stripes when a small pool is used with a large
-        // parallelism setting.
-        let max_stripes = 1usize << capacity.ilog2();
-        let target_stripes = parallelism
-            .get()
-            .checked_next_power_of_two()
-            .unwrap_or(max_stripes)
-            .min(max_stripes);
+        assert_allocation::<CachePadded<Stripe>>(geometry.stripe_count);
+        assert_allocation::<CachePadded<CreationCursor>>(geometry.stripe_count);
 
-        // Small freelists reserve the target number of striped words when
-        // capacity allows it, so different threads can start from different
-        // cache lines. Large freelists are constrained by the number of bits
-        // required to represent all slots.
-        let word_count = target_stripes
-            .max(capacity.div_ceil(SLOT_BITMAP_WORD_BITS))
-            .next_power_of_two();
-        // `word_count` is always a power of two, so slot mapping can use the
-        // low bits as a word index and the remaining high bits as the bit
-        // index inside that word.
-        let word_shift = word_count.trailing_zeros();
-        let word_mask = word_count - 1;
+        let mut stripes = Vec::with_capacity(geometry.stripe_count);
+        let mut creation_cursors = Vec::with_capacity(geometry.stripe_count);
 
-        let words = (0..word_count)
-            .map(|_| CachePadded::new(AtomicU64::new(0)))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        for stripe_index in 0..geometry.stripe_count {
+            let stripe_capacity = geometry.stripe_capacity(stripe_index);
+            let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
+            let leaf_blocks = logical_words.div_ceil(LEAF_WORDS_PER_BLOCK);
+            let (group_count, single_groups, valid_group_mask) =
+                group_geometry(logical_words, geometry.base_chunk_words, options.max_groups);
 
-        // Constructor-exclusive prefill can reserve every valid slot without
-        // running the concurrent affinity probe.
-        let reserved = (0..word_count)
-            .map(|word_index| {
-                let bits = if prefill {
-                    Self::valid_bits(capacity, word_shift, word_index)
-                } else {
-                    0
-                };
-                CachePadded::new(AtomicU64::new(bits))
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let slots = (0..slot_count)
-            .map(|slot| CachePadded::new(UnsafeCell::new(PooledOwner::new(slot, layout.size()))))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            assert_allocation::<LeafBlock>(leaf_blocks);
+            assert_allocation::<CachePadded<UnsafeCell<PooledOwner>>>(stripe_capacity);
+
+            let leaves = (0..leaf_blocks)
+                .map(|block| {
+                    let words = std::array::from_fn(|offset| {
+                        let logical_word = block * LEAF_WORDS_PER_BLOCK + offset;
+                        let bits = if prefill && logical_word < logical_words {
+                            let remaining = stripe_capacity - logical_word * SLOT_WORD_BITS;
+                            low_bits(remaining.min(SLOT_WORD_BITS))
+                        } else {
+                            0
+                        };
+                        AtomicU64::new(bits)
+                    });
+                    CachePadded::new(words)
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let slots = (0..stripe_capacity)
+                .map(|local| {
+                    let slot = geometry.slot(stripe_index, local);
+                    let slot = u32::try_from(slot).expect("slot id must fit in u32");
+                    CachePadded::new(UnsafeCell::new(PooledOwner::new(slot, layout.size())))
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let summary = if prefill && summaries_enabled {
+                valid_group_mask
+            } else {
+                0
+            };
+            let cursor = if prefill {
+                encode_cursor(0, stripe_capacity)
+            } else {
+                0
+            };
+
+            stripes.push(CachePadded::new(Stripe {
+                summary: AtomicU64::new(summary),
+                leaves,
+                slots,
+                capacity: stripe_capacity,
+                logical_words,
+                valid_group_mask,
+                group_count,
+                single_groups,
+            }));
+            creation_cursors.push(CachePadded::new(CreationCursor::new(cursor)));
+        }
 
         let freelist = Self {
             layout,
-            created: AtomicUsize::new(if prefill { capacity } else { 0 }),
-            reserved,
-            words,
-            slots,
-            word_mask,
-            word_shift,
+            capacity,
+            created: CachePadded::new(AtomicUsize::new(if prefill { capacity } else { 0 })),
+            stripes: stripes.into_boxed_slice(),
+            creation_cursors: creation_cursors.into_boxed_slice(),
+            stripe_mask: geometry.stripe_mask,
+            stripe_shift: geometry.stripe_shift,
+            base_chunk_words: geometry.base_chunk_words,
+            base_chunk_shift: geometry.base_chunk_shift,
+            summaries_enabled,
         };
 
         if prefill {
-            freelist.put_batch((0..slot_count).map(|slot| {
-                // SAFETY: construction exclusively owns this reserved
-                // side-table entry. `put_batch` publishes it after initialization.
-                unsafe { PooledBuffer::new(freelist.slot_ptr(slot), layout, false) }
-            }));
+            for (stripe_index, stripe) in freelist.stripes.iter().enumerate() {
+                for local in 0..stripe.capacity {
+                    // SAFETY: construction exclusively owns every eagerly
+                    // initialized owner entry. Leaf bits are not shared until
+                    // construction returns.
+                    let _ = unsafe {
+                        PooledBuffer::new(freelist.owner_ptr(stripe_index, local), layout, false)
+                    };
+                }
+            }
         }
 
         freelist
     }
 
+    #[cfg(test)]
+    pub(super) fn new_forced_summary(
+        capacity: NonZeroU32,
+        parallelism: NonZeroUsize,
+        layout: Layout,
+        prefill: bool,
+    ) -> Self {
+        Self::new_inner(
+            capacity,
+            parallelism,
+            layout,
+            prefill,
+            ConstructionOptions {
+                force_summaries: true,
+                max_groups: AVAILABILITY_BITS,
+            },
+        )
+    }
+
     /// Creates a new buffer and reserves a stable slot id for it.
     ///
     /// Creation has two steps. First, `created` claims one capacity permit.
-    /// Then the reservation bitmap assigns an actual slot id using the same
-    /// per-thread probe order as [`Self::take`]. This keeps newly-created
-    /// buffers mapped to the words their creating thread will probe first after
-    /// those buffers are returned to the global freelist.
+    /// Then a stripe-local cursor assigns the actual slot id using the same
+    /// per-thread probe phases as [`Self::take`]. This keeps newly-created
+    /// buffers mapped to the groups and words their creating thread will probe
+    /// first after those buffers are returned to the global freelist.
     ///
     /// Returns `None` once every creation permit in the fixed-capacity
     /// freelist has been claimed.
@@ -320,7 +665,7 @@ impl Freelist {
     /// its allocation leaks and its owner pointer dangles.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
-        let capacity = self.slots.len();
+        let probe = Probe::new(self.stripe_mask);
 
         // `created` admits exactly `capacity` creators. It does not publish a
         // buffer or a slot id, so relaxed ordering is enough.
@@ -329,94 +674,151 @@ impl Freelist {
         #[allow(deprecated)]
         self.created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                (created < capacity).then_some(created + 1)
+                next_admission(created, self.capacity)
             })
             .ok()?;
 
-        // Capture this thread's probe state once so the inner loop does not
-        // repeatedly touch thread-local storage.
-        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
+        for scanned in 0..self.stripes.len() {
+            let stripe_index = probe.stripe(scanned, self.stripe_mask);
+            let stripe = &self.stripes[stripe_index];
+            let cursor = &self.creation_cursors[stripe_index];
+            let Some((probe_phase, ticket)) = cursor.claim(probe.phase(), stripe.capacity) else {
+                continue;
+            };
+            let cursor_probe = Probe::from_phase(stripe_index, probe_phase);
+            let local = self.unrank_local(stripe, cursor_probe, ticket);
 
-        // The capacity permit guarantees that some valid reservation bit is
-        // still clear. The bitmap RMW below chooses which slot id this creator
-        // owns.
-        let slot = 'reserve: {
-            for scanned in 0..self.reserved.len() {
-                let word_index = probe.word_index(scanned);
-                let word_ref = &self.reserved[word_index];
-                // Creation searches for zero bits, so unused high bits would
-                // look available without this mask.
-                let valid = Self::valid_bits(capacity, self.word_shift, word_index);
-                // The relaxed load only chooses candidates. The following RMW
-                // decides ownership.
-                let mut available = !word_ref.load(Ordering::Relaxed) & valid;
-
-                while available != 0 {
-                    // Probe a thread-specific bit order inside the chosen word so
-                    // colliding threads do not all stampede bit 0 first.
-                    let bit = probe.select_set_bit(available);
-                    let mask = 1u64 << bit;
-                    // This needs atomic uniqueness, not memory publication: no
-                    // parked buffer is made visible by reserving a slot id.
-                    let observed = word_ref.fetch_or(mask, Ordering::Relaxed);
-                    if observed & mask == 0 {
-                        break 'reserve self.slot_index(word_index, bit);
-                    }
-
-                    // Another creator reserved that candidate first. Continue
-                    // from the word state returned by the RMW instead of
-                    // restarting the whole scan.
-                    available = !observed & valid;
-                }
-            }
-
-            unreachable!("creation permit guarantees one reservable slot");
-        };
-
-        // SAFETY: the reservation RMW assigned `slot` exactly once, so no other
-        // thread can initialize or publish this side-table entry.
-        let buffer = unsafe { PooledBuffer::new(self.slot_ptr(slot), self.layout, zeroed) };
-
-        Some(buffer)
-    }
-
-    /// Returns the bitmap word index and bit mask for a slot id.
-    ///
-    /// Low slot-id bits choose the cache-line-padded word. High slot-id bits
-    /// choose the bit inside that word, spreading consecutive slots across
-    /// stripes instead of packing them into one atomic word.
-    #[inline(always)]
-    const fn slot_word(&self, slot: u32) -> (usize, u64) {
-        let slot = slot as usize;
-        let word_index = slot & self.word_mask;
-        let bit = slot >> self.word_shift;
-        (word_index, 1u64 << bit)
-    }
-
-    /// Returns the slot id represented by a bitmap word index and bit index.
-    ///
-    /// This is the inverse of [`Self::slot_word`] and is used after a bit has
-    /// been claimed from the bitmap.
-    #[inline(always)]
-    const fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
-        let slot = (bit << self.word_shift) | word_index;
-        slot as u32
-    }
-
-    /// Returns the mask of valid slot bits for a bitmap word.
-    ///
-    /// Some words have unused high bits when capacity does not fill a complete
-    /// final logical row. For example, with capacity 10 and 4 words, words 0
-    /// and 1 have three valid bits (slots 0/4/8 and 1/5/9), while words 2 and 3
-    /// have only two.
-    #[inline(always)]
-    const fn valid_bits(capacity: usize, word_shift: u32, word_index: usize) -> u64 {
-        let bits = ((capacity - 1 - word_index) >> word_shift) + 1;
-        if bits == SLOT_BITMAP_WORD_BITS {
-            u64::MAX
-        } else {
-            (1u64 << bits) - 1
+            // SAFETY: the cursor assigned this local owner exactly once. All
+            // preparation that can fail happened before admission.
+            let buffer = unsafe {
+                PooledBuffer::new(self.owner_ptr(stripe_index, local), self.layout, zeroed)
+            };
+            return Some(buffer);
         }
+
+        unreachable!("creation permit guarantees one cursor with capacity")
+    }
+
+    #[inline(always)]
+    const fn slot_location(&self, slot: u32) -> (usize, usize, usize, u64) {
+        let slot = slot as usize;
+        let stripe = slot & self.stripe_mask;
+        let local = slot >> self.stripe_shift;
+        let word = local >> SLOT_WORD_SHIFT;
+        let mask = 1u64 << (local & (SLOT_WORD_BITS - 1));
+        (stripe, local, word, mask)
+    }
+
+    #[inline(always)]
+    #[cfg(all(test, not(feature = "loom")))]
+    const fn slot_index(&self, stripe: usize, local: usize) -> u32 {
+        ((local << self.stripe_shift) | stripe) as u32
+    }
+
+    #[inline(always)]
+    const fn group_for_word(&self, stripe: &Stripe, word: usize) -> usize {
+        let base = word >> self.base_chunk_shift;
+        group_for_base(stripe.single_groups as usize, base)
+    }
+
+    #[inline(always)]
+    fn group_word_range(&self, stripe: &Stripe, group: usize) -> (usize, usize, usize) {
+        let (base, base_count) = group_base_range(stripe.single_groups as usize, group);
+        let start = base << self.base_chunk_shift;
+        let full_words = base_count * self.base_chunk_words;
+        let end = start.saturating_add(full_words).min(stripe.logical_words);
+        (start, end, full_words)
+    }
+
+    #[inline(always)]
+    fn group_slot_count(&self, stripe: &Stripe, group: usize) -> usize {
+        let (start, end, _) = self.group_word_range(stripe, group);
+        (end * SLOT_WORD_BITS).min(stripe.capacity) - start * SLOT_WORD_BITS
+    }
+
+    #[inline(always)]
+    const fn word_offset(probe: Probe, words: usize, full_words: Option<usize>) -> usize {
+        if let Some(full_words) = full_words
+            && words == full_words
+        {
+            return probe.word_phase as usize & (full_words - 1);
+        }
+        reduce_word_phase(probe.word_phase, words)
+    }
+
+    fn unrank_local(&self, stripe: &Stripe, probe: Probe, mut ticket: usize) -> usize {
+        if !self.summaries_enabled {
+            return self.unrank_span(stripe, probe, 0, stripe.logical_words, None, ticket);
+        }
+
+        let group_count = stripe.group_count as usize;
+        for offset in 0..group_count {
+            let group = probe.group(offset, group_count);
+            let slots = self.group_slot_count(stripe, group);
+            if ticket < slots {
+                let (start, end, full_words) = self.group_word_range(stripe, group);
+                return self.unrank_span(stripe, probe, start, end, Some(full_words), ticket);
+            }
+            ticket -= slots;
+        }
+
+        unreachable!("cursor ticket must map to one local slot")
+    }
+
+    fn unrank_span(
+        &self,
+        stripe: &Stripe,
+        probe: Probe,
+        start: usize,
+        end: usize,
+        full_words: Option<usize>,
+        ticket: usize,
+    ) -> usize {
+        let words = end - start;
+        let offset = Self::word_offset(probe, words, full_words);
+        let split = start + offset;
+        let ticket = match self.unrank_run(stripe, probe, split, end, ticket) {
+            Ok(local) => return local,
+            Err(ticket) => ticket,
+        };
+        self.unrank_run(stripe, probe, start, split, ticket)
+            .unwrap_or_else(|_| unreachable!("span ticket must map to one local slot"))
+    }
+
+    const fn unrank_run(
+        &self,
+        stripe: &Stripe,
+        probe: Probe,
+        start: usize,
+        end: usize,
+        mut ticket: usize,
+    ) -> Result<usize, usize> {
+        if start == end {
+            return Err(ticket);
+        }
+
+        let partial_bits = stripe.capacity & (SLOT_WORD_BITS - 1);
+        let has_partial = partial_bits != 0 && end == stripe.logical_words;
+        let full_end = if has_partial { end - 1 } else { end };
+        let full_slots = (full_end - start) * SLOT_WORD_BITS;
+        if ticket < full_slots {
+            let word = start + ticket / SLOT_WORD_BITS;
+            let rank = ticket & (SLOT_WORD_BITS - 1);
+            let bit = (rank + probe.bit_phase as usize) & (SLOT_WORD_BITS - 1);
+            return Ok(word * SLOT_WORD_BITS + bit);
+        }
+        ticket -= full_slots;
+
+        if has_partial {
+            let valid = low_bits(partial_bits);
+            if ticket < partial_bits {
+                let bit = probe.select_ranked_bit(valid, ticket);
+                return Ok((end - 1) * SLOT_WORD_BITS + bit);
+            }
+            ticket -= partial_bits;
+        }
+
+        Err(ticket)
     }
 
     /// Puts one tracked buffer into the global freelist.
@@ -435,11 +837,18 @@ impl Freelist {
     #[inline]
     pub fn put(&self, buffer: PooledBuffer) {
         let slot = buffer.slot();
+        let (stripe_index, _, word, mask) = self.slot_location(slot);
+        let stripe = &self.stripes[stripe_index];
+        let leaf = stripe.leaf(word);
+        let summary = &stripe.summary;
+        let group = group_mask(self.group_for_word(stripe, word));
 
-        // Setting the slot bit makes the slot available. `Release` pairs with
-        // the taker's `Acquire` clear before it reuses the side-table entry.
-        let (word_index, mask) = self.slot_word(slot);
-        let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
+        let previous = leaf.fetch_or(mask, Ordering::Release);
+        if self.summaries_enabled {
+            // Every completed summarized return publishes unconditionally.
+            // The RMW preserves both sibling availability and any active code.
+            summary.fetch_or(group, Ordering::Release);
+        }
         assert_eq!(
             previous & mask,
             0,
@@ -449,9 +858,10 @@ impl Freelist {
 
     /// Puts several tracked buffers into the global freelist.
     ///
-    /// Batch insertion groups returned slots by bitmap word so each touched
-    /// stripe needs only one atomic `fetch_or`, regardless of how many entries
-    /// in the batch map to that word.
+    /// Batch insertion groups returned slots by leaf word, so each touched word
+    /// needs one atomic `fetch_or` regardless of how many entries map to it.
+    /// Summarized stripes then publish all touched groups with one additional
+    /// atomic `fetch_or` per stripe.
     ///
     /// `BufferPool` callers pass simple non-panicking iterators over entries
     /// they already own. Avoiding per-entry guards keeps this path
@@ -466,10 +876,6 @@ impl Freelist {
     #[inline]
     pub fn put_batch(&self, entries: impl IntoIterator<Item = PooledBuffer>) {
         let mut entries = entries.into_iter();
-
-        // Keep empty and single-entry batches on the cheapest path. The mask
-        // scratch space is only needed once there are multiple slots to
-        // coalesce.
         let Some(buffer) = entries.next() else {
             return;
         };
@@ -478,93 +884,138 @@ impl Freelist {
             return;
         };
 
-        let word_count = self.words.len();
-        if word_count <= INLINE_PUT_BATCH_MASKS {
-            let mut masks = MaybeUninit::<[u64; INLINE_PUT_BATCH_MASKS]>::uninit();
-            // Only the active bitmap words need scratch space. Avoid clearing
-            // the whole inline array for small freelists.
-            //
-            // SAFETY: `word_count <= INLINE_PUT_BATCH_MASKS`, so the
-            // initialized prefix is in bounds. `u64` has no drop glue, and the
-            // uninitialized tail is never exposed.
+        let dense_len = self.stripes.len() * self.stripes[0].logical_words;
+        if dense_len <= INLINE_LEAF_MASKS {
+            let mut masks = MaybeUninit::<[u64; INLINE_LEAF_MASKS]>::uninit();
+            // SAFETY: only the active dense prefix is initialized and exposed.
             let masks = unsafe {
                 let ptr = masks.as_mut_ptr().cast::<u64>();
-                ptr.write_bytes(0, word_count);
-                std::slice::from_raw_parts_mut(ptr, word_count)
+                ptr.write_bytes(0, dense_len);
+                slice::from_raw_parts_mut(ptr, dense_len)
             };
-            self.put_entries(masks, buffer, next_buffer, entries);
-        } else {
-            // Very large freelists are uncommon, so keep the common case on the
-            // stack and fall back to heap scratch only when the bitmap is wider
-            // than the fixed inline staging area.
-            let mut masks = vec![0u64; word_count];
-            self.put_entries(masks.as_mut_slice(), buffer, next_buffer, entries);
-        }
-    }
-
-    /// Inserts a multi-entry batch using per-word scratch masks.
-    ///
-    /// `put_batch` peels the first two entries before calling this helper, so
-    /// this path only handles batches large enough to benefit from coalescing.
-    /// `masks` must contain exactly one zeroed entry per bitmap word. Each slot
-    /// is ORed into its word's scratch mask. Once all entries are
-    /// staged, one `Release` `fetch_or` per non-empty mask makes the
-    /// corresponding slots available.
-    ///
-    /// The iterator must not panic after yielding an entry, because
-    /// staged-but-not-inserted buffers would no longer be owned by the caller
-    /// and would not yet be reachable through the bitmap.
-    #[inline(always)]
-    fn put_entries(
-        &self,
-        masks: &mut [u64],
-        buffer: PooledBuffer,
-        next_buffer: PooledBuffer,
-        entries: impl Iterator<Item = PooledBuffer>,
-    ) {
-        // Masks are staged by word before the later Release `fetch_or` makes
-        // every staged slot in that word available.
-        self.stage_put(masks, buffer);
-        self.stage_put(masks, next_buffer);
-        for buffer in entries {
-            self.stage_put(masks, buffer);
-        }
-
-        for (word_index, &mask) in masks.iter().enumerate() {
-            if mask == 0 {
-                continue;
+            let stride = self.stripes[0].logical_words;
+            self.stage_dense(masks, stride, buffer);
+            self.stage_dense(masks, stride, next_buffer);
+            for buffer in entries {
+                self.stage_dense(masks, stride, buffer);
             }
 
-            // One Release operation makes every returned slot represented by
-            // this word mask available.
-            let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
-            assert_eq!(
-                previous & mask,
-                0,
-                "returned slot batch must not already contain a free slot"
-            );
+            let mut records = PutRecords::new();
+            for (index, &mask) in masks.iter().enumerate() {
+                if mask == 0 {
+                    continue;
+                }
+                let stripe = index / stride;
+                let word = index % stride;
+                records.push(self.put_record(stripe, word, mask));
+            }
+            self.publish_records(records.as_mut_slice());
+        } else {
+            let (lower, upper) = entries.size_hint();
+            let remaining = upper.filter(|upper| *upper == lower).unwrap_or(lower);
+            let capacity = remaining
+                .checked_add(2)
+                .expect("put batch length exceeds address space");
+            let mut records = PutRecords::with_capacity(capacity);
+            self.stage_record(&mut records, buffer);
+            self.stage_record(&mut records, next_buffer);
+            for buffer in entries {
+                self.stage_record(&mut records, buffer);
+            }
+
+            let records = records.as_mut_slice();
+            records.sort_unstable_by_key(|record| (record.stripe, record.word, record.mask));
+            let len = Self::coalesce_records(records);
+            self.publish_records(&records[..len]);
         }
     }
 
-    /// Records one returned buffer's slot in the batch scratch mask.
-    ///
-    /// This helper intentionally does not touch the atomic bitmap. The caller
-    /// later inserts the accumulated mask for each word, so multiple slots that
-    /// map to the same bitmap word share a single `Release` operation.
-    ///
-    /// `masks` must contain the scratch word for `buffer`'s slot.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the batch already staged this slot: a duplicate would OR
-    /// into the mask idempotently and silently alias the slot, where the
-    /// equivalent sequential `put` calls panic on the second return.
     #[inline(always)]
-    fn stage_put(&self, masks: &mut [u64], buffer: PooledBuffer) {
-        let slot = buffer.slot();
-        let (word_index, mask) = self.slot_word(slot);
-        assert_eq!(masks[word_index] & mask, 0, "duplicate slot in put_batch");
-        masks[word_index] |= mask;
+    fn stage_dense(&self, masks: &mut [u64], stride: usize, buffer: PooledBuffer) {
+        let (stripe, _, word, mask) = self.slot_location(buffer.slot());
+        let index = stripe * stride + word;
+        assert_eq!(masks[index] & mask, 0, "duplicate slot in put_batch");
+        masks[index] |= mask;
+    }
+
+    #[inline(always)]
+    fn stage_record<'a>(&'a self, records: &mut PutRecords<'a>, buffer: PooledBuffer) {
+        let (stripe, _, word, mask) = self.slot_location(buffer.slot());
+        records.push(self.put_record(stripe, word, mask));
+    }
+
+    #[inline(always)]
+    fn put_record(&self, stripe_index: usize, word: usize, mask: u64) -> PutRecord<'_> {
+        let stripe = &self.stripes[stripe_index];
+        PutRecord {
+            stripe: stripe_index,
+            word,
+            mask,
+            group_mask: group_mask(self.group_for_word(stripe, word)),
+            leaf: stripe.leaf(word),
+            summary: &stripe.summary,
+        }
+    }
+
+    #[inline(always)]
+    fn coalesce_records(records: &mut [PutRecord<'_>]) -> usize {
+        let mut len = 0;
+        for read in 0..records.len() {
+            let record = records[read];
+            if len > 0
+                && records[len - 1].stripe == record.stripe
+                && records[len - 1].word == record.word
+            {
+                assert_eq!(
+                    records[len - 1].mask & record.mask,
+                    0,
+                    "duplicate slot in put_batch"
+                );
+                records[len - 1].mask |= record.mask;
+                records[len - 1].group_mask |= record.group_mask;
+            } else {
+                records[len] = record;
+                len += 1;
+            }
+        }
+        len
+    }
+
+    fn publish_records(&self, records: &[PutRecord<'_>]) {
+        let Some(first) = records.first() else {
+            return;
+        };
+        let mut stripe = first.stripe;
+        let mut summary = first.summary;
+        let mut groups = 0u64;
+        let mut overlap = 0u64;
+
+        for record in records {
+            if record.stripe != stripe {
+                if self.summaries_enabled {
+                    summary.fetch_or(groups, Ordering::Release);
+                }
+                assert_eq!(
+                    overlap, 0,
+                    "returned slot batch must not already contain a free slot"
+                );
+                stripe = record.stripe;
+                summary = record.summary;
+                groups = 0;
+                overlap = 0;
+            }
+
+            overlap |= record.leaf.fetch_or(record.mask, Ordering::Release) & record.mask;
+            groups |= record.group_mask;
+        }
+
+        if self.summaries_enabled {
+            summary.fetch_or(groups, Ordering::Release);
+        }
+        assert_eq!(
+            overlap, 0,
+            "returned slot batch must not already contain a free slot"
+        );
     }
 
     /// Takes any one available slot from the global freelist.
@@ -579,38 +1030,11 @@ impl Freelist {
     /// bits from the same word can both succeed.
     #[inline]
     pub fn take(&self) -> Option<PooledBuffer> {
-        // Capture this thread's probe state once so the inner loop does not
-        // repeatedly touch thread-local storage.
-        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
-
-        for scanned in 0..self.words.len() {
-            let word_index = probe.word_index(scanned);
-            let word_ref = &self.words[word_index];
-            // This relaxed load only chooses candidate bits. The Acquire
-            // `fetch_and` below claims the bit if it is still present.
-            let mut word = word_ref.load(Ordering::Relaxed);
-
-            while word != 0 {
-                // Probe a thread-specific bit order inside the chosen word so
-                // colliding threads do not all stampede bit 0 first.
-                let bit = probe.select_set_bit(word);
-                let mask = 1u64 << bit;
-                let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
-                if observed & mask != 0 {
-                    let slot = self.slot_index(word_index, bit);
-                    // The Acquire `fetch_and` above synchronizes with the
-                    // put-side Release operation.
-                    return Some(self.buffer(slot));
-                }
-
-                // Another thread removed that bit first. Reuse the returned
-                // word value instead of restarting the whole scan from the
-                // beginning.
-                word = observed & !mask;
-            }
-        }
-
-        None
+        let mut result = None;
+        self.take_with_probe(Probe::new(self.stripe_mask), 1, &mut |buffer| {
+            result = Some(buffer);
+        });
+        result
     }
 
     /// Takes up to `max` available slots from the global freelist.
@@ -630,56 +1054,263 @@ impl Freelist {
     /// synchronization cost across the batch.
     #[inline]
     pub fn take_batch(&self, max: usize, mut on_entry: impl FnMut(PooledBuffer)) -> usize {
-        if max == 1 {
-            // Keep single-slot takes on the cheaper path.
-            let Some(buffer) = self.take() else {
-                return 0;
-            };
-            on_entry(buffer);
-            return 1;
+        if max == 0 {
+            return 0;
         }
+        self.take_with_probe(Probe::new(self.stripe_mask), max, &mut on_entry)
+    }
 
-        // Capture this thread's probe state once so the inner loop does not
-        // repeatedly touch thread-local storage.
-        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
-        let mut filled = 0;
-
-        for scanned in 0..self.words.len() {
-            if filled == max {
+    fn take_with_probe(
+        &self,
+        probe: Probe,
+        max: usize,
+        on_entry: &mut impl FnMut(PooledBuffer),
+    ) -> usize {
+        let mut context = TakeContext {
+            max,
+            filled: 0,
+            on_entry,
+        };
+        for scanned in 0..self.stripes.len() {
+            let stripe_index = probe.stripe(scanned, self.stripe_mask);
+            let stripe = &self.stripes[stripe_index];
+            if self.summaries_enabled {
+                self.scan_summarized_stripe(stripe_index, stripe, probe, &mut context);
+            } else {
+                self.scan_bypass_stripe(stripe_index, stripe, probe, &mut context);
+            }
+            if context.is_full() {
                 break;
             }
+        }
+        context.filled
+    }
 
-            let word_index = probe.word_index(scanned);
-            let word_ref = &self.words[word_index];
-            // This relaxed load only chooses candidate bits. The Acquire
-            // `fetch_and` below claims whichever candidates are still present.
-            let mut word = word_ref.load(Ordering::Relaxed);
+    fn scan_bypass_stripe(
+        &self,
+        stripe_index: usize,
+        stripe: &Stripe,
+        probe: Probe,
+        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
+    ) {
+        let mut word = reduce_word_phase(probe.word_phase, stripe.logical_words);
+        for _ in 0..stripe.logical_words {
+            let candidates = stripe.leaf(word).load(Ordering::Acquire);
+            self.claim_word(stripe_index, stripe, word, candidates, probe, context);
+            if context.is_full() {
+                return;
+            }
+            word += 1;
+            if word == stripe.logical_words {
+                word = 0;
+            }
+        }
+    }
 
-            while word != 0 && filled < max {
-                // Stage several candidate bits from the current word, then try
-                // to clear all of them with one atomic operation.
-                let claim = probe.select_set_bits(word, max - filled);
-                let observed = word_ref.fetch_and(!claim, Ordering::Acquire);
-                // `claim` is speculative. Intersect it with the observed word
-                // to keep only the bits this thread actually cleared.
-                let mut claimed = observed & claim;
+    fn scan_summarized_stripe(
+        &self,
+        stripe_index: usize,
+        stripe: &Stripe,
+        probe: Probe,
+        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
+    ) {
+        let state = stripe.summary.load(Ordering::Acquire);
+        if state == 0 {
+            return;
+        }
 
-                while claimed != 0 {
-                    let bit = claimed.trailing_zeros() as usize;
-                    let slot = self.slot_index(word_index, bit);
-                    // These bits were cleared by the Acquire `fetch_and` above,
-                    // so each corresponding slot is now owned by this caller.
-                    on_entry(self.buffer(slot));
-                    claimed &= claimed - 1;
-                    filled += 1;
+        let mut low_pending = state & stripe.valid_group_mask;
+        let mut code_pending = 0u64;
+        let mut processed = 0u64;
+        if let Some(group) = decode_code(state) {
+            Self::add_code_candidate(stripe, group, processed, &mut code_pending);
+        }
+
+        while low_pending != 0 {
+            let group = probe.select_group(low_pending, stripe.group_count as usize);
+            let mask = group_mask(group);
+            low_pending &= !mask;
+            processed |= mask;
+            let repair = code_pending & mask != 0;
+            code_pending &= !mask;
+
+            let before = context.filled;
+            self.scan_group(stripe_index, stripe, group, probe, repair, context);
+            if context.is_full() {
+                return;
+            }
+            if context.filled != before {
+                continue;
+            }
+
+            let current = stripe.summary.load(Ordering::Acquire);
+            if let Some(code_group) = decode_code(current) {
+                Self::add_code_candidate(stripe, code_group, processed, &mut code_pending);
+                continue;
+            }
+            if current & mask == 0 {
+                continue;
+            }
+
+            let desired = (current & AVAILABILITY_MASK & !mask) | encode_code(group);
+            match stripe.summary.compare_exchange(
+                current,
+                desired,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => self.clean_owned_group(stripe_index, stripe, group, probe, context),
+                Err(actual) => {
+                    if let Some(code_group) = decode_code(actual) {
+                        Self::add_code_candidate(stripe, code_group, processed, &mut code_pending);
+                    }
                 }
-
-                // Continue from the word snapshot returned by `fetch_and`.
-                word = observed & !claim;
+            }
+            if context.is_full() {
+                return;
             }
         }
 
-        filled
+        while code_pending != 0 {
+            let group = probe.select_group(code_pending, stripe.group_count as usize);
+            let mask = group_mask(group);
+            code_pending &= !mask;
+            if processed & mask != 0 {
+                continue;
+            }
+            processed |= mask;
+            self.scan_group(stripe_index, stripe, group, probe, true, context);
+            if context.is_full() {
+                return;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn add_code_candidate(stripe: &Stripe, group: usize, processed: u64, pending: &mut u64) {
+        assert!(group < stripe.group_count as usize);
+        *pending |= group_mask(group) & !processed;
+    }
+
+    fn scan_group(
+        &self,
+        stripe_index: usize,
+        stripe: &Stripe,
+        group: usize,
+        probe: Probe,
+        repair: bool,
+        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
+    ) {
+        let (start, end, full_words) = self.group_word_range(stripe, group);
+        let words = end - start;
+        let offset = Self::word_offset(probe, words, Some(full_words));
+        let mut word = start + offset;
+        let mask = group_mask(group);
+
+        for _ in 0..words {
+            let candidates = stripe.leaf(word).load(Ordering::Acquire);
+            if repair && candidates != 0 {
+                stripe.summary.fetch_or(mask, Ordering::Release);
+            }
+            self.claim_word(stripe_index, stripe, word, candidates, probe, context);
+            if context.is_full() {
+                return;
+            }
+            word += 1;
+            if word == end {
+                word = start;
+            }
+        }
+    }
+
+    fn clean_owned_group(
+        &self,
+        stripe_index: usize,
+        stripe: &Stripe,
+        group: usize,
+        probe: Probe,
+        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
+    ) {
+        let mask = group_mask(group);
+        let mut guard = CleanupGuard::new(&stripe.summary, mask);
+        let (start, end, full_words) = self.group_word_range(stripe, group);
+        let words = end - start;
+        let offset = Self::word_offset(probe, words, Some(full_words));
+        let mut word = start + offset;
+
+        for visited in 0..words {
+            let candidates = stripe.leaf(word).load(Ordering::Acquire);
+            if candidates != 0 {
+                stripe.summary.fetch_or(mask, Ordering::Release);
+                guard.disarm();
+                stripe
+                    .summary
+                    .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+                self.claim_word(stripe_index, stripe, word, candidates, probe, context);
+                if context.is_full() {
+                    return;
+                }
+
+                word += 1;
+                if word == end {
+                    word = start;
+                }
+                for _ in visited + 1..words {
+                    let candidates = stripe.leaf(word).load(Ordering::Acquire);
+                    self.claim_word(stripe_index, stripe, word, candidates, probe, context);
+                    if context.is_full() {
+                        return;
+                    }
+                    word += 1;
+                    if word == end {
+                        word = start;
+                    }
+                }
+                return;
+            }
+
+            word += 1;
+            if word == end {
+                word = start;
+            }
+        }
+
+        guard.disarm();
+        stripe
+            .summary
+            .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+    }
+
+    fn claim_word(
+        &self,
+        stripe_index: usize,
+        stripe: &Stripe,
+        word: usize,
+        mut candidates: u64,
+        probe: Probe,
+        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
+    ) {
+        let valid = stripe.valid_leaf_mask(word);
+        candidates &= valid;
+        let mut attempted = 0u64;
+
+        while candidates != 0 && !context.is_full() {
+            let claim = probe.select_set_bits(candidates, context.max - context.filled);
+            attempted |= claim;
+            let observed = stripe.leaf(word).fetch_and(!claim, Ordering::Acquire);
+            let mut claimed = observed & claim;
+
+            while claimed != 0 {
+                let bit = probe.select_set_bit(claimed);
+                let local = word * SLOT_WORD_BITS + bit;
+                (context.on_entry)(self.buffer(stripe_index, local));
+                claimed &= !(1u64 << bit);
+                context.filled += 1;
+            }
+
+            candidates |= observed & valid & !attempted;
+            candidates &= !attempted;
+        }
     }
 
     /// Drops every currently available buffer from the global freelist.
@@ -694,22 +1325,19 @@ impl Freelist {
     pub fn drain(&self) -> usize {
         let mut drained = 0;
 
-        for (word_index, word) in self.words.iter().enumerate() {
-            // Drain clears each whole word directly instead of using the
-            // probe-based take path. That keeps destruction independent from
-            // thread-local probe state, which may already be unavailable while
-            // TLS caches are being destroyed.
-            let mut claimed = word.swap(0, Ordering::Acquire);
+        for (stripe_index, stripe) in self.stripes.iter().enumerate() {
+            for word in 0..stripe.logical_words {
+                let mut claimed = stripe.leaf(word).swap(0, Ordering::Acquire);
 
-            while claimed != 0 {
-                let bit = claimed.trailing_zeros() as usize;
-                let slot = self.slot_index(word_index, bit);
-                let buffer = self.buffer(slot);
-                // SAFETY: this freelist created the buffer for this slot,
-                // allocated with this freelist's layout.
-                unsafe { buffer.deallocate(self.layout) };
-                claimed &= claimed - 1;
-                drained += 1;
+                while claimed != 0 {
+                    let bit = claimed.trailing_zeros() as usize;
+                    let local = word * SLOT_WORD_BITS + bit;
+                    let buffer = self.buffer(stripe_index, local);
+                    // SAFETY: this freelist allocated this slot with `layout`.
+                    unsafe { buffer.deallocate(self.layout) };
+                    claimed &= claimed - 1;
+                    drained += 1;
+                }
             }
         }
 
@@ -718,10 +1346,17 @@ impl Freelist {
 
     /// Returns the side-table pointer for a slot id.
     #[inline(always)]
+    #[cfg(all(test, not(feature = "loom")))]
     fn slot_ptr(&self, slot: u32) -> ptr::NonNull<PooledOwner> {
-        let cell = self
+        let (stripe, local, _, _) = self.slot_location(slot);
+        self.owner_ptr(stripe, local)
+    }
+
+    #[inline(always)]
+    fn owner_ptr(&self, stripe: usize, local: usize) -> ptr::NonNull<PooledOwner> {
+        let cell = self.stripes[stripe]
             .slots
-            .get(slot as usize)
+            .get(local)
             .expect("slot id must refer to an allocated slot");
 
         cfg_if::cfg_if! {
@@ -740,9 +1375,9 @@ impl Freelist {
     /// The caller must have cleared the slot's free bit or freshly reserved
     /// the slot before calling this method.
     #[inline(always)]
-    fn buffer(&self, slot: u32) -> PooledBuffer {
+    fn buffer(&self, stripe: usize, local: usize) -> PooledBuffer {
         // SAFETY: the caller owns the slot and its data allocation is live.
-        let buffer = unsafe { PooledBuffer::from_owner(self.slot_ptr(slot)) };
+        let buffer = unsafe { PooledBuffer::from_owner(self.owner_ptr(stripe, local)) };
         // Under loom, every claim validates that the parked slot's refcount
         // sentinel was restored before the bitmap publication.
         #[cfg(feature = "loom")]
@@ -759,25 +1394,27 @@ impl Drop for Freelist {
     }
 }
 
-/// Per-call probe state for choosing bitmap words and bits.
-///
-/// Keeping this logic in one place makes the claim path easier to read and
-/// keeps the freelist API focused on putting and taking slots.
-struct SlotBitmapProbe {
-    start_word: usize,
-    word_mask: usize,
-    bit_offset: u32,
+#[derive(Clone, Copy)]
+struct ProbeId {
+    raw: usize,
+    mixed: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Probe {
+    home_stripe: usize,
+    group_phase: u32,
+    word_phase: u32,
+    bit_phase: u32,
 }
 
 // Monotonic source for per-thread probe ids.
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
-        static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+        static NEXT_PROBE_ID: AtomicUsize = AtomicUsize::new(0);
     } else {
         loom::lazy_static! {
-            // Loom's `AtomicUsize::new` is not const, so the modeled global
-            // counter has to be initialized through `lazy_static!`.
-            static ref NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+            static ref NEXT_PROBE_ID: AtomicUsize = AtomicUsize::new(0);
         }
     }
 }
@@ -785,94 +1422,91 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
         thread_local! {
-            // The per-thread probe id gives each thread a stable starting point for
-            // bitmap scans.
-            //
-            // Keep this const-initialized so the TLS value has no destructor. The
-            // cold path initializes the id explicitly instead of using a lazy TLS
-            // initializer.
-            static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
+            static TLS_PROBE_ID: Cell<Option<ProbeId>> = const { Cell::new(None) };
         }
     } else {
         loom::thread_local! {
-            // Loom's `thread_local!` macro does not accept const initializers.
-            static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = Cell::new(None);
+            static TLS_PROBE_ID: Cell<Option<ProbeId>> = Cell::new(None);
         }
     }
 }
 
-impl SlotBitmapProbe {
-    /// Builds probe state for the current thread and freelist layout.
-    ///
-    /// The thread's stable id chooses both its home word and its preferred bit
-    /// offset inside each word.
+impl Probe {
     #[inline(always)]
-    fn new(word_mask: usize, word_shift: u32) -> Self {
-        let thread_id = TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| {
-            if let Some(id) = thread_id.get() {
+    fn new(stripe_mask: usize) -> Self {
+        let id = TLS_PROBE_ID.with(|probe_id| {
+            if let Some(id) = probe_id.get() {
                 return id;
             }
 
-            // Relaxed ordering is enough because probe ids only spread starting
-            // points across bitmap words, they do not synchronize buffer
-            // ownership.
-            let id = NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
-            thread_id.set(Some(id));
+            let raw = NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+            let id = ProbeId {
+                raw,
+                mixed: mix_probe_id(raw as u64),
+            };
+            probe_id.set(Some(id));
             id
         });
+        Self::from_id(id, stripe_mask)
+    }
 
+    #[inline(always)]
+    const fn from_id(id: ProbeId, stripe_mask: usize) -> Self {
         Self {
-            // Low id bits choose the first bitmap word this thread probes.
-            // With a power-of-two word count, masking is equivalent to modulo
-            // but avoids a division on the hot path.
-            start_word: thread_id & word_mask,
-            word_mask,
-            // Threads that share a home word should start from well-separated
-            // bits within that word.
-            bit_offset: Self::bit_offset(thread_id, word_shift),
+            home_stripe: id.raw & stripe_mask,
+            group_phase: (id.mixed & 63) as u32,
+            bit_phase: ((id.mixed >> 6) & 63) as u32,
+            word_phase: ((id.mixed >> 12) & WORD_PHASE_MASK) as u32,
         }
     }
 
-    /// Returns the bit offset for this thread's home-word collision group.
     #[inline(always)]
-    const fn bit_offset(thread_id: usize, word_shift: u32) -> u32 {
-        // `word_shift` is `log2(word_count)`, so shifting drops the id bits
-        // used to choose the home word. Bit-reversing the low six group bits
-        // gives offsets `0, 32, 16, 48, ...`, spreading home-word collisions
-        // across the 64-bit word for power-of-two batch sizes.
-        let group = thread_id >> word_shift;
-        (group.reverse_bits() >> (usize::BITS - SLOT_BITMAP_WORD_SHIFT)) as u32
+    const fn from_phase(home_stripe: usize, phase: u64) -> Self {
+        Self {
+            home_stripe,
+            group_phase: (phase & 63) as u32,
+            bit_phase: ((phase >> 6) & 63) as u32,
+            word_phase: ((phase >> 12) & WORD_PHASE_MASK) as u32,
+        }
     }
 
-    /// Returns the word index to inspect after `scanned` words.
     #[inline(always)]
-    const fn word_index(&self, scanned: usize) -> usize {
-        (self.start_word + scanned) & self.word_mask
+    const fn phase(self) -> u64 {
+        self.group_phase as u64 | ((self.bit_phase as u64) << 6) | ((self.word_phase as u64) << 12)
     }
 
-    /// Selects one set bit from `word` using a rotated probe order.
-    ///
-    /// This probe's bit offset becomes the first position checked. The returned
-    /// index is in the original, unrotated word.
     #[inline(always)]
-    const fn select_set_bit(&self, word: u64) -> usize {
-        // Rotate the word so the thread's preferred probe offset becomes bit 0,
-        // select the first set bit in that rotated view, then rotate the answer
-        // back into the original word numbering.
-        let rotated = word.rotate_right(self.bit_offset);
-        ((rotated.trailing_zeros() + self.bit_offset) & (SLOT_BITMAP_WORD_BITS as u32 - 1)) as usize
+    const fn stripe(self, scanned: usize, stripe_mask: usize) -> usize {
+        (self.home_stripe + scanned) & stripe_mask
     }
 
-    /// Selects up to `limit` set bits from `word` using a rotated probe order.
-    ///
-    /// The returned mask is in the original, unrotated word and can be used
-    /// directly in a `fetch_and`.
+    #[inline(always)]
+    const fn group(self, offset: usize, group_count: usize) -> usize {
+        let start = (self.group_phase as usize * group_count) >> 6;
+        let group = start + offset;
+        if group >= group_count {
+            group - group_count
+        } else {
+            group
+        }
+    }
+
+    #[inline(always)]
+    const fn select_group(self, groups: u64, group_count: usize) -> usize {
+        let start = (self.group_phase as usize * group_count) >> 6;
+        let rotated = groups.rotate_right(start as u32);
+        ((rotated.trailing_zeros() as usize) + start) & (SLOT_WORD_BITS - 1)
+    }
+
+    #[inline(always)]
+    const fn select_set_bit(self, word: u64) -> usize {
+        let rotated = word.rotate_right(self.bit_phase);
+        ((rotated.trailing_zeros() + self.bit_phase) & (SLOT_WORD_BITS as u32 - 1)) as usize
+    }
+
     #[inline]
-    const fn select_set_bits(&self, word: u64, limit: usize) -> u64 {
-        // Gather up to `limit` set bits using the same rotated probe order as
-        // `select_set_bit`. The result is rotated back so callers can apply it
-        // directly as a mask against the original word.
-        let mut remaining = word.rotate_right(self.bit_offset);
+    const fn select_set_bits(self, word: u64, limit: usize) -> u64 {
+        let mut remaining = word.rotate_right(self.bit_phase);
         let mut selected = 0u64;
         let mut taken = 0;
 
@@ -884,7 +1518,18 @@ impl SlotBitmapProbe {
             taken += 1;
         }
 
-        selected.rotate_left(self.bit_offset)
+        selected.rotate_left(self.bit_phase)
+    }
+
+    #[inline(always)]
+    const fn select_ranked_bit(self, word: u64, rank: usize) -> usize {
+        let mut rotated = word.rotate_right(self.bit_phase);
+        let mut skipped = 0;
+        while skipped < rank {
+            rotated &= rotated - 1;
+            skipped += 1;
+        }
+        ((rotated.trailing_zeros() + self.bit_phase) & (SLOT_WORD_BITS as u32 - 1)) as usize
     }
 }
 
@@ -903,14 +1548,26 @@ pub(super) mod tests {
 
     pub fn len(freelist: &Freelist) -> usize {
         freelist
-            .words
+            .stripes
             .iter()
-            .map(|word| word.load(Ordering::Acquire).count_ones() as usize)
+            .map(|stripe| {
+                (0..stripe.logical_words)
+                    .map(|word| stripe.leaf(word).load(Ordering::Acquire).count_ones() as usize)
+                    .sum::<usize>()
+            })
             .sum()
     }
 
     pub fn num_words(freelist: &Freelist) -> usize {
-        freelist.words.len()
+        freelist
+            .stripes
+            .iter()
+            .map(|stripe| stripe.logical_words)
+            .sum()
+    }
+
+    pub fn num_stripes(freelist: &Freelist) -> usize {
+        freelist.stripes.len()
     }
 
     fn reserve_by_slot(freelist: &Freelist, capacity: usize) -> Vec<Option<PooledBuffer>> {
@@ -928,6 +1585,254 @@ pub(super) mod tests {
         Ok(layout) => layout,
         Err(_) => unreachable!(),
     };
+
+    fn mapping_shell(base_chunk_words: usize) -> Freelist {
+        Freelist {
+            layout: TEST_LAYOUT,
+            capacity: 0,
+            created: CachePadded::new(AtomicUsize::new(0)),
+            stripes: Vec::<CachePadded<Stripe>>::new().into_boxed_slice(),
+            creation_cursors: Vec::<CachePadded<CreationCursor>>::new().into_boxed_slice(),
+            stripe_mask: 0,
+            stripe_shift: 0,
+            base_chunk_words,
+            base_chunk_shift: base_chunk_words.trailing_zeros(),
+            summaries_enabled: true,
+        }
+    }
+
+    fn mapping_stripe(capacity: usize, base_chunk_words: usize) -> Stripe {
+        let logical_words = capacity.div_ceil(SLOT_WORD_BITS);
+        let (group_count, single_groups, valid_group_mask) =
+            group_geometry(logical_words, base_chunk_words, AVAILABILITY_BITS);
+        Stripe {
+            summary: AtomicU64::new(0),
+            leaves: Vec::new().into_boxed_slice(),
+            slots: Vec::new().into_boxed_slice(),
+            capacity,
+            logical_words,
+            valid_group_mask,
+            group_count,
+            single_groups,
+        }
+    }
+
+    #[test]
+    fn test_geometry_bounds_stripes_for_capacity_and_parallelism() {
+        let target = TARGET_MAX_SLOTS_PER_STRIPE;
+        let cases = [
+            (1, 1, 1),
+            (3, 4, 2),
+            (target - 1, 1, 1),
+            (target, 1, 1),
+            (target + 1, 1, 2),
+            ((1usize << 29) - 1, 1, 32),
+            (1usize << 29, 1, 32),
+            ((1usize << 29) + 1, 1, 64),
+            (1usize << 29, 16, 32),
+            (1usize << 29, 64, 64),
+            (1usize << 29, 1024, 1024),
+            (1usize << 29, 4096, 4096),
+            (8192, 4095, 4096),
+            (8192, 4096, 4096),
+            (8192, 4097, 4096),
+            (u32::MAX as usize, 1, 256),
+            (u32::MAX as usize, usize::MAX, 4096),
+        ];
+
+        for (capacity, parallelism, expected_stripes) in cases {
+            let geometry = Geometry::new(capacity, parallelism);
+            assert_eq!(geometry.stripe_count, expected_stripes);
+            assert!(geometry.stripe_count.is_power_of_two());
+            assert!(geometry.base_chunk_words <= 4096);
+            for stripe in 0..geometry.stripe_count {
+                let stripe_capacity = geometry.stripe_capacity(stripe);
+                assert!(stripe_capacity <= target);
+                let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
+                let base_chunks = logical_words.div_ceil(geometry.base_chunk_words);
+                assert!(base_chunks <= 64);
+                let (groups, _, mask) =
+                    group_geometry(logical_words, geometry.base_chunk_words, AVAILABILITY_BITS);
+                assert!(groups <= AVAILABILITY_BITS as u32);
+                assert_eq!(mask & CODE_MASK, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_geometry_capacity_and_word_boundaries() {
+        for (capacity, expected_words) in [(1, 1), (63, 1), (64, 1), (65, 2)] {
+            let geometry = Geometry::new(capacity, 1);
+            assert_eq!(geometry.max_logical_words, expected_words);
+        }
+
+        for words in [1, 63, 64, 65] {
+            let capacity = (words - 1) * SLOT_WORD_BITS + 1;
+            let geometry = Geometry::new(capacity, 1);
+            assert_eq!(geometry.max_logical_words, words);
+        }
+    }
+
+    #[test]
+    fn test_geometry_counts_aggregate_leaf_blocks() {
+        for blocks in [15, 16, 17, 31, 32, 33] {
+            let capacity = blocks * LEAF_WORDS_PER_BLOCK * SLOT_WORD_BITS;
+            let concentrated = Geometry::new(capacity, 1);
+            assert_eq!(concentrated.total_leaf_blocks, blocks);
+
+            let stripes = 1usize << blocks.ilog2();
+            let extra_blocks = blocks - stripes;
+            let scattered_capacity = stripes * LEAF_WORDS_PER_BLOCK * SLOT_WORD_BITS + extra_blocks;
+            let scattered = Geometry::new(scattered_capacity, stripes);
+            assert_eq!(scattered.stripe_count, stripes);
+            assert_eq!(scattered.total_leaf_blocks, blocks);
+        }
+    }
+
+    #[test]
+    fn test_group_geometry_pairs_only_the_tail() {
+        let cases = [
+            (1, 1, 1),
+            (57, 57, 57),
+            (58, 58, 58),
+            (59, 58, 57),
+            (63, 58, 53),
+            (64, 58, 52),
+        ];
+
+        for (base_chunks, expected_groups, expected_single) in cases {
+            for logical_words in [base_chunks * 4, (base_chunks - 1) * 4 + 1] {
+                let (groups, single, mask) = group_geometry(logical_words, 4, AVAILABILITY_BITS);
+                assert_eq!(groups as usize, expected_groups);
+                assert_eq!(single as usize, expected_single);
+                assert_eq!(mask, low_bits(expected_groups));
+
+                for base in 0..base_chunks {
+                    let group = group_for_base(expected_single, base);
+                    let (first, count) = group_base_range(expected_single, group);
+                    assert!(base >= first && base < first + count);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_masks_codes_and_admission_boundaries() {
+        assert_eq!(low_bits(64), u64::MAX);
+        assert_eq!(encode_code(0), 0x0400_0000_0000_0000);
+        assert_eq!(encode_code(57), 0xe800_0000_0000_0000);
+        assert_eq!(decode_code(encode_code(0)), Some(0));
+        assert_eq!(decode_code(encode_code(57)), Some(57));
+        for group in 0..AVAILABILITY_BITS {
+            let code = encode_code(group);
+            assert_eq!(code & AVAILABILITY_MASK, 0);
+            assert_eq!(decode_code(code), Some(group));
+            assert_ne!(code, 0);
+        }
+        assert!(std::panic::catch_unwind(|| decode_code(59u64 << CODE_SHIFT)).is_err());
+        assert_eq!(next_admission(usize::MAX, usize::MAX), None);
+        assert_eq!(next_admission(usize::MAX - 1, usize::MAX), Some(usize::MAX));
+    }
+
+    #[test]
+    fn test_cursor_encoding_and_group_major_bijection() {
+        let phase = PROBE_PHASE_MASK;
+        let next = 1 << 24;
+        let state = encode_cursor(phase, next);
+        assert_eq!(decode_cursor_phase(state), phase);
+        assert_eq!(decode_cursor_next(state), next);
+
+        let cursor = CreationCursor::new(0);
+        assert_eq!(cursor.claim(phase, 2), Some((phase, 0)));
+        assert_eq!(cursor.claim(0, 2), Some((phase, 1)));
+        let full = cursor.state.load(Ordering::Relaxed);
+        assert_eq!(cursor.claim(1, 2), None);
+        assert_eq!(cursor.state.load(Ordering::Relaxed), full);
+
+        for (capacity, max_groups) in [(1, 58), (65, 1), (130, 58), (257, 58)] {
+            let set = Freelist::new_inner(
+                NZU32!(capacity),
+                NZUsize!(1),
+                TEST_LAYOUT,
+                false,
+                ConstructionOptions {
+                    force_summaries: true,
+                    max_groups,
+                },
+            );
+            let probe = Probe::from_id(
+                ProbeId {
+                    raw: 10,
+                    mixed: mix_probe_id(10),
+                },
+                set.stripe_mask,
+            );
+            for stripe in set.stripes.iter() {
+                let mut seen = vec![false; stripe.capacity];
+                for ticket in 0..stripe.capacity {
+                    let local = set.unrank_local(stripe, probe, ticket);
+                    assert!(local < stripe.capacity);
+                    assert!(!seen[local]);
+                    seen[local] = true;
+                }
+                assert!(seen.into_iter().all(|seen| seen));
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_retains_unreduced_phase_across_group_widths() {
+        let set = mapping_shell(4096);
+        let stripe = mapping_stripe(1 << 24, 4096);
+        assert_eq!(stripe.group_count, 58);
+        assert_eq!(stripe.single_groups, 52);
+        let probe = Probe::from_id(
+            ProbeId {
+                raw: 10,
+                mixed: mix_probe_id(10),
+            },
+            31,
+        );
+        assert_eq!(probe.group(0, 58), 51);
+
+        let (single_start, _, single_full) = set.group_word_range(&stripe, 51);
+        assert_eq!(
+            Freelist::word_offset(probe, single_full, Some(single_full)),
+            800
+        );
+        let first = set.unrank_local(&stripe, probe, 0);
+        assert_eq!(first / SLOT_WORD_BITS - single_start, 800);
+
+        let (pair_start, _, pair_full) = set.group_word_range(&stripe, 52);
+        assert_eq!(
+            Freelist::word_offset(probe, pair_full, Some(pair_full)),
+            4896
+        );
+        let first_pair_ticket = set.group_slot_count(&stripe, 51);
+        let first_pair = set.unrank_local(&stripe, probe, first_pair_ticket);
+        assert_eq!(first_pair / SLOT_WORD_BITS - pair_start, 4896);
+    }
+
+    #[test]
+    fn test_fixed_probe_prefixes_remain_in_the_first_group() {
+        let set = mapping_shell(4096);
+        let stripe = mapping_stripe(1 << 24, 4096);
+        for (raw, tickets) in [(10_567, 8), (684, 64)] {
+            let probe = Probe::from_id(
+                ProbeId {
+                    raw,
+                    mixed: mix_probe_id(raw as u64),
+                },
+                31,
+            );
+            let group = probe.group(0, stripe.group_count as usize);
+            let (start, end, _) = set.group_word_range(&stripe, group);
+            for ticket in 0..tickets {
+                let local = set.unrank_local(&stripe, probe, ticket);
+                assert!((start..end).contains(&(local / SLOT_WORD_BITS)));
+            }
+        }
+    }
 
     #[test]
     fn test_freelist_try_create_tracks_capacity_and_prefill() {
@@ -986,6 +1891,130 @@ pub(super) mod tests {
         // Return taken test buffers so the freelist owns deallocation.
         for buffer in taken {
             prefilled.put(buffer);
+        }
+    }
+
+    #[test]
+    fn test_freelist_forced_summary_publishes_and_cleans() {
+        let set = Freelist::new_forced_summary(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
+        assert!(set.summaries_enabled);
+        let buffer = set.try_create(false).expect("slot");
+        let slot = buffer.slot();
+        set.put(buffer);
+
+        let (stripe_index, _, word, _) = set.slot_location(slot);
+        let stripe = &set.stripes[stripe_index];
+        let group = set.group_for_word(stripe, word);
+        assert_ne!(
+            stripe.summary.load(Ordering::Acquire) & group_mask(group),
+            0
+        );
+
+        let taken = set.take().expect("published slot");
+        assert_eq!(taken.slot(), slot);
+        assert!(set.take().is_none());
+        assert_eq!(stripe.summary.load(Ordering::Acquire), 0);
+        set.put(taken);
+    }
+
+    #[test]
+    fn test_freelist_summary_batch_publication_and_overlap_panic() {
+        let set = Freelist::new_forced_summary(NZU32!(3), NZUsize!(1), TEST_LAYOUT, false);
+        let mut entries = reserve_by_slot(&set, 3);
+        let first = entries[0].take().unwrap();
+        let second = entries[1].take().unwrap();
+        let first_slot = first.slot();
+
+        // SAFETY: this duplicate exists only to exercise the post-publication
+        // overlap assertion. The original handle is published first.
+        let duplicate = unsafe { PooledBuffer::from_owner(set.slot_ptr(first_slot)) };
+        set.put(first);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            set.put_batch([second, duplicate]);
+        }));
+        assert!(panic.is_err());
+
+        let mut taken = Vec::new();
+        assert_eq!(set.take_batch(3, |buffer| taken.push(buffer)), 2);
+        let mut slots = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![0, 1]);
+        for buffer in taken {
+            set.put(buffer);
+        }
+        for buffer in entries.into_iter().flatten() {
+            set.put(buffer);
+        }
+    }
+
+    #[test]
+    fn test_freelist_summary_code_observer_repairs_before_claim() {
+        let set = Freelist::new_forced_summary(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false);
+        let buffer = set.try_create(false).expect("slot");
+        let stripe = &set.stripes[0];
+
+        // Seed the constructor-exclusive state that an active cleaner exposes.
+        stripe.leaf(0).store(1, Ordering::Relaxed);
+        stripe.summary.store(encode_code(0), Ordering::Relaxed);
+        let taken = set.take().expect("code observer must scan the named group");
+        assert_eq!(taken.slot(), buffer.slot());
+        let state = stripe.summary.load(Ordering::Acquire);
+        assert_ne!(state & group_mask(0), 0);
+        assert_eq!(decode_code(state), Some(0));
+
+        // This test seeded a code without an owner, so remove it explicitly.
+        stripe
+            .summary
+            .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+        set.put(taken);
+    }
+
+    #[test]
+    fn test_freelist_cleanup_guard_restores_navigation_on_unwind() {
+        let summary = AtomicU64::new(encode_code(0) | group_mask(1));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = CleanupGuard::new(&summary, group_mask(0));
+            panic!("injected cleanup failure");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            summary.load(Ordering::Acquire),
+            group_mask(0) | group_mask(1)
+        );
+    }
+
+    #[test]
+    fn test_freelist_drain_leaves_summary_state_unchanged() {
+        let set = Freelist::new_forced_summary(NZU32!(2), NZUsize!(1), TEST_LAYOUT, true);
+        let before = set.stripes[0].summary.load(Ordering::Acquire);
+        assert_ne!(before, 0);
+        assert_eq!(set.drain(), 2);
+        assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), before);
+        assert!(set.take().is_none());
+        assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_freelist_forced_pair_group_reaches_both_chunks() {
+        let set = Freelist::new_inner(
+            NZU32!(65),
+            NZUsize!(1),
+            TEST_LAYOUT,
+            false,
+            ConstructionOptions {
+                force_summaries: true,
+                max_groups: 1,
+            },
+        );
+        assert_eq!(set.stripes[0].group_count, 1);
+        assert_eq!(set.stripes[0].single_groups, 0);
+        let mut entries = reserve_by_slot(&set, 65);
+        set.put(entries[64].take().expect("second chunk slot"));
+        let taken = set.take().expect("paired group must reach its tail chunk");
+        assert_eq!(taken.slot(), 64);
+        set.put(taken);
+        for buffer in entries.into_iter().flatten() {
+            set.put(buffer);
         }
     }
 
@@ -1094,23 +2123,16 @@ pub(super) mod tests {
 
     #[test]
     fn test_freelist_try_create_uses_thread_probe_order() {
-        // Lazy creation should choose the same first word and bit order that
-        // this thread will later use when taking from the global freelist.
-        // Capacity 512 with parallelism 8 gives each word 64 valid bits, so
-        // the second reservation should stay in the home word instead of
-        // falling through to another stripe because of mask limits.
+        // Lazy creation follows the same group, word, and bit phases as reuse.
         let set = Freelist::new(NZU32!(512), NZUsize!(8), TEST_LAYOUT, false);
-        let probe = SlotBitmapProbe::new(set.word_mask, set.word_shift);
+        let probe = Probe::new(set.stripe_mask);
+        let stripe_index = probe.home_stripe;
+        let stripe = &set.stripes[stripe_index];
 
-        // Derive the expected slot ids from this thread's stable probe state.
-        let expected0 = set.slot_index(probe.word_index(0), probe.bit_offset as usize);
-        let expected1 = set.slot_index(
-            probe.word_index(0),
-            ((probe.bit_offset + 1) & (SLOT_BITMAP_WORD_BITS as u32 - 1)) as usize,
-        );
+        let expected0 = set.slot_index(stripe_index, set.unrank_local(stripe, probe, 0));
+        let expected1 = set.slot_index(stripe_index, set.unrank_local(stripe, probe, 1));
 
-        // The first two lazy reservations should follow this thread's rotated
-        // bit order within its home word.
+        // The first two cursor tickets use that exact order.
         let buffer0 = set.try_create(false).expect("first probed slot");
         let buffer1 = set.try_create(false).expect("second probed slot");
         let slot0 = buffer0.slot();
@@ -1141,7 +2163,7 @@ pub(super) mod tests {
             let barrier = Arc::clone(&barrier);
             let tx = tx.clone();
             handles.push(std::thread::spawn(move || {
-                // Align creators so the reservation bitmap sees real RMW
+                // Align creators so admission and stripe cursors see real RMW
                 // contention instead of serial thread startup.
                 barrier.wait();
                 let mut entries = Vec::new();
@@ -1184,9 +2206,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_freelist_uses_striped_power_of_two_words() {
-        // Covers target parallelism, capping when capacity is too small, and
-        // capacity-driven word growth for large slot counts.
+    fn test_freelist_uses_bounded_power_of_two_stripes() {
         let cases = [
             (1, 1, 1),
             (2, 2, 2),
@@ -1196,22 +2216,29 @@ pub(super) mod tests {
             (16, 8, 8),
             (64, 8, 8),
             (512, 8, 8),
-            (513, 8, 16),
-            (4097, 8, 128),
+            (513, 8, 8),
+            (4097, 8, 8),
         ];
 
-        for (capacity, parallelism, expected_words) in cases {
+        for (capacity, parallelism, expected_stripes) in cases {
             let set = Freelist::new(NZU32!(capacity), NZUsize!(parallelism), TEST_LAYOUT, false);
-            assert_eq!(num_words(&set), expected_words);
-            assert!(num_words(&set).is_power_of_two());
+            assert_eq!(num_stripes(&set), expected_stripes);
+            assert!(num_stripes(&set).is_power_of_two());
 
-            // Validate the striped mapping and its inverse for every slot that
-            // can actually be handed out by this freelist.
             for slot in 0..capacity {
-                let (word_index, mask) = set.slot_word(slot);
-                let bit = mask.trailing_zeros() as usize;
-                assert!(word_index < expected_words);
-                assert_eq!(set.slot_index(word_index, bit), slot);
+                let (stripe, local, word, mask) = set.slot_location(slot);
+                assert!(stripe < expected_stripes);
+                assert!(word < set.stripes[stripe].logical_words);
+                assert_ne!(mask, 0);
+                assert_eq!(set.slot_index(stripe, local), slot);
+            }
+
+            for (stripe_index, stripe) in set.stripes.iter().enumerate() {
+                assert_eq!(stripe.slots.len(), stripe.capacity);
+                for local in 0..stripe.capacity {
+                    let slot = set.slot_index(stripe_index, local);
+                    assert_eq!(set.slot_ptr(slot), set.owner_ptr(stripe_index, local));
+                }
             }
         }
     }
@@ -1268,11 +2295,10 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_freelist_put_batch_uses_heap_masks_when_word_count_exceeds_inline_capacity() {
-        // A capacity of 8193 requires more than 128 bitmap words after rounding,
-        // forcing `put_batch` to use heap scratch for its per-word masks.
+    fn test_freelist_put_batch_uses_sparse_records_for_large_leaf_layout() {
         let set = Freelist::new(NZU32!(8193), NZUsize!(65), TEST_LAYOUT, false);
-        assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
+        assert!(set.stripes.len() * set.stripes[0].logical_words > INLINE_LEAF_MASKS);
+        assert!(num_words(&set) > INLINE_LEAF_MASKS);
 
         // Reserve all slots so the sparse test slots are valid while only
         // those slots are published to the freelist.
@@ -1367,9 +2393,9 @@ pub(super) mod tests {
     #[test]
     fn test_freelist_take_batch_breaks_after_filling_target_in_home_word() {
         let set = Freelist::new(NZU32!(16), NZUsize!(8), TEST_LAYOUT, true);
-        let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
-        let slot0 = set.slot_index(start_word, 0);
-        let slot1 = set.slot_index(start_word, 1);
+        let home = Probe::new(set.stripe_mask).home_stripe;
+        let slot0 = set.slot_index(home, 0);
+        let slot1 = set.slot_index(home, 1);
 
         // A two-slot batch should fill from this thread's first probed word
         // and stop immediately.
@@ -1390,13 +2416,13 @@ pub(super) mod tests {
     #[test]
     fn test_freelist_take_batch_stops_mid_word_when_limit_is_reached() {
         let set = Freelist::new(NZU32!(24), NZUsize!(8), TEST_LAYOUT, true);
-        let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
+        let home = Probe::new(set.stripe_mask).home_stripe;
         // This thread's first probed word contains three slots, so the batch
         // claim has to stop after clearing only the requested number of bits.
         let slots = [
-            set.slot_index(start_word, 0),
-            set.slot_index(start_word, 1),
-            set.slot_index(start_word, 2),
+            set.slot_index(home, 0),
+            set.slot_index(home, 1),
+            set.slot_index(home, 2),
         ];
 
         let mut taken = Vec::new();
@@ -1418,20 +2444,20 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_slot_bitmap_probe_selectors_respect_offset_and_limit() {
+    fn test_probe_selectors_respect_phase_and_limit() {
         // The probe offset should rotate priority without selecting bits that
         // are not present in the original word.
         let word = (1u64 << 1) | (1u64 << 5) | (1u64 << 9) | (1u64 << 20);
 
-        let probe_0 = SlotBitmapProbe {
-            start_word: 0,
-            word_mask: 0,
-            bit_offset: 0,
+        let probe_0 = Probe {
+            home_stripe: 0,
+            group_phase: 0,
+            word_phase: 0,
+            bit_phase: 0,
         };
-        let probe_6 = SlotBitmapProbe {
-            start_word: 0,
-            word_mask: 0,
-            bit_offset: 6,
+        let probe_6 = Probe {
+            bit_phase: 6,
+            ..probe_0
         };
 
         assert_eq!(probe_0.select_set_bit(word), 1);
@@ -1443,10 +2469,9 @@ pub(super) mod tests {
         assert_eq!(selected & !word, 0);
         assert_eq!(selected, (1u64 << 9) | (1u64 << 20));
 
-        let probe_32 = SlotBitmapProbe {
-            start_word: 0,
-            word_mask: 0,
-            bit_offset: 32,
+        let probe_32 = Probe {
+            bit_phase: 32,
+            ..probe_0
         };
         let wrap_word = (1u64 << 4) | (1u64 << 40);
         let selected = probe_32.select_set_bits(wrap_word, 2);
@@ -1455,39 +2480,45 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_slot_bitmap_probe_offsets_spread_home_word_collisions() {
-        // For an 8-word freelist, thread ids spaced by 8 share home word 0.
-        // Spread their bit offsets across the word instead of assigning
-        // adjacent offsets.
-        assert_eq!(
-            [
-                SlotBitmapProbe::bit_offset(0, 3),
-                SlotBitmapProbe::bit_offset(8, 3),
-                SlotBitmapProbe::bit_offset(16, 3),
-                SlotBitmapProbe::bit_offset(24, 3),
-                SlotBitmapProbe::bit_offset(32, 3),
-                SlotBitmapProbe::bit_offset(40, 3),
-                SlotBitmapProbe::bit_offset(48, 3),
-                SlotBitmapProbe::bit_offset(56, 3),
-            ],
-            [0, 32, 16, 48, 8, 40, 24, 56]
-        );
+    fn test_probe_mixer_vectors_and_fields() {
+        let vectors = [
+            (0, 0x0000_0000_0000_0000),
+            (1, 0x5692_161d_100b_05e5),
+            (10, 0x075c_8519_a932_0579),
+            (32, 0xadfb_1ebb_497f_ad45),
+            (33, 0xb494_1eef_8208_68c7),
+            (u32::MAX as u64, 0x8b32_c408_e8c2_c97c),
+            (u64::MAX, 0xb4d0_55fc_f2cb_bd7b),
+        ];
+        for (id, expected) in vectors {
+            assert_eq!(mix_probe_id(id), expected);
+        }
 
-        // The same collision groups should spread for the 64-word network
-        // geometry.
-        assert_eq!(
-            [
-                SlotBitmapProbe::bit_offset(0, 6),
-                SlotBitmapProbe::bit_offset(64, 6),
-                SlotBitmapProbe::bit_offset(128, 6),
-                SlotBitmapProbe::bit_offset(192, 6),
-                SlotBitmapProbe::bit_offset(256, 6),
-                SlotBitmapProbe::bit_offset(320, 6),
-                SlotBitmapProbe::bit_offset(384, 6),
-                SlotBitmapProbe::bit_offset(448, 6),
-            ],
-            [0, 32, 16, 48, 8, 40, 24, 56]
+        let id = ProbeId {
+            raw: 33,
+            mixed: mix_probe_id(33),
+        };
+        let probe = Probe::from_id(id, 31);
+        assert_eq!(probe.home_stripe, 1);
+        assert!(probe.group_phase < 64);
+        assert!(probe.bit_phase < 64);
+        assert!((probe.word_phase as u64) < (1 << WORD_PHASE_BITS));
+        assert_eq!(Probe::from_phase(1, probe.phase()).phase(), probe.phase());
+
+        let mut wrapped = (0..32)
+            .map(|offset| probe.stripe(offset, 31))
+            .collect::<Vec<_>>();
+        wrapped.sort_unstable();
+        assert_eq!(wrapped, (0..32).collect::<Vec<_>>());
+
+        let wrapped_id = Probe::from_id(
+            ProbeId {
+                raw: usize::MAX,
+                mixed: mix_probe_id(usize::MAX as u64),
+            },
+            31,
         );
+        assert_eq!(wrapped_id.home_stripe, usize::MAX & 31);
     }
 
     #[test]
@@ -1557,6 +2588,7 @@ mod loom_tests {
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
+            mpsc,
         },
         thread,
     };
@@ -1616,6 +2648,575 @@ mod loom_tests {
     fn single_word_freelist(capacity: u32) -> Freelist {
         let layout = Layout::from_size_align(64, 64).unwrap();
         Freelist::new(NZU32!(capacity), NZUsize!(1), layout, false)
+    }
+
+    fn forced_summary_freelist(capacity: u32) -> Freelist {
+        let layout = Layout::from_size_align(64, 64).unwrap();
+        Freelist::new_forced_summary(NZU32!(capacity), NZUsize!(1), layout, false)
+    }
+
+    // Performs the authoritative half of a put and leaves its summary
+    // publication pending. `PooledBuffer` has no drop glue, so the set leaf
+    // owns the allocation when this helper returns.
+    fn stall_put_after_leaf(freelist: &Freelist, buffer: PooledBuffer) -> (usize, u64) {
+        let (stripe_index, _, word, mask) = freelist.slot_location(buffer.slot());
+        let stripe = &freelist.stripes[stripe_index];
+        let previous = stripe.leaf(word).fetch_or(mask, Ordering::Release);
+        assert_eq!(previous & mask, 0);
+        (
+            stripe_index,
+            group_mask(freelist.group_for_word(stripe, word)),
+        )
+    }
+
+    #[test]
+    fn summary_starts_after_completed_publication_uses_exact_code() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(1));
+            let buffer = set.try_create(false).expect("slot");
+            let producer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(buffer))
+            };
+            producer.join().unwrap();
+
+            let stripe = &set.stripes[0];
+            let group = group_mask(0);
+            assert_ne!(stripe.leaf(0).load(Ordering::Acquire), 0);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+
+            // The take starts after the producer joins. No competing operation
+            // can clear the published leaf, so an empty pass would leave that
+            // completed publication set throughout the pass.
+            let taker = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.take())
+            };
+            let buffer = taker
+                .join()
+                .unwrap()
+                .expect("the exact code must preserve starts-after visibility");
+            assert_eq!(buffer.slot(), 0);
+
+            let state = stripe.summary.load(Ordering::Acquire);
+            assert_eq!(state & group, group);
+            assert_eq!(decode_code(state), Some(0));
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            set.put(buffer);
+        });
+    }
+
+    #[test]
+    fn summary_second_put_publishes_while_first_is_delayed() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(2));
+            let mut entries = Leases::entries(&set);
+            let second_buffer = entries.pop().unwrap();
+            let delayed_buffer = entries.pop().unwrap();
+            assert!(entries.pop().is_none());
+
+            let (leaf_ready_tx, leaf_ready_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let delayed = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || {
+                    let (_, group) = stall_put_after_leaf(&set, delayed_buffer);
+                    leaf_ready_tx.send(group).unwrap();
+                    resume_rx.recv().unwrap();
+                    set.stripes[0].summary.fetch_or(group, Ordering::Release);
+                })
+            };
+
+            let group = leaf_ready_rx.recv().unwrap();
+            assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+
+            let second = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(second_buffer))
+            };
+            second.join().unwrap();
+            assert_eq!(
+                set.stripes[0].summary.load(Ordering::Acquire) & group,
+                group
+            );
+
+            // Both slots share one leaf. The second put must publish the group
+            // even though the first put already made that leaf nonzero.
+            let expected = 0b11;
+            let seen = AtomicUsize::new(0);
+            let leases = Leases::new(Arc::clone(&set));
+            assert_eq!(
+                set.take_batch(2, |buffer| {
+                    leases.push_expected(&seen, expected, buffer)
+                }),
+                2
+            );
+            assert_eq!(seen.load(Ordering::Relaxed), expected);
+
+            resume_tx.send(()).unwrap();
+            delayed.join().unwrap();
+            assert!(set.take().is_none());
+            assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn summary_competing_takes_clean_one_stale_group() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(1));
+            let group = group_mask(0);
+            set.stripes[0].summary.fetch_or(group, Ordering::Release);
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let mut takers = Vec::new();
+            for _ in 0..2 {
+                takers.push(thread::spawn({
+                    let set = Arc::clone(&set);
+                    let completed = Arc::clone(&completed);
+                    move || {
+                        assert!(set.take().is_none());
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }));
+            }
+
+            for taker in takers {
+                taker.join().unwrap();
+            }
+            assert_eq!(completed.load(Ordering::Relaxed), 2);
+            assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn summary_code_observer_repairs_before_claim_callback() {
+        loom::model(|| {
+            let set = forced_summary_freelist(1);
+            let buffer = set.try_create(false).expect("slot");
+            set.put(buffer);
+
+            let stripe = &set.stripes[0];
+            let group = group_mask(0);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+
+            let mut claimed = None;
+            assert_eq!(
+                set.take_batch(1, |buffer| {
+                    let state = stripe.summary.load(Ordering::Acquire);
+                    assert_eq!(state & group, group);
+                    assert_eq!(decode_code(state), Some(0));
+                    claimed = Some(buffer);
+                }),
+                1
+            );
+
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            set.put(claimed.expect("observer must claim the coded group"));
+        });
+    }
+
+    #[test]
+    fn summary_batch_publication_races_take() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(2));
+            let entries = Leases::entries(&set);
+            let leases = Leases::new(Arc::clone(&set));
+            let stamps = SlotStamps::new(2);
+            let seen = Arc::new(AtomicUsize::new(0));
+            let expected = 0b11;
+
+            let writer = {
+                let set = Arc::clone(&set);
+                let stamps = Arc::clone(&stamps);
+                thread::spawn(move || {
+                    for entry in &entries {
+                        stamps.write(entry.slot());
+                    }
+                    set.put_batch(entries);
+                })
+            };
+            let taker = {
+                let set = Arc::clone(&set);
+                let leases = Arc::clone(&leases);
+                let stamps = Arc::clone(&stamps);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    if let Some(buffer) = set.take() {
+                        stamps.assert_visible(buffer.slot());
+                        leases.push_expected(&seen, expected, buffer);
+                    }
+                })
+            };
+
+            writer.join().unwrap();
+            taker.join().unwrap();
+            while let Some(buffer) = set.take() {
+                stamps.assert_visible(buffer.slot());
+                leases.push_expected(&seen, expected, buffer);
+            }
+
+            assert_eq!(seen.load(Ordering::Relaxed), expected);
+            assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn summary_batch_publication_races_stale_group_cleanup() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(2));
+            let entries = Leases::entries(&set);
+            let leases = Leases::new(Arc::clone(&set));
+            let seen = Arc::new(AtomicUsize::new(0));
+            let expected = 0b11;
+            let group = group_mask(0);
+
+            // Make cleanup eligible before the batch starts. Loom can then
+            // place the one-shot cleanup CAS before, between, or after the
+            // batch's leaf publications and its final summary publication.
+            set.stripes[0].summary.fetch_or(group, Ordering::Release);
+
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put_batch(entries))
+            };
+            let taker = {
+                let set = Arc::clone(&set);
+                let leases = Arc::clone(&leases);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    set.take_batch(2, |buffer| leases.push_expected(&seen, expected, buffer));
+                })
+            };
+
+            writer.join().unwrap();
+            taker.join().unwrap();
+            while let Some(buffer) = set.take() {
+                leases.push_expected(&seen, expected, buffer);
+            }
+
+            assert_eq!(seen.load(Ordering::Relaxed), expected);
+            assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn summary_code_owner_repairs_and_clears_before_callback() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(1));
+            let buffer = set.try_create(false).expect("slot");
+            let group = group_mask(0);
+            let stripe = &set.stripes[0];
+            stripe.summary.fetch_or(group, Ordering::Release);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+
+            let (leaf_ready_tx, leaf_ready_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let publisher = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || {
+                    let (_, published_group) = stall_put_after_leaf(&set, buffer);
+                    leaf_ready_tx.send(published_group).unwrap();
+                    resume_rx.recv().unwrap();
+                    set.stripes[0]
+                        .summary
+                        .fetch_or(published_group, Ordering::Release);
+                })
+            };
+
+            assert_eq!(leaf_ready_rx.recv().unwrap(), group);
+            let mut claimed = None;
+            {
+                let mut on_entry = |buffer| {
+                    let state = stripe.summary.load(Ordering::Acquire);
+                    assert_eq!(state & group, group);
+                    assert_eq!(decode_code(state), None);
+                    claimed = Some(buffer);
+                };
+                let mut context = TakeContext {
+                    max: 1,
+                    filled: 0,
+                    on_entry: &mut on_entry,
+                };
+                set.clean_owned_group(0, stripe, 0, Probe::from_phase(0, 0), &mut context);
+                assert_eq!(context.filled, 1);
+            }
+
+            resume_tx.send(()).unwrap();
+            publisher.join().unwrap();
+            set.put(claimed.expect("the code owner must claim the published leaf"));
+        });
+    }
+
+    #[test]
+    fn summary_code_observers_losing_one_candidate_deliver_once() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(1));
+            let buffer = set.try_create(false).expect("slot");
+            set.put(buffer);
+
+            let stripe = &set.stripes[0];
+            let group = group_mask(0);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+
+            let leases = Leases::new(Arc::clone(&set));
+            let seen = Arc::new(AtomicUsize::new(0));
+            let mut takers = Vec::new();
+            for _ in 0..2 {
+                takers.push(thread::spawn({
+                    let set = Arc::clone(&set);
+                    let leases = Arc::clone(&leases);
+                    let seen = Arc::clone(&seen);
+                    move || {
+                        set.take_batch(1, |buffer| {
+                            let state = set.stripes[0].summary.load(Ordering::Acquire);
+                            assert_eq!(state & group, group);
+                            assert_eq!(decode_code(state), Some(0));
+                            leases.push_expected(&seen, 1, buffer);
+                        });
+                    }
+                }));
+            }
+            for taker in takers {
+                taker.join().unwrap();
+            }
+
+            assert_eq!(seen.load(Ordering::Relaxed), 1);
+            assert_eq!(stripe.summary.load(Ordering::Acquire) & group, group);
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+        });
+    }
+
+    #[test]
+    fn summary_code_observer_and_drain_conserve_the_leaf() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(1));
+            let buffer = set.try_create(false).expect("slot");
+            set.put(buffer);
+
+            let stripe = &set.stripes[0];
+            let group = group_mask(0);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+
+            let leases = Leases::new(Arc::clone(&set));
+            let taken = Arc::new(AtomicUsize::new(0));
+            let drained = Arc::new(AtomicUsize::new(0));
+            let taker = {
+                let set = Arc::clone(&set);
+                let leases = Arc::clone(&leases);
+                let taken = Arc::clone(&taken);
+                thread::spawn(move || {
+                    set.take_batch(1, |buffer| {
+                        let state = set.stripes[0].summary.load(Ordering::Acquire);
+                        assert_eq!(state & group, group);
+                        assert_eq!(decode_code(state), Some(0));
+                        let previous = taken.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(previous, 0);
+                        leases.push(buffer);
+                    });
+                })
+            };
+            let drainer = {
+                let set = Arc::clone(&set);
+                let drained = Arc::clone(&drained);
+                thread::spawn(move || {
+                    drained.store(set.drain(), Ordering::Relaxed);
+                })
+            };
+
+            taker.join().unwrap();
+            drainer.join().unwrap();
+            assert_eq!(
+                taken.load(Ordering::Relaxed) + drained.load(Ordering::Relaxed),
+                1
+            );
+
+            // The observer may have conservatively repaired the low bit even
+            // if drain won the leaf. Removing the manually installed code must
+            // preserve that low state for ordinary cleanup.
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            assert!(set.take().is_none());
+            assert_eq!(stripe.summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn summary_paired_group_reaches_partial_final_leaf() {
+        loom::model(|| {
+            let layout = Layout::from_size_align(64, 64).unwrap();
+            let set = Arc::new(Freelist::new_inner(
+                NZU32!(65),
+                NZUsize!(1),
+                layout,
+                true,
+                ConstructionOptions {
+                    force_summaries: true,
+                    max_groups: 1,
+                },
+            ));
+            assert_eq!(set.stripes[0].group_count, 1);
+            assert_eq!(set.stripes[0].single_groups, 0);
+
+            let leases = Leases::new(Arc::clone(&set));
+            let mut target = None;
+            let mut entries = Vec::new();
+            assert_eq!(set.take_batch(65, |buffer| entries.push(buffer)), 65);
+            for buffer in entries {
+                if buffer.slot() == 64 {
+                    target = Some(buffer);
+                } else {
+                    leases.push(buffer);
+                }
+            }
+
+            set.put(target.expect("partial final leaf slot"));
+            let buffer = set.take().expect("paired group must reach its tail leaf");
+            assert_eq!(buffer.slot(), 64);
+            leases.push(buffer);
+        });
+    }
+
+    #[test]
+    fn summary_drain_races_put_without_touching_navigation() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(1));
+            let buffer = set.try_create(false).expect("slot");
+            let stripe = &set.stripes[0];
+            let code = encode_code(0);
+            let group = group_mask(0);
+            stripe.summary.fetch_or(code, Ordering::Release);
+
+            let drained = Arc::new(AtomicUsize::new(0));
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(buffer))
+            };
+            let drainer = {
+                let set = Arc::clone(&set);
+                let drained = Arc::clone(&drained);
+                thread::spawn(move || {
+                    drained.store(set.drain(), Ordering::Relaxed);
+                })
+            };
+
+            writer.join().unwrap();
+            drainer.join().unwrap();
+            assert_eq!(stripe.summary.load(Ordering::Acquire), code | group);
+
+            let total = drained.load(Ordering::Relaxed) + set.drain();
+            assert_eq!(total, 1);
+            assert_eq!(stripe.summary.load(Ordering::Acquire), code | group);
+
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            assert!(set.take().is_none());
+            assert_eq!(stripe.summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn summary_cleanup_guard_restores_state_during_unwind() {
+        loom::model(|| {
+            let summary = AtomicU64::new(encode_code(0) | group_mask(1));
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = CleanupGuard::new(&summary, group_mask(0));
+                panic!("injected cleanup failure");
+            }));
+
+            assert!(panic.is_err());
+            assert_eq!(
+                summary.load(Ordering::Acquire),
+                group_mask(0) | group_mask(1)
+            );
+        });
+    }
+
+    #[test]
+    fn creation_cursor_first_claim_installs_phase_for_followers() {
+        loom::model(|| {
+            let cursor = Arc::new(CreationCursor::new(0));
+            let claims = Arc::new(Mutex::new(Vec::new()));
+            let requested_phases = [0x1234, 0x5678];
+            let mut creators = Vec::new();
+
+            for requested in requested_phases {
+                creators.push(thread::spawn({
+                    let cursor = Arc::clone(&cursor);
+                    let claims = Arc::clone(&claims);
+                    move || {
+                        let (adopted, ticket) = cursor
+                            .claim(requested, 2)
+                            .expect("both cursor claims must fit");
+                        claims.lock().push((requested, adopted, ticket));
+                    }
+                }));
+            }
+
+            for creator in creators {
+                creator.join().unwrap();
+            }
+
+            let mut claims = claims.lock();
+            claims.sort_unstable_by_key(|claim| claim.2);
+            assert_eq!(claims.len(), 2);
+            assert_eq!(claims[0].2, 0);
+            assert_eq!(claims[1].2, 1);
+            assert_eq!(claims[0].1, claims[0].0);
+            assert_eq!(claims[1].1, claims[0].1);
+            assert!(requested_phases.contains(&claims[0].1));
+
+            let state = cursor.state.load(Ordering::Relaxed);
+            assert_eq!(decode_cursor_phase(state), claims[0].1);
+            assert_eq!(decode_cursor_next(state), 2);
+        });
     }
 
     // Each geometry gives a model a small bitmap layout: one or more active
@@ -1751,13 +3352,11 @@ mod loom_tests {
 
     #[test]
     fn concurrent_creates_do_not_duplicate_slots() {
-        // `created` admits the two creators, then the relaxed reservation
-        // bitmap chooses their slot ids. Parallelism 1 places both slots in
-        // one word and models the smallest same-word race, where both creators
-        // may choose the same first candidate and one must continue to the
-        // remaining bit. Parallelism 2 gives each slot its own word, so a
-        // creator that claims both permits must fall through its full home
-        // word and reserve the remaining slot in the other stripe.
+        // `created` admits the two creators, then relaxed stripe cursors choose
+        // their slot ids. Parallelism 1 places both slots in one word and
+        // models two creators advancing one cursor. Parallelism 2 gives each
+        // slot its own stripe, so a creator that claims both permits must move
+        // from its full home cursor to the remaining cursor.
         for parallelism in [1, 2] {
             loom::model(move || {
                 let freelist = Arc::new(Freelist::new(

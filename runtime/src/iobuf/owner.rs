@@ -53,11 +53,11 @@
 //! ```
 //!
 //! Pooled allocations keep their owner metadata out of the data allocation.
-//! Each size class owns a cache-line-padded side table with one [`PooledOwner`]
-//! per possible tracked buffer:
+//! Each size class partitions stable, cache-line-padded [`PooledOwner`] records
+//! into stripe-local slices with one entry per possible tracked buffer:
 //!
 //! ```text
-//! SizeClass slots: [ refs | lease | data_base | capacity | slot ]
+//! stripe slots:    [ refs | lease | data_base | capacity | slot ]
 //!                    ^
 //!                    OwnerRef target
 //!
@@ -66,9 +66,9 @@
 //!                    data base
 //! ```
 //!
-//! The freelist bitmap records which slots are globally available. The slot
-//! entry is the single state record for refcounting, class liveness, data
-//! pointer, and return routing.
+//! Packed freelist leaves record which slots are globally available. The stable
+//! owner entry remains the single state record for refcounting, class liveness,
+//! data pointers, and return routing.
 //!
 //! Returning to heap allocations: low-alignment mutable buffers use the
 //! front-block layout instead of the tail layout above:
@@ -1019,11 +1019,11 @@ impl HeapOwner {
 
 /// Owner record for one pooled slot.
 ///
-/// The owning freelist stores one cache-line-padded slot entry per possible
-/// pooled buffer. Stable fields (`refs` sentinel, `data_base`, `capacity`,
-/// `slot`) are written when the slot is created and remain associated with
-/// that slot until the size class drops. The lease is live only while the slot
-/// is outside the global freelist.
+/// The owning freelist eagerly creates one cache-line-padded entry per possible
+/// pooled buffer in stripe-local stable storage. The refcount sentinel,
+/// capacity, and global slot id are initialized before sharing. Lazy creation
+/// initializes `data_base` once for the cursor-reserved entry. The lease is live
+/// only while the slot is outside the global freelist.
 #[repr(C)]
 pub struct PooledOwner {
     /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -1128,8 +1128,8 @@ impl PooledBuffer {
     /// # Safety
     ///
     /// The caller must own `owner` initialization for this size class. No other
-    /// thread may read it until the returned buffer is published through the
-    /// freelist bitmap or handed to a checked-out owner. The side-table entry
+    /// thread may read it until the returned buffer is published through its
+    /// freelist leaf or handed to a checked-out owner. The stripe-local entry
     /// must outlive the returned buffer and every operation on it.
     #[inline]
     pub unsafe fn new(owner: NonNull<PooledOwner>, layout: Layout, zeroed: bool) -> Self {
@@ -1262,7 +1262,7 @@ impl PooledBuffer {
     ///
     /// A buffer leaving the global freelist must observe the refcount
     /// sentinel of 1: the final release restores the sentinel before the
-    /// bitmap bit's Release publication, and the claimant's Acquire clear
+    /// leaf bit's Release publication, and the claimant's Acquire clear
     /// pairs with it. A Relaxed load suffices because the assertion is on the
     /// value. Loom explores every interleaving that could expose a stale one.
     #[cfg(feature = "loom")]
