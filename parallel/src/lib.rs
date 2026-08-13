@@ -87,6 +87,10 @@ commonware_macros::stability_scope!(BETA {
                 sync::Arc,
             };
 
+            // Crate-private until increment B (spawn hand-off) makes it publicly
+            // constructible; only tests reference it until then.
+            #[cfg_attr(not(test), allow(dead_code))]
+            mod parked;
             mod policy;
         } else {
             extern crate alloc;
