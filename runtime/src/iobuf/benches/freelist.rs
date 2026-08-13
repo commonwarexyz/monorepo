@@ -15,6 +15,10 @@
 //! buffers, keeping occupancy stable throughout the run. This matches the
 //! steady-state shape of multi-threaded freelist reuse.
 //!
+//! Freelist-only cases at 32 and 33 physical free-word blocks also benchmark
+//! successful reuse and settled-empty scans across the automatic x86-64
+//! traversal-policy boundary.
+//!
 //! The benchmarked values are [`PooledBuffer`] handles backed by initialized
 //! benchmark slots, keeping the baseline container shape close to the real
 //! freelist.
@@ -29,13 +33,18 @@ use std::{
     alloc::Layout,
     cell::UnsafeCell,
     hint::black_box,
+    mem::size_of,
     num::{NonZeroU32, NonZeroUsize},
     ptr::NonNull,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
 };
 
 const SLOTS: &[usize] = &[16, 64, 512];
 const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
+const AUTO_POLICY_BLOCKS: [usize; 2] = [32, 33];
+
+const FREE_WORDS_PER_BLOCK: usize = size_of::<CachePadded<AtomicU64>>() / size_of::<AtomicU64>();
+const SLOTS_PER_FREE_WORD_BLOCK: usize = FREE_WORDS_PER_BLOCK * u64::BITS as usize;
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
@@ -131,6 +140,40 @@ pub fn bench(c: &mut Criterion) {
                 bench_case::<ArrayQueueFreelist>(c, slots, threading, batch);
             }
         }
+    }
+
+    bench_automatic_policy_boundary(c);
+}
+
+fn bench_automatic_policy_boundary(c: &mut Criterion) {
+    for blocks in AUTO_POLICY_BLOCKS {
+        let slots = blocks
+            .checked_mul(SLOTS_PER_FREE_WORD_BLOCK)
+            .expect("benchmark capacity must be representable");
+
+        bench_case::<Freelist>(c, slots, Threading::Single, 1);
+
+        let name = format!(
+            "{}/impl=freelist op=empty slots={slots} threads=1 blocks={blocks}",
+            module_path!(),
+        );
+        c.bench_function(&name, |b| {
+            let freelist = Freelist::new(
+                NonZeroU32::new(u32::try_from(slots).expect("benchmark capacity must fit in u32"))
+                    .expect("benchmark capacity must be non-zero"),
+                NonZeroUsize::MIN,
+                BENCH_LAYOUT,
+                false,
+            );
+            // SAFETY: no buffer has been created for this freelist.
+            assert!(unsafe { freelist.take() }.is_none());
+
+            b.iter(|| {
+                // SAFETY: no buffer has been created, and the freelist remains
+                // alive for the duration of the call.
+                black_box(unsafe { freelist.take() })
+            });
+        });
     }
 }
 

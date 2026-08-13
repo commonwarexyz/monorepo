@@ -39,9 +39,7 @@
 //! than the largest enabled class return [`PoolError::Oversized`] from
 //! [`BufferPool::try_alloc`], or fall back to an untracked aligned heap
 //! allocation from [`BufferPool::alloc`]. A request routed to an exhausted
-//! class returns [`PoolError::Exhausted`] without trying larger classes. Under
-//! concurrent returns, exhaustion reports the result of one bounded pass, not
-//! an instantaneous global-empty snapshot.
+//! class returns [`PoolError::Exhausted`] without trying larger classes.
 //!
 //! # Cache Structure
 //!
@@ -91,10 +89,7 @@ pub enum PoolError {
     /// The requested capacity exceeds the maximum buffer size.
     #[error("requested capacity exceeds maximum buffer size")]
     Oversized,
-    /// One bounded global pass found no buffer and creation was unavailable.
-    ///
-    /// Concurrent returns may overlap or fall behind that pass, so this is not
-    /// a linearizable snapshot that the size class was empty at one instant.
+    /// The pool is exhausted for the required size class.
     #[error("pool exhausted for required size class")]
     Exhausted,
 }
@@ -171,10 +166,11 @@ pub struct BufferPoolConfig {
     alignment: NonZeroUsize,
     /// Expected number of threads concurrently accessing the pool.
     ///
-    /// This supplies the minimum shared-freelist stripe target. Capacity may
-    /// raise that count to keep each search domain bounded, and the internal
-    /// count is capped at 4096. The value also derives thread-cache capacity
-    /// when the thread-cache policy is automatic.
+    /// This sizes the shared global freelist stripes. Capacity may raise the
+    /// internal stripe count to bound each search domain. It is also used to
+    /// derive thread-cache capacity when the thread-cache policy is automatic,
+    /// using approximately half of each class limit divided across expected
+    /// threads.
     parallelism: NonZeroUsize,
     /// Policy for sizing the per-thread local cache in each size class.
     ///
@@ -373,12 +369,11 @@ impl BufferPoolConfig {
 
     /// Returns a copy of this config with a new expected parallelism.
     ///
-    /// This controls the minimum global-freelist stripe count and automatic
-    /// thread-cache capacity. Capacity may raise the internal stripe count so
-    /// each search domain contains at most `2^24` slots under the current
-    /// capacity type. The stripe count is capped at 4096, including when both
-    /// capacity and expected parallelism exceed that value. This changes the
-    /// tuning shape without changing accepted capacities or public types.
+    /// This controls the minimum global-freelist stripe count, and controls
+    /// thread-cache capacity when the thread-cache policy is automatic. The
+    /// automatic policy reserves about half of each class for the global
+    /// freelist and divides the remaining capacity across expected threads.
+    /// Capacity may raise the internal stripe count to bound each search domain.
     pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.parallelism = parallelism;
         self
@@ -697,7 +692,7 @@ impl PoolMetrics {
 /// - a per-thread local cache for same-thread reuse
 ///
 /// The global freelist owns the allocation layout, monotonic creation admission,
-/// stripe cursors, packed free leaves, and stable owner entries for this class.
+/// stripe cursors, packed free words, and stable owner entries for this class.
 /// A tracked buffer can be globally parked, owned by a pooled backing, or
 /// parked in one thread's local cache, but its slot always belongs to this
 /// `SizeClass`.
@@ -902,29 +897,6 @@ impl SizeClassHandle {
     ) -> Self {
         let layout = PooledOwner::layout(size, alignment);
         let freelist = Freelist::new(max, parallelism, layout, prefill);
-        let class = SizeClass {
-            class_id,
-            size,
-            global: freelist,
-            thread_cache_capacity,
-        };
-        Self {
-            token: SizeClassToken::new(class),
-        }
-    }
-
-    /// Creates a tiny test size class that always exercises summary publication.
-    #[cfg(all(test, feature = "loom"))]
-    fn new_forced_summary(
-        class_id: usize,
-        size: usize,
-        alignment: usize,
-        max: NonZeroU32,
-        thread_cache_capacity: usize,
-    ) -> Self {
-        assert!(max.get() <= 2);
-        let layout = PooledOwner::layout(size, alignment);
-        let freelist = Freelist::new_forced_summary(max, NZUsize!(1), layout, false);
         let class = SizeClass {
             class_id,
             size,
@@ -1322,7 +1294,7 @@ impl TlsSizeClassCache {
     /// leases own strong references represented by one shared token. Each
     /// lease is consumed without being released, the whole batch parks with
     /// one coalesced [`Freelist::put_batch`], and the strong references are
-    /// released only after every leaf and summary publication completes.
+    /// released only after every free-word and summary publication completes.
     /// Parking before releasing matters: if the public pool is already gone
     /// and these leases are the last references, releasing first would drop
     /// the freelist before the buffers returned to it.
@@ -1942,8 +1914,7 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: one bounded global pass found no buffer and
-    ///   creation was unavailable. Concurrent returns may overlap that pass.
+    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     #[inline(always)]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         if capacity == 0 {
@@ -2039,8 +2010,7 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: one bounded global pass found no buffer and
-    ///   creation was unavailable. Concurrent returns may overlap that pass.
+    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
         if len == 0 {
             return Ok(IoBufMut::default());
@@ -4257,6 +4227,24 @@ mod loom_tests {
     use bytes::BufMut;
     use loom::thread;
 
+    fn forced_summary_class(max: NonZeroU32, thread_cache_capacity: usize) -> SizeClassHandle {
+        assert!(max.get() <= 2);
+        let size = 64;
+        let alignment = 64;
+        let layout = PooledOwner::layout(size, alignment);
+        let global =
+            crate::iobuf::freelist::test_helpers::forced_summary(max, NZUsize!(1), layout, false);
+        let class = SizeClass {
+            class_id: 1,
+            size,
+            global,
+            thread_cache_capacity,
+        };
+        SizeClassHandle {
+            token: SizeClassToken::new(class),
+        }
+    }
+
     // Models the pooled buffer lifecycle across threads: checkout, freeze,
     // clone, cross-thread final drop, and reuse from the same pool. Whichever
     // thread drops last must return the buffer to the global freelist with
@@ -4352,11 +4340,11 @@ mod loom_tests {
     }
 
     // The checked-out buffer's lease is the final class reference while the
-    // production return path performs its leaf and summary RMWs.
+    // production return path performs its free-word and summary RMWs.
     #[test]
     fn forced_summary_single_return_keeps_final_lease_live() {
         loom::model(|| {
-            let class = SizeClassHandle::new_forced_summary(1, 64, 64, NZU32!(1), 0);
+            let class = forced_summary_class(NZU32!(1), 0);
             let mut buffer = class.try_create(false).expect("tracked slot");
             // SAFETY: `try_create` installed this buffer's live lease.
             let lease = unsafe { buffer.take_lease() };
@@ -4368,11 +4356,11 @@ mod loom_tests {
     }
 
     // The cache entries' leases remain live until the real batch-drop path has
-    // completed every leaf and summary publication.
+    // completed every free-word and summary publication.
     #[test]
     fn forced_summary_batch_return_keeps_final_leases_live() {
         loom::model(|| {
-            let class = SizeClassHandle::new_forced_summary(1, 64, 64, NZU32!(2), 2);
+            let class = forced_summary_class(NZU32!(2), 2);
             let mut cache = TlsSizeClassCache::new(2);
             for _ in 0..2 {
                 cache.push(class.try_create(false).expect("tracked slot"));

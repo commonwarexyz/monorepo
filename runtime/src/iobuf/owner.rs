@@ -66,9 +66,9 @@
 //!                    data base
 //! ```
 //!
-//! Packed freelist leaves record which slots are globally available. The stable
-//! owner entry remains the single state record for refcounting, class liveness,
-//! data pointers, and return routing.
+//! The free bits in each freelist stripe record which slots are globally
+//! available. The stable owner entry remains the single state record for
+//! refcounting, class liveness, data pointers, and return routing.
 //!
 //! Returning to heap allocations: low-alignment mutable buffers use the
 //! front-block layout instead of the tail layout above:
@@ -1129,8 +1129,9 @@ impl PooledBuffer {
     ///
     /// The caller must own `owner` initialization for this size class. No other
     /// thread may read it until the returned buffer is published through its
-    /// freelist leaf or handed to a checked-out owner. The stripe-local entry
-    /// must outlive the returned buffer and every operation on it.
+    /// freelist stripe's free bit or handed to a checked-out owner. The
+    /// stripe-local entry must outlive the returned buffer and every operation
+    /// on it.
     #[inline]
     pub unsafe fn new(owner: NonNull<PooledOwner>, layout: Layout, zeroed: bool) -> Self {
         assert!(layout.size() > 0, "pooled data layout must be non-zero");
@@ -1262,9 +1263,10 @@ impl PooledBuffer {
     ///
     /// A buffer leaving the global freelist must observe the refcount
     /// sentinel of 1: the final release restores the sentinel before the
-    /// leaf bit's Release publication, and the claimant's Acquire clear
-    /// pairs with it. A Relaxed load suffices because the assertion is on the
-    /// value. Loom explores every interleaving that could expose a stale one.
+    /// freelist stripe's free-bit Release publication, and the claimant's
+    /// Acquire clear pairs with it. A Relaxed load suffices because the
+    /// assertion is on the value. Loom explores every interleaving that could
+    /// expose a stale one.
     #[cfg(feature = "loom")]
     pub(crate) fn assert_parked_sentinel(&self) {
         // SAFETY: the caller just claimed the slot, so the side-table entry
