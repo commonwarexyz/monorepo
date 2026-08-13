@@ -113,9 +113,9 @@ where
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
     ///
-    /// Simplex compares complete signed votes when checking duplicates and
-    /// conflicts. Signing the same subject more than once for the same participant
-    /// must therefore produce the same signature encoding.
+    /// Schemes must provide deterministic signatures (a participant must produce the same
+    /// signature encoding every time it signs the same subject) because Simplex compares
+    /// encoded votes when detecting equivocation.
     pub scheme: S,
 
     /// Leader election configuration.

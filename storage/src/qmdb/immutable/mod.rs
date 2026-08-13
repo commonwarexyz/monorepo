@@ -815,8 +815,7 @@ where
     C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: Hasher,
-    T: Translator + Send + Sync,
-    T::Key: Send + Sync,
+    T: Translator,
     S: Strategy,
 {
     type Family = F;

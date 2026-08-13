@@ -39,7 +39,7 @@ use crate::{
             },
         },
         metrics::Metrics,
-        operation::{Committable, Key},
+        operation::Key,
     },
     translator::Translator,
 };
@@ -70,13 +70,13 @@ async fn build_db<F, E, U, I, H, C, T, S>(
 where
     F: merkle::Family,
     E: Context + Spawner,
-    U: Update + Send + Sync + 'static,
+    U: Update,
     I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
     C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Codec + Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let hasher = qmdb::hasher::<H>();
 

@@ -961,16 +961,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 }
 
 /// The [`Readable`] implementation for the full structure operates only on the in-memory
-/// portion. After [`Merkle::sync`], nodes that have been flushed to the journal are no longer
-/// accessible through this interface. In particular, [`Readable::get_node`] returns `None` for
-/// flushed positions, and [`Readable::pruning_boundary`] reflects the in-memory boundary (which may
-/// be tighter than the journal's prune boundary reported by [`Merkle::bounds`]). This means
-/// batch operations like `update_leaf` will correctly reject leaves that have been synced out of
-/// memory with [`Error::ElementPruned`].
+/// portion. After [`Merkle::sync`], nodes flushed to the journal are no longer accessible
+/// through this interface, even though [`Merkle::bounds`] still reports them as retained.
 impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
     type Family = F;
     type Digest = D;
-    type Error = Error<F>;
 
     fn size(&self) -> Position<F> {
         self.size()
@@ -978,10 +973,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D,
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         self.mem.get_node(pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        self.mem.pruning_boundary()
     }
 }
 
@@ -3630,7 +3621,7 @@ mod tests {
     }
 
     /// Regression: update_leaf on a synced-out leaf must return ElementPruned, not panic.
-    /// Before the fix, `Readable::pruning_boundary` returned the journal's prune boundary
+    /// Before the fix, the batch took its pruning boundary from the journal's prune boundary
     /// (which could be 0), so the batch accepted the update. During merkleize, get_node
     /// returned None for the synced-out sibling and hit an expect panic.
     async fn full_update_leaf_after_sync_returns_pruned_inner<F: Family>(

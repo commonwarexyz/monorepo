@@ -1,5 +1,6 @@
 use crate::dkg::{
     ReshareBlock,
+    network::Directory,
     reshare::{EpochInfoResponse, Mailbox},
     types::Payload,
 };
@@ -10,6 +11,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_utils::sequence::Unit;
 use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
@@ -19,12 +21,12 @@ use tracing::{debug, field};
 /// Carries the wrapper's upstream input alongside the reshare `payload` selected
 /// and fetched for the block being proposed. The wrapped application attaches
 /// `payload` to the block it builds and uses `upstream` for its own purposes.
-pub struct Input<Upstream, V: Variant, C: Signer> {
+pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// Input forwarded from the application wrapping the reshare wrapper.
     pub upstream: Upstream,
 
     /// The reshare payload selected for this proposal, if any.
-    pub payload: Option<Payload<V, C>>,
+    pub payload: Option<Payload<V, C, D>>,
 }
 
 /// An [`Application`](commonware_consensus::Application) wrapper that enforces the
@@ -52,7 +54,7 @@ pub struct Input<Upstream, V: Variant, C: Signer> {
 /// input-providing application still works.
 pub struct Application<A, B, V, C>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
 {
@@ -63,7 +65,7 @@ where
 
 impl<A, B, V, C> Application<A, B, V, C>
 where
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
 {
@@ -91,7 +93,7 @@ where
 impl<A, B, V, C> Clone for Application<A, B, V, C>
 where
     A: Clone,
-    B: ReshareBlock,
+    B: ReshareBlock<Variant = V, Signer = C>,
     V: Variant,
     C: Signer,
 {
@@ -107,7 +109,7 @@ where
 impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
 where
     E: Rng + Spawner + Metrics + Clock,
-    A: ConsensusApplication<E, Block = B, Input = Input<I, V, C>>,
+    A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
     B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock + Clone,
     V: Variant,
@@ -500,6 +502,7 @@ mod tests {
             output,
             players: Set::default(),
             next_players: Set::default(),
+            directory: Unit,
         })
     }
 
