@@ -2965,6 +2965,107 @@ mod tests {
         });
     }
 
+    /// Regression: the next view's proposal request dispatches before the
+    /// current iteration's journal sync and vote broadcast, so the automaton
+    /// builds the next block during that work. Constructing the notarize for
+    /// view 1 advances the optimistic frontier, so the view 2 request must go
+    /// out before the view 1 notarize is broadcast.
+    #[test_collect_traces]
+    fn test_next_propose_dispatches_before_broadcast(traces: TraceStorage) {
+        let n = 5;
+        let namespace = b"next_propose_dispatches_before_broadcast".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(5));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+
+            let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // Wait for the optimistic view-2 notarize: by then the voter has
+            // requested the view-2 proposal and broadcast the view-1 notarize.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
+                            && notarize.view() == View::new(2)
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(8)) => {
+                        panic!("expected optimistic notarize for view 2");
+                    }
+                }
+            }
+
+            // Both events log at DEBUG from the voter task, so their order in
+            // the trace is the voter's execution order.
+            let events = traces.get_by_level(Level::DEBUG);
+            let propose_next = events
+                .iter()
+                .position(|event| {
+                    event.metadata.content == "requested proposal from automaton"
+                        && event
+                            .expect_span_at_index(0, |span| {
+                                span.expect_content_exact("simplex.voter.propose")?;
+                                span.expect_field_exact("view", "2")
+                            })
+                            .is_ok()
+                })
+                .expect("view 2 proposal must be requested");
+            let broadcast = events
+                .iter()
+                .position(|event| {
+                    event.metadata.content == "broadcasting notarize"
+                        && event
+                            .expect_span_at_index(0, |span| {
+                                span.expect_content_exact("simplex.voter.notify")?;
+                                span.expect_field_exact("view", "1")
+                            })
+                            .is_ok()
+                })
+                .expect("view 1 notarize must be broadcast");
+            assert!(
+                propose_next < broadcast,
+                "view 2 propose request must dispatch before the view 1 notarize broadcast \
+                 (propose at {propose_next}, broadcast at {broadcast})"
+            );
+        });
+    }
+
     /// Regression: same-term optimistic future verification may run after a
     /// local parent notarize, without waiting for parent certification.
     #[test_traced]
