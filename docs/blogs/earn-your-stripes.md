@@ -177,7 +177,7 @@ $$
 
 lanes, including final-block padding. Re-encoding would instead rerun the encoder's IFFT/FFT pipeline across every symbol column to recompute all $m$ recovery shards.
 
-The recovery path now feeds exactly $k$ shards to the decoder. If more were received, surplus recovery shards are forgotten and reconstructed too. Let $\rho$ be the committed root. The acceptance condition is unchanged:
+The recovery path now feeds exactly $k$ shards to the decoder. If more arrive, surplus recovery shards are treated as missing and reconstructed too. Let $\rho$ be the committed root of the binary Merkle tree (BMT). The acceptance condition is unchanged:
 
 $$
 \operatorname{BMT}\!\left(H(C_0), \ldots, H(C_{k+m-1})\right)
@@ -202,7 +202,7 @@ Figure 2: Both paths derive $D_1$ and $R_1$. The old decoder hid $R_1$, so the e
 
 Revealed recovery shards are byte-identical to the encoder's output, including shard widths that are not 64-byte aligned.
 
-A back-to-back rerun of the striped-only checkpoint and the immediate decode-reveal change isolates the improvement:
+Running the recovery-heavy benchmark first with striping alone and then with decode-reveal isolates the improvement:
 
 ```{=html}
 <div id="earn-your-stripes-chart-reveal" class="cw-rs-chart" role="img" aria-label="Line chart of recovery-heavy verification latency for decode plus encode and decode plus reveal. With 8 and 16 workers, latency changes from 10.20 to 9.09 milliseconds and from 7.64 to 6.87 milliseconds, reductions of 10.8 and 10.1 percent."></div>
@@ -237,12 +237,12 @@ The final [pull request](https://github.com/commonwarexyz/monorepo/pull/4091) co
 
 The one-worker row is an end-to-end comparison of the baseline and final implementations, so it does not isolate either optimization. Tests also confirm that striped and full-width operations produce the same codeword, that revealed recovery shards match encoder output, and that tampered originals, recoveries, padding, and surplus shards are rejected.
 
-## An AI Research Loop
+## Finding the Bottleneck
 
-The first author used QED's AI research agent to find this optimization. The agent read the coding stack and noticed that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. It then tested whether recovery could be split into independent stripes and run in parallel.
+Sunghyeon used QED's AI research agent to find this optimization. The agent read the coding stack and noticed that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. It then tested whether recovery could be split into independent stripes and run in parallel.
 
-The loop resembles the one QED uses for security audits. It scans the code, gathers repository evidence, forms hypotheses, and verifies them with tests and benchmarks. Whether a finding is useful depends on repository context, since the same pattern may be a known issue or an intentional design choice. Lessons from continuously auditing Commonware helped the bot identify a valid optimization.
+The loop resembles the one QED uses for security audits. It scans the code, gathers repository evidence, forms hypotheses, and verifies them with tests and benchmarks. Whether a finding is useful depends on repository context, since the same pattern may be a known issue or an intentional design choice. Lessons from [continuously auditing Commonware](https://qedaudit.io/blog/commonware/) helped the bot identify a valid optimization.
 
 ## Next Steps
 
-Reed-Solomon is not the last place to look. The NTTs under ZODA pose the same question: how much latency is still hiding in math that can be split across cores?
+It is more practical than ever to tune low-level primitives to run closer to the limits of modern hardware. We expect to keep investing in this work across the Commonware Library, from our recent [SHA-256 optimizations](https://github.com/commonwarexyz/monorepo/pull/4187) to upcoming work on [faster Ed25519 signature verification](https://github.com/commonwarexyz/monorepo/pull/4467).

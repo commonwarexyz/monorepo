@@ -357,10 +357,11 @@ O’Grady</a></div>
         symbol column to recompute all <span
         class="math inline">m</span> recovery shards.</p>
         <p>The recovery path now feeds exactly <span
-        class="math inline">k</span> shards to the decoder. If more were
-        received, surplus recovery shards are forgotten and
+        class="math inline">k</span> shards to the decoder. If more
+        arrive, surplus recovery shards are treated as missing and
         reconstructed too. Let <span class="math inline">\rho</span> be
-        the committed root. The acceptance condition is unchanged:</p>
+        the committed root of the binary Merkle tree (BMT). The
+        acceptance condition is unchanged:</p>
         <p><span class="math display">
         \operatorname{BMT}\!\left(H(C_0), \ldots, H(C_{k+m-1})\right)
         \stackrel{?}{=} \rho.
@@ -395,8 +396,8 @@ O’Grady</a></div>
         </div>
         <p>Revealed recovery shards are byte-identical to the encoder’s
         output, including shard widths that are not 64-byte aligned.</p>
-        <p>A back-to-back rerun of the striped-only checkpoint and the
-        immediate decode-reveal change isolates the improvement:</p>
+        <p>Running the recovery-heavy benchmark first with striping
+        alone and then with decode-reveal isolates the improvement:</p>
         <div id="earn-your-stripes-chart-reveal" class="cw-rs-chart" role="img" aria-label="Line chart of recovery-heavy verification latency for decode plus encode and decode plus reveal. With 8 and 16 workers, latency changes from 10.20 to 9.09 milliseconds and from 7.64 to 6.87 milliseconds, reductions of 10.8 and 10.1 percent."></div>
         <noscript>
           <table>
@@ -431,8 +432,8 @@ O’Grady</a></div>
         recovery shards match encoder output, and that tampered
         originals, recoveries, padding, and surplus shards are
         rejected.</p>
-        <h2 id="an-ai-research-loop">An AI Research Loop</h2>
-        <p>The first author used QED’s AI research agent to find this
+        <h2 id="finding-the-bottleneck">Finding the Bottleneck</h2>
+        <p>Sunghyeon used QED’s AI research agent to find this
         optimization. The agent read the coding stack and noticed that
         hashing the missing shards in decode was parallelized, but
         Reed-Solomon recovery was not. It then tested whether recovery
@@ -442,12 +443,18 @@ O’Grady</a></div>
         and verifies them with tests and benchmarks. Whether a finding
         is useful depends on repository context, since the same pattern
         may be a known issue or an intentional design choice. Lessons
-        from continuously auditing Commonware helped the bot identify a
-        valid optimization.</p>
+        from <a href="https://qedaudit.io/blog/commonware/">continuously
+        auditing Commonware</a> helped the bot identify a valid
+        optimization.</p>
         <h2 id="next-steps">Next Steps</h2>
-        <p>Reed-Solomon is not the last place to look. The NTTs under
-        ZODA pose the same question: how much latency is still hiding in
-        math that can be split across cores?</p>
+        <p>It is more practical than ever to tune low-level primitives
+        to run closer to the limits of modern hardware. We expect to
+        keep investing in this work across the Commonware Library, from
+        our recent <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4187">SHA-256
+        optimizations</a> to upcoming work on <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4467">faster
+        Ed25519 signature verification</a>.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
