@@ -20,8 +20,6 @@ mod conformance;
 pub enum Error {
     #[error("merkle error: {0}")]
     Merkle(anyhow::Error),
-    #[error("journal error: {0}")]
-    Journal(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
@@ -48,8 +46,6 @@ pub enum Error {
     ReplayFailed,
     #[error("size overflow")]
     SizeOverflow,
-    #[error("unexpected size: expected={0} actual={1}")]
-    UnexpectedSize(u32, u32),
     #[error("missing blob: {0}")]
     MissingBlob(u64),
     #[error("item out of range: {0}")]

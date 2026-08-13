@@ -27,10 +27,10 @@
 //! 5. Decode value
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
-use crate::journal::Error;
+use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
-use commonware_runtime::{BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage};
+use commonware_runtime::{BufMut, Error as RError, Handle};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -51,7 +51,7 @@ pub struct Config<C> {
 }
 
 /// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
-struct Inner<E: BufferPooler + Storage + Metrics, V: Codec> {
+struct Inner<E: Context, V: Codec> {
     manager: Manager<E, WriteFactory>,
 
     /// Compression level (if enabled).
@@ -61,7 +61,7 @@ struct Inner<E: BufferPooler + Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
+impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
@@ -258,9 +258,9 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// future) destroys the handle. Mutations on pruned sections fail with
 /// [Error::AlreadyPrunedToSection] without mutating. Check [Glob::pruned] first to keep the
 /// handle.
-pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
+pub struct Glob<E: Context, V: Codec>(Box<Inner<E, V>>);
 
-impl<E: BufferPooler + Storage + Metrics, V: CodecShared> std::fmt::Debug for Glob<E, V> {
+impl<E: Context, V: CodecShared> std::fmt::Debug for Glob<E, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Glob")
             .field("oldest_section", &self.oldest_section())
@@ -269,7 +269,7 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> std::fmt::Debug for Gl
     }
 }
 
-impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
+impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))

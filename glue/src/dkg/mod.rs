@@ -49,6 +49,14 @@
 //! state (e.g., a staking contract). The chain can announce future players first,
 //! giving those nodes an epoch to state sync and enter the next ceremony normally.
 //!
+//! A node beginning state sync has no application state from which to resolve
+//! participant reachability. Everything required to connect to the active
+//! committee therefore rides in
+//! [`types::EpochInfo`] itself: the key-only participant sets and the
+//! transport [`network::Directory`] for those participants. The provider hooks
+//! are consulted only while building or verifying an epoch's final block,
+//! which only fully synced nodes do.
+//!
 //! Before starting either actor, initialize one [`state_sync::Plan`] under a
 //! stable node-wide partition prefix and clone it into the orchestrator and
 //! reshare configurations. The plan durably records fresh state-sync material
@@ -66,6 +74,26 @@
 //! epoch and catches up through ordinary marshal delivery: backup vote or
 //! certificate traffic from a future epoch hints marshal to fetch the missing
 //! boundary finalization. See [`probe`] for the bootstrap trust model.
+//!
+//! # Peer Activation
+//!
+//! DKG peer identities remain key-only in ceremony artifacts and all wire
+//! messages. Transport-specific reachability lives in the
+//! [`network::Directory`] embedded in each [`types::EpochInfo`], so activation
+//! through [`network::Manager`] consumes only in-band data:
+//!
+//! - One-shot bootstrap activates epoch zero from its configured directory
+//!   before registering its DKG channel.
+//! - A fresh-node probe activates its configured bootstrap snapshot and
+//!   directory when the first subscriber appears, before requesting a latest
+//!   finalization.
+//! - Continuous operation activates an epoch from the epoch's own
+//!   [`types::EpochInfo`] after its readiness gate opens and before Simplex or
+//!   its epoch channels start.
+//!
+//! Restart and state-sync entry activate the recovered epoch from the same
+//! certificate-backed [`types::EpochInfo`] as uninterrupted operation, so no
+//! out-of-band registry access is required during recovery.
 //!
 //! # Marshal Retention
 //!
@@ -111,7 +139,7 @@
 //! See [`probe`], [`fence`], [`orchestrator`], [`reshare`], [`state_sync`], and
 //! [`types`] for the detailed actors, synchronization points, and wire artifacts.
 
-use crate::dkg::types::SchemeInfo;
+use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
     PublicKey, Signer,
@@ -126,6 +154,7 @@ use std::future::Future;
 
 pub mod bootstrap;
 pub mod fence;
+pub mod network;
 pub mod orchestrator;
 pub mod probe;
 pub mod reshare;
@@ -143,8 +172,11 @@ pub trait ReshareBlock: Block {
     /// Signer type used by DKG payloads.
     type Signer: Signer;
 
+    /// Transport directory type carried by this block's epoch artifacts.
+    type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
+
     /// Retrieves the [`Payload`](types::Payload) carried by this block, if any.
-    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::Signer>>;
+    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::Signer, Self::Directory>>;
 }
 
 /// A registrar of signing schemes that supplies a [`Provider`] an [`Epoch`]-scoped
@@ -229,15 +261,26 @@ pub trait SecretStore: Send + Sync + 'static {
 /// Participant policy provider.
 ///
 /// This is the only application hook on canonical epoch structure: it supplies
-/// the intended participant set for a future `epoch`. The actor derives dealers,
-/// current players, and ordinary epoch progression from finalized public truth,
-/// and consults this only for the players of an epoch it cannot yet read from a
-/// finalized boundary block.
+/// the intended participant set and transport directory for a future `epoch`.
+/// The actor derives dealers, current players, and ordinary epoch progression
+/// from finalized public truth, and consults this only for the values of an
+/// epoch it cannot yet read from a finalized boundary block.
 ///
-/// [`participants`](Self::participants) must be deterministic at a given epoch
-/// across all honest nodes (see its documentation for the exact contract).
+/// Both hooks are consulted exclusively while building or verifying an epoch's
+/// final block, so implementations may be backed by application state (e.g., a
+/// staking or address-registry contract): a node performing those operations is
+/// fully synced. Their results are embedded in the next
+/// [`types::EpochInfo`], which is what recovering and state-syncing nodes use
+/// instead of this provider.
+///
+/// [`participants`](Self::participants) and [`directory`](Self::directory)
+/// must be deterministic for the same inputs across all honest nodes (see
+/// their documentation for the exact contracts).
 pub trait ParticipantsProvider: Send + Sync + 'static {
     type PublicKey: PublicKey;
+
+    /// Transport directory type embedded in epoch artifacts.
+    type Directory: Directory<Self::PublicKey>;
 
     /// Returns the intended participant set for `epoch`.
     ///
@@ -250,13 +293,13 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// a deterministic provider contract failure.
     ///
     /// In continuous reshare, this hook is consulted while building or
-    /// verifying an epoch's final block. That final block carries the
-    /// [`types::EpochInfo`] for the next epoch, and this set is embedded
-    /// verbatim as that epoch info's `next_players`.
+    /// verifying the final block two epochs before `epoch`. That block carries
+    /// the [`types::EpochInfo`] for the following epoch, with this set embedded
+    /// verbatim as `next_players`.
     ///
     /// Therefore the result for `epoch` must be locked in before honest nodes
-    /// propose or verify the final block that announces `epoch` as
-    /// `next_players`. The proposer and every verifier independently rebuild
+    /// propose or verify the final block that announces it as `next_players`.
+    /// The proposer and every verifier independently rebuild
     /// and compare the value for equality. Because [`Set`] is order sensitive
     /// (both its equality and its encoding depend on element order), any
     /// divergence in membership or ordering between proposer and verifier
@@ -264,4 +307,26 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// (e.g. sort) the returned `Set` so it is identical regardless of how the
     /// underlying membership is stored or queried.
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
+
+    /// Returns the transport directory embedded in the [`types::EpochInfo`]
+    /// for `epoch`.
+    ///
+    /// `peers` is the union of the epoch's dealers, players, and next players.
+    /// It may contain up to three times the actor's configured
+    /// `max_participants` entries when those sets are disjoint. The returned
+    /// directory MUST contain exactly these peers. Missing or unrequested
+    /// entries are treated as a deterministic provider contract failure.
+    ///
+    /// This is consulted while building or verifying the final block of
+    /// `epoch - 1`, under the same determinism and lock-in contract as
+    /// [`participants`](Self::participants): for a given `epoch` and `peers`,
+    /// every honest node MUST return an identical value, including the same
+    /// reachability data for each peer, and repeated calls MUST return the same
+    /// value. An update submitted during an epoch takes effect in a later
+    /// epoch's directory, never retroactively.
+    fn directory(
+        &mut self,
+        epoch: Epoch,
+        peers: Set<Self::PublicKey>,
+    ) -> impl Future<Output = Self::Directory> + Send;
 }

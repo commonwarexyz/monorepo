@@ -1,6 +1,7 @@
 use super::setup::{EpochPreparation, PreparedEpoch};
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    network::Manager,
     reshare::{Actor, EpochInfoResponse, Message, actor::Mode, metrics::Phase, store::Store},
     types::Participants,
 };
@@ -14,7 +15,7 @@ use commonware_cryptography::{
     certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Manager, Receiver, Sender, utils::mux::MuxHandle};
+use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
@@ -22,7 +23,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
-use tracing::{debug, info_span};
+use tracing::{debug, info_span, warn};
 
 impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
 where
@@ -30,9 +31,9 @@ where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
-    M: Manager<PublicKey = C::PublicKey>,
+    M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
-    P: ParticipantsProvider<PublicKey = C::PublicKey>,
+    P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
@@ -43,7 +44,7 @@ where
 {
     pub(super) async fn run_dkg<SE, RE>(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         dealing_mux: &mut MuxHandle<SE, RE>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
@@ -66,10 +67,19 @@ where
         }
 
         let completion = self.dkg_completion();
-        let Some(mut prepared) = self.setup_dkg(store).await else {
-            self.complete_dkg(completion, store);
-            self.terminal().await;
-            return;
+        let mut prepared = match self.setup_dkg(store).await {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => {
+                self.complete_dkg(completion, store);
+                self.terminal().await;
+                return;
+            }
+            Err(error) => {
+                warn!(epoch = %epoch, %error, "failed to activate DKG peer set, shutting down");
+                self.complete_dkg(completion, store);
+                self.terminal().await;
+                return;
+            }
         };
 
         let chan = dealing_mux
@@ -104,8 +114,8 @@ where
 
     async fn setup_dkg(
         &mut self,
-        store: &mut Store<E, SS, V, C::PublicKey>,
-    ) -> Option<PreparedEpoch<V, C>> {
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+    ) -> Result<Option<PreparedEpoch<V, C>>, M::Error> {
         self.metrics.set_phase(Phase::Setup);
 
         let height = self
@@ -118,7 +128,7 @@ where
             .containing(height)
             .expect("epocher must know of block height");
         if bounds.epoch() != Epoch::zero() {
-            return None;
+            return Ok(None);
         }
 
         let participants = self
@@ -136,12 +146,19 @@ where
             .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
             .expect("DKG epoch must have enough dealer-log slots");
 
+        // Activate the complete epoch-zero snapshot with its configured
+        // directory before the channel is registered or any dealings can be
+        // sent.
+        let directory = self.dkg_directory().expect("DKG setup requires DKG mode");
+        self.manager
+            .track(Epoch::zero(), snapshot.tracked_peers(), &directory)?;
+
         let seed = store
             .seed_or_random(Epoch::zero(), self.context.as_present_mut())
             .await;
         store.put_seed(Epoch::zero(), seed).await;
 
-        Some(self.prepare_epoch(
+        Ok(Some(self.prepare_epoch(
             store,
             EpochPreparation {
                 epoch: Epoch::zero(),
@@ -151,7 +168,7 @@ where
                 share: None,
                 seed,
             },
-        ))
+        )))
     }
 
     async fn terminal(&mut self) {
@@ -209,7 +226,14 @@ where
         }
     }
 
-    fn dkg_completion(&mut self) -> Option<super::DkgCompletion<V, C::PublicKey>> {
+    pub(super) fn dkg_directory(&self) -> Option<B::Directory> {
+        match &self.mode {
+            Mode::Dkg { directory, .. } => Some(directory.clone()),
+            Mode::Reshare => None,
+        }
+    }
+
+    fn dkg_completion(&mut self) -> Option<super::DkgCompletion<V, C::PublicKey, B::Directory>> {
         match &mut self.mode {
             Mode::Dkg { completion, .. } => completion.take(),
             Mode::Reshare => unreachable!("DKG completion requires DKG mode"),
@@ -218,8 +242,8 @@ where
 
     fn complete_dkg(
         &mut self,
-        completion: Option<super::DkgCompletion<V, C::PublicKey>>,
-        store: &mut Store<E, SS, V, C::PublicKey>,
+        completion: Option<super::DkgCompletion<V, C::PublicKey, B::Directory>>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
         let info = store.current().filter(|info| info.epoch == Epoch::zero());
         if let Some(completion) = completion {
