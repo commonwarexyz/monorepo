@@ -129,6 +129,42 @@ fn test_try_fold_ok_and_err() {
 }
 
 #[test]
+fn test_fold_init_order_matches_sequential_non_commutative() {
+    // reduce_op is associative but NOT commutative (Vec concatenation): the trait contract
+    // (codified by the crate's proptest suite against Rayon) requires input-segment order.
+    let strategy = parked(4);
+    let expected = Sequential.fold_init(
+        0..N as u64,
+        || (),
+        Vec::new,
+        |mut acc, _, x| {
+            acc.push(x);
+            acc
+        },
+        |mut a, b| {
+            a.extend(b);
+            a
+        },
+    );
+    for _ in 0..50 {
+        let got = strategy.manual().fold_init(
+            0..N as u64,
+            || (),
+            Vec::new,
+            |mut acc, _, x| {
+                acc.push(x);
+                acc
+            },
+            |mut a, b| {
+                a.extend(b);
+                a
+            },
+        );
+        assert_eq!(got, expected);
+    }
+}
+
+#[test]
 fn test_map_partition_collect_vec() {
     let strategy = parked(4);
     let (evens, odds) = strategy
@@ -194,6 +230,16 @@ fn test_sort_by_and_join_and_spawn() {
 
     let result = futures::executor::block_on(strategy.spawn(|_| 42u8));
     assert_eq!(result, 42);
+}
+
+#[test]
+fn test_single_worker_parallel_arm() {
+    // One worker with planning parallelism 2: the caller and the lone worker share every
+    // scoped job (the loom models run this exact configuration).
+    let strategy =
+        Parked::new(NonZeroUsize::new(1).unwrap()).with_parallelism(NonZeroUsize::new(2).unwrap());
+    let out = strategy.manual().map_collect_vec(0..N as u64, |i| i * 5);
+    assert_eq!(out, (0..N as u64).map(|i| i * 5).collect::<Vec<_>>());
 }
 
 #[test]

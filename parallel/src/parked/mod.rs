@@ -15,6 +15,8 @@ mod pool;
 mod scoped;
 mod sync;
 
+#[cfg(all(test, not(feature = "loom")))]
+mod bench_tests;
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests;
 #[cfg(all(test, not(feature = "loom")))]
@@ -29,18 +31,25 @@ use futures::future::{self, Either};
 use pool::Shared;
 use scoped::Ctl;
 use std::panic::{self, Location};
-use sync::{Arc, Mutex, spawn_worker};
+use sync::{Arc, Mutex, WorkerHandle, spawn_worker};
 
 /// Sends the pool into shutdown when the last `Parked` handle drops.
 struct Owner {
     shared: Arc<Shared>,
+    /// Worker handles, joined on shutdown under loom (a detached loom thread can outlive
+    /// the model iteration's execution arena). Production detaches for now; joining --
+    /// including the last-owner-drop-on-a-worker case -- is increment B lifecycle work.
+    #[cfg(feature = "loom")]
+    workers: Mutex<Vec<WorkerHandle>>,
 }
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        // Workers observe the flag and exit; threads are detached (joining, including the
-        // last-owner-drop-on-a-worker case, is specified for increment B's lifecycle work).
         self.shared.shutdown();
+        #[cfg(feature = "loom")]
+        for handle in self.workers.lock().unwrap().drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -73,16 +82,34 @@ impl Parked {
     /// Creates a `Parked` strategy with `workers` background worker threads.
     pub(crate) fn new(workers: NonZeroUsize) -> Self {
         let shared = Arc::new(Shared::new(workers.get()));
-        for id in 0..workers.get() {
-            let s = Arc::clone(&shared);
-            spawn_worker(id, move || pool::worker_loop(s, id));
-        }
+        #[cfg_attr(not(feature = "loom"), allow(clippy::let_underscore_untyped))]
+        let handles: Vec<WorkerHandle> = (0..workers.get())
+            .map(|id| {
+                let s = Arc::clone(&shared);
+                spawn_worker(id, move || pool::worker_loop(s, id))
+            })
+            .collect();
+        #[cfg(not(feature = "loom"))]
+        drop(handles); // production detaches workers (see Owner)
         Self {
             shared: Arc::clone(&shared),
-            _owner: Arc::new(Owner { shared }),
+            _owner: Arc::new(Owner {
+                shared,
+                #[cfg(feature = "loom")]
+                workers: Mutex::new(handles),
+            }),
             parallelism: workers.get(),
             policy: Some(policy::Policy::default()),
         }
+    }
+
+    /// Overrides the parallelism assumed for planning decisions (mirrors
+    /// `Rayon::with_parallelism`). Used by loom models to engage the parallel arms with a
+    /// single worker, keeping the explored thread count small.
+    #[cfg(test)]
+    pub(crate) fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+        self.parallelism = parallelism.get();
+        self
     }
 
     #[track_caller]
@@ -247,18 +274,25 @@ where
     // Quiescent: no executor can touch the buffers anymore.
     let error = error.into_inner().unwrap();
     if outcome.panic.is_some() || error.is_some() {
-        for range in done.into_inner().unwrap() {
-            for j in range {
-                // SAFETY: this range was fully written by a completed chunk, and is dropped
-                // only here (failure path returns before `out` gains length).
-                unsafe { ptr::drop_in_place(out_ptr.get().add(j)) };
+        // Cleanup runs user `Drop` impls; catch their panics so the first chunk payload
+        // still wins (a cleanup panic aborts remaining cleanup, leaking, which is safe).
+        let cleanup = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for range in done.into_inner().unwrap() {
+                for j in range {
+                    // SAFETY: this range was fully written by a completed chunk, and is
+                    // dropped only here (failure path returns before `out` gains length).
+                    unsafe { ptr::drop_in_place(out_ptr.get().add(j)) };
+                }
             }
-        }
-        for j in outcome.claimed..n {
-            // SAFETY: indexes past the claim watermark were never read by any executor.
-            unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
-        }
+            for j in outcome.claimed..n {
+                // SAFETY: indexes past the claim watermark were never read by any executor.
+                unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
+            }
+        }));
         if let Some(payload) = outcome.panic {
+            panic::resume_unwind(payload);
+        }
+        if let Err(payload) = cleanup {
             panic::resume_unwind(payload);
         }
         return Err(error.expect("failure without panic must carry an error"));
@@ -293,7 +327,10 @@ where
     // SAFETY: as in `scoped_map`: elements are owned by the protocol from here on.
     unsafe { items.set_len(0) };
 
-    let partials: Mutex<Vec<R>> = Mutex::new(Vec::new());
+    // Partials are tagged with their chunk's start index and reduced in input order:
+    // Sequential and Rayon both preserve segment order, so `reduce_op` may rely on
+    // associativity alone (commutativity is NOT required by the trait contract).
+    let partials: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::new());
     let error: Mutex<Option<E>> = Mutex::new(None);
 
     let body = |range: Range<usize>, ctl: &Ctl<'_>| {
@@ -316,7 +353,7 @@ where
             }
         };
         match result {
-            Ok(Ok(acc)) => partials.lock().unwrap().push(acc),
+            Ok(Ok(acc)) => partials.lock().unwrap().push((range.start, acc)),
             Ok(Err(e)) => {
                 {
                     let mut slot = error.lock().unwrap();
@@ -338,16 +375,25 @@ where
 
     let error = error.into_inner().unwrap();
     if outcome.panic.is_some() || error.is_some() {
-        for j in outcome.claimed..n {
-            // SAFETY: never claimed, never read.
-            unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
-        }
+        let cleanup = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for j in outcome.claimed..n {
+                // SAFETY: never claimed, never read.
+                unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
+            }
+        }));
         if let Some(payload) = outcome.panic {
+            panic::resume_unwind(payload);
+        }
+        if let Err(payload) = cleanup {
             panic::resume_unwind(payload);
         }
         return Err(error.expect("failure without panic must carry an error"));
     }
-    Ok(partials.into_inner().unwrap())
+    let mut partials = partials.into_inner().unwrap();
+    // Chunk starts are unique; stable sort restores input-segment order cheaply since
+    // completion order is usually near claim order.
+    partials.sort_by_key(|(start, _)| *start);
+    Ok(partials.into_iter().map(|(_, acc)| acc).collect())
 }
 
 impl Strategy for Parked {

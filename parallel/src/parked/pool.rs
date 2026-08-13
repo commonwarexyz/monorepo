@@ -8,7 +8,7 @@
 
 use super::{
     scoped::{Job, Slot},
-    sync::{Arc, AtomicBool, AtomicU8, AtomicUsize, Ordering, Parker, spin},
+    sync::{Arc, AtomicBool, AtomicU8, AtomicUsize, Ordering, Parker, fence, spin},
 };
 
 /// Number of concurrently published jobs. A performance knob, never a correctness bound:
@@ -24,9 +24,9 @@ pub(super) const SLOTS: usize = 4;
 /// reintroduce the idle tax because it only holds a worker awake immediately after work
 /// existed, and is bounded in microseconds.
 #[cfg(not(feature = "loom"))]
-const SEARCH_ROUNDS: usize = 64;
+pub(super) const SEARCH_ROUNDS: usize = 64;
 #[cfg(feature = "loom")]
-const SEARCH_ROUNDS: usize = 0;
+pub(super) const SEARCH_ROUNDS: usize = 0;
 
 /// Idle-entry states.
 const ACTIVE: u8 = 0;
@@ -77,9 +77,12 @@ impl Shared {
         &self.slots[idx]
     }
 
-    /// Whether any slot currently looks published.
-    fn any_published(&self) -> bool {
-        self.slots.iter().any(Slot::looks_published)
+    /// Whether any slot holds work a new executor could claim. The park decision keys on
+    /// this rather than on publication: a published job with nothing left to claim will
+    /// never produce new work (claims are monotonic), so parking beside it is safe, and
+    /// staying awake beside it would hot-spin for the length of a straggler chunk.
+    fn any_claimable(&self) -> bool {
+        self.slots.iter().any(Slot::looks_claimable)
     }
 
     /// Attempts to publish `job` into an empty slot, returning its index. `None` means the
@@ -147,7 +150,7 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
             if shared.shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            if shared.any_published() {
+            if shared.any_claimable() {
                 continue 'outer;
             }
             spin();
@@ -157,9 +160,16 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
         // registration: a submitter that saw an empty registry will not wake us, so we
         // must not park with work pending.
         let me = &shared.idle[id];
-        me.state.store(REGISTERED, Ordering::SeqCst);
+        // Count first, then become claimable: the count over-approximates registered
+        // workers, so a claimant's decrement (which follows a successful CAS on `state`,
+        // which follows this store) can never underflow it.
         shared.idle_count.fetch_add(1, Ordering::SeqCst);
-        if shared.shutdown.load(Ordering::SeqCst) || shared.any_published() {
+        me.state.store(REGISTERED, Ordering::SeqCst);
+        // Register-vs-publish handshake: order our registration before the work recheck,
+        // pairing with the publisher's publish-then-scan fence. A submitter that missed our
+        // registration published before our recheck; a publication we miss here claimed us.
+        fence(Ordering::SeqCst);
+        if shared.shutdown.load(Ordering::SeqCst) || shared.any_claimable() {
             // Withdraw the registration. A failed CAS means a submitter already claimed
             // (and decremented for) us; the deposited token makes our next park return
             // immediately, which the loop tolerates as a spurious wake.

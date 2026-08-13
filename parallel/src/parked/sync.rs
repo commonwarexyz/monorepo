@@ -11,7 +11,7 @@ cfg_if! {
     if #[cfg(feature = "loom")] {
         pub(super) use loom::sync::{
             Arc, Condvar, Mutex,
-            atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering, fence},
         };
 
         /// Yields in spin-wait loops so the loom scheduler can interleave other threads.
@@ -19,14 +19,19 @@ cfg_if! {
             loom::thread::yield_now();
         }
 
+        /// A joinable worker handle (loom requires spawned threads to be joined before a
+        /// model iteration ends; a detached thread can outlive the execution arena its
+        /// loom objects live in).
+        pub(super) type WorkerHandle = loom::thread::JoinHandle<()>;
+
         /// Spawns a worker thread. Loom threads cannot be named.
-        pub(super) fn spawn_worker<F: FnOnce() + Send + 'static>(_id: usize, f: F) {
-            loom::thread::spawn(f);
+        pub(super) fn spawn_worker<F: FnOnce() + Send + 'static>(_id: usize, f: F) -> WorkerHandle {
+            loom::thread::spawn(f)
         }
     } else {
         pub(super) use std::sync::{
             Arc, Condvar, Mutex,
-            atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering, fence},
         };
 
         /// Hint to the CPU that we are in a short spin-wait.
@@ -34,12 +39,15 @@ cfg_if! {
             core::hint::spin_loop();
         }
 
+        /// A joinable worker handle.
+        pub(super) type WorkerHandle = std::thread::JoinHandle<()>;
+
         /// Spawns a named worker thread.
-        pub(super) fn spawn_worker<F: FnOnce() + Send + 'static>(id: usize, f: F) {
+        pub(super) fn spawn_worker<F: FnOnce() + Send + 'static>(id: usize, f: F) -> WorkerHandle {
             std::thread::Builder::new()
                 .name(format!("commonware-parked-{id}"))
                 .spawn(f)
-                .expect("failed to spawn pool worker");
+                .expect("failed to spawn pool worker")
         }
     }
 }
