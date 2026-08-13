@@ -9,20 +9,24 @@ use futures::{
 use pin_project::pin_project;
 use std::{collections::BTreeMap, future::Future, pin::Pin, task::Poll};
 
-/// A future type that can be used in `Pool`.
-type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+/// A future type that can be used in [ScopedPool].
+type PooledFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// An unordered pool of futures.
+/// An unordered pool of futures that may borrow for `'a`.
 ///
 /// Futures can be added to the pool, and removed from the pool as they resolve.
+/// Use [Pool] unless the futures hold a borrow.
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
-pub struct Pool<T> {
-    pool: FuturesUnordered<PooledFuture<T>>,
+pub struct ScopedPool<'a, T> {
+    pool: FuturesUnordered<PooledFuture<'a, T>>,
 }
 
-impl<T: Send> Default for Pool<T> {
+/// An unordered pool of futures that borrow nothing.
+pub type Pool<T> = ScopedPool<'static, T>;
+
+impl<'a, T: Send + 'a> Default for ScopedPool<'a, T> {
     fn default() -> Self {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
@@ -32,7 +36,7 @@ impl<T: Send> Default for Pool<T> {
     }
 }
 
-impl<T: Send> Pool<T> {
+impl<'a, T: Send + 'a> ScopedPool<'a, T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
         // Subtract the dummy future.
@@ -45,29 +49,29 @@ impl<T: Send> Pool<T> {
     }
 
     /// Adds a future to the pool.
-    ///
-    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
-    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) {
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'a) {
         self.pool.push(Box::pin(future));
     }
 
     /// Returns a futures that resolves to the next future in the pool that resolves.
     ///
     /// If the pool is empty, the future will never resolve.
-    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<T>>> {
+    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<'a, T>>> {
         self.pool.select_next_some()
     }
 
-    /// Cancels all futures in the pool.
+    /// Drops every future in the pool, excluding the dummy future.
     ///
-    /// Excludes the dummy future.
+    /// Each future is cancelled where it stands, so anything it was holding is
+    /// dropped with it. Callers that need to recover state from in-flight
+    /// futures must signal them and await their completion instead.
     pub fn cancel_all(&mut self) {
         self.pool.clear();
         self.pool.push(Self::create_dummy_future());
     }
 
     /// Creates a dummy future that never resolves.
-    fn create_dummy_future() -> PooledFuture<T> {
+    fn create_dummy_future() -> PooledFuture<'a, T> {
         Box::pin(async { future::pending::<T>().await })
     }
 }

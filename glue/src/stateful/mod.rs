@@ -6,7 +6,7 @@
 //! bookkeeping:
 //!
 //! 1. Before each `propose` or `verify`, the actor forks unmerkleized batches
-//!    from the parent block's pending state (or from committed database state
+//!    from the parent block's pending state (or from applied database state
 //!    if the parent has been finalized).
 //! 2. The application executes against those batches and returns merkleized
 //!    results, which the actor stores as a new pending tip keyed by the
@@ -96,7 +96,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::DatabaseSet;
+use db::{DatabaseSet, MerkleizedOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -141,14 +141,19 @@ pub struct Input<Upstream, Provider> {
 /// return [`DatabaseSet::Merkleized`] batches after execution. The surrounding
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
-/// finalization.
+/// finalization. In every execution method, read through `batches` (passing
+/// the borrowed `databases` for fallback). The batch overlays speculative
+/// ancestor state that `databases` alone does not reflect, so reading
+/// `databases` directly returns stale values for any key an ancestor wrote.
 ///
 /// [`Stateful`] may freely clone the application and invoke its methods
-/// concurrently. Implementors should treat `Application` as a stateless,
-/// deterministic state machine: given the same method inputs and database
-/// state, every clone must produce the same state-transition result. Mutable
-/// state that affects those results must live in the database batches provided
-/// to proposal, verification, and replay methods.
+/// concurrently. Any method may run on a fresh clone that is discarded
+/// afterward, so cloning must be cheap and state an implementor wants to keep
+/// must live behind shared handles. Implementors should treat `Application` as
+/// a stateless, deterministic state machine: given the same method inputs and
+/// database state, every clone must produce the same state-transition result.
+/// Mutable state that affects those results must live in the database batches
+/// provided to proposal, verification, and replay methods.
 pub trait Application<E>: Clone + Send + 'static
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -224,7 +229,8 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
@@ -237,15 +243,12 @@ where
     /// stable verdict. Return [`None`] only when the block is permanently
     /// invalid for the supplied context, ancestry, and batches. If validity may
     /// still change as additional information becomes available, continue
-    /// waiting instead of returning [`None`].
+    /// waiting instead of returning [`None`]. In other words, to abstain from
+    /// voting, do not resolve this future yet. Abstaining is not represented by
+    /// a special return value.
     ///
-    /// Validity is relative to those inputs: finalizing a competing branch
-    /// later does not retroactively change a completed verdict.
-    ///
-    /// In other words, to abstain from voting, do not resolve this future yet.
-    /// Keep it pending until the implementation can either prove the block
-    /// valid, prove it invalid, or the consensus engine cancels the request.
-    /// Abstaining is not represented by a special return value.
+    /// Validity is relative to the supplied inputs. Finalizing a competing
+    /// branch later does not retroactively change a completed verdict.
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).
@@ -259,24 +262,24 @@ where
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
     ///
-    /// This future is scoped to its caller. Stateful may also cancel and retry
-    /// it before finalization or pruning. Cancellation and retry must not
+    /// This future is scoped to its caller. Dropping the response cancels only
+    /// this request. Applying a finalized block, pruning, and capturing each
+    /// cancel every verification still running, and any request the finalized
+    /// block does not invalidate is then re-run. Cancellation and retry must not
     /// violate invariants or lose durable progress.
     ///
-    /// Verification may overlap finalization while its batches remain valid.
-    /// Stateful retries or rejects requests that cannot safely overlap it.
-    /// Read through the provided batches without holding the database set's
-    /// locks. Batches may be branch-scoped views rather than historical
-    /// snapshots: retained ancestor overlays preserve same-branch state, while
-    /// unresolved reads may fall through to the live applied database. Such
-    /// batches remain valid only while applied state advances along their branch
-    /// (see [`db::Shared::read`] for guard discipline).
+    /// `batches` is a branch-scoped view, not a historical snapshot. Retained
+    /// ancestor overlays preserve same-branch state, while unresolved reads fall
+    /// through to the applied state of the `databases` passed alongside it. A
+    /// batch is therefore valid only while applied state advances along its own
+    /// branch.
     fn verify(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> impl Future<Output = Option<MerkleizedOf<Self::Databases, E>>> + Send;
 
     /// Apply a previously certified block to reconstruct its merkleized state.
     ///
@@ -302,8 +305,9 @@ where
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+        databases: &Self::Databases,
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> impl Future<Output = MerkleizedOf<Self::Databases, E>> + Send;
 
     /// Observe a finalized block after it is reflected in the database set.
     ///
@@ -320,10 +324,12 @@ where
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
     ///
-    /// This hook receives read-only database handles and may overlap verification
-    /// of blocks built on the newly finalized block or one of its retained
-    /// descendants. Result-affecting mutations must be made through normal block
-    /// execution, not from this observer.
+    /// This hook receives read-only access to the database set. On the normal
+    /// finalization path it runs with the set exclusively held, after every
+    /// verification has been cancelled, and the block's marshal acknowledgement
+    /// waits for it. A slow implementation therefore stalls finalization and
+    /// verification alike. Result-affecting mutations must be made through normal
+    /// block execution, not from this observer.
     ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
     /// marshal's reporter stream: a crash after this hook runs but before the block's flush and
@@ -336,7 +342,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+        _databases: &Self::Databases,
     ) -> impl Future<Output = ()> + Send {
         async {}
     }

@@ -1,6 +1,7 @@
 use super::{
     Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, VerificationProgress, await_or_cancel, fetch_ancestor, is_already_processed,
+    ReplayTracking, VerificationProgress, VerificationResult, await_or_cancel, fetch_ancestor,
+    is_already_processed,
 };
 use crate::stateful::{actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
@@ -54,17 +55,19 @@ where
 }
 
 /// Executes one independently-polled verification request.
-pub(in crate::stateful::actor) struct Verifier<E, A>
+/// The application is cloned per request, but the database set is borrowed from
+/// the processor that owns it, so every job ends before the set is consumed.
+pub(in crate::stateful::actor) struct Verifier<'a, E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     pub(super) app: A,
-    pub(super) execution: Execution<E, A>,
+    pub(super) execution: &'a Execution<E, A>,
     pub(super) replays: ReplayFlights<PendingDigest<A, E>>,
 }
 
-impl<E, A> Clone for Verifier<E, A>
+impl<E, A> Clone for Verifier<'_, E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -72,13 +75,13 @@ where
     fn clone(&self) -> Self {
         Self {
             app: self.app.clone(),
-            execution: self.execution.clone(),
+            execution: self.execution,
             replays: self.replays.clone(),
         }
     }
 }
 
-impl<E, A> Verifier<E, A>
+impl<E, A> Verifier<'_, E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -93,7 +96,7 @@ where
         ancestry: impl Ancestry<A::Block>,
         progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
-    ) -> Option<bool>
+    ) -> VerificationResult
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -109,18 +112,18 @@ where
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
                 verification.cancelled().await;
-                return None;
+                return VerificationResult::Cancelled;
             }
             None => {
                 debug!("verification request cancelled before initial block arrived");
-                return None;
+                return VerificationResult::Cancelled;
             }
         };
         let block_digest = block.digest();
 
         if self.execution.pending_contains(&block_digest) {
             timer.observe(context);
-            return Some(true);
+            return VerificationResult::Decided(true);
         }
 
         // A finalized candidate cannot be re-executed against newer database
@@ -132,10 +135,10 @@ where
             ProcessedBlock::Continue => {}
             ProcessedBlock::Accepted => {
                 timer.observe(context);
-                return Some(true);
+                return VerificationResult::Decided(true);
             }
-            ProcessedBlock::Rejected => return Some(false),
-            ProcessedBlock::Cancelled => return None,
+            ProcessedBlock::Rejected => return VerificationResult::Decided(false),
+            ProcessedBlock::Cancelled => return VerificationResult::Cancelled,
         }
 
         // Reconstruct the candidate's parent state. This is the only phase
@@ -152,8 +155,8 @@ where
             .await
         {
             Ok(parent) => parent,
-            Err(PrepareFailure::Invalid) => return Some(false),
-            Err(PrepareFailure::Cancelled) => return None,
+            Err(PrepareFailure::Invalid) => return VerificationResult::Decided(false),
+            Err(PrepareFailure::Cancelled) => return VerificationResult::Cancelled,
         };
 
         progress.verifying(block_digest, parent.digest, consensus_context.round());
@@ -167,7 +170,7 @@ where
                 verification,
             )
             .await;
-        if result == Some(true) {
+        if matches!(result, VerificationResult::Decided(true)) {
             timer.observe(context);
         }
         result
@@ -314,7 +317,7 @@ where
         parent: PreparedParent<A, E>,
         ancestry: impl Ancestry<A::Block>,
         verification: &mut Verification,
-    ) -> Option<bool> {
+    ) -> VerificationResult {
         let block_digest = block.digest();
         let round = consensus_context.round();
 
@@ -329,6 +332,7 @@ where
                     consensus_context,
                 ),
                 ancestry,
+                &self.execution.databases,
                 parent.batches,
             ),
         )
@@ -340,7 +344,7 @@ where
                     parent_digest = ?parent.digest,
                     "verification request cancelled during verify"
                 );
-                return None;
+                return VerificationResult::Cancelled;
             }
         };
 
@@ -348,9 +352,9 @@ where
             warn!(
                 parent_digest = ?parent.digest,
                 ?block_digest,
-                "verification rejected: app.verify returned None"
+                "verification rejected: application returned None"
             );
-            return Some(false);
+            return VerificationResult::Decided(false);
         };
         let tail = info_span!(
             "stateful.processor.match_commitments",
@@ -367,7 +371,7 @@ where
                 ?block_digest,
                 "verification rejected: verified state must match block commitments"
             );
-            return Some(false);
+            return VerificationResult::Decided(false);
         }
         if !self
             .execution
@@ -378,11 +382,11 @@ where
                 ?block_digest,
                 "verification result became incompatible before caching"
             );
-            return Some(false);
+            return VerificationResult::Decided(false);
         }
         self.execution.update_pending_metric();
         drop(block);
         drop(tail);
-        Some(true)
+        VerificationResult::Decided(true)
     }
 }
