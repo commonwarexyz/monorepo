@@ -70,7 +70,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_runtime::Spawner;
+use commonware_runtime::{ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     cache::Clock,
@@ -281,7 +281,9 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    let stream = reader.replay(*inactivity_floor_loc, init_buffer).await?;
+    let stream = reader
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
 
@@ -632,7 +634,9 @@ where
     // leave the workers running detached, retaining the log and their range allocations
     // after init has already failed. The stream is also released before the join.
     let routing_result: Result<(), Error<F>> = async {
-        let stream = log.replay(floor, init_buffer).await?;
+        let stream = log
+            .replay(floor, init_buffer, ReadOptions::default())
+            .await?;
         pin_mut!(stream);
         let mut batches: Vec<RoutedBatch<_>> = (0..workers)
             .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))

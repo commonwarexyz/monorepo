@@ -1,25 +1,63 @@
-use commonware_runtime::tokio::Context;
+use commonware_runtime::{
+    mocks::{DontCacheContext, DontCacheControl},
+    tokio::Context,
+};
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::{sequence::U64, test_rng};
-use rand::{RngExt as _, seq::SliceRandom};
+use rand::{Rng, RngExt as _, seq::SliceRandom};
 
 /// Partition used across all metadata benchmarks.
 pub const PARTITION: &str = "metadata-bench-partition";
 
+/// Cache policy compared by metadata benchmarks.
+#[derive(Clone, Copy)]
+pub enum Policy {
+    Default,
+    DontCache,
+}
+
+impl Policy {
+    /// Stable benchmark label for this policy.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::DontCache => "dont_cache",
+        }
+    }
+
+    const fn enabled(self) -> bool {
+        matches!(self, Self::DontCache)
+    }
+}
+
+/// Return both policies in a deterministic randomized registration order.
+pub fn policies(rng: &mut impl Rng) -> [Policy; 2] {
+    let mut policies = [Policy::Default, Policy::DontCache];
+    policies.shuffle(rng);
+    policies
+}
+
 /// Concrete metadata type reused by every benchmark.
-pub type MetadataType = Metadata<Context, U64, Vec<u8>>;
+pub type MetadataType = Metadata<DontCacheContext<Context>, U64, Vec<u8>>;
 pub type Key = U64;
 pub type Val = Vec<u8>;
 
 /// Open (or create) a fresh metadata store.
 ///
 /// The caller is responsible for closing or destroying it.
-pub async fn init(ctx: Context) -> MetadataType {
+pub async fn init(
+    ctx: Context,
+    read_policy: Policy,
+    write_policy: Policy,
+) -> (MetadataType, DontCacheControl) {
+    let (ctx, control) = DontCacheContext::new(ctx);
+    control.set_read(read_policy.enabled());
+    control.set_write(write_policy.enabled());
     let cfg = Config {
         partition: PARTITION.into(),
         codec_config: ((0..).into(), ()),
     };
-    Metadata::init(ctx, cfg).await.unwrap()
+    (Metadata::init(ctx, cfg).await.unwrap(), control)
 }
 
 /// Generate `count` random key-value pairs.

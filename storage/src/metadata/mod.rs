@@ -92,15 +92,132 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
-            fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, WriteFaultContext,
+            WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::sequence::U64;
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
+
+    fn assert_options(recordings: &Recordings, reads: &[ReadOptions], writes: &[WriteOptions]) {
+        let snapshot = recordings.snapshot();
+        assert_eq!(snapshot.reads.as_slice(), reads);
+        assert_eq!(snapshot.writes.as_slice(), writes);
+        recordings.clear();
+    }
+
+    fn assert_durability(pending: &PendingSyncs, calls: usize, starts: usize, completions: usize) {
+        assert_eq!(pending.calls(), calls);
+        assert_eq!(pending.starts(), starts);
+        assert_eq!(pending.completions(), completions);
+    }
+
+    #[test_traced]
+    fn test_io_options_and_durability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let (recording, recordings) = RecordingContext::new(DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            });
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let key = U64::new(1);
+            let extra_key = U64::new(2);
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(recording.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Seed both mirrors so equal-size updates take the incremental branch.
+            metadata.put(key.clone(), vec![1; 8]);
+            metadata = metadata.sync().await.unwrap();
+            metadata = metadata.sync().await.unwrap();
+            recordings.clear();
+            pending.arm();
+
+            // Non-pipelined incremental writes retain default options and a trailing sync.
+            metadata.put(key.clone(), vec![2; 8]);
+            metadata = drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            assert_options(
+                &recordings,
+                &[],
+                &[
+                    WriteOptions::default(),
+                    WriteOptions::default(),
+                    WriteOptions::default(),
+                ],
+            );
+            assert_durability(&pending, 1, 0, 0);
+
+            // Pipelined incremental writes retain default options and a started sync.
+            metadata.put(key.clone(), vec![3; 8]);
+            let (next, handle) = metadata.start_sync().await.unwrap();
+            metadata = next;
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            assert_options(
+                &recordings,
+                &[],
+                &[
+                    WriteOptions::default(),
+                    WriteOptions::default(),
+                    WriteOptions::default(),
+                ],
+            );
+            assert_durability(&pending, 2, 1, 1);
+
+            // A growing pipelined rewrite retains a default option and a started sync.
+            metadata.put(extra_key.clone(), vec![4; 16]);
+            let (next, handle) = metadata.start_sync().await.unwrap();
+            metadata = next;
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::default()]);
+            assert_durability(&pending, 3, 2, 2);
+
+            // A growing non-pipelined rewrite retains range-scoped durability.
+            metadata = drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::SYNC]);
+            assert_durability(&pending, 4, 2, 2);
+
+            // A shrinking pipelined rewrite retains a default option and a started sync.
+            metadata.remove(&extra_key);
+            let (next, handle) = metadata.start_sync().await.unwrap();
+            metadata = next;
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::default()]);
+            assert_durability(&pending, 5, 3, 3);
+
+            // A shrinking non-pipelined rewrite retains a default option and a trailing sync.
+            metadata = drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::default()]);
+            assert_durability(&pending, 6, 3, 3);
+
+            // Both populated mirrors retain normal caching when reloaded.
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(recording.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_options(
+                &recordings,
+                &[ReadOptions::default(), ReadOptions::default()],
+                &[],
+            );
+            metadata.destroy().await.unwrap();
+        });
+    }
 
     #[test_traced]
     fn test_start_sync_pipelined_destroy() {

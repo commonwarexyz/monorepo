@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{ReadOptions, buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::journal::contiguous::{
     Mutable,
     fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -6,7 +6,7 @@ use commonware_storage::journal::contiguous::{
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
 use criterion::criterion_main;
-use rand::Rng;
+use rand::{Rng, seq::SliceRandom};
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
@@ -40,6 +40,36 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
+
+/// Cache policy compared by replay benchmarks.
+#[derive(Clone, Copy)]
+enum ReplayPolicy {
+    Default,
+    DontCache,
+}
+
+impl ReplayPolicy {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::DontCache => "dont_cache",
+        }
+    }
+
+    fn options(self) -> ReadOptions {
+        match self {
+            Self::Default => ReadOptions::default(),
+            Self::DontCache => ReadOptions::DONT_CACHE,
+        }
+    }
+}
+
+/// Return both policies in a deterministic randomized registration order.
+fn replay_policies(rng: &mut impl Rng) -> [ReplayPolicy; 2] {
+    let mut policies = [ReplayPolicy::Default, ReplayPolicy::DontCache];
+    policies.shuffle(rng);
+    policies
+}
 
 /// Open and return a temp fixed journal with the given config parameters and items of size ITEM_SIZE.
 async fn get_fixed_journal<const ITEM_SIZE: usize>(

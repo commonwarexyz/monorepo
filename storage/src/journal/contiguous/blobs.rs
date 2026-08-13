@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs,
+    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -565,11 +565,14 @@ impl<'a, B: RBlob> Blob<'a, B> {
         self,
         offset: u64,
         buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<Replay<'a, B>, Error> {
         match self {
+            // Live writable data reads through its CacheRef, whose policy is configured by the
+            // owner of that cache rather than by this replay operation.
             Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
             Self::Sealed(sealed) => {
-                let mut replay = sealed.replay(buffer_size)?;
+                let mut replay = sealed.replay(buffer_size, read_options)?;
                 replay.seek_to(offset)?;
                 Ok(Replay::paged(replay))
             }

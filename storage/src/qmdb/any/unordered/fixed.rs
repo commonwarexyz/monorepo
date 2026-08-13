@@ -155,7 +155,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
-        Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _,
+        Clock as _, Metrics as _, ReadOptions, Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -938,13 +938,14 @@ pub(crate) mod test {
             &self,
             start_pos: u64,
             buffer: NonZeroUsize,
+            read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
                 impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
                 JournalError,
             >,
         > + Send {
-            self.0.replay(start_pos, buffer)
+            self.0.replay(start_pos, buffer, read_options)
         }
     }
 

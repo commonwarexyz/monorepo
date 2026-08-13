@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
+    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -156,7 +156,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Read blob
         let len: usize = len.try_into().expect("blob too large for platform");
         let buf = blob
-            .read_at(0, len)
+            .read_at(0, len, ReadOptions::default())
             .await?
             .coalesce_with_pool(context.storage_buffer_pool());
 

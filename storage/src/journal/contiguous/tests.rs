@@ -4,7 +4,7 @@ use super::{Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as _, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
+    Blob as _, ReadOptions, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs},
@@ -34,7 +34,11 @@ pub(super) async fn corrupt_page(
         offset < size - physical_page_size,
         "corruption target must be an interior page"
     );
-    let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
+    let byte = blob
+        .read_at(offset, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
     blob.write_at(
         offset,
         vec![byte.as_ref()[0] ^ 0xFF],
@@ -258,7 +262,10 @@ where
     }
 
     {
-        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -289,7 +296,10 @@ where
     }
 
     {
-        let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(7, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -320,7 +330,10 @@ where
     }
 
     {
-        let stream = journal.replay(13, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(13, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -352,7 +365,10 @@ where
     }
 
     {
-        let stream = journal.replay(0, NZUsize!(9)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(9), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -439,7 +455,10 @@ where
     {
         // Replay from a position that may or may not be pruned (section-aligned)
         // We replay from position 10 which should be safe
-        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(10, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -518,7 +537,10 @@ where
 
     {
         // Replay from position 10 and verify positions
-        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(10, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -572,7 +594,10 @@ where
     let journal = factory("replay-on-empty".into()).await.unwrap();
 
     {
-        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -601,7 +626,10 @@ where
     let bounds = journal.bounds();
 
     {
-        let stream = journal.replay(bounds.end, NZUsize!(1024)).await.unwrap();
+        let stream = journal
+            .replay(bounds.end, NZUsize!(1024), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -704,7 +732,10 @@ where
 
         // Replay and verify all items
         {
-            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            let stream = journal
+                .replay(0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -768,7 +799,10 @@ where
 
         // Replay from position 10 (first non-pruned position)
         {
-            let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+            let stream = journal
+                .replay(10, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -1203,7 +1237,10 @@ where
 
         // Replay should yield no items
         {
-            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            let stream = journal
+                .replay(0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();

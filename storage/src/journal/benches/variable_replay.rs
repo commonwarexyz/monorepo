@@ -1,11 +1,14 @@
-use crate::{ITEM_SIZE, ITEMS_PER_BLOB, append_fixed_random_data, get_variable_journal};
+use crate::{
+    ITEM_SIZE, ITEMS_PER_BLOB, ReplayPolicy, append_fixed_random_data, get_variable_journal,
+    replay_policies,
+};
 use commonware_runtime::{
-    Runner as _, Supervisor as _,
+    Supervisor as _,
     benchmarks::{context, tokio},
-    tokio::{Config, Context, Runner},
+    tokio::{Config, Context},
 };
 use commonware_storage::journal::contiguous::{Contiguous as _, variable::Journal};
-use commonware_utils::{NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZUsize, sequence::FixedBytes, test_rng};
 use criterion::{Criterion, criterion_group};
 use futures::{StreamExt, pin_mut};
 use std::{
@@ -20,10 +23,11 @@ const PARTITION: &str = "variable-test-partition";
 async fn bench_run(
     journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
     buffer: usize,
+    policy: ReplayPolicy,
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let stream = reader
-        .replay(0, NZUsize!(buffer))
+        .replay(0, NZUsize!(buffer), policy.options())
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -41,53 +45,48 @@ async fn bench_run(
 /// Benchmark the replaying of items from a variable journal containing exactly that
 /// number of items.
 fn bench_variable_replay(c: &mut Criterion) {
+    let mut rng = test_rng();
     for items in [1_000, 10_000, 100_000, 500_000] {
         let cfg = Config::default();
-        let mut initialized = false;
         let runner = tokio::Runner::new(cfg.clone());
         for buffer in [16_384, 65_536, 1_048_576] {
-            c.bench_function(
-                &format!(
-                    "{}/items={} buffer={} size={}",
-                    module_path!(),
-                    items,
-                    buffer,
-                    ITEM_SIZE
-                ),
-                |b| {
-                    // Setup: populate journal (once, on first sample).
-                    if !initialized {
-                        Runner::new(cfg.clone()).start(|ctx| async move {
-                            let j = get_variable_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-                            append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
-                        });
-                        initialized = true;
-                    }
-
-                    // Benchmark: measure replay time.
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let mut j =
-                            get_variable_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
+            for policy in replay_policies(&mut rng) {
+                c.bench_function(
+                    &format!(
+                        "{}/items={} buffer={} size={} read_options={}",
+                        module_path!(),
+                        items,
+                        buffer,
+                        ITEM_SIZE,
+                        policy.label()
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let mut duration = Duration::ZERO;
+                            for _ in 0..iters {
+                                // A fresh journal and page cache give both arms equivalent
+                                // initial state before the one-pass replay.
+                                let journal = get_variable_journal(
+                                    ctx.child("storage"),
+                                    PARTITION,
+                                    ITEMS_PER_BLOB,
+                                )
                                 .await;
-                        let mut duration = Duration::ZERO;
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            j = bench_run(j, buffer).await;
-                            duration += start.elapsed();
-                        }
-                        duration
-                    });
-                },
-            );
-        }
+                                let journal =
+                                    append_fixed_random_data::<_, ITEM_SIZE>(journal, items).await;
 
-        // Cleanup: destroy journal.
-        if initialized {
-            Runner::new(cfg).start(|context| async move {
-                let j = get_variable_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
-                j.destroy().await.unwrap();
-            });
+                                let start = Instant::now();
+                                let journal = bench_run(journal, buffer, policy).await;
+                                duration += start.elapsed();
+
+                                journal.destroy().await.unwrap();
+                            }
+                            duration
+                        });
+                    },
+                );
+            }
         }
     }
 }

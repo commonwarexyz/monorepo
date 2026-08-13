@@ -42,7 +42,7 @@
 //! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{BufferPooler, Runner, Supervisor as _, deterministic};
+use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
 use commonware_storage::journal::{
     Error,
     contiguous::{
@@ -311,7 +311,9 @@ async fn collect_replay<C: Contiguous<Item = Item>>(
     start_pos: u64,
     buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
-    let stream = reader.replay(start_pos, buffer).await?;
+    let stream = reader
+        .replay(start_pos, buffer, ReadOptions::default())
+        .await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(result) = stream.next().await {

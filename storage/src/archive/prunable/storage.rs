@@ -194,7 +194,14 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let mut intervals = RMap::new();
         let oversized = {
             debug!("initializing archive from index journal");
-            let mut replay = oversized.replay(0, 0, cfg.replay_buffer).await?;
+            let mut replay = oversized
+                .replay(
+                    0,
+                    0,
+                    cfg.replay_buffer,
+                    commonware_runtime::ReadOptions::default(),
+                )
+                .await?;
             while let Some(result) = replay.next().await {
                 let (_section, position, entry) = result?;
 
