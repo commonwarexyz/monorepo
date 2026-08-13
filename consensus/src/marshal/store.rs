@@ -1,13 +1,30 @@
 //! Interfaces for stores of finalized certificates and blocks.
 
 use crate::{Block, simplex::types::Finalization, types::Height};
+use commonware_codec::CodecShared;
 use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
-use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Storage};
+use commonware_runtime::{Blob, BufferPooler, Clock, Handle, Metrics, Storage};
 use commonware_storage::{
     archive::{self, Archive, Identifier, immutable, prunable},
     translator::Translator,
 };
-use std::{error::Error, future::Future};
+use commonware_utils::BoxedError;
+use std::{error::Error, future::Future, pin::Pin, sync::Arc};
+
+/// A store's read half, shared by everything reading from it (see [HeightReader]).
+pub type Reader<T> = Arc<dyn HeightReader<Item = T>>;
+
+/// Future returned by [HeightReader::get].
+pub type Get<'a, T> = Pin<Box<dyn Future<Output = Result<Option<T>, BoxedError>> + Send + 'a>>;
+
+/// Reader of a [Certificates] or [Blocks] store.
+pub trait HeightReader: Send + Sync + 'static {
+    /// The type of item that is stored.
+    type Item;
+
+    /// Retrieve the item stored at `height` (see [Certificates::get] and [Blocks::get]).
+    fn get(&self, height: Height) -> Get<'_, Self::Item>;
+}
 
 /// Durable store for [Finalizations](Finalization) keyed by height and block digest.
 ///
@@ -109,6 +126,16 @@ pub trait Certificates: Send + Sync + Sized + 'static {
 
     /// Retrieve an iterator over ranges that overlap or follow `from`.
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
+
+    /// A reader over the latest published state, or `None` when the implementation cannot serve
+    /// reads off the store's owner.
+    ///
+    /// Callers obtain a reader once and keep it while the store itself is consumed and replaced by
+    /// every mutation, so a reader must track its store's successors rather than snapshot the state
+    /// it was built from. It must observe later publishes and later prunes.
+    fn reader(&self) -> Option<Reader<Finalization<Self::Scheme, Self::Commitment>>> {
+        None
+    }
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
@@ -225,6 +252,16 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     /// # Returns
     /// `Some(height)` if there are any stored blocks, or `None` if the store is empty.
     fn last_index(&self) -> Option<Height>;
+
+    /// A reader over the latest published state, or `None` when the implementation cannot serve
+    /// reads off the store's owner.
+    ///
+    /// Callers obtain a reader once and keep it while the store itself is consumed and replaced by
+    /// every mutation, so a reader must track its store's successors rather than snapshot the state
+    /// it was built from. It must observe later publishes and later prunes.
+    fn reader(&self) -> Option<Reader<Self::Block>> {
+        None
+    }
 }
 
 impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
@@ -331,6 +368,22 @@ where
     }
 }
 
+impl<B, V> HeightReader for prunable::Reader<B, V>
+where
+    B: Blob,
+    V: CodecShared + 'static,
+{
+    type Item = V;
+
+    fn get(&self, height: Height) -> Get<'_, Self::Item> {
+        Box::pin(async move {
+            Self::get(self, height.get())
+                .await
+                .map_err(BoxedError::from)
+        })
+    }
+}
+
 impl<T, E, B, C, S> Certificates for prunable::Archive<T, E, B, Finalization<S, C>>
 where
     T: Translator,
@@ -384,6 +437,10 @@ where
         <Self as Archive>::ranges_from(self, from.get())
             .map(|(s, e)| (Height::new(s), Height::new(e)))
     }
+
+    fn reader(&self) -> Option<Reader<Finalization<Self::Scheme, Self::Commitment>>> {
+        Some(Arc::new(Self::reader(self)))
+    }
 }
 
 impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
@@ -432,5 +489,9 @@ where
 
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
+    }
+
+    fn reader(&self) -> Option<Reader<Self::Block>> {
+        Some(Arc::new(Self::reader(self)))
     }
 }

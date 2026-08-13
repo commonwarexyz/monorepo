@@ -95,6 +95,24 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
+    /// The underlying blob of this writer.
+    ///
+    /// Reading it skips the write buffer, so call [Self::flush] first to see all writes.
+    /// Mutating it while this [Write] exists causes undefined behavior.
+    pub const fn blob(&self) -> &B {
+        &self.blob
+    }
+
+    /// Write buffered bytes to the blob without syncing.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        if let Some((buf, offset)) = self.buffer.take() {
+            self.sync_state
+                .write_at(&self.blob, offset, buf, WriteOptions::default())
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Ensure the read doesn't overflow.
@@ -240,12 +258,7 @@ impl<B: Blob> Write<B> {
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
     /// mutate the blob wait before issuing blob operations.
     pub async fn start_sync(&mut self) -> Handle<()> {
-        if let Some((buf, offset)) = self.buffer.take()
-            && let Err(err) = self
-                .sync_state
-                .write_at(&self.blob, offset, buf, WriteOptions::default())
-                .await
-        {
+        if let Err(err) = self.flush().await {
             return Handle::ready(Err(err));
         }
 

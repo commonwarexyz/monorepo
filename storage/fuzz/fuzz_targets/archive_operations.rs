@@ -30,9 +30,11 @@ enum ArchiveOperation {
     HasByKey(RawKey),
     Prune(u64),
     Sync,
+    StartSync,
     NextGap {
         start: u64,
     },
+    ReaderGet(u64),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -65,6 +67,7 @@ fn fuzz(data: FuzzInput) {
         };
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.child("storage"), cfg.clone()).await.expect("init failed");
+        let reader = archive.reader();
 
         // Keep a map of inserted items for verification
         let mut items = Vec::new();
@@ -74,6 +77,12 @@ fn fuzz(data: FuzzInput) {
 
         // Track written indices
         let mut written_indices = std::collections::HashSet::new();
+
+        // What readers see: everything the last sync covered, minus anything pruned since.
+        let mut published: Vec<(u64, RawKey, RawValue)> = Vec::new();
+
+        // Durability handles still in flight, awaited once every operation has run.
+        let mut pending_syncs = Vec::new();
 
         for op in &data.operations {
             match op {
@@ -195,24 +204,42 @@ fn fuzz(data: FuzzInput) {
                 ArchiveOperation::Prune(min) => {
                     let min = min - min % cfg.items_per_section.get();
                     archive = archive.prune(min).await.expect("prune failed");
-                    match oldest_allowed {
-                        None => {
-                            oldest_allowed = Some(min);
-                            items.retain(|(i, _, _)| *i >= min);
-                            written_indices.retain(|i| *i >= min);
-                        }
-                        Some(already_pruned) => {
-                            if min > already_pruned {
-                                oldest_allowed = Some(min);
-                                items.retain(|(i, _, _)| *i >= min);
-                                written_indices.retain(|i| *i >= min);
-                            }
-                        }
+                    if oldest_allowed.is_none_or(|already_pruned| min > already_pruned) {
+                        oldest_allowed = Some(min);
+                        items.retain(|(i, _, _)| *i >= min);
+                        written_indices.retain(|i| *i >= min);
+                        // A prune hides state at once, with no publish.
+                        published.retain(|(i, _, _)| *i >= min);
                     }
                 }
 
                 ArchiveOperation::Sync => {
                     archive = archive.sync().await.expect("sync failed");
+                    // A blocking sync publishes everything accepted so far.
+                    published = items.clone();
+                }
+
+                ArchiveOperation::StartSync => {
+                    let handle;
+                    (archive, handle) = archive.start_sync().await.expect("start_sync failed");
+                    // Publishing follows the flush, so readers see everything accepted before the
+                    // handle resolves. Hold the handle so later operations run while durability is
+                    // still pending, which is what makes this different from a blocking sync.
+                    published = items.clone();
+                    pending_syncs.push(handle);
+                }
+
+                ArchiveOperation::ReaderGet(index) => {
+                    let result = reader.get(*index).await.expect("reader get failed");
+                    let expected = published
+                        .iter()
+                        .find(|(i, _, _)| *i == *index)
+                        .map(|(_, _, value)| value);
+                    assert_eq!(
+                        result.as_ref().map(|value| value.as_ref()),
+                        expected.map(|value| value.as_slice()),
+                        "reader value mismatch for index {index}",
+                    );
                 }
 
                 ArchiveOperation::NextGap { start } => {
@@ -235,6 +262,11 @@ fn fuzz(data: FuzzInput) {
                         }
                 }
             }
+        }
+
+        // Every in-flight durability handle must resolve.
+        for handle in pending_syncs {
+            handle.await.expect("start_sync handle failed");
         }
 
         archive = archive.sync().await.expect("final sync failed");

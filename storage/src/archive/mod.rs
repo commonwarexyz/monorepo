@@ -39,6 +39,8 @@ pub enum Error {
     RecordCorrupted,
     #[error("record too large")]
     RecordTooLarge,
+    #[error("section holds too many records: {0}")]
+    SectionFull(u64),
 }
 
 /// A write-once key-value store addressed by both an index and a key.
@@ -1289,5 +1291,15 @@ mod tests {
         value: i32,
     ) {
         assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_reader_futures_are_send(
+        archive: &prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+    ) {
+        fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        let reader = archive.reader();
+        assert_send_sync(&reader);
+        assert_send(reader.get(1));
     }
 }

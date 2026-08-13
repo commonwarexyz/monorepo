@@ -6,6 +6,7 @@ use super::{
     durability::{DispatchGate, Durable as _},
     floor::{Floor, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
+    serving,
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
     variant::NoBuffer,
@@ -37,7 +38,7 @@ use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
-        metrics::{Gauge, GaugeExt, MetricsExt as _},
+        metrics::{Gauge, GaugeExt, Histogram, HistogramExt as _, MetricsExt as _, histogram},
         traces::TracedExt as _,
     },
 };
@@ -157,6 +158,8 @@ where
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
+    // Time the actor loop spends answering produce requests inline
+    produce_serving: Histogram,
 }
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
@@ -230,6 +233,11 @@ where
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
         let processed_height = context.gauge("processed_height", "Processed height of application");
+        let produce_serving = context.histogram(
+            "produce_serving_duration",
+            "Time the actor loop spends answering produce requests inline",
+            histogram::Buckets::LOCAL,
+        );
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
@@ -269,6 +277,7 @@ where
                 finalized_blocks,
                 finalized_height,
                 processed_height,
+                produce_serving,
             },
             Mailbox::new(sender, config.max_pending_acks),
             floor,
@@ -379,6 +388,21 @@ where
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>::default();
+
+        // Serve finalized backfill off the actor loop when both stores expose readers. Stores
+        // without readers, such as immutable archives, keep the inline path.
+        let serving = match (
+            self.finalizations_by_height.reader(),
+            self.finalized_blocks.reader(),
+        ) {
+            (Some(finalizations), Some(blocks)) => Some(serving::spawn::<_, V, _>(
+                self.context.child("serving"),
+                finalizations,
+                blocks,
+                self.max_repair,
+            )),
+            _ => None,
+        };
 
         // Observe durable syncs that no consensus caller awaits (the
         // notarization and finalization paths). A flush failure inside
@@ -533,6 +557,7 @@ where
                         &mut syncs,
                         &mut buffer,
                         &mut application,
+                        serving.as_ref(),
                     )
                     .await;
             },
@@ -937,6 +962,7 @@ where
 
     /// Handles a batch of resolver messages, starting one pooled
     /// finalized-archive sync if any accepted delivery buffered a write.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_resolver_message<Buf, R>(
         mut self: Box<Self>,
         message: handler::Message<V::Commitment>,
@@ -945,6 +971,7 @@ where
         syncs: &mut Pool<PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        serving: Option<&serving::Mailbox>,
     ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -952,6 +979,7 @@ where
     {
         let mut handled = false;
         let mut produces = Vec::new();
+        let mut finalized = Vec::new();
         let mut delivers = Vec::new();
 
         // Drain up to max_repair resolver messages. Block deliveries are handled
@@ -967,9 +995,17 @@ where
             handled = true;
 
             match msg {
-                handler::Message::Produce { key, response } => {
-                    produces.push((key, response));
-                }
+                handler::Message::Produce { key, response } => match (key, serving.is_some()) {
+                    // Finalized keys read only the finalized stores, so the serving task answers
+                    // them off this loop. Held until the batch tail, like the inline produces, so
+                    // a height this batch finalized is published before the request reads.
+                    (Key::Finalized { height }, true) => {
+                        finalized.push((height, response));
+                    }
+                    (key, _) => {
+                        produces.push((key, response));
+                    }
+                },
                 handler::Message::Deliver {
                     delivery,
                     value,
@@ -1020,14 +1056,28 @@ where
         let round = self.floor.round();
         self = self.start_finalized_sync(round, syncs).await;
 
+        // Hand the finalized requests off now that this batch's writes are published.
+        if let Some(serving) = serving {
+            for (height, response) in finalized {
+                if !response.is_closed() {
+                    serving.forward(height, response);
+                }
+            }
+        }
+
         // Handle produce requests in parallel.
-        join_all(
-            produces
-                .into_iter()
-                .filter(|(_, response)| !response.is_closed())
-                .map(|(key, response)| self.handle_produce(key, response, buffer)),
-        )
-        .await;
+        if !produces.is_empty() {
+            let start = self.context.current();
+            join_all(
+                produces
+                    .into_iter()
+                    .filter(|(_, response)| !response.is_closed())
+                    .map(|(key, response)| self.handle_produce(key, response, buffer)),
+            )
+            .await;
+            self.produce_serving
+                .observe_between(start, self.context.current());
+        }
 
         self
     }
@@ -1057,7 +1107,7 @@ where
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
-                response.send_lossy((finalization, V::into_inner(block)).encode());
+                response.send_lossy(serving::finalized_response::<V, _>(finalization, block));
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {

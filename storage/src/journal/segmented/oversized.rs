@@ -54,7 +54,7 @@
 
 use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
-    glob::{Config as GlobConfig, Glob},
+    glob::{Capture, Config as GlobConfig, Glob},
 };
 use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
@@ -471,6 +471,16 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.values.get(section, offset, size).await
     }
 
+    /// See [Glob::capture_section].
+    pub(crate) async fn capture_values(
+        mut self,
+        section: u64,
+    ) -> Result<(Self, Option<Capture<E::Blob, V>>), Error> {
+        let capture;
+        (self.values, capture) = self.values.capture_section(section).await?;
+        Ok((self, capture))
+    }
+
     /// Consumes the journal and returns an owned [Replay] reader over index entries
     /// starting from `start_position` in `start_section`.
     ///
@@ -621,6 +631,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.index.size(section)
     }
 
+    /// The number of index records in `section`, which is the position the next append takes.
+    pub fn records(&self, section: u64) -> Result<u64, Error> {
+        self.index.section_len(section)
+    }
+
     /// Get the value size for a section, derived from the last entry's location.
     pub async fn value_size(&self, section: u64) -> Result<u64, Error> {
         match self.index.last(section).await {
@@ -641,6 +656,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// section pruned in a previous execution reports false.
     pub fn pruned(&self, section: u64) -> bool {
         self.index.pruned(section)
+    }
+
+    /// Returns an iterator over all section numbers.
+    pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.index.sections()
     }
 
     /// Returns the oldest section number, if any exist.
@@ -700,8 +720,8 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
-        buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
+        Blob, Buf, BufMut, BufferPooler, Metrics as _, Runner, Storage, Supervisor as _,
+        WriteOptions, buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
     };
     use commonware_utils::{NZU16, NZUsize};
 
@@ -4171,6 +4191,287 @@ mod tests {
                 Err(Error::AlreadyPrunedToSection(1))
             ));
             assert!(oversized.last(1).await.unwrap().is_some());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// The value of the runtime's storage-write counter.
+    fn storage_writes(context: &deterministic::Context) -> u64 {
+        context
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix("runtime_storage_writes_total "))
+            .expect("storage_writes metric must be registered")
+            .parse()
+            .expect("metric must be an integer")
+    }
+
+    /// Append `(id, [id; 16])` pairs at the given `(section, id)` coordinates, returning
+    /// each append's `(section, position, offset, size)`.
+    async fn append_pairs(
+        oversized: &mut Option<Oversized<deterministic::Context, TestEntry, TestValue>>,
+        pairs: &[(u64, u8)],
+    ) -> Vec<(u64, u64, u64, u32)> {
+        let mut located = Vec::new();
+        for &(section, id) in pairs {
+            let (journal, position, offset, size) = oversized
+                .take()
+                .unwrap()
+                .append(section, TestEntry::new(id as u64, 0, 0), &[id; 16])
+                .await
+                .expect("Failed to append");
+            *oversized = Some(journal);
+            located.push((section, position, offset, size));
+        }
+        located
+    }
+
+    /// The deterministic runtime's blob type.
+    type TestBlob = <deterministic::Context as Storage>::Blob;
+
+    /// Assert `capture` returns the same values as the live journal for every location in
+    /// `located` belonging to `section`.
+    async fn assert_value_parity(
+        oversized: &Oversized<deterministic::Context, TestEntry, TestValue>,
+        capture: &Capture<TestBlob, TestValue>,
+        section: u64,
+        located: &[(u64, u64, u64, u32)],
+    ) {
+        for &(_, _, offset, size) in located.iter().filter(|(s, ..)| *s == section) {
+            let live = oversized
+                .get_value(section, offset, size)
+                .await
+                .expect("live get_value");
+            assert_eq!(
+                live,
+                capture.get(offset, size).await.expect("capture value")
+            );
+        }
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_parity() {
+        for compression in [None, Some(3)] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let mut cfg = test_cfg(&context);
+                cfg.compression = compression;
+                let oversized: Oversized<_, TestEntry, TestValue> =
+                    Oversized::init(context.child("journal"), cfg, None)
+                        .await
+                        .expect("Failed to init");
+                let mut slot = Some(oversized);
+                let located =
+                    append_pairs(&mut slot, &[(1, 1), (1, 2), (1, 3), (2, 4), (2, 5)]).await;
+                let mut oversized = slot.unwrap().sync(&[1, 2]).await.expect("Failed to sync");
+
+                for section in [1, 2] {
+                    let capture;
+                    (oversized, capture) = oversized
+                        .capture_values(section)
+                        .await
+                        .expect("Failed to capture");
+                    let capture = capture.expect("section must exist");
+                    assert_value_parity(&oversized, &capture, section, &located).await;
+                }
+
+                oversized.destroy().await.expect("Failed to destroy");
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_excludes_later_appends() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("journal"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+            let mut slot = Some(oversized);
+            let located = append_pairs(&mut slot, &[(1, 1), (1, 2)]).await;
+            let mut oversized = slot.unwrap().sync(1).await.expect("Failed to sync");
+
+            let capture;
+            (oversized, capture) = oversized
+                .capture_values(1)
+                .await
+                .expect("Failed to capture");
+            let capture = capture.expect("section must exist");
+
+            // A later append (synced or not) sits past the capture's size.
+            let mut slot = Some(oversized);
+            let late = append_pairs(&mut slot, &[(1, 3)]).await;
+            let oversized = slot.unwrap().sync(1).await.expect("Failed to sync");
+            let (_, _, offset, size) = late[0];
+            assert!(oversized.get_value(1, offset, size).await.is_ok());
+            assert!(matches!(
+                capture.get(offset, size).await,
+                Err(Error::Runtime(RError::BlobInsufficientLength))
+            ));
+            assert_value_parity(&oversized, &capture, 1, &located).await;
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_survives_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("journal"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+            let mut slot = Some(oversized);
+            let located = append_pairs(&mut slot, &[(1, 1), (2, 2)]).await;
+            let mut oversized = slot.unwrap().sync(&[1, 2]).await.expect("Failed to sync");
+
+            let capture;
+            (oversized, capture) = oversized
+                .capture_values(1)
+                .await
+                .expect("Failed to capture");
+            let capture = capture.expect("section must exist");
+
+            // Prune section 1 away. The live journal rejects reads, the capture keeps serving
+            // through the handle it holds.
+            let (oversized, pruned) = oversized.prune(2).await.expect("Failed to prune");
+            assert!(pruned);
+            let (section, _, offset, size) = located[0];
+            assert!(oversized.get_value(section, offset, size).await.is_err());
+            assert_eq!(
+                capture.get(offset, size).await.expect("capture value"),
+                [1; 16]
+            );
+
+            // Capturing a pruned section is an error rather than an empty capture. The error
+            // destroys the journal, so this is the last thing the test can do with it.
+            assert!(matches!(
+                oversized.capture_values(section).await,
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_before_sync_observes_accepted_appends() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("journal"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+            let mut slot = Some(oversized);
+            let located = append_pairs(&mut slot, &[(1, 1), (1, 2)]).await;
+            let mut oversized = slot.unwrap();
+
+            // Without a sync, the capture's flush is what puts the buffered values on the blob.
+            let capture;
+            (oversized, capture) = oversized
+                .capture_values(1)
+                .await
+                .expect("Failed to capture");
+            let capture = capture.expect("section must exist");
+            assert_value_parity(&oversized, &capture, 1, &located).await;
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_after_sync_writes_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("journal"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+            let mut slot = Some(oversized);
+            append_pairs(&mut slot, &[(1, 1), (1, 2)]).await;
+            let mut oversized = slot.unwrap().sync(1).await.expect("Failed to sync");
+
+            let writes = storage_writes(&context);
+            let capture;
+            (oversized, capture) = oversized
+                .capture_values(1)
+                .await
+                .expect("Failed to capture");
+            assert!(capture.is_some(), "section must exist");
+            assert_eq!(
+                storage_writes(&context),
+                writes,
+                "a post-sync capture must not write to storage"
+            );
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_none_without_value_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to init");
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("Failed to append");
+            oversized = oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
+
+            // Losing the value blob makes repair rewind the index section to zero entries, so a
+            // capture must find nothing rather than fail.
+            context
+                .remove(&cfg.value_partition, Some(&1u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove value blob");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg, None)
+                    .await
+                    .expect("Failed to reinit");
+            let capture;
+            (oversized, capture) = oversized.capture_values(1).await.expect("capture failed");
+            assert!(capture.is_none());
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_capture_values_rejects_torn_value() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("journal"), test_cfg(&context), None)
+                    .await
+                    .expect("Failed to init");
+            let mut slot = Some(oversized);
+            let located = append_pairs(&mut slot, &[(1, 1)]).await;
+            let mut oversized = slot.unwrap().sync(1).await.expect("Failed to sync");
+
+            // Corrupt the value bytes, then capture. The capture must surface the mismatch.
+            let (_, _, offset, size) = located[0];
+            oversized
+                .values
+                .inject(1, offset, vec![0xFF; size as usize])
+                .await
+                .expect("Failed to corrupt value bytes");
+            let capture;
+            (oversized, capture) = oversized
+                .capture_values(1)
+                .await
+                .expect("Failed to capture");
+            let capture = capture.expect("section must exist");
+            assert!(matches!(
+                capture.get(offset, size).await,
+                Err(Error::ChecksumMismatch(_, _))
+            ));
 
             oversized.destroy().await.expect("Failed to destroy");
         });

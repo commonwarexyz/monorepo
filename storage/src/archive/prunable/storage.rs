@@ -1,4 +1,7 @@
-use super::{Config, Translator};
+use super::{
+    Config, Translator,
+    reader::{Location, Reader, State, section},
+};
 use crate::{
     Context,
     archive::{Error, Identifier},
@@ -13,8 +16,11 @@ use commonware_runtime::{
     Buf, BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Array;
-use std::collections::{BTreeMap, BTreeSet, btree_map};
+use commonware_utils::{Array, sync::RwLock};
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map},
+    sync::Arc,
+};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -126,17 +132,18 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    /// Maps translated key representation to its corresponding index.
+    /// Maps translated key representation to its corresponding index. Not shared, since only
+    /// the writer resolves keys.
     keys: Index<T, u64>,
 
-    /// Maps index to its first position in the index journal.
-    indices: BTreeMap<u64, u64>,
+    /// Where each item lives, and the captures readers serve from (see [super::reader]).
+    state: Arc<RwLock<State<E::Blob, V>>>,
 
-    /// Additional positions for indices that have more than one entry.
-    /// Only populated when used via [crate::archive::MultiArchive::put_multi].
-    extra_indices: BTreeMap<u64, Vec<u64>>,
+    /// Later locations for indices holding more than one item, populated only by
+    /// [crate::archive::MultiArchive::put_multi]. Not shared, since readers serve the first.
+    extras: BTreeMap<u64, Vec<Location>>,
 
-    /// Interval tracking for gap detection.
+    /// Interval tracking for gap detection. Not shared, since readers do not query gaps.
     intervals: RMap,
 
     // Metrics
@@ -151,25 +158,7 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
-        (index / self.items_per_section) * self.items_per_section
-    }
-
-    /// Returns true when `index` is below the prune floor.
-    const fn pruned(&self, index: u64) -> bool {
-        match self.oldest_allowed {
-            Some(oldest_allowed) => index < oldest_allowed,
-            None => false,
-        }
-    }
-
-    /// Iterate over all positions for a given index (first + extras).
-    fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
-        self.indices.get(&index).into_iter().copied().chain(
-            self.extra_indices
-                .get(&index)
-                .into_iter()
-                .flat_map(|v| v.iter().copied()),
-        )
+        section(index, self.items_per_section)
     }
 
     /// See [Archive::init].
@@ -188,35 +177,52 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
 
         // Initialize keys and replay index journal (no values read!)
-        let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
-        let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let items_per_section = cfg.items_per_section.get();
+        let mut locations: BTreeMap<u64, Location> = BTreeMap::new();
+        let mut extras: BTreeMap<u64, Vec<Location>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
-        let oversized = {
+        let mut oversized = {
             debug!("initializing archive from index journal");
             let mut replay = oversized.replay(0, 0, cfg.replay_buffer).await?;
             while let Some(result) = replay.next().await {
-                let (_section, position, entry) = result?;
+                let (_section, position, record) = result?;
 
-                // Store index location (position in index journal)
-                match indices.entry(entry.index) {
+                // Store where the item lives
+                let location = Location {
+                    value_offset: record.value_offset,
+                    position: u32::try_from(position).map_err(|_| Error::SectionFull(position))?,
+                    value_size: record.value_size,
+                };
+                match locations.entry(record.index) {
                     btree_map::Entry::Vacant(e) => {
-                        e.insert(position);
+                        e.insert(location);
                     }
                     btree_map::Entry::Occupied(_) => {
-                        extra_indices.entry(entry.index).or_default().push(position);
+                        extras.entry(record.index).or_default().push(location);
                     }
                 }
 
                 // Store index in keys
-                keys.insert(&entry.key, entry.index);
+                keys.insert(&record.key, record.index);
 
                 // Store index in intervals
-                intervals.insert(entry.index);
+                intervals.insert(record.index);
             }
             debug!("archive initialized");
             replay.finish()?
         };
+
+        // Capture the recovered sections so readers work immediately after restart. Repair can
+        // leave an index section whose values are gone, which captures as nothing.
+        let mut captures = BTreeMap::new();
+        for section in oversized.sections().collect::<Vec<_>>() {
+            let capture;
+            (oversized, capture) = oversized.capture_values(section).await?;
+            if let Some(capture) = capture {
+                captures.insert(section, capture);
+            }
+        }
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
@@ -228,19 +234,21 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let gets = context.counter("gets", "Number of gets performed");
         let has = context.counter("has", "Number of has performed");
         let syncs = context.counter("syncs", "Number of syncs called");
-        let _ = items_tracked.try_set(indices.len());
+        let _ = items_tracked.try_set(locations.len());
 
-        // Return populated archive
         Ok(Self {
-            items_per_section: cfg.items_per_section.get(),
+            items_per_section,
             oversized,
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
-            indices,
-            extra_indices,
-            intervals,
             keys,
+            state: Arc::new(RwLock::new(State {
+                locations,
+                captures,
+            })),
+            extras,
+            intervals,
             items_tracked,
             indices_pruned,
             unnecessary_reads,
@@ -250,101 +258,26 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         })
     }
 
-    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        // Update metrics
-        self.gets.inc();
-
-        // Get first position at this index
-        let position = match self.indices.get(&index) {
-            Some(&position) => position,
-            None => return Ok(None),
-        };
-
-        // Fetch index entry to get value location
-        let section = self.section(index);
-        let entry = self.oversized.get(section, position).await?;
-        let (value_offset, value_size) = entry.value_location();
-
-        // Fetch value directly from blob storage (bypasses page cache)
-        let value = self
-            .oversized
-            .get_value(section, value_offset, value_size)
-            .await?;
-        Ok(Some(value))
-    }
-
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        // Update metrics
-        self.gets.inc();
-
-        // Fetch index
-        let iter = self.keys.get(key);
-        for index in iter {
-            // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
-                continue;
-            }
-
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
-                return Err(Error::RecordCorrupted);
-            }
-            let section = self.section(*index);
-
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, position).await?;
-
-                // Verify key matches
-                if entry.key.as_ref() == key.as_ref() {
-                    // Fetch value directly from blob storage (bypasses page cache)
-                    let (value_offset, value_size) = entry.value_location();
-                    let value = self
-                        .oversized
-                        .get_value(section, value_offset, value_size)
-                        .await?;
-                    return Ok(Some(value));
-                }
-                self.unnecessary_reads.inc();
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Check whether any retained index stores `key`.
+    /// Capture `sections` and publish them to readers.
     ///
-    /// Confirms translated-key candidates against index journal entries,
-    /// never reading values.
-    async fn has_key(&self, key: &K) -> Result<bool, Error> {
-        for index in self.keys.get(key) {
-            // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
-                continue;
-            }
-
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
-                return Err(Error::RecordCorrupted);
-            }
-            let section = self.section(*index);
-
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, position).await?;
-                if entry.key.as_ref() == key.as_ref() {
-                    return Ok(true);
-                }
-                self.unnecessary_reads.inc();
+    /// Captures are taken before the guard, so no read waits on I/O. Callers publish after
+    /// syncing, so each capture's flush has nothing to write.
+    async fn publish(
+        mut self: Box<Self>,
+        sections: impl IntoIterator<Item = u64>,
+    ) -> Result<Box<Self>, Error> {
+        let mut captured = Vec::new();
+        for section in sections {
+            // A section with writes to publish still has its value blob open, so never `None`.
+            let capture;
+            (self.oversized, capture) = self.oversized.capture_values(section).await?;
+            if let Some(capture) = capture {
+                captured.push((section, capture));
             }
         }
 
-        Ok(false)
-    }
-
-    fn has_index(&self, index: u64) -> bool {
-        // Check if index exists
-        self.indices.contains_key(&index)
+        self.state.write().captures.extend(captured);
+        Ok(self)
     }
 
     async fn put_internal(
@@ -362,24 +295,44 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
 
         // Check for existing index when enforcing single-item semantics.
-        if skip_if_index_exists && self.indices.contains_key(&index) {
+        if skip_if_index_exists && self.state.read().locations.contains_key(&index) {
             return Ok((self, true));
         }
 
-        // Write value and index entry atomically (glob first, then index)
+        // Refuse before appending, so a section that cannot be tracked is never written. A
+        // `Location` holds its position in a u32, which bounds a section's record count.
         let section = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
-        let position;
-        (self.oversized, position, _, _) = self.oversized.append(section, entry, &data).await?;
+        let position = self.oversized.records(section)?;
+        if u32::try_from(position).is_err() {
+            return Err(Error::SectionFull(position));
+        }
 
-        // Store index location
-        match self.indices.entry(index) {
-            btree_map::Entry::Vacant(e) => {
-                e.insert(position);
-            }
-            btree_map::Entry::Occupied(_) => {
-                self.extra_indices.entry(index).or_default().push(position);
-            }
+        // Write value and index entry atomically (glob first, then index)
+        let record = Record::new(index, key.clone(), 0, 0);
+        let (position, value_offset, value_size);
+        (self.oversized, position, value_offset, value_size) =
+            self.oversized.append(section, record, &data).await?;
+        let location = Location {
+            value_offset,
+            position: u32::try_from(position).map_err(|_| Error::SectionFull(position))?,
+            value_size,
+        };
+
+        // Store where the item lives. Readers see it once a sync publishes the section.
+        let (extra, items) = {
+            let mut state = self.state.write();
+            let extra = match state.locations.entry(index) {
+                btree_map::Entry::Vacant(e) => {
+                    e.insert(location);
+                    None
+                }
+                // Readers serve the first item at an index, so later ones go to `extras`.
+                btree_map::Entry::Occupied(_) => Some(location),
+            };
+            (extra, state.locations.len())
+        };
+        if let Some(location) = extra {
+            self.extras.entry(index).or_default().push(location);
         }
 
         // Store interval
@@ -393,7 +346,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.pending.insert(section);
 
         // Update metrics
-        let _ = self.items_tracked.try_set(self.indices.len());
+        let _ = self.items_tracked.try_set(items);
         Ok((self, true))
     }
 
@@ -412,23 +365,33 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
         debug!(min, "pruning archive");
 
+        // Cut locations and their captures under one guard, before the journal drops anything, so
+        // no reader can serve below the new floor. A read already under way finishes, since its
+        // blob outlives the name.
+        let (pruned, stale, items) = {
+            let mut state = self.state.write();
+            let State {
+                locations,
+                captures,
+            } = &mut *state;
+            let kept = locations.split_off(&min);
+            let pruned = std::mem::replace(locations, kept);
+            let kept = captures.split_off(&min);
+            let stale = std::mem::replace(captures, kept);
+            (pruned, stale, locations.len())
+        };
+        self.indices_pruned.inc_by(pruned.len() as u64);
+        self.extras = self.extras.split_off(&min);
+
+        // Releasing the last handle on a pruned blob closes it, so do that with no reader waiting.
+        drop(stale);
+
         // Prune oversized journal (handles both index and values)
         (self.oversized, _) = self.oversized.prune(min).await?;
 
         // Remove pending and requested sync work (no need to call `sync` as we are pruning)
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
-
-        // Remove all indices that are less than min
-        loop {
-            let next = match self.indices.first_key_value() {
-                Some((index, _)) if *index < min => *index,
-                _ => break,
-            };
-            self.indices.remove(&next).unwrap();
-            self.extra_indices.remove(&next);
-            self.indices_pruned.inc();
-        }
 
         // Remove all keys from interval tree less than min
         if min > 0 {
@@ -437,15 +400,94 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Update last pruned (to prevent reads from pruned sections)
         self.oldest_allowed = Some(min);
-        let _ = self.items_tracked.try_set(self.indices.len());
+        let _ = self.items_tracked.try_set(items);
         Ok(self)
+    }
+
+    /// Where the first item at `index` lives, if any.
+    ///
+    /// Pruning trims `locations` under the same guard that raises the floor, so an index below
+    /// the floor is already absent.
+    fn locate(&self, index: u64) -> Option<Location> {
+        self.state.read().locations.get(&index).copied()
+    }
+
+    /// Where every item at `index` lives, first one first.
+    ///
+    /// The trailing slice is empty unless `put_multi` stored more than one item here.
+    fn locate_all(&self, index: u64) -> Option<(Location, &[Location])> {
+        let first = self.locate(index)?;
+        let rest = self.extras.get(&index).map_or(&[][..], Vec::as_slice);
+        Some((first, rest))
+    }
+
+    /// Read the value at `location` in `section`.
+    async fn read_value(&self, section: u64, location: &Location) -> Result<V, Error> {
+        // Fetch value directly from blob storage (bypasses page cache)
+        Ok(self
+            .oversized
+            .get_value(section, location.value_offset, location.value_size)
+            .await?)
+    }
+
+    /// Which of `index`'s locations holds `key`, if any.
+    ///
+    /// Confirms translated-key candidates against index journal records, never reading values.
+    async fn match_key(
+        &self,
+        index: u64,
+        (first, rest): (Location, &[Location]),
+        key: &K,
+    ) -> Result<Option<Location>, Error> {
+        let section = self.section(index);
+        for location in std::iter::once(first).chain(rest.iter().copied()) {
+            let record = self
+                .oversized
+                .get(section, u64::from(location.position))
+                .await?;
+            if record.key.as_ref() == key.as_ref() {
+                return Ok(Some(location));
+            }
+            self.unnecessary_reads.inc();
+        }
+        Ok(None)
+    }
+
+    /// The section and location stored under `key` at one of its candidate indices.
+    async fn locate_key(&self, key: &K) -> Result<Option<(u64, Location)>, Error> {
+        // Keys are pruned lazily, so a candidate below the floor may still be listed.
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        for index in self.keys.get(key) {
+            if *index < oldest_allowed {
+                continue;
+            }
+            // The key index must never name an index with nothing stored at it.
+            let Some(locations) = self.locate_all(*index) else {
+                return Err(Error::RecordCorrupted);
+            };
+            if let Some(location) = self.match_key(*index, locations, key).await? {
+                return Ok(Some((self.section(*index), location)));
+            }
+        }
+        Ok(None)
     }
 
     /// See [crate::archive::Archive::get].
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        self.gets.inc();
         match identifier {
-            Identifier::Index(index) => self.get_index(index).await,
-            Identifier::Key(key) => self.get_key(key).await,
+            Identifier::Index(index) => {
+                let Some(location) = self.locate(index) else {
+                    return Ok(None);
+                };
+                Ok(Some(self.read_value(self.section(index), &location).await?))
+            }
+            Identifier::Key(key) => {
+                let Some((section, location)) = self.locate_key(key).await? else {
+                    return Ok(None);
+                };
+                Ok(Some(self.read_value(section, &location).await?))
+            }
         }
     }
 
@@ -453,8 +495,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
         self.has.inc();
         match identifier {
-            Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.has_key(key).await,
+            Identifier::Index(index) => Ok(self.locate(index).is_some()),
+            Identifier::Key(key) => Ok(self.locate_key(key).await?.is_some()),
         }
     }
 
@@ -462,6 +504,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         // Update metrics (`requested` sections were already counted by `start_sync`)
         self.syncs.inc_by(self.pending.len() as u64);
+        let dirty: Vec<u64> = self.pending.iter().copied().collect();
         self.requested.append(&mut self.pending);
 
         // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
@@ -469,6 +512,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.oversized = self.oversized.sync(&self.requested).await?;
 
         self.requested.clear();
+
+        self = self.publish(dirty).await?;
         Ok(self)
     }
 
@@ -480,9 +525,14 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Move sections into `requested` rather than dropping them: section buffers reuse
         // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
         // without issuing a new sync.
+        let dirty: Vec<u64> = self.pending.iter().copied().collect();
         self.requested.append(&mut self.pending);
+
         let handle;
         (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
+
+        // Publish without waiting for durability
+        self = self.publish(dirty).await?;
         Ok((self, handle))
     }
 
@@ -523,30 +573,15 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::MultiArchive::get_all].
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
-        // Update metrics
         self.gets.inc();
-
-        // Check if the index exists.
-        if !self.indices.contains_key(&index) {
+        let Some((first, rest)) = self.locate_all(index) else {
             return Ok(None);
-        }
+        };
 
-        // Get all positions at this index
         let section = self.section(index);
-        let extra_count = self.extra_indices.get(&index).map_or(0, Vec::len);
-
-        let mut values = Vec::with_capacity(1 + extra_count);
-        for position in self.iter_positions(index) {
-            // Fetch index entry from index journal to verify key
-            let entry = self.oversized.get(section, position).await?;
-
-            // Fetch value directly from blob storage (bypasses page cache)
-            let (value_offset, value_size) = entry.value_location();
-            let value = self
-                .oversized
-                .get_value(section, value_offset, value_size)
-                .await?;
-            values.push(value);
+        let mut values = Vec::with_capacity(1 + rest.len());
+        for location in std::iter::once(first).chain(rest.iter().copied()) {
+            values.push(self.read_value(section, &location).await?);
         }
         Ok(Some(values))
     }
@@ -555,27 +590,15 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
-        // Ignore pruned indices.
-        if self.pruned(index) {
-            return Ok(false);
-        }
-
-        // A key absent from the in-memory index is not stored anywhere, so
-        // absence is decided without touching disk. A translated-key hit may
-        // be a collision, so confirm against the stored keys at `index`
-        // (reads index journal entries, never values).
+        // A key absent from the in-memory index is not stored anywhere, so absence is decided
+        // without touching disk. A translated-key hit may be a collision, so confirm it.
         if !self.keys.get(key).any(|candidate| *candidate == index) {
             return Ok(false);
         }
-        let section = self.section(index);
-        for position in self.iter_positions(index) {
-            let entry = self.oversized.get(section, position).await?;
-            if entry.key.as_ref() == key.as_ref() {
-                return Ok(true);
-            }
-            self.unnecessary_reads.inc();
-        }
-        Ok(false)
+        let Some(locations) = self.locate_all(index) else {
+            return Ok(false);
+        };
+        Ok(self.match_key(index, locations, key).await?.is_some())
     }
 }
 
@@ -612,6 +635,21 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
         self.0 = self.0.prune(min).await?;
         Ok(self)
+    }
+
+    /// A cloneable handle serving reads by index from the last published state.
+    ///
+    /// A put is invisible until a sync covers it. Both sync paths publish, since both flush
+    /// before returning. Reads outlive the archive, still serving that state.
+    ///
+    /// Serves the first item at an index, so items added by
+    /// [crate::archive::MultiArchive::put_multi] are unreachable through it.
+    pub fn reader(&self) -> Reader<E::Blob, V> {
+        Reader::new(
+            self.0.state.clone(),
+            self.0.items_per_section,
+            self.0.gets.clone(),
+        )
     }
 }
 

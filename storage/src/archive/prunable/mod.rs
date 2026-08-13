@@ -58,13 +58,20 @@
 //! _To avoid random memory reads in the common case, the in-memory index directly stores the first
 //! item in the linked list instead of a pointer to the first item._
 //!
-//! `index` is the key to the map used to serve lookups by `index` that stores the position in the
-//! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
-//! the number of open blobs):
+//! Lookups by `index` go through a map keyed by `index` (selected by
+//! `section = index / items_per_section * items_per_section` to minimize the number of open
+//! blobs). Its value records where the item lives, so a lookup by index reads the value blob
+//! directly and never visits the index journal:
 //!
 //! ```text
-//! // Maps index -> position in index journal
-//! indices: BTreeMap<u64, u64>
+//! // Maps index -> where the item lives
+//! locations: BTreeMap<u64, Location>
+//!
+//! struct Location {
+//!     value_offset: u64,  // byte offset of the value's frame
+//!     position: u32,      // the record's position in its section, for key lookups
+//!     value_size: u32,    // byte length of that frame
+//! }
 //! ```
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
@@ -74,25 +81,26 @@
 //! ## Memory Overhead
 //!
 //! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
-//! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
-//! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
-//! the first `8` bytes of a key will use `~40` bytes to index each key.
+//! index item is `8 + 16` (where `8` is the index and `16` is a `Location`, whose fields are
+//! ordered to avoid padding). The memory used to track each key item is
+//! `~translated(key).len() + 16` bytes (where `16` is the size of the `Record` struct). This means
+//! that an [Archive] employing a [Translator] that uses the first `8` bytes of a key will use
+//! `~48` bytes to index each key.
 //!
 //! ### MultiArchive Overhead
 //!
-//! [Archive] stores index positions in a dual-map layout:
-//! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
-//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
+//! [Archive] stores locations in a dual-map layout:
+//! - `locations: BTreeMap<u64, Location>` tracks the first item at each index.
+//! - `extras: BTreeMap<u64, Vec<Location>>` tracks additional items at indices written via
 //!   [crate::archive::MultiArchive::put_multi].
 //!
 //! This means the baseline overhead above remains unchanged for the first item at an index. For
 //! indices with duplicates, the additional in-memory payload is:
-//! - one `Vec<u64>` header (`24` bytes), and
-//! - `n * 8` bytes for `n` additional positions.
+//! - one `Vec<Location>` header (`24` bytes), and
+//! - `n * 16` bytes for `n` additional locations.
 //!
-//! Equivalently, this is `24 + (n * 8)` bytes per duplicated index, excluding `BTreeMap` node
-//! overhead for `extra_indices`.
+//! Equivalently, this is `24 + (n * 16)` bytes per duplicated index, excluding `BTreeMap` node
+//! overhead for `extras`.
 //!
 //! # Pruning
 //!
@@ -110,10 +118,14 @@
 //!
 //! # Read Path
 //!
-//! All reads (by index or key) first read the index entry from the index journal to get the
-//! value location (offset and size), then read the value from the value blob. The index journal
-//! uses a page cache for caching, so hot entries are served from memory. Values are read directly
-//! from disk without caching to avoid polluting the page cache with large values.
+//! A read by index takes the value's location from memory and reads the value blob once. A read
+//! by key must find which of its translated-key candidates actually holds the key, so it reads
+//! those candidates' index journal records first. The index journal uses a page cache, so hot
+//! records are served from memory. Values are read straight from disk, so large values never
+//! evict anything from that cache.
+//!
+//! A read by index never touches the index journal, so corruption there surfaces at init replay
+//! instead. Values carry their own checksum, which every read verifies.
 //!
 //! # Compression
 //!
@@ -126,6 +138,34 @@
 //!
 //! [Archive] tracks gaps in the index space to enable the caller to efficiently fetch unknown keys
 //! using `next_gap`. This is a very common pattern when syncing blocks in a blockchain.
+//!
+//! # Readers
+//!
+//! [Archive::reader] returns a cloneable [Reader] that serves reads by index from other tasks.
+//! Resolving a key needs the in-memory key index, which the writer keeps to itself.
+//!
+//! - A put is invisible to readers until a sync covers it. Both [crate::archive::Archive::sync]
+//!   and [crate::archive::Archive::start_sync] publish, because both flush before they return.
+//!   [crate::archive::Archive::start_sync] publishes without waiting for durability, so a reader
+//!   can serve a write that a crash would lose. [crate::archive::Archive::sync] publishes after
+//!   its fsync, so a value it covers stays invisible for that fsync's duration.
+//! - A read by index serves the first item stored there, so items added by
+//!   [crate::archive::MultiArchive::put_multi] are unreachable through a [Reader].
+//! - A prune takes effect immediately: it drops each index and its section together, so a reader
+//!   cannot find an entry whose section is gone. A read already under way finishes, because the
+//!   blob it holds outlives the name.
+//! - Each publish stores one blob handle per synced section. The `gets` counter counts writer
+//!   and reader traffic together.
+//!
+//! ## Concurrency
+//!
+//! The writer and its readers share one lock over the location map and the captures. Two rules
+//! keep contention low:
+//!
+//! - No I/O and no `.await` happens under a guard. Critical sections are map lookups and handle
+//!   clones, so neither side ever waits on the other's disk.
+//!
+//! Readers see no single point in time: two reads can observe different states.
 //!
 //! # Example
 //!
@@ -170,6 +210,8 @@ use crate::translator::Translator;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+mod reader;
+pub use reader::Reader;
 mod storage;
 pub use storage::Archive;
 
@@ -223,8 +265,8 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Supervisor as _,
-        deterministic,
+        BufferPooler, Error as RError, Metrics as _, Runner, Spawner as _, Storage as _,
+        Supervisor as _, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_next_pending_syncs,
             release_pending_syncs,
@@ -1422,6 +1464,9 @@ mod tests {
             assert!(archive.has_at(1, &test_key("aaaa2")).await.unwrap());
             assert!(!archive.has_at(1, &test_key("bbbb")).await.unwrap());
 
+            // Replay also rebuilds where each of their values lives, not just its record.
+            assert_eq!(archive.get_all(1).await.unwrap(), Some(vec![10, 20]));
+
             // Pruned indices report absent
             let archive = archive.prune(2).await.unwrap();
             assert!(!archive.has_at(1, &test_key("aaaa1")).await.unwrap());
@@ -1563,5 +1608,366 @@ mod tests {
                 .expect("Failed to put_multi_sync below floor");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
         });
+    }
+
+    #[test_traced]
+    fn test_reader_lag_until_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            assert_eq!(reader.get(1).await.unwrap(), None);
+
+            // An unsynced put is visible to the writer but not to readers.
+            let archive = archive
+                .put(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(reader.get(1).await.unwrap(), None);
+
+            // The sync publishes it.
+            let archive = archive.sync().await.expect("Failed to sync");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_publishes_before_its_handle_completes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+
+            // start_sync flushes before it returns, so the write is readable even though the
+            // sync itself has not completed.
+            let (archive, handle) = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+
+            release_pending_syncs(&pending);
+            handle.await.expect("sync handle should complete");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_stops_serving_at_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // One item per section so pruning drops whole sections.
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            for index in 1u64..=5 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            let archive = archive.sync().await.expect("Failed to sync");
+            assert_eq!(reader.get(1).await.unwrap(), Some(1));
+
+            // Pruning drops each index and its section together, so it takes effect at once
+            // rather than at the next sync.
+            let archive = archive.prune(4).await.expect("Failed to prune");
+            assert_eq!(reader.get(1).await.unwrap(), None);
+            assert_eq!(reader.get(4).await.unwrap(), Some(4));
+            assert_eq!(reader.get(5).await.unwrap(), Some(5));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_serves_after_destroy() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            let archive = archive
+                .put_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put_sync");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+
+            // Destroying unlinks the blobs but leaves the captured handles readable, so the
+            // reader keeps serving what it already had.
+            archive.destroy().await.expect("Failed to destroy");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+        });
+    }
+
+    #[test_traced]
+    fn test_init_tolerates_lost_value_blob() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            archive
+                .put_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put_sync");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+
+            // Lose the value blob. Recovery rewinds the index and init must still succeed,
+            // since capturing for readers must not turn a warned-about state into a failure.
+            context
+                .remove(&cfg.value_partition, Some(&0u64.to_be_bytes()))
+                .await
+                .expect("Failed to remove value blob");
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("init must tolerate a lost value blob");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
+            let reader = archive.reader();
+            assert_eq!(reader.get(1).await.unwrap(), None);
+
+            // Init left the archive usable, so a fresh write publishes normally. Without this the
+            // assertions above hold for an archive that recovered into a dead state.
+            let archive = archive
+                .put_sync(1, test_key("aaa"), 20)
+                .await
+                .expect("Failed to put_sync after recovery");
+            assert_eq!(reader.get(1).await.unwrap(), Some(20));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_ignores_writes_after_its_capture() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // One section holds everything, so the second put lands in a section the reader
+            // has already captured.
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            let archive = archive
+                .put_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put_sync");
+
+            // The writer keeps appending to the captured section. The new entry is in the shared
+            // map at once, so the capture's size is what hides it.
+            let archive = archive.put(2, test_key("bbb"), 20).await.unwrap();
+            assert_eq!(reader.get(2).await.unwrap(), None);
+
+            let archive = archive.sync().await.expect("Failed to sync");
+            assert_eq!(reader.get(2).await.unwrap(), Some(20));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_reads_values_buffered_until_the_capture() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // These values overrun the value write buffer many times over, so some sit in it
+            // unflushed before the sync. Every value a reader can see must be on the blob the
+            // capture holds.
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let mut archive = Archive::<_, _, FixedBytes<64>, FixedBytes<512>>::init(
+                context.child("storage"),
+                cfg,
+            )
+            .await
+            .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            let value = |index: u64| FixedBytes::<512>::new([index as u8; 512]);
+            for index in 0u64..16 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), value(index))
+                    .await
+                    .expect("Failed to put");
+            }
+            let mut archive = archive.sync().await.expect("Failed to sync");
+            for index in 0u64..16 {
+                assert_eq!(
+                    reader.get(index).await.unwrap(),
+                    Some(value(index)),
+                    "value {index} must be readable"
+                );
+            }
+
+            // Writes after the capture stay invisible, values included.
+            for index in 16u64..24 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), value(index))
+                    .await
+                    .expect("Failed to put");
+            }
+            for index in 16u64..24 {
+                assert_eq!(reader.get(index).await.unwrap(), None);
+            }
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_duplicate_put_keeps_earlier_entry_visible() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            let archive = archive
+                .put_multi_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put_multi_sync");
+
+            // A second entry at the same index goes to the extras, so the first stays put and
+            // the reader keeps returning it.
+            let archive = archive
+                .put_multi(1, test_key("bbb"), 20)
+                .await
+                .expect("Failed to put_multi");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+
+            let archive = archive.sync().await.expect("Failed to sync");
+            assert_eq!(reader.get(1).await.unwrap(), Some(10));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_serves_recovered_state_after_restart() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            // One item per section, so recovery has to key each capture by its own section.
+            let cfg = test_config(&context, NZU64!(1));
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            for index in 1u64..=3 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), index as i32)
+                    .await
+                    .expect("Failed to put");
+            }
+            archive.sync().await.expect("Failed to sync");
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_config(&context, NZU64!(1));
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
+                .await
+                .expect("Failed to reopen archive");
+
+            // Recovered state publishes at init, before any new sync.
+            let reader = archive.reader();
+            for index in 1u64..=3 {
+                assert_eq!(reader.get(index).await.unwrap(), Some(index as i32));
+            }
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_metrics_aggregate_with_writer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config(&context, NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let reader = archive.reader();
+            let archive = archive
+                .put_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put_sync");
+
+            archive.get(Identifier::Index(1)).await.unwrap();
+            reader.get(1).await.unwrap();
+            assert!(has_metric_value(&context.encode(), "gets_total", 2));
+
+            archive.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_concurrent_with_writer_is_deterministic_slow_() {
+        fn run() -> String {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let cfg = test_config(&context, NZU64!(4));
+                let mut archive =
+                    Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                        .await
+                        .expect("Failed to initialize archive");
+                let reader = archive.reader();
+
+                // A concurrent task reads while the writer appends, syncs, and prunes. Every value
+                // it sees must be the one written there, and it must see at least one.
+                let poller = context.child("poller").spawn(move |_| async move {
+                    let mut seen = 0usize;
+                    for _ in 0..64 {
+                        for index in 0u64..32 {
+                            if let Some(value) = reader.get(index).await.expect("read must succeed")
+                            {
+                                assert_eq!(value, index as i32);
+                                seen += 1;
+                            }
+                        }
+                        commonware_runtime::reschedule().await;
+                    }
+                    assert!(seen > 0, "reader never observed a published value");
+                });
+
+                for index in 0u64..32 {
+                    archive = archive
+                        .put(index, test_key(&format!("k{index}")), index as i32)
+                        .await
+                        .expect("Failed to put");
+                    if index.is_multiple_of(3) {
+                        archive = archive.sync().await.expect("Failed to sync");
+                    }
+                    if index == 20 {
+                        archive = archive.prune(8).await.expect("Failed to prune");
+                    }
+                }
+                drop(archive);
+                poller.await.expect("poller failed");
+                context.auditor().state()
+            })
+        }
+
+        assert_eq!(run(), run());
     }
 }

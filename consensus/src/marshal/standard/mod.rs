@@ -93,7 +93,7 @@ mod tests {
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic,
+        deterministic, telemetry::metrics::has_metric_value,
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
@@ -4525,6 +4525,100 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_finalized_produce_served_off_the_actor_loop() {
+        const PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: "finalized-produce-server".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+
+            // Prunable stores expose readers, so the actor spawns the serving task. Their syncs
+            // are paced, which is what separates "stored" from "readable" below.
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "finalized-produce-server", PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "genesis dispatched",
+                || application.blocks().contains_key(&Height::zero()),
+            )
+            .await;
+
+            // A produce for a height that was never stored is dropped, and the peer retries.
+            let (response, missing_rx) = oneshot::channel();
+            resolver.enqueue(handler::Message::Produce {
+                key: handler::Key::Finalized {
+                    height: Height::new(9),
+                },
+                response,
+            });
+            assert!(missing_rx.await.is_err());
+
+            // Finalize a block, then ask for it. Publishing happens inside `start_sync`, so the
+            // height is readable before the paced handle resolves and the block reaches the
+            // application.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            let (response, response_rx) = oneshot::channel();
+            resolver.enqueue(handler::Message::Produce {
+                key: handler::Key::Finalized {
+                    height: Height::new(1),
+                },
+                response,
+            });
+            let served = response_rx.await.expect("finalized height must be served");
+            assert_eq!(served, (finalization, block).encode());
+            assert!(
+                !application.blocks().contains_key(&Height::new(1)),
+                "served before the paced sync completed, so publishing did not wait for durability"
+            );
+
+            // Only the serving task keeps these counters, so they distinguish it from the actor
+            // answering inline.
+            let encoded = context.encode();
+            assert!(has_metric_value(&encoded, "forwarded_total", 2));
+            assert!(has_metric_value(&encoded, "served_total", 1));
+            assert!(has_metric_value(&encoded, "missing_total", 1));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_start_floor_applies_local_anchor_without_fetch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -7103,6 +7197,10 @@ mod tests {
         fn last_index(&self) -> Option<Height> {
             self.inner.last_index()
         }
+
+        fn reader(&self) -> Option<crate::marshal::store::Reader<Self::Block>> {
+            self.inner.reader()
+        }
     }
 
     impl<T: crate::marshal::store::Certificates> crate::marshal::store::Certificates for PacedStore<T> {
@@ -7164,6 +7262,13 @@ mod tests {
 
         fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
             self.inner.ranges_from(from)
+        }
+
+        fn reader(
+            &self,
+        ) -> Option<crate::marshal::store::Reader<Finalization<Self::Scheme, Self::Commitment>>>
+        {
+            self.inner.reader()
         }
     }
 

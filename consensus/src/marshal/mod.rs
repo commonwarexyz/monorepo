@@ -40,6 +40,14 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! Serving a peer's request for a finalized block runs off the actor loop when both finalized
+//! stores expose a reader (see [`store::Certificates::reader`]), so those disk reads no longer
+//! block consensus processing, though they still share the executor and the disk. A reader serves
+//! what the store last published, and a batch publishes before its finalized requests are
+//! forwarded, so a height finalized in the same batch is served rather than missed. A height whose
+//! store has not published yet misses and the peer retries. Stores without a reader, such as
+//! immutable archives, answer inline as before.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage

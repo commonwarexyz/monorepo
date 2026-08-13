@@ -909,6 +909,34 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_flush_puts_bytes_on_the_blob_but_leaves_them_undurable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context.open("partition", b"write_flush").await.unwrap();
+            let mut writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(8));
+            writer.write_at(0, b"hello").await.unwrap();
+
+            // A flush hands the bytes to the blob, so a handle on it sees them without a sync.
+            writer.flush().await.unwrap();
+            assert_eq!(writer.size(), 5);
+            let read = blob.read_at(0, 5).await.unwrap().freeze().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+
+            // They are not durable yet, so a fresh open of the same name still sees nothing.
+            let (_, size) = context.open("partition", b"write_flush").await.unwrap();
+            assert_eq!(size, 0);
+
+            // The writer stays dirty, so the sync it still owes is what makes them durable.
+            writer.sync().await.unwrap();
+            let (blob, size) = context.open("partition", b"write_flush").await.unwrap();
+            assert_eq!(size, 5);
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
+            let read = reader.read(5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+        });
+    }
+
+    #[test_traced]
     fn test_write_multiple_flushes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

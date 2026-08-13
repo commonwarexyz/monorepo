@@ -50,6 +50,7 @@ pub(crate) mod cache;
 mod delivery;
 pub(crate) mod durability;
 mod floor;
+mod serving;
 pub use floor::Floor;
 mod stream;
 
