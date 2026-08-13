@@ -36,7 +36,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Storage as RuntimeStorage, buffer::paged::CacheRef,
+    BufferPooler, Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
 use commonware_storage::journal::{
     self,
@@ -203,7 +203,7 @@ where
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
             let mut replay = events
-                .replay(0, 0, READ_BUFFER)
+                .replay(0, 0, READ_BUFFER, ReadOptions::default())
                 .await
                 .expect("failed to replay reshare events");
 
@@ -699,7 +699,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic, mocks::RecordingContext};
     use commonware_utils::{N3f1, NZU32, TestRng, ordered::Set};
 
     type TestStore<E> = Store<E, MemorySecretStore, MinPk, PublicKey>;
@@ -829,7 +829,15 @@ mod tests {
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
 
-            let store = init_store(context.child("restart"), "replay", secret_store).await;
+            let (restart_context, recordings) = RecordingContext::new(context.child("restart"));
+            let store = init_store(restart_context, "replay", secret_store).await;
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::default())
+            );
             // The current epoch is not persisted; the setup state re-derives it from
             // finalized blocks, so a restarted store has no current epoch on its own.
             assert!(store.current().is_none());
