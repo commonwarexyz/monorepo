@@ -1745,33 +1745,34 @@ mod tests {
         dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
     }
 
-    /// Reporter used by the stable-leader end-to-end tests.
-    type StableLeaderReporter = mocks::reporter::Reporter<
+    /// Reporter used by the round-robin end-to-end tests.
+    type RoundRobinReporter = mocks::reporter::Reporter<
         deterministic::Context,
         ed25519::Scheme,
         RoundRobin<Sha256>,
         Sha256Digest,
     >;
 
-    /// Spins up the fully-linked five-validator ed25519 cluster shared by the
-    /// stable-leader and pipelined-handoff end-to-end tests, parameterized by
-    /// the knobs that differ between them. Returns the per-validator
-    /// reporters, the index of the leader elected for view 1 (stable for the
-    /// whole term), and the network oracle.
+    /// Spins up the fully-linked five-validator ed25519 round-robin cluster
+    /// shared by the stable-leader and pipelined-handoff end-to-end tests,
+    /// parameterized by the elector config and propose latency. Returns the
+    /// per-validator reporters, the index of the leader elected for view 1,
+    /// and the network oracle.
     ///
     /// The 1.5s leader and 3.5s certification timeouts are tuned to the
     /// callers' link latencies: with latency near or above
     /// half the leader timeout, a view that waits for its parent's
     /// certification (two or more network trips) times out, so runs stay
-    /// nullification-free only when views pipeline optimistically.
-    async fn setup_stable_leader_cluster(
+    /// nullification-free only when views pipeline (optimistic validation
+    /// within terms, pipelined handoffs across them).
+    async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],
         link: Link,
         elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
     ) -> (
-        Vec<StableLeaderReporter>,
+        Vec<RoundRobinReporter>,
         usize,
         Oracle<PublicKey, deterministic::Context>,
     ) {
@@ -1861,7 +1862,7 @@ mod tests {
         let link_latency = Duration::from_millis(100);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, _oracle) = setup_stable_leader_cluster(
+            let (reporters, leader_idx, _oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_high_latency",
                 Link {
@@ -1921,7 +1922,7 @@ mod tests {
         let term_length = TermLength::new(NZU32!(2));
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (reporters, _, _oracle) = setup_stable_leader_cluster(
+            let (reporters, _, _oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_pipelined_handoff_boundary_latency",
                 Link {
@@ -1985,7 +1986,7 @@ mod tests {
         let link_latency = Duration::from_millis(100);
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            let (reporters, _, _oracle) = setup_stable_leader_cluster(
+            let (reporters, _, _oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_pipelined_handoff_rotating",
                 Link {
@@ -1998,21 +1999,18 @@ mod tests {
             )
             .await;
 
+            // Time the span from the first measured notarization to the last.
             let reporter = reporters[0].clone();
-            let mut first = None;
-            let mut last = None;
-            for view in measured_views.clone() {
-                while !reporter.notarizations.lock().contains_key(&View::new(view)) {
-                    context.sleep(Duration::from_millis(1)).await;
-                }
-                let now = context.current();
-                first.get_or_insert(now);
-                last = Some(now);
+            let start = View::new(*measured_views.start());
+            while !reporter.notarizations.lock().contains_key(&start) {
+                context.sleep(Duration::from_millis(1)).await;
             }
-            let elapsed = last
-                .unwrap()
-                .duration_since(first.unwrap())
-                .unwrap_or_default();
+            let first = context.current();
+            let end = View::new(*measured_views.end());
+            while !reporter.notarizations.lock().contains_key(&end) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let elapsed = context.current().duration_since(first).unwrap_or_default();
             let views = measured_views.end() - measured_views.start();
             let average = elapsed / u32::try_from(views).unwrap();
             assert!(
@@ -2037,7 +2035,7 @@ mod tests {
         let required_view = View::new(1000);
         let executor = deterministic::Runner::timed(Duration::from_secs(40));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, oracle) = setup_stable_leader_cluster(
+            let (reporters, leader_idx, oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_full_term_no_nullify",
                 // 1s latency shrinks the 1.5s leader timeout below a
