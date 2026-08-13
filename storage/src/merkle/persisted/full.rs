@@ -639,6 +639,52 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
     }
 
+    /// Batched [`Self::get_node`]: `positions` must be strictly increasing. Memory-resident
+    /// nodes are served directly; the rest go through the journal's batched read, which
+    /// serves page-cache hits in bulk and fetches misses concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ElementPruned`] for the first of `positions` that falls below the
+    /// journal's pruning boundary.
+    pub async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let bounds = self.journal.bounds();
+        let mut nodes = vec![None; positions.len()];
+        let mut journal_positions = Vec::with_capacity(positions.len());
+        for (slot, &position) in nodes.iter_mut().zip(positions) {
+            if let Some(node) = self.mem.get_node(position) {
+                *slot = Some(node);
+            } else if *position >= bounds.start {
+                // In-subsequence order is preserved, so this stays strictly increasing.
+                journal_positions.push(*position);
+            } else {
+                return Err(Error::ElementPruned(position));
+            }
+        }
+
+        // Within-bounds reads are guaranteed not to return `ItemPruned` (see
+        // [`crate::journal::contiguous::Contiguous::read`]).
+        let items = if journal_positions.is_empty() {
+            Vec::new()
+        } else {
+            self.journal
+                .read_many(&journal_positions)
+                .await
+                .map_err(Error::Journal)?
+        };
+
+        // The unfilled slots are exactly the journal subsequence, in the order it was built.
+        let mut items = items.into_iter();
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.unwrap_or_else(|| items.next().expect("one item per journal read")))
+            .collect())
+    }
+
     /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
         if !loc.is_valid() {
@@ -987,6 +1033,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
 
     async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
         Self::get_node(self, position).await
+    }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        Self::get_nodes(self, positions).await
     }
 }
 
@@ -1410,6 +1460,87 @@ mod tests {
         ));
 
         mmr.destroy().await.unwrap();
+    }
+
+    /// `get_nodes` must agree with per-position `get_node` on every available position
+    /// (journal-resident and memory-resident) and reject the positions `get_node` reports
+    /// as absent.
+    async fn full_get_nodes_matches_get_node_inner<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
+            .await
+            .unwrap();
+
+        // Flushed leaves (journal-resident after sync), a pruned prefix, then unflushed
+        // leaves on top (memory-resident).
+        const LEAF_COUNT: usize = 200;
+        let mut batch = mmr.new_batch();
+        for i in 0..LEAF_COUNT {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr = mmr.apply_batch(&batch).unwrap();
+        mmr = mmr.sync().await.unwrap();
+        mmr = mmr.prune(Location::<F>::new(50)).await.unwrap();
+        let mut batch = mmr.new_batch();
+        for i in LEAF_COUNT..LEAF_COUNT + 10 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr = mmr.apply_batch(&batch).unwrap();
+
+        // Partition by what `get_node` reports, so both APIs are judged against the same
+        // notion of availability.
+        let all: Vec<Position<F>> = (0..*mmr.size()).map(Position::new).collect();
+        let mut absent = Vec::new();
+        let mut available = Vec::new();
+        for &position in &all {
+            match mmr.get_node(position).await.unwrap() {
+                Some(node) => available.push((position, node)),
+                None => absent.push(position),
+            }
+        }
+        assert!(!absent.is_empty(), "expected some pruned positions");
+        assert!(!available.is_empty(), "expected some available positions");
+
+        // Spanning the pruning boundary is an error naming a position `get_node` calls absent.
+        match mmr.get_nodes(&all).await {
+            Err(Error::ElementPruned(position)) => {
+                assert!(absent.contains(&position), "position {position}")
+            }
+            other => panic!("expected ElementPruned, got {other:?}"),
+        }
+
+        // Every available position, then a sparse subset (slot correspondence), then empty.
+        let positions: Vec<Position<F>> = available.iter().map(|&(pos, _)| pos).collect();
+        let batched = mmr.get_nodes(&positions).await.unwrap();
+        assert_eq!(batched.len(), available.len());
+        for (slot, &(position, node)) in available.iter().enumerate() {
+            assert_eq!(batched[slot], node, "position {position}");
+        }
+
+        let sparse: Vec<Position<F>> = positions.iter().copied().step_by(7).collect();
+        let batched = mmr.get_nodes(&sparse).await.unwrap();
+        for (slot, &position) in sparse.iter().enumerate() {
+            let single = mmr.get_node(position).await.unwrap().unwrap();
+            assert_eq!(batched[slot], single, "position {position}");
+        }
+
+        assert!(mmr.get_nodes(&[]).await.unwrap().is_empty());
+        mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_get_nodes_matches_get_node_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_get_nodes_matches_get_node_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_get_nodes_matches_get_node_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_get_nodes_matches_get_node_inner::<mmb::Family>);
     }
 
     #[test_traced]
