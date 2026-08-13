@@ -16,12 +16,12 @@ struct State {
     /// Producers that completed registration.
     ready: usize,
     /// Whether producers should wait, cancel, or start measurement.
-    release: ProducerRelease,
+    release: Release,
 }
 
 /// Coordinator decision observed by every cancellation producer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProducerRelease {
+enum Release {
     /// A producer failure requires waiting producers to discard their timers.
     Cancel,
     /// Every producer may begin cancellation.
@@ -36,35 +36,35 @@ impl ProducerGate {
         Self {
             state: Mutex::new(State {
                 ready: 0,
-                release: ProducerRelease::Waiting,
+                release: Release::Waiting,
             }),
             changed: Condvar::new(),
         }
     }
 
-    /// Registers one arrival and waits for the coordinator's decision.
-    pub(crate) fn arrive_and_wait(&self) -> ProducerRelease {
+    /// Registers one arrival and returns whether cancellation should start.
+    pub(crate) fn arrive_and_wait(&self) -> bool {
         let mut state = self.state.lock();
         state.ready += 1;
         self.changed.notify_all();
-        while state.release == ProducerRelease::Waiting {
+        while state.release == Release::Waiting {
             self.changed.wait(&mut state);
         }
-        state.release
+        state.release == Release::Start
     }
 
     /// Waits until every producer arrives or setup is canceled.
     pub(crate) fn wait_until_ready(&self, producers: usize) -> bool {
         let mut state = self.state.lock();
-        while state.ready < producers && state.release == ProducerRelease::Waiting {
+        while state.ready < producers && state.release == Release::Waiting {
             self.changed.wait(&mut state);
         }
-        state.ready == producers && state.release != ProducerRelease::Cancel
+        state.ready == producers && state.release != Release::Cancel
     }
 
     /// Releases producers unless setup was already canceled.
     pub(crate) fn start(&self) {
-        self.release(ProducerRelease::Start);
+        self.release(Release::Start);
     }
 
     /// Dominates any prior decision and releases producers without measurement.
@@ -72,7 +72,7 @@ impl ProducerGate {
     /// Replacing `Start` records that an already-released producer panicked.
     /// Producers that left the gate continue and expose the panic through join.
     pub(crate) fn cancel(&self) {
-        self.release(ProducerRelease::Cancel);
+        self.release(Release::Cancel);
     }
 
     /// Cancels waiting producers before resuming a producer panic.
@@ -87,9 +87,9 @@ impl ProducerGate {
     }
 
     /// Publishes one decision while preserving cancellation dominance.
-    fn release(&self, release: ProducerRelease) {
+    fn release(&self, release: Release) {
         let mut state = self.state.lock();
-        if release == ProducerRelease::Cancel || state.release == ProducerRelease::Waiting {
+        if release == Release::Cancel || state.release == Release::Waiting {
             state.release = release;
         }
         self.changed.notify_all();

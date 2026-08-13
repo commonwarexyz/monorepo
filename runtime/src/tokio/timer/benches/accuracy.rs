@@ -3,8 +3,7 @@
 use crate::{
     Backend, Config,
     backend::DeadlinePair,
-    checked_observations,
-    config::{ACCURACY_CONCURRENCY, ACCURACY_SPREAD},
+    config::{ACCURACY_SPREAD, ACCURACY_TASKS},
     report, sleep_for, sleep_until,
 };
 use commonware_runtime::tokio as commonware_tokio;
@@ -38,8 +37,8 @@ impl Mode {
 /// One fixed accuracy scenario.
 #[derive(Clone, Copy)]
 struct Scenario {
-    /// Simultaneous tasks in each batch.
-    concurrency: usize,
+    /// Tasks registered in each batch.
+    tasks: usize,
     /// Duration requested from the selected timer.
     target: Duration,
     /// Registration topology.
@@ -68,24 +67,24 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
 
     let mut scenarios = vec![
         Scenario {
-            concurrency: 1,
+            tasks: 1,
             target: Duration::from_micros(10),
             mode: Mode::Synchronized,
         },
         Scenario {
-            concurrency: 1,
+            tasks: 1,
             target: Duration::from_micros(100),
             mode: Mode::Synchronized,
         },
     ];
-    for &concurrency in &ACCURACY_CONCURRENCY {
+    for &tasks in &ACCURACY_TASKS {
         scenarios.push(Scenario {
-            concurrency,
+            tasks,
             target: Duration::from_micros(100),
             mode: Mode::Synchronized,
         });
         scenarios.push(Scenario {
-            concurrency,
+            tasks,
             target: Duration::from_micros(100),
             mode: Mode::Spread,
         });
@@ -93,7 +92,7 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
 
     for backend in config.backends() {
         for scenario in &scenarios {
-            let observations = checked_observations(config.accuracy_batches, scenario.concurrency)?;
+            let observations = config.accuracy_batches * scenario.tasks;
             let mut lateness = Vec::with_capacity(observations);
             let mut clock_pair_span = report::ClockPairSpan::default();
 
@@ -111,22 +110,22 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
             }
 
             let name = format!(
-                "{}::sleep/backend={} mode={} target_us={} concurrency={}",
+                "{}::sleep/backend={} mode={} target_us={} tasks={} spread_us={} \
+                 worker_threads={} timer_shards={}",
                 module_path!(),
                 backend,
                 scenario.mode.name(),
                 scenario.target.as_micros(),
-                scenario.concurrency,
+                scenario.tasks,
+                match scenario.mode {
+                    Mode::Synchronized => 0,
+                    Mode::Spread => ACCURACY_SPREAD.as_micros(),
+                },
+                config.worker_threads,
+                report::timer_shards_label(backend, config.shards()),
             );
             let clock_pair_span = clock_pair_span.label("lateness_bound");
-            report::print_duration(
-                &name,
-                config.accuracy_batches,
-                &[("concurrency", scenario.concurrency)],
-                "lateness",
-                &lateness,
-                Some(&clock_pair_span),
-            )?;
+            report::print_accuracy(&name, config.accuracy_batches, &lateness, &clock_pair_span)?;
         }
     }
     Ok(())
@@ -138,12 +137,12 @@ async fn run_batch(
     backend: Backend,
     scenario: Scenario,
 ) -> io::Result<AccuracyBatch> {
-    let ready = Arc::new(Barrier::new(scenario.concurrency + 1));
-    let start = Arc::new(Barrier::new(scenario.concurrency + 1));
+    let ready = Arc::new(Barrier::new(scenario.tasks + 1));
+    let start = Arc::new(Barrier::new(scenario.tasks + 1));
     let common_deadline = Arc::new(OnceLock::<DeadlinePair>::new());
     let spread_origin = Arc::new(OnceLock::<tokio::time::Instant>::new());
-    let offsets = spread_offsets(scenario.concurrency);
-    let mut handles = Vec::with_capacity(scenario.concurrency);
+    let offsets = spread_offsets(scenario.tasks);
+    let mut handles = Vec::with_capacity(scenario.tasks);
 
     for offset in offsets {
         let clock = Arc::clone(&clock);
@@ -216,19 +215,18 @@ fn checked_lateness(observed: Instant, deadline: Instant) -> io::Result<Duration
 }
 
 /// Builds offsets that include both endpoints of the configured spread.
-fn spread_offsets(concurrency: usize) -> Vec<Duration> {
-    if concurrency == 1 {
+fn spread_offsets(tasks: usize) -> Vec<Duration> {
+    if tasks == 1 {
         return vec![Duration::ZERO];
     }
 
-    let last =
-        u32::try_from(concurrency - 1).expect("fixed accuracy concurrency must fit into u32");
+    let last = u32::try_from(tasks - 1).expect("fixed accuracy task count must fit into u32");
     (0..=last)
         .map(|index| ACCURACY_SPREAD * index / last)
         .collect()
 }
 
-/// Collects every task result while preserving the first observed failure.
+/// Collects every task result while preserving the first failure in spawn order.
 async fn collect_handles(
     handles: Vec<JoinHandle<io::Result<Duration>>>,
 ) -> io::Result<Vec<Duration>> {

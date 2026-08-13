@@ -1,14 +1,7 @@
-//! Shared percentile calculation and benchmark reporting.
+//! Percentile calculation and machine-readable benchmark reporting.
 
-use crate::{
-    Backend, Config,
-    config::{
-        ACCURACY_CONCURRENCY, ACCURACY_SPREAD, CANCEL_PERCENT, CANCELLATION_TIMERS, PEER_LEAD,
-        REGISTRATION_STEP, REGISTRATION_TIMERS, STORM_LEAD, STORM_TIMERS,
-    },
-};
+use crate::{Backend, Config};
 use std::{
-    fmt::Write as _,
     io,
     time::{Duration, Instant},
 };
@@ -58,7 +51,7 @@ impl ClockPairSpan {
     /// Includes one optional clock-pair span in the reported bound.
     pub(crate) fn observe(&mut self, span: Option<Duration>) {
         if let Some(span) = span {
-            self.samples = self.samples.saturating_add(1);
+            self.samples += 1;
             self.maximum = self.maximum.max(span);
         }
     }
@@ -74,109 +67,53 @@ impl ClockPairSpan {
     }
 }
 
-/// Prints the effective benchmark configuration and platform.
-pub(crate) fn print_effective_config(config: &Config) {
-    let shards = config
-        .shards()
-        .map_or_else(|| "tokio-fallback".to_owned(), |count| count.to_string());
+/// Prints the benchmark configuration for one runtime topology.
+pub(crate) fn print_effective_config(
+    config: &Config,
+    runtime_scope: &str,
+    worker_threads: usize,
+    shards: Option<usize>,
+) {
+    let backend = config.backend.map_or("all", Backend::name);
+    let shards = shards.map_or_else(|| "tokio-fallback".to_owned(), |count| count.to_string());
     println!(
-        "effective_config scenario={} backend={} os={} arch={} worker_threads={} shards={} \
-         accuracy_batches={} samples_per_concurrency_slot={} accuracy_concurrency={:?} \
-         accuracy_spread_us={} worst_batches={} registration_timers={} registration_step_ns={} \
-         cancellation_timers={} cancel_percent={} storm_timers={} storm_lead_us={} \
-         peer_lead_us={} fairness_worker_threads=1 fairness_shards={}",
+        "effective_config runtime_scope={runtime_scope} scenario={} backend={backend} os={} \
+         arch={} worker_threads={worker_threads} \
+         commonware_timer_shards={shards} accuracy_batches={} worst_batches={}",
         config.scenario,
-        config.backend,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        config.worker_threads,
-        shards,
         config.accuracy_batches,
-        config.accuracy_batches,
-        ACCURACY_CONCURRENCY,
-        ACCURACY_SPREAD.as_micros(),
         config.worst_batches,
-        REGISTRATION_TIMERS,
-        REGISTRATION_STEP.as_nanos(),
-        CANCELLATION_TIMERS,
-        CANCEL_PERCENT,
-        STORM_TIMERS,
-        STORM_LEAD.as_micros(),
-        PEER_LEAD.as_micros(),
-        fairness_shards_label(),
     );
 }
 
-/// Prints one duration distribution with common accounting fields.
-pub(crate) fn print_duration(
+/// Prints one accuracy distribution and its clock-pair bound.
+pub(crate) fn print_accuracy(
     name: &str,
     batches: usize,
-    dimensions: &[(&str, usize)],
-    metric: &str,
     samples: &[Duration],
-    additional_fields: Option<&str>,
-) -> io::Result<Distribution> {
+    clock_pair_bound: &str,
+) -> io::Result<()> {
     let distribution = Distribution::new(samples)?;
-    let accounting = format_sample_counts(batches, dimensions, &[(metric, samples.len())]);
-    let additional_fields =
-        additional_fields.map_or_else(String::new, |fields| format!(" {fields}"));
     println!(
-        "{name} {accounting} {metric}_p50_us={:.3} {metric}_p99_us={:.3} \
-         {metric}_max_us={:.3}{}",
+        "{name} batches={batches} lateness_samples={} lateness_p50_us={:.3} \
+         lateness_p99_us={:.3} lateness_max_us={:.3} {clock_pair_bound}",
+        samples.len(),
         micros(distribution.p50),
         micros(distribution.p99),
         micros(distribution.max),
-        additional_fields,
     );
-    Ok(distribution)
+    Ok(())
 }
 
-/// Formats workload dimensions and the sample count for each metric.
-pub(crate) fn format_sample_counts(
-    batches: usize,
-    dimensions: &[(&str, usize)],
-    metrics: &[(&str, usize)],
-) -> String {
-    let mut output = format!("batches={batches}");
-    for (name, value) in dimensions {
-        write!(output, " {name}={value}").expect("writing to a string cannot fail");
+/// Describes the timer shards used by one backend.
+pub(crate) fn timer_shards_label(backend: Backend, shards: Option<usize>) -> String {
+    match (backend, shards) {
+        (Backend::Commonware, Some(shards)) => shards.to_string(),
+        (Backend::Commonware, None) => "tokio-fallback".to_owned(),
+        (Backend::Tokio, _) => "backend-managed".to_owned(),
     }
-    for (name, samples) in metrics {
-        write!(output, " {name}_samples={samples}").expect("writing to a string cannot fail");
-    }
-    output
-}
-
-/// Describes deterministic producer placement across native timer shards.
-pub(crate) fn cancellation_shard_distribution(
-    backend: Backend,
-    shards: Option<usize>,
-    producers: usize,
-) -> String {
-    let unavailable = |effective| {
-        format!(
-            "effective_timer_shards={effective} producers_per_timer_shard_min=unavailable \
-             producers_per_timer_shard_max=unavailable"
-        )
-    };
-    let shards = match (backend, shards) {
-        (Backend::Commonware, Some(shards)) => shards,
-        (Backend::Commonware, None) => return unavailable("tokio-fallback"),
-        (Backend::Tokio, _) => return unavailable("backend-managed"),
-    };
-
-    // Dedicated producer threads receive consecutive round-robin claims.
-    let effective = producers.min(shards);
-    let minimum = if producers < shards {
-        1
-    } else {
-        producers / shards
-    };
-    let maximum = producers.div_ceil(shards);
-    format!(
-        "effective_timer_shards={effective} producers_per_timer_shard_min={minimum} \
-         producers_per_timer_shard_max={maximum}"
-    )
 }
 
 /// Measures from release through the final recorded operation completion.
@@ -190,7 +127,12 @@ pub(crate) fn elapsed_through_last(
             "cannot measure drain without a completed operation",
         )
     })?;
-    Ok(last.saturating_duration_since(start))
+    last.checked_duration_since(start).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cancellation completed before its common release",
+        )
+    })
 }
 
 /// Converts a duration to fractional microseconds for compact output.
@@ -218,16 +160,4 @@ fn percentile_index(length: usize, percentile: usize) -> io::Result<usize> {
             "nearest-rank percentile produced no sample",
         )
     })
-}
-
-/// Returns the fixed fairness shard count for the active platform.
-const fn fairness_shards_label() -> &'static str {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        "1"
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        "tokio-fallback"
-    }
 }

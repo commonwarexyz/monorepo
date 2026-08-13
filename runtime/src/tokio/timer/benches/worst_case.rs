@@ -9,10 +9,11 @@ use crate::{
     },
     peer_gap::{PeerGap, dispatch_lateness},
     poll_once,
-    producer_gate::{ProducerGate, ProducerRelease},
+    producer_gate::ProducerGate,
     report, sleep_until, sleep_until_wall,
 };
 use commonware_runtime::{Runner as _, tokio as commonware_tokio};
+use rand::{SeedableRng, prelude::SliceRandom, rngs::StdRng};
 use std::{
     io,
     sync::{
@@ -68,20 +69,24 @@ async fn benchmark_descending_registration(
         }
 
         let name = format!(
-            "{}::descending_registration/backend={} timers={} step_ns={}",
+            "{}::descending_registration/backend={} timers={} step_ns={} worker_threads={} \
+             timer_shards={}",
             module_path!(),
             backend,
             REGISTRATION_TIMERS,
             REGISTRATION_STEP.as_nanos(),
+            config.worker_threads,
+            report::timer_shards_label(backend, config.shards()),
         );
-        report::print_duration(
-            &name,
+        let distribution = report::Distribution::new(&elapsed)?;
+        println!(
+            "{name} batches={} registration_samples={} registration_p50_us={:.3} \
+             registration_max_us={:.3}",
             config.worst_batches,
-            &[("timers_per_batch", REGISTRATION_TIMERS), ("producers", 1)],
-            "registration",
-            &elapsed,
-            None,
-        )?;
+            elapsed.len(),
+            report::micros(distribution.p50),
+            report::micros(distribution.max),
+        );
     }
     Ok(())
 }
@@ -95,23 +100,28 @@ async fn run_registration_batch(
     let mut sleeps = Vec::with_capacity(REGISTRATION_TIMERS);
     let start = Instant::now();
 
-    // Register latest to earliest so each insertion becomes the heap minimum.
-    for index in 0..REGISTRATION_TIMERS {
-        let positions = u32::try_from(REGISTRATION_TIMERS - index)
-            .expect("fixed registration count must fit into u32");
-        let wall_deadline = wall_base + REGISTRATION_STEP * positions;
-        let mut sleep = sleep_until_wall(clock, backend, wall_deadline);
+    // Manual bulk polling must not let Tokio's task budget leave sleeps unregistered.
+    tokio::task::unconstrained(async {
+        // Register latest to earliest so each insertion becomes the heap minimum.
+        for index in 0..REGISTRATION_TIMERS {
+            let positions = u32::try_from(REGISTRATION_TIMERS - index)
+                .expect("fixed registration count must fit into u32");
+            let wall_deadline = wall_base + REGISTRATION_STEP * positions;
+            let mut sleep = sleep_until_wall(clock, backend, wall_deadline);
 
-        // Tokio registers lazily, while Commonware registers during construction.
-        // Both paths also convert the same wall deadline before this poll.
-        if poll_once(&mut sleep).is_ready() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "descending timer expired during registration",
-            ));
+            // Tokio registers lazily, while Commonware registers during construction.
+            // Both paths also convert the same wall deadline before this poll.
+            if poll_once(&mut sleep).is_ready() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "descending timer expired during registration",
+                ));
+            }
+            sleeps.push(sleep);
         }
-        sleeps.push(sleep);
-    }
+        Ok::<_, io::Error>(())
+    })
+    .await?;
     let elapsed = start.elapsed();
 
     // Cancellation is deliberately outside the registration distribution.
@@ -125,6 +135,9 @@ async fn benchmark_cancellation(
     config: &Config,
     clock: Arc<commonware_tokio::Context>,
 ) -> io::Result<()> {
+    println!(
+        "cancellation_note aggregate drain excludes registration and retains uncanceled timers until every producer finishes"
+    );
     for backend in config.backends() {
         let mut one_producer_p50 = None;
         for producers in config.cancellation_producer_counts() {
@@ -157,29 +170,22 @@ async fn benchmark_cancellation(
                 baseline.as_secs_f64() / drain_distribution.p50.as_secs_f64()
             };
             let name = format!(
-                "{}::cancellation/backend={} timers={} cancel_percent={} producers={}",
+                "{}::cancellation/backend={} timers={} cancel_percent={} producers={} \
+                 worker_threads={} timer_shards={}",
                 module_path!(),
                 backend,
                 CANCELLATION_TIMERS,
                 CANCEL_PERCENT,
                 producers,
+                config.worker_threads,
+                report::timer_shards_label(backend, config.shards()),
             );
-            let accounting = report::format_sample_counts(
-                config.worst_batches,
-                &[
-                    ("timers_per_batch", CANCELLATION_TIMERS),
-                    ("producers", producers),
-                ],
-                &[("drain", drain.len())],
-            );
-            let shard_distribution =
-                report::cancellation_shard_distribution(backend, config.shards(), producers);
             println!(
-                "{name} {accounting} drain_p50_us={:.3} drain_p99_us={:.3} \
-                 drain_max_us={:.3} scaling_vs_one_producer={scaling:.3} measurement_passes=1 \
-                 cancellation_measurement=aggregate_drain {shard_distribution}",
+                "{name} batches={} drain_samples={} drain_p50_us={:.3} drain_max_us={:.3} \
+                 scaling_vs_one_producer={scaling:.3}",
+                config.worst_batches,
+                drain.len(),
                 report::micros(drain_distribution.p50),
-                report::micros(drain_distribution.p99),
                 report::micros(drain_distribution.max),
             );
         }
@@ -236,51 +242,40 @@ pub(super) async fn run_cancellation_batch(
     producers: usize,
     batch: u64,
 ) -> io::Result<Duration> {
-    let wall_deadline = SystemTime::now() + LONG_DEADLINE;
-    let tokio_deadline = tokio::time::Instant::now() + LONG_DEADLINE;
-    let gate = Arc::new(ProducerGate::new());
+    let deadlines = DeadlinePair::new(backend, LONG_DEADLINE);
     let runtime = tokio::runtime::Handle::current();
-    let mut handles = Vec::with_capacity(producers);
 
-    for producer in 0..producers {
-        let local_timers = partition(timers, producers, producer);
-        let local_canceled = partition(canceled, producers, producer);
-        let input = CancellationProducer {
-            runtime: runtime.clone(),
-            clock: Arc::clone(&clock),
-            backend,
-            wall_deadline,
-            tokio_deadline,
-            timers: local_timers,
-            canceled: local_canceled,
-            seed: batch.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                ^ u64::try_from(producer).unwrap_or(u64::MAX),
-            gate: Arc::clone(&gate),
-        };
-        let unwind_gate = Arc::clone(&gate);
-        let handle = std::thread::Builder::new()
-            .name(format!("timer-cancel-{producer}"))
-            .spawn(move || unwind_gate.cancel_on_unwind(|| run_cancellation_producer(input)));
-        match handle {
-            Ok(handle) => handles.push(handle),
-            Err(error) => {
-                gate.cancel();
-                tokio::task::spawn_blocking(move || discard_producers(handles))
-                    .await
-                    .map_err(|join_error| {
-                        io::Error::other(format!(
-                            "cancellation producer cleanup task failed: {join_error}"
-                        ))
-                    })?;
-                return Err(error);
+    // Keep thread creation, coordination, and joins off every runtime worker.
+    let coordinated = tokio::task::spawn_blocking(move || {
+        let gate = Arc::new(ProducerGate::new());
+        let mut handles = Vec::with_capacity(producers);
+        for producer in 0..producers {
+            let input = CancellationProducer {
+                runtime: runtime.clone(),
+                clock: Arc::clone(&clock),
+                backend,
+                wall_deadline: deadlines.wall,
+                tokio_deadline: deadlines.tokio,
+                timers: partition(timers, producers, producer),
+                canceled: partition(canceled, producers, producer),
+                seed: batch.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    ^ u64::try_from(producer).unwrap_or(u64::MAX),
+                gate: Arc::clone(&gate),
+            };
+            let unwind_gate = Arc::clone(&gate);
+            let handle = std::thread::Builder::new()
+                .name(format!("timer-cancel-{producer}"))
+                .spawn(move || unwind_gate.cancel_on_unwind(|| run_cancellation_producer(input)));
+            match handle {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    gate.cancel();
+                    discard_producers(handles);
+                    return Err(error);
+                }
             }
         }
-    }
-
-    // Coordination and joins may block, so keep them off every runtime worker.
-    let coordinator_gate = Arc::clone(&gate);
-    let coordinated = tokio::task::spawn_blocking(move || {
-        coordinate_cancellation(coordinator_gate, handles, producers)
+        coordinate_cancellation(gate, handles, producers, deadlines.measurement_deadline)
     })
     .await
     .map_err(|error| {
@@ -321,10 +316,10 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
         completed_early |= poll_once(&mut sleep).is_ready();
         sleeps.push(sleep);
     }
-    shuffle(&mut sleeps, input.seed);
+    sleeps.shuffle(&mut StdRng::seed_from_u64(input.seed));
     let survivors = sleeps.split_off(input.canceled);
 
-    if input.gate.arrive_and_wait() == ProducerRelease::Cancel {
+    if !input.gate.arrive_and_wait() {
         return None;
     }
     let last_cancellation = drain_cancellations(&mut sleeps);
@@ -339,9 +334,7 @@ fn run_cancellation_producer(input: CancellationProducer) -> Option<ProducerResu
 #[inline(never)]
 fn drain_cancellations(sleeps: &mut Vec<BenchSleep>) -> Instant {
     debug_assert!(!sleeps.is_empty());
-    for sleep in sleeps.drain(..) {
-        drop(sleep);
-    }
+    sleeps.clear();
     Instant::now()
 }
 
@@ -350,11 +343,20 @@ fn coordinate_cancellation(
     gate: Arc<ProducerGate>,
     handles: Vec<std::thread::JoinHandle<Option<ProducerResult>>>,
     producers: usize,
+    deadline: Instant,
 ) -> io::Result<CoordinatedCancellation> {
     // Do not release cancellation until every timer has been initially polled.
     if !gate.wait_until_ready(producers) {
         discard_producers(handles);
         return Err(io::Error::other("cancellation producer setup was canceled"));
+    }
+    if Instant::now() >= deadline {
+        gate.cancel();
+        discard_producers(handles);
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "cancellation setup reached the long timer deadline",
+        ));
     }
     // Reserve result storage before release so coordinator allocation cannot
     // contribute to the measured cancellation drain.
@@ -362,6 +364,15 @@ fn coordinate_cancellation(
     let drain_start = Instant::now();
     gate.start();
     collect_producers(handles, &mut results)?;
+    if results
+        .iter()
+        .any(|result| result.last_cancellation >= deadline)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "cancellation drain reached the long timer deadline",
+        ));
+    }
     let drain = report::elapsed_through_last(
         drain_start,
         results.iter().map(|result| result.last_cancellation),
@@ -402,22 +413,6 @@ const fn partition(total: usize, partitions: usize, index: usize) -> usize {
     total / partitions + if index < total % partitions { 1 } else { 0 }
 }
 
-/// Applies an in-place deterministic Fisher-Yates shuffle.
-fn shuffle<T>(values: &mut [T], mut state: u64) {
-    if state == 0 {
-        state = 1;
-    }
-    for upper in (1..values.len()).rev() {
-        // Xorshift64 is sufficient because ordering, not cryptography, is required.
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let modulus = u64::try_from(upper + 1).unwrap_or(u64::MAX);
-        let index = usize::try_from(state % modulus).unwrap_or(0);
-        values.swap(upper, index);
-    }
-}
-
 /// Measures first dispatch, full drain, and peer scheduling during expiry.
 async fn benchmark_expiry_storm(
     config: &Config,
@@ -441,36 +436,32 @@ async fn benchmark_expiry_storm(
         let first = report::Distribution::new(&first_dispatch)?;
         let drain = report::Distribution::new(&full_drain)?;
         let peer = report::Distribution::new(&peer_gap)?;
+        let fairness_shards = cfg!(any(target_os = "linux", target_os = "macos")).then_some(1);
         let name = format!(
-            "{}::expiry_storm/backend={} timers={} worker_threads=1",
+            "{}::expiry_storm/backend={} timers={} lead_us={} peer_lead_us={} worker_threads=1 \
+             timer_shards={}",
             module_path!(),
             backend,
             STORM_TIMERS,
-        );
-        let accounting = report::format_sample_counts(
-            config.worst_batches,
-            &[("timers_per_batch", STORM_TIMERS)],
-            &[
-                ("first_dispatch", first_dispatch.len()),
-                ("full_drain", full_drain.len()),
-                ("peer_gap", peer_gap.len()),
-            ],
+            STORM_LEAD.as_micros(),
+            PEER_LEAD.as_micros(),
+            report::timer_shards_label(backend, fairness_shards),
         );
         let clock_pair_span = clock_pair_span.label("first_dispatch_bound");
         println!(
-            "{name} {accounting} first_dispatch_p50_us={:.3} first_dispatch_p99_us={:.3} \
-             first_dispatch_max_us={:.3} full_drain_p50_us={:.3} \
-             full_drain_p99_us={:.3} full_drain_max_us={:.3} \
-             peer_gap_p50_us={:.3} peer_gap_p99_us={:.3} peer_gap_max_us={:.3} \
-             {clock_pair_span}",
+            "{name} batches={} first_dispatch_samples={} full_drain_samples={} \
+             peer_gap_samples={} first_dispatch_p50_us={:.3} first_dispatch_max_us={:.3} \
+             full_drain_p50_us={:.3} full_drain_max_us={:.3} peer_gap_p50_us={:.3} \
+             peer_gap_max_us={:.3} {clock_pair_span}",
+            config.worst_batches,
+            first_dispatch.len(),
+            full_drain.len(),
+            peer_gap.len(),
             report::micros(first.p50),
-            report::micros(first.p99),
             report::micros(first.max),
             report::micros(drain.p50),
-            report::micros(drain.p99),
             report::micros(drain.max),
             report::micros(peer.p50),
-            report::micros(peer.p99),
             report::micros(peer.max),
         );
     }
@@ -478,7 +469,7 @@ async fn benchmark_expiry_storm(
 }
 
 /// One measured common-deadline expiry storm.
-struct StormResult {
+pub(super) struct StormResult {
     /// Lateness of the first timer callback.
     first_dispatch: Duration,
     /// Time between the first and final timer callbacks.
@@ -490,7 +481,7 @@ struct StormResult {
 }
 
 /// Registers a common-deadline storm with a recording waker and runnable peer.
-async fn run_storm_batch(
+pub(super) async fn run_storm_batch(
     clock: &commonware_tokio::Context,
     backend: Backend,
     timers: usize,
@@ -503,16 +494,21 @@ async fn run_storm_batch(
     let mut task_context = Context::from_waker(&waker);
     let mut sleeps = Vec::with_capacity(timers);
 
-    for _ in 0..timers {
-        let mut sleep = sleep_until(clock, backend, deadlines.wall, deadlines.tokio);
-        if matches!(sleep.as_mut().poll(&mut task_context), Poll::Ready(())) {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "storm timer expired during registration, increase the STORM_LEAD benchmark constant",
-            ));
+    // Manual bulk polling must not let Tokio's task budget leave sleeps unregistered.
+    tokio::task::unconstrained(async {
+        for _ in 0..timers {
+            let mut sleep = sleep_until(clock, backend, deadlines.wall, deadlines.tokio);
+            if matches!(sleep.as_mut().poll(&mut task_context), Poll::Ready(())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "storm timer expired during registration, increase the STORM_LEAD benchmark constant",
+                ));
+            }
+            sleeps.push(sleep);
         }
-        sleeps.push(sleep);
-    }
+        Ok::<_, io::Error>(())
+    })
+    .await?;
     if Instant::now() >= deadlines.measurement_deadline {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -554,6 +550,10 @@ async fn run_storm_batch(
 
     let first = recorder.first_elapsed()?;
     let last = recorder.last_elapsed()?;
+    tokio::task::unconstrained(async {
+        validate_storm_completion(&mut sleeps, last, lead + STORM_COMPLETION_TIMEOUT)
+    })
+    .await?;
     let first_dispatch = dispatch_lateness(first, lead)?;
     drop(sleeps);
     Ok(StormResult {
@@ -562,6 +562,32 @@ async fn run_storm_batch(
         peer_gap,
         clock_pair_span: deadlines.clock_pair_span,
     })
+}
+
+/// Rejects a late wake target or a target reached by redundant wakes.
+pub(super) fn validate_storm_completion(
+    sleeps: &mut [BenchSleep],
+    last: Duration,
+    completion_deadline: Duration,
+) -> io::Result<()> {
+    if last > completion_deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "storm callbacks completed after the benchmark timeout",
+        ));
+    }
+    let pending = sleeps
+        .iter_mut()
+        .map(|sleep| matches!(poll_once(sleep), Poll::Ready(())))
+        .filter(|ready| !ready)
+        .count();
+    if pending != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("storm wake target was reached with {pending} timers still pending"),
+        ));
+    }
+    Ok(())
 }
 
 /// Measures scheduling gaps until every callback arrives or the watchdog expires.

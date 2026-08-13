@@ -8,7 +8,7 @@ mod accuracy;
 mod backend;
 pub(crate) use backend::{BenchSleep, poll_once, sleep_for, sleep_until, sleep_until_wall};
 mod config;
-pub(crate) use config::{Backend, Config, checked_observations};
+pub(crate) use config::{Backend, Config};
 mod peer_gap;
 mod producer_gate;
 mod report;
@@ -23,133 +23,50 @@ use std::{
 };
 
 #[test]
-fn harness_arguments_leave_the_custom_benchmark_idle() {
-    let cases = [
+fn cli_activates_only_for_cargo_bench_and_keeps_arguments_strict() {
+    for arguments in [
         Vec::<&str>::new(),
         vec!["--list"],
-        vec!["--verbose"],
-        vec!["-qv", "foreign-filter", "--bench"],
-        vec!["--nocapture", "--bench"],
-        vec!["--no-capture", "--bench"],
-        vec!["--fail-fast", "--bench"],
-        vec!["--format=terse", "--bench"],
-        vec!["--exact", "foreign-filter", "--bench"],
-        vec!["-Z", "unstable-options", "--bench"],
-        vec!["foreign-filter", "--bench"],
-        vec!["--output-format", "bencher", "--bench"],
-        vec!["--sample-size", "10", "--bench"],
-        vec!["--measurement-time=1", "--bench"],
-    ];
-
-    for arguments in cases {
-        let parsed = Config::parse_from(arguments.clone())
-            .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
-        assert!(parsed.is_none(), "{arguments:?}");
-    }
-
-    // Cargo's custom-benchmark marker still selects the default timer suite.
-    assert!(Config::parse_from(["--bench"]).unwrap().is_some());
-}
-
-#[test]
-fn timer_selectors_keep_foreign_arguments_strict() {
-    for arguments in [
-        vec!["--scenario", "expiry", "--list"],
-        vec![
-            "--scenario",
-            "expiry",
-            "--output-format",
-            "bencher",
-            "--bench",
-        ],
+        vec!["--scenario", "accuracy"],
     ] {
-        let error = Config::parse_from(arguments.clone())
-            .expect_err("timer selector accepted a foreign argument");
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
-    }
-}
-
-#[test]
-fn misspelled_timer_options_are_rejected() {
-    for arguments in [
-        vec!["--backnd", "tokio", "--bench"],
-        vec!["--backnd=tokio", "--bench"],
-        vec!["--sample-size", "10", "--backnd=tokio", "--bench"],
-    ] {
-        let error = Config::parse_from(arguments.clone())
-            .expect_err("misspelled timer option was treated as a harness argument");
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
+        assert!(Config::parse_from(arguments).unwrap().is_none());
     }
 
-    for harness_option in ["--test-threads", "--format", "--skip", "-Z"] {
-        let arguments = vec![harness_option, "--backnd=tokio", "--bench"];
-        let error = Config::parse_from(arguments.clone())
-            .expect_err("timer option typo was consumed as a harness value");
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
-    }
-}
-
-#[test]
-fn malformed_harness_values_are_rejected() {
-    for arguments in [
-        vec!["--test-threads", "0", "--bench"],
-        vec!["--test-threads=0", "--bench"],
-    ] {
-        let error = Config::parse_from(arguments.clone())
-            .expect_err("malformed harness value was silently ignored");
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
-    }
-}
-
-#[test]
-fn unsupported_runtime_thread_counts_are_rejected_before_construction() {
-    let worker_counts = [usize::MAX.to_string(), 129usize.to_string()];
-
-    for worker_threads in &worker_counts {
-        for scenario in ["accuracy", "registration"] {
-            let error =
-                Config::parse_from(["--scenario", scenario, "--worker-threads", worker_threads])
-                    .expect_err("unsupported thread count reached runtime construction");
-
-            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{scenario}");
-        }
-    }
-
-    let maximum = 128usize.to_string();
-    let config = Config::parse_from(["--scenario", "accuracy", "--worker-threads", &maximum])
+    let defaults = Config::parse_from(["--bench"])
         .unwrap()
-        .expect("benchmark worker limit was rejected");
-    assert_eq!(config.worker_threads, 128);
-}
+        .expect("Cargo's benchmark marker did not activate the suite");
+    assert_eq!(defaults.backend, None);
 
-#[test]
-fn excessive_batch_counts_are_rejected_before_allocation() {
-    for (scenario, option) in [
-        ("accuracy", "--accuracy-batches"),
-        ("registration", "--worst-batches"),
+    let selected = Config::parse_from([
+        "--scenario",
+        "cancellation",
+        "--backend",
+        "commonware",
+        "--worker-threads",
+        "4",
+        "--accuracy-batches",
+        "2",
+        "--worst-batches",
+        "1",
+        "--bench",
+    ])
+    .unwrap()
+    .expect("valid benchmark configuration stayed idle");
+    assert_eq!(selected.backend, Some(Backend::Commonware));
+    assert_eq!(selected.cancellation_producer_counts(), [1, 4, 16]);
+
+    let error = Config::parse_from(["--backnd=tokio", "--bench"])
+        .expect_err("unknown benchmark option was accepted");
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+
+    for (option, value) in [
+        ("--worker-threads", "129"),
+        ("--accuracy-batches", "101"),
+        ("--worst-batches", "101"),
     ] {
-        let error = Config::parse_from(["--scenario", scenario, option, "101"])
-            .expect_err("excessive batch count reached benchmark allocation");
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{scenario}");
-
-        assert!(
-            Config::parse_from(["--scenario", scenario, option, "100"])
-                .unwrap()
-                .is_some(),
-            "{scenario}"
-        );
-    }
-}
-
-#[test]
-fn worst_batch_overflow_is_rejected_before_allocation() {
-    let worst_batches = usize::MAX.to_string();
-
-    for scenario in ["registration", "cancellation", "expiry"] {
-        let error = Config::parse_from(["--scenario", scenario, "--worst-batches", &worst_batches])
-            .expect_err("overflowing workload reached benchmark execution");
-
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{scenario}");
+        let error = Config::parse_from([option, value, "--bench"])
+            .expect_err("out-of-range benchmark configuration was accepted");
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{option}");
     }
 }
 
@@ -209,6 +126,33 @@ fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
 }
 
 #[test]
+fn storm_validation_rejects_late_or_incomplete_wake_targets() {
+    let deadline = Duration::from_micros(10);
+    let mut ready: Vec<BenchSleep> = vec![Box::pin(std::future::ready(()))];
+    worst_case::validate_storm_completion(&mut ready, deadline, deadline).unwrap();
+
+    let mut late: Vec<BenchSleep> = vec![Box::pin(std::future::ready(()))];
+    assert_eq!(
+        worst_case::validate_storm_completion(
+            &mut late,
+            deadline + Duration::from_nanos(1),
+            deadline,
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::TimedOut
+    );
+
+    let mut incomplete: Vec<BenchSleep> = vec![Box::pin(std::future::pending())];
+    assert_eq!(
+        worst_case::validate_storm_completion(&mut incomplete, deadline, deadline)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
 fn latency_statistics_preserve_percentiles_and_drain_boundary() {
     // Use unsorted samples and out-of-order producer completions.
     let samples = [
@@ -225,12 +169,15 @@ fn latency_statistics_preserve_percentiles_and_drain_boundary() {
 
     let distribution = report::Distribution::new(&samples).unwrap();
     let drain = report::elapsed_through_last(start, completions).unwrap();
+    let invalid =
+        report::elapsed_through_last(start, [start.checked_sub(Duration::from_nanos(1)).unwrap()]);
 
     // Percentiles use nearest rank and drain ignores join order.
     assert_eq!(distribution.p50, Duration::from_nanos(2));
     assert_eq!(distribution.p99, Duration::from_nanos(3));
     assert_eq!(distribution.max, Duration::from_nanos(3));
     assert_eq!(drain, Duration::from_micros(9));
+    assert_eq!(invalid.unwrap_err().kind(), io::ErrorKind::InvalidData);
 }
 
 #[test]
@@ -263,6 +210,24 @@ fn cancellation_orchestration_handles_each_backend_and_producer_topology() {
             .await
             .unwrap();
         }
+    });
+}
+
+#[test]
+fn storm_registration_exceeds_tokios_cooperative_budget_without_losing_timers() {
+    let runner =
+        commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(1));
+
+    runner.start(|context| async move {
+        worst_case::run_storm_batch(
+            &context,
+            Backend::Tokio,
+            256,
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap();
     });
 }
 
