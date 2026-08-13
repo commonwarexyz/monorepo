@@ -439,16 +439,13 @@ where
                 // certified phase and applying the retention policy)
                 // unless the round was pruned while recovery was in
                 // flight. Recording may unlock already-buffered votes.
-                let mut dirty = None;
-                if let Some(round) = work.get_mut(&view) {
+                let recorded = work.get_mut(&view).is_some_and(|round| {
                     let _guard = round.span().entered();
                     debug!(%view, %kind, "constructed certificate, forwarding to voter");
-                    if round.record_certificate(&certificate) {
-                        dirty = Some(view);
-                    }
-                }
+                    round.record_certificate(&certificate)
+                });
                 voter.recovered(certificate);
-                dirty
+                recorded.then_some(view)
             }
         }
     }

@@ -376,8 +376,10 @@ impl<
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        let begun = self.begin_verify(rng, strategy);
-        self.verifier.drive(begun).await
+        let (batch, job) = self.begin_verify(rng, strategy)?;
+        let (votes, invalid) = job.await;
+        self.finish_verify(votes);
+        Some((batch, invalid))
     }
 
     /// Begins a batch verification of the first kind of vote worth verifying
@@ -439,13 +441,8 @@ impl<
             .collect()
     }
 
-    /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
-    /// Test-only shim over [Self::begin_construct_certificate].
-    ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless the round will
-    /// also be discarded.
+    /// Test-only shim over [Self::begin_construct_certificate] and
+    /// [Self::record_certificate].
     #[cfg(test)]
     pub async fn try_construct_certificate(
         &mut self,

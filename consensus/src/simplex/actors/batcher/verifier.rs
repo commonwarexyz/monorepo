@@ -12,9 +12,10 @@ use commonware_cryptography::{Digest, certificate::Verification};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::ordered::Set;
+use futures::{FutureExt as _, future::BoxFuture};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
-use std::{future::Future, mem, pin::Pin, sync::Arc};
+use std::{future::Future, mem, sync::Arc};
 use tracing::{Instrument as _, Span, info_span};
 
 /// Runs a CPU-bound job through [Strategy::spawn], entering `span` on the worker thread and
@@ -216,8 +217,7 @@ pub enum VerifiedVotes<S: Scheme<D>, D: Digest> {
 /// An owned, in-flight verification batch: resolves to the verified votes and
 /// the signers that failed verification. Feed the votes back through
 /// [Verifier::finish_verify].
-pub type VerifyJob<S, D> =
-    Pin<Box<dyn Future<Output = (VerifiedVotes<S, D>, Vec<Participant>)> + Send>>;
+pub type VerifyJob<S, D> = BoxFuture<'static, (VerifiedVotes<S, D>, Vec<Participant>)>;
 
 /// How the selected proposal changed after an update.
 pub(super) struct ProposalUpdate {
@@ -352,13 +352,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         self.proposal.proposal()
     }
 
-    /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
     /// Test-only shim over [Self::begin_construct_certificate].
-    ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless
-    /// the verifier will also be discarded.
     #[cfg(test)]
     pub async fn try_construct_certificate(
         &mut self,
@@ -539,7 +533,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// result. Test-only shim over the `begin_verify_*` methods and
     /// [Self::finish_verify].
     #[cfg(test)]
-    pub(super) async fn drive(
+    async fn drive(
         &mut self,
         begun: Option<(usize, VerifyJob<S, D>)>,
     ) -> Option<(usize, Vec<Participant>)> {
@@ -610,7 +604,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             ));
             (VerifiedVotes::Notarizes(verified_notarizes), invalid)
         });
-        Some((batch, Box::pin(job) as VerifyJob<S, D>))
+        Some((batch, job.boxed()))
     }
 
     /// Test-only shim over [Self::begin_verify_nullifies] and
@@ -661,7 +655,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             );
             (VerifiedVotes::Nullifies(verified_nullifies), invalid)
         });
-        Some((batch, Box::pin(job) as VerifyJob<S, D>))
+        Some((batch, job.boxed()))
     }
 
     /// Test-only shim over [Self::begin_verify_finalizes] and
@@ -725,7 +719,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             ));
             (VerifiedVotes::Finalizes(verified_finalizes), invalid)
         });
-        Some((batch, Box::pin(job) as VerifyJob<S, D>))
+        Some((batch, job.boxed()))
     }
 
     /// Reintegrates the result of a completed verification batch into the
