@@ -35,7 +35,10 @@ pub trait Storage<F: Family>: Send + Sync {
         positions: &[Position<F>],
     ) -> impl Future<Output = Result<Vec<Self::Digest>, Error<F>>> + Send {
         async move {
-            debug_assert!(positions.is_sorted_by(|a, b| a < b));
+            assert!(
+                positions.is_sorted_by(|a, b| a < b),
+                "positions must be strictly increasing"
+            );
             let mut nodes = Vec::with_capacity(positions.len());
             for &position in positions {
                 let node = self

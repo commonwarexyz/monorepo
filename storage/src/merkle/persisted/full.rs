@@ -648,7 +648,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Returns [`Error::ElementPruned`] for the first of `positions` that falls below the
     /// journal's pruning boundary.
     pub async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        debug_assert!(positions.is_sorted_by(|a, b| a < b));
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
         let bounds = self.journal.bounds();
         let mut nodes = vec![None; positions.len()];
         let mut journal_positions = Vec::with_capacity(positions.len());
@@ -662,6 +665,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 return Err(Error::ElementPruned(position));
             }
         }
+
         // Within-bounds reads are guaranteed not to return `ItemPruned` (see
         // [`crate::journal::contiguous::Contiguous::read`]).
         let items = if journal_positions.is_empty() {
@@ -672,6 +676,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 .await
                 .map_err(Error::Journal)?
         };
+
         // The unfilled slots are exactly the journal subsequence, in the order it was built.
         let mut items = items.into_iter();
         Ok(nodes
