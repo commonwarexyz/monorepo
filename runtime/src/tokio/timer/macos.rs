@@ -103,7 +103,7 @@ impl Alarm for NativeAlarm {
         // kqueue carries the absolute Mach deadline through its intptr_t data
         // field. Stay within its positive range instead of relying on signed-bit
         // reinterpretation. Rounding down keeps conversion back to ticks within
-        // that range; Duration::MAX is used only when it is the smaller limit.
+        // that range. Duration::MAX is used only when it is the smaller limit.
         let max_ticks =
             u64::try_from(libc::intptr_t::MAX).expect("intptr_t maximum must be nonnegative");
         Deadline::from_duration(

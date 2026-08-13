@@ -911,16 +911,8 @@ mod tests {
             assert_eq!(kind, AssignmentKind::Provisional);
             drop(block_on_sleep);
 
-            // Let every runtime worker reach its park callback. The callback
-            // claims each worker index once and independently of fallback use.
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while context.executor.timer.allocator_claims().0 < WORKERS {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "timer workers did not reach their park callbacks"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            // Runtime startup completes every worker claim independently of
+            // the block_on caller's fallback use.
             let claims_before = context.executor.timer.allocator_claims();
             assert_eq!(claims_before.0, WORKERS);
             assert_eq!(claims_before.1, 1);

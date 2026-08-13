@@ -22,15 +22,12 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::{Arc, Weak, atomic::AtomicU64},
+    sync::{Arc, Weak, atomic::AtomicU64, mpsc},
     task::{Context, Poll, Waker},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use thiserror::Error;
-use tokio::{
-    runtime::{Builder as TokioBuilder, Runtime},
-    task::JoinHandle,
-};
+use tokio::runtime::{Builder as TokioBuilder, Runtime};
 
 /// Maximum difference covered by an already armed slightly later alarm.
 const REARM_TOLERANCE: Duration = Duration::from_nanos(50);
@@ -41,20 +38,20 @@ const WAKE_BATCH: usize = 32;
 /// Expired entries processed before yielding when more are ready.
 const EXPIRY_YIELD_BUDGET: usize = 512;
 
+/// Maximum time allowed for every initial Tokio worker to claim timer affinity.
+const WORKER_AFFINITY_START_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Entry state before its single terminal transition.
 const ENTRY_WAITING: u8 = 0;
 
 /// Entry state after its deadline expires.
 const ENTRY_FIRED: u8 = 1;
 
-/// Entry state after its sleep future is dropped.
-const ENTRY_CANCELED: u8 = 2;
+/// Entry state after cancellation or orderly scheduler shutdown.
+const ENTRY_QUIESCENT: u8 = 2;
 
 /// Entry state after timer infrastructure fails.
 const ENTRY_FAILED: u8 = 3;
-
-/// Entry state after orderly timer scheduler shutdown.
-const ENTRY_STOPPED: u8 = 4;
 
 /// Heap index used by entries that are not resident.
 pub(super) const NOT_IN_HEAP: usize = usize::MAX;
@@ -130,6 +127,8 @@ pub(super) trait Alarm: Send + Sync + Sized + 'static {
 pub(crate) struct Builder {
     /// Shared allocator used by callbacks and the eventual scheduler.
     affinity: Arc<Affinity>,
+    /// One notification for every initial worker affinity claim.
+    worker_claimed: mpsc::Receiver<()>,
 }
 
 impl Builder {
@@ -144,12 +143,37 @@ impl Builder {
             next_fallback: AtomicUsize::new(0),
         });
         let callback_affinity = Arc::clone(&affinity);
-        runtime_builder.on_thread_park(move || callback_affinity.assign_worker());
-        Self { affinity }
+        let (worker_claimed_sender, worker_claimed) = mpsc::channel();
+        runtime_builder.on_thread_park(move || {
+            if callback_affinity.assign_worker() {
+                let _ = worker_claimed_sender.send(());
+            }
+        });
+        Self {
+            affinity,
+            worker_claimed,
+        }
     }
 
     /// Enters the built runtime, validates every shard, and starts its drivers.
     pub(crate) fn build(self, runtime: &Runtime, panicker: Panicker) -> Timer {
+        // Tokio queues every initial worker before returning its runtime. No
+        // Commonware task can create a block_in_place replacement before this
+        // method, so finish original worker claims before exposing the timer.
+        let deadline = Instant::now() + WORKER_AFFINITY_START_TIMEOUT;
+        for claimed in 0..self.affinity.worker_threads {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            self.worker_claimed
+                .recv_timeout(remaining)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to initialize timer worker affinity after {claimed} of {} claims \
+                         within {WORKER_AFFINITY_START_TIMEOUT:?}: {error}",
+                        self.affinity.worker_threads
+                    )
+                });
+        }
+
         // AsyncFd registration requires the reactor selected by this builder.
         let _guard = runtime.enter();
 
@@ -175,14 +199,12 @@ impl Builder {
             shards.push(Arc::new(Shard::new(index, alarm, panicker.clone())));
         }
 
-        let drivers = shards
-            .iter()
-            .map(|shard| runtime.spawn(run_driver(Arc::clone(shard))))
-            .collect();
+        for shard in &shards {
+            runtime.spawn(run_driver(Arc::clone(shard)));
+        }
 
         Timer {
             shards,
-            drivers,
             affinity: self.affinity,
         }
     }
@@ -192,8 +214,6 @@ impl Builder {
 pub(crate) struct Timer {
     /// Shards selected by worker or cached fallback affinity.
     shards: Vec<Arc<Shard<NativeAlarm>>>,
-    /// Driver tasks, retained so teardown can abort them.
-    drivers: Vec<JoinHandle<()>>,
     /// Per-runtime shard selection state.
     affinity: Arc<Affinity>,
 }
@@ -267,9 +287,6 @@ impl Drop for Timer {
         for shard in &self.shards {
             shard.stop();
         }
-        for driver in &self.drivers {
-            driver.abort();
-        }
     }
 }
 
@@ -308,7 +325,7 @@ struct RegisteredSleep<A: Alarm> {
 
 impl<A: Alarm> Drop for RegisteredSleep<A> {
     fn drop(&mut self) {
-        if self.entry.transition(ENTRY_CANCELED) {
+        if self.entry.transition(ENTRY_QUIESCENT) {
             // Task migration cannot change the shard that owns this entry.
             if let Some(shard) = self.shard.upgrade() {
                 shard.cancel(&self.entry);
@@ -346,7 +363,7 @@ impl Entry {
         match self.state.load(AtomicOrdering::Acquire) {
             ENTRY_FIRED => return Poll::Ready(()),
             ENTRY_FAILED => resume_reported_panic("high-resolution timer scheduler failed"),
-            ENTRY_STOPPED => return Poll::Pending,
+            ENTRY_QUIESCENT => return Poll::Pending,
             _ => {}
         }
 
@@ -363,7 +380,7 @@ impl Entry {
                 self.waker.take();
                 resume_reported_panic("high-resolution timer scheduler failed");
             }
-            ENTRY_STOPPED => {
+            ENTRY_QUIESCENT => {
                 self.waker.take();
                 Poll::Pending
             }
@@ -464,7 +481,7 @@ impl<A: Alarm> Shard<A> {
             match state.lifecycle {
                 ShardLifecycle::Stopped => {
                     // Release makes orderly teardown visible to a later future poll.
-                    entry.state.store(ENTRY_STOPPED, AtomicOrdering::Release);
+                    entry.state.store(ENTRY_QUIESCENT, AtomicOrdering::Release);
                     false
                 }
                 ShardLifecycle::Failed => {
@@ -474,9 +491,7 @@ impl<A: Alarm> Shard<A> {
                 }
                 ShardLifecycle::Running => {
                     let previous = state.entries.peek();
-                    let sequence = state.sequence;
-                    state.sequence = state.sequence.wrapping_add(1);
-                    state.entries.push(deadline, sequence, entry);
+                    state.entries.push(deadline, entry);
                     let desired = state.entries.peek();
                     previous != desired && !arm_covers(state.armed_deadline, desired)
                 }
@@ -588,13 +603,13 @@ impl<A: Alarm> Shard<A> {
             state.armed_deadline = None;
             drain_heap(&mut state.entries)
         };
-        complete_entries(pending, ENTRY_STOPPED);
+        complete_entries(pending, ENTRY_QUIESCENT);
         self.signal.notify();
     }
 
     /// Captures failure state, drains the heap, and interrupts the root runtime.
     fn fail(&self, failure: DriverFailure) {
-        let (queued, desired, armed, notified, pending) = {
+        let (queued, desired, armed, notified, notification, pending) = {
             let mut state = self.state.lock();
             if state.lifecycle != ShardLifecycle::Running {
                 return;
@@ -603,19 +618,25 @@ impl<A: Alarm> Shard<A> {
             let desired = state.entries.peek();
             let armed = state.armed_deadline;
             let notified = self.signal.is_notified();
-            let message = format!(
-                "timer shard {} failed during {}: {}; snapshot=ShardSnapshot {{ queued: \
-                 {queued}, desired: {desired:?}, armed: {armed:?}, notified: {notified} }}",
-                self.index, failure.operation, failure.cause
-            );
             state.lifecycle = ShardLifecycle::Failed;
             state.armed_deadline = None;
             let pending = drain_heap(&mut state.entries);
             // Claim root interruption while the shard lock prevents a newly
             // failed sleep from racing this more detailed payload.
-            self.panicker.notify_fatal(Box::new(message));
-            (queued, desired, armed, notified, pending)
+            let notification = self.panicker.claim_fatal();
+            (queued, desired, armed, notified, notification, pending)
         };
+
+        // The root receiver may invoke its waker synchronously, so publish only
+        // after releasing the shard lock and before waking failed sleepers.
+        if let Some(notification) = notification {
+            let message = format!(
+                "timer shard {} failed during {}: {}. snapshot=ShardSnapshot {{ queued: \
+                 {queued}, desired: {desired:?}, armed: {armed:?}, notified: {notified} }}",
+                self.index, failure.operation, failure.cause
+            );
+            notification.notify(Box::new(message));
+        }
 
         // Every failed shard emits its own actionable diagnostic, even when
         // another panic already claimed or closed root interruption.
@@ -656,8 +677,6 @@ enum ShardLifecycle {
 struct ShardState {
     /// Indexed 4-ary minimum heap.
     entries: Heap,
-    /// Wrapping tie breaker for equal deadlines.
-    sequence: u64,
     /// Deadline most recently confirmed armed by the driver.
     armed_deadline: Option<Deadline>,
     /// Whether the shard is running, stopped normally, or failed.
@@ -669,7 +688,6 @@ impl ShardState {
     fn new() -> Self {
         Self {
             entries: Heap::default(),
-            sequence: 0,
             armed_deadline: None,
             lifecycle: ShardLifecycle::Running,
         }
@@ -757,7 +775,7 @@ impl Batch {
                     || entry.transition(terminal))
                     && let Some(waker) = entry.take_waker()
                 {
-                    if terminal == ENTRY_STOPPED {
+                    if terminal == ENTRY_QUIESCENT {
                         drop(waker);
                     } else {
                         waker.wake();
@@ -898,7 +916,7 @@ impl DriverSignal {
 pub(crate) enum AssignmentKind {
     /// Temporary round-robin choice for a non-worker or pre-park worker.
     Provisional,
-    /// Unique worker index claimed from the worker-only allocator.
+    /// Unique index claimed by one of the runtime's initial worker threads.
     Worker,
 }
 
@@ -1002,7 +1020,7 @@ struct Affinity {
     lifetime: Arc<()>,
     /// Number of native timer shards.
     worker_threads: usize,
-    /// Allocator consumed only by worker park callbacks.
+    /// Allocator exhausted by initial worker park callbacks during startup.
     next_worker: AtomicUsize,
     /// Allocator consumed only on uncached fallback lookup.
     next_fallback: AtomicUsize,
@@ -1030,17 +1048,19 @@ impl Affinity {
     }
 
     /// Preserves a worker assignment or upgrades a provisional one.
-    fn assign_worker(&self) {
+    ///
+    /// Returns whether this callback claimed a new worker slot.
+    fn assign_worker(&self) -> bool {
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
             let existing = assignments.activate(self.runtime_id);
             if matches!(existing, Some((_, AssignmentKind::Worker))) {
-                return;
+                return false;
             }
 
-            // `block_in_place` may move one logical worker core to a temporary
-            // blocking-pool thread. Such threads also invoke this park callback,
-            // so only the configured number of callbacks may claim worker slots.
+            // Initial workers exhaust every slot before timer construction
+            // returns. Later block_in_place replacements also invoke this park
+            // callback, but can receive only provisional fallback assignments.
             // Relaxed ordering is sufficient because this counter allocates
             // unique claims only.
             //
@@ -1058,7 +1078,7 @@ impl Affinity {
                 },
             ) else {
                 if existing.is_some() {
-                    return;
+                    return false;
                 }
                 let index =
                     self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
@@ -1068,7 +1088,7 @@ impl Affinity {
                     kind: AssignmentKind::Provisional,
                     index,
                 });
-                return;
+                return false;
             };
             assignments.install(ThreadAssignment {
                 runtime_id: self.runtime_id,
@@ -1076,7 +1096,8 @@ impl Affinity {
                 kind: AssignmentKind::Worker,
                 index,
             });
-        });
+            true
+        })
     }
 }
 

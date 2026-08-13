@@ -12,12 +12,10 @@ use std::sync::atomic::Ordering;
 /// Number of children assigned to each heap item.
 const ARITY: usize = 4;
 
-/// A timer and its ordering metadata.
+/// A timer and its deadline.
 struct Item {
     /// Fixed monotonic deadline for the timer.
     deadline: Deadline,
-    /// Sequence used to order timers with the same deadline.
-    sequence: u64,
     /// Shared timer state.
     entry: EntryArc<Entry>,
 }
@@ -26,7 +24,6 @@ impl Item {
     /// Return whether this item belongs before another item.
     fn precedes(&self, other: &Self) -> bool {
         self.deadline < other.deadline
-            || (self.deadline == other.deadline && self.sequence < other.sequence)
     }
 }
 
@@ -53,7 +50,7 @@ impl Heap {
     /// # Panics
     ///
     /// Panics if the timer entry is already resident in a heap.
-    pub(super) fn push(&mut self, deadline: Deadline, sequence: u64, entry: EntryArc<Entry>) {
+    pub(super) fn push(&mut self, deadline: Deadline, entry: EntryArc<Entry>) {
         // Every heap-index access occurs while the owning shard mutex is held.
         // Relaxed ordering is sufficient because the mutex publishes mutations.
         assert_eq!(
@@ -63,11 +60,7 @@ impl Heap {
         );
 
         let index = self.items.len();
-        self.items.push(Item {
-            deadline,
-            sequence,
-            entry,
-        });
+        self.items.push(Item { deadline, entry });
         self.items[index]
             .entry
             .heap_index
@@ -209,8 +202,6 @@ mod tests {
     struct ModelItem {
         /// Deadline expressed as nanoseconds for convenient comparison.
         deadline: u64,
-        /// Sequence used by the heap tie breaker.
-        sequence: u64,
         /// Entry whose identity ties the model to the heap.
         entry: Arc<Entry>,
     }
@@ -221,15 +212,10 @@ mod tests {
     }
 
     /// Insert a fresh entry and return its shared identity.
-    fn insert(heap: &mut Heap, deadline_nanos: u64, sequence: u64) -> Arc<Entry> {
+    fn insert(heap: &mut Heap, deadline_nanos: u64) -> Arc<Entry> {
         let entry = Arc::new(Entry::new());
-        heap.push(deadline(deadline_nanos), sequence, Arc::clone(&entry));
+        heap.push(deadline(deadline_nanos), Arc::clone(&entry));
         entry
-    }
-
-    /// Return the comparable key of a heap item.
-    const fn key(item: &Item) -> (Duration, u64) {
-        (item.deadline.as_duration(), item.sequence)
     }
 
     /// Assert heap order and every stored resident index.
@@ -250,15 +236,18 @@ mod tests {
 
     /// Pops and verifies the minimum retained by the reference model.
     fn assert_pop_matches_model(heap: &mut Heap, model: &mut Vec<ModelItem>) {
-        let expected_index = model
+        let expected_deadline = model
             .iter()
-            .enumerate()
-            .min_by_key(|(_, timer)| (timer.deadline, timer.sequence))
-            .map(|(index, _)| index)
+            .map(|timer| timer.deadline)
+            .min()
             .expect("reference model is not empty");
-        let expected = model.swap_remove(expected_index);
         let popped = heap.pop().expect("heap matches reference length");
-        assert!(Arc::ptr_eq(&popped, &expected.entry));
+        let popped_index = model
+            .iter()
+            .position(|timer| Arc::ptr_eq(&popped, &timer.entry))
+            .expect("popped entry is retained by the reference model");
+        assert_eq!(model[popped_index].deadline, expected_deadline);
+        let expected = model.swap_remove(popped_index);
         assert_eq!(
             expected.entry.heap_index.load(Ordering::Relaxed),
             NOT_IN_HEAP
@@ -277,20 +266,20 @@ mod tests {
     }
 
     /// Insert keys, verify every intermediate state, and verify pop order.
-    fn assert_ordered(keys: &[(u64, u64)]) {
+    fn assert_ordered(keys: &[u64]) {
         let mut expected = keys.to_vec();
         expected.sort_unstable();
 
         let mut heap = Heap::default();
-        for &(deadline, sequence) in keys {
-            insert(&mut heap, deadline, sequence);
+        for &deadline in keys {
+            insert(&mut heap, deadline);
             assert_invariants(&heap);
         }
 
         for expected in expected {
             assert_eq!(
-                heap.items.first().map(key),
-                Some((Duration::from_nanos(expected.0), expected.1))
+                heap.items.first().map(|item| item.deadline.as_duration()),
+                Some(Duration::from_nanos(expected))
             );
             let popped = heap.pop().expect("expected a timer");
             assert_eq!(popped.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
@@ -312,10 +301,10 @@ mod tests {
         assert_eq!(missing.heap_index.load(Ordering::Relaxed), NOT_IN_HEAP);
 
         // Push and pop a singleton, checking its key, identity, and index.
-        let entry = insert(&mut heap, 7, 11);
+        let entry = insert(&mut heap, 7);
         assert_eq!(heap.peek(), Some(deadline(7)));
         assert!(Arc::ptr_eq(&heap.items[0].entry, &entry));
-        assert_eq!(key(&heap.items[0]), (Duration::from_nanos(7), 11));
+        assert_eq!(heap.items[0].deadline.as_duration(), Duration::from_nanos(7));
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), 0);
         assert_invariants(&heap);
 
@@ -325,11 +314,11 @@ mod tests {
         assert_invariants(&heap);
 
         // Remove a singleton by index, then remove three positions from a larger heap.
-        insert(&mut heap, 1, 0);
+        insert(&mut heap, 1);
         assert_remove_at(&mut heap, 0);
         assert_eq!(heap.len(), 0);
         for value in (0..64).rev() {
-            insert(&mut heap, value, value);
+            insert(&mut heap, value);
         }
         assert_invariants(&heap);
 
@@ -340,37 +329,22 @@ mod tests {
         assert_remove_at(&mut heap, final_index);
     }
 
-    /// Ascending, descending, equal, and wrapping insertions pop in order.
+    /// Ascending, descending, and equal insertions pop in deadline order.
     #[test]
     fn insertion_shapes_and_pop_order() {
         // Exercise already ordered input, the worst insertion direction, and
-        // equal deadlines whose order depends only on sequence.
-        let ascending = (0..128).map(|value| (value, value)).collect::<Vec<_>>();
+        // equal deadlines that may pop in any identity order.
+        let ascending = (0..128).collect::<Vec<_>>();
         assert_ordered(&ascending);
 
-        let descending = (0..128)
-            .rev()
-            .map(|value| (value, value))
-            .collect::<Vec<_>>();
+        let descending = (0..128).rev().collect::<Vec<_>>();
         assert_ordered(&descending);
 
-        let equal = (0..128)
-            .rev()
-            .map(|sequence| (42, sequence))
-            .collect::<Vec<_>>();
+        let equal = vec![42; 128];
         assert_ordered(&equal);
 
-        // Place equal deadlines on both sides of u64 wrap plus distinct
-        // deadlines that must still dominate the numeric sequence tie breaker.
-        let wrapping = [
-            (9, u64::MAX - 1),
-            (9, u64::MAX),
-            (9, 0),
-            (9, 1),
-            (8, 0),
-            (10, u64::MAX),
-        ];
-        assert_ordered(&wrapping);
+        let interleaved = [9, 9, 9, 9, 8, 10];
+        assert_ordered(&interleaved);
     }
 
     /// Replacing an arbitrary item with an earlier tail item sifts upward.
@@ -380,7 +354,7 @@ mod tests {
         // later parent, forcing the replacement toward the root.
         let mut heap = Heap::default();
         for value in [0, 100, 1, 2, 3, 101, 102, 103, 104, 10] {
-            insert(&mut heap, value, value);
+            insert(&mut heap, value);
         }
         assert_invariants(&heap);
 
@@ -406,7 +380,7 @@ mod tests {
         // children, so root removal must move that replacement toward a leaf.
         let mut heap = Heap::default();
         for value in 0..10 {
-            insert(&mut heap, value, value);
+            insert(&mut heap, value);
         }
         assert_invariants(&heap);
 
@@ -432,7 +406,7 @@ mod tests {
         // out-of-range and sentinel indices for the same resident entry.
         let mut heap = Heap::default();
         for value in 0..16 {
-            insert(&mut heap, value, value);
+            insert(&mut heap, value);
         }
         let original_len = heap.len();
         let victim = Arc::clone(&heap.items[5].entry);
@@ -458,24 +432,18 @@ mod tests {
     /// Randomized operations match a simple identity-based reference model.
     #[test]
     fn randomized_operations_match_reference_model() {
-        // Use deterministic randomness and begin near sequence wrap so the trace
-        // combines insert, pop, indexed removal, and wrapping tie breakers.
+        // Use deterministic randomness so the trace combines insert, pop, and
+        // indexed removal with many equal deadlines.
         let mut rng = test_rng();
         let mut heap = Heap::default();
         let mut model = Vec::<ModelItem>::new();
-        let mut sequence = u64::MAX - 64;
 
         for _ in 0..20_000 {
             let should_insert = model.is_empty() || (model.len() < 128 && rng.random_bool(0.55));
             if should_insert {
                 let deadline = rng.random_range(0..257);
-                let entry = insert(&mut heap, deadline, sequence);
-                model.push(ModelItem {
-                    deadline,
-                    sequence,
-                    entry,
-                });
-                sequence = sequence.wrapping_add(1);
+                let entry = insert(&mut heap, deadline);
+                model.push(ModelItem { deadline, entry });
             } else if rng.random_bool(0.5) {
                 assert_pop_matches_model(&mut heap, &mut model);
             } else {
@@ -544,7 +512,7 @@ mod tests {
         // entry again under a different key.
         let mut heap = Heap::default();
         let entry = Arc::new(Entry::new());
-        heap.push(deadline(1), 0, Arc::clone(&entry));
-        heap.push(deadline(2), 1, entry);
+        heap.push(deadline(1), Arc::clone(&entry));
+        heap.push(deadline(2), entry);
     }
 }

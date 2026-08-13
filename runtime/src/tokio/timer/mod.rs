@@ -25,9 +25,9 @@
 //!
 //! ```text
 //!                 WAITING
-//!              /    |    \    \
-//!             v     v     v    v
-//!          FIRED CANCELED FAILED STOPPED
+//!                /    |    \
+//!               v     v     v
+//!            FIRED QUIESCENT FAILED
 //! ```
 //!
 //! The heap mutex owns registration and alarm intent. Native alarm operations
@@ -38,6 +38,7 @@
 //! shard share the entry until one terminal transition wins. Expiry commits
 //! `FIRED` while removing an entry, then invokes or releases its waker from
 //! reusable driver scratch storage after unlocking the shard.
+//! `QUIESCENT` covers both a dropped sleep and orderly scheduler shutdown.
 //!
 //! Wall-clock deadlines are converted once to a fixed monotonic deadline.
 //! Later wall-clock changes do not move a registered sleep. A 50 nanosecond
@@ -49,8 +50,8 @@
 //! sleepers, so an ordinary task panic cannot replace the infrastructure
 //! diagnostic. Failed sleepers unwind with an already-reported marker so they
 //! do not duplicate that diagnostic. Orderly scheduler teardown instead marks
-//! queued sleeps stopped without waking them, signals drivers, and aborts
-//! their tasks.
+//! queued sleeps stopped without waking them and signals drivers before the
+//! owning Tokio runtime tears down their tasks.
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "macos"))] {

@@ -2,10 +2,10 @@
 mod ordinary {
     use super::super::{
         Affinity, Alarm, AssignmentKind, Batch, Deadline, DriverFailure, DriverSignal,
-        ENTRY_CANCELED, ENTRY_FAILED, ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING,
-        EXPIRY_YIELD_BUDGET, Entry, NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle, Sleep,
-        ThreadAssignment, ThreadAssignments, WAKE_BATCH, allocate_runtime_id, register_relative,
-        run_driver, run_driver_loop,
+        ENTRY_FAILED, ENTRY_FIRED, ENTRY_QUIESCENT, ENTRY_WAITING, EXPIRY_YIELD_BUDGET, Entry,
+        NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle, Sleep, ThreadAssignment,
+        ThreadAssignments, WAKE_BATCH, allocate_runtime_id, register_relative, run_driver,
+        run_driver_loop,
     };
     use crate::{
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -17,6 +17,7 @@ mod ordinary {
         task::{ArcWake, AtomicWaker, noop_waker, waker},
     };
     use std::{
+        future::Future as _,
         io,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
@@ -299,12 +300,15 @@ mod ordinary {
     struct LockCheckingWaker {
         /// Shard whose state lock must not be held.
         shard: Arc<Shard<FakeAlarm>>,
+        /// Whether the callback ran.
+        invoked: AtomicBool,
         /// Whether the callback acquired the state lock.
         acquired: AtomicBool,
     }
 
     impl ArcWake for LockCheckingWaker {
         fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.invoked.store(true, AtomicOrdering::Release);
             let acquired = arc_self.shard.state.try_lock().is_some();
             arc_self.acquired.store(acquired, AtomicOrdering::Release);
         }
@@ -484,7 +488,7 @@ mod ordinary {
             shard.register(at(10), Arc::new(Entry::new()));
         }
         let final_entry = Arc::new(Entry::new());
-        shard.register(at(10), Arc::clone(&final_entry));
+        shard.register(at(11), Arc::clone(&final_entry));
 
         let competitor_ran = Arc::new(AtomicBool::new(false));
         let checking = Arc::new(YieldCheckingWaker {
@@ -502,7 +506,7 @@ mod ordinary {
                 competitor_ran.store(true, AtomicOrdering::Release);
             })
         };
-        control.set_now(at(10));
+        control.set_now(at(11));
         control.inject_readiness();
         let mut batch = Batch::new();
         driver_ok(run_driver_loop(&shard, &mut batch).await);
@@ -560,7 +564,7 @@ mod ordinary {
 
         // Dropping the unpolled future must cancel and remove the exact entry.
         drop(registered);
-        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
+        assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_QUIESCENT);
         assert_eq!(entry.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
         assert_eq!(shard.state.lock().entries.len(), 0);
     }
@@ -624,7 +628,7 @@ mod ordinary {
 
         // Canceling the head moves the minimum later and requests a new arm.
         drop(head_sleep);
-        assert_eq!(head.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
+        assert_eq!(head.state.load(AtomicOrdering::Acquire), ENTRY_QUIESCENT);
         assert!(shard.signal.is_notified());
         consume_signal(&shard);
         driver_ok(shard.rearm());
@@ -632,7 +636,7 @@ mod ordinary {
 
         // Canceling the final entry requests and performs a disarm.
         drop(tail_sleep);
-        assert_eq!(tail.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
+        assert_eq!(tail.state.load(AtomicOrdering::Acquire), ENTRY_QUIESCENT);
         assert!(shard.signal.is_notified());
         consume_signal(&shard);
         driver_ok(shard.rearm());
@@ -671,7 +675,7 @@ mod ordinary {
     }
 
     #[test]
-    fn expiry_removes_only_elapsed_entries_in_deadline_and_sequence_order() {
+    fn expiry_removes_only_elapsed_entries() {
         // Queue one earliest entry, two equal entries, and one future entry out of order.
         let (shard, control) = fake_shard();
         let (equal_first, _equal_first_sleep) = register(&shard, at(50));
@@ -685,8 +689,12 @@ mod ordinary {
         assert!(!driver_ok(shard.take_expired(&mut batch)));
         assert_eq!(batch.entries.len(), 3);
         assert!(Arc::ptr_eq(&batch.entries[0], &earliest));
-        assert!(Arc::ptr_eq(&batch.entries[1], &equal_first));
-        assert!(Arc::ptr_eq(&batch.entries[2], &equal_second));
+        assert!(batch.entries[1..]
+            .iter()
+            .any(|entry| Arc::ptr_eq(entry, &equal_first)));
+        assert!(batch.entries[1..]
+            .iter()
+            .any(|entry| Arc::ptr_eq(entry, &equal_second)));
         assert_eq!(shard.state.lock().entries.len(), 1);
         assert_ne!(future.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
 
@@ -759,6 +767,7 @@ mod ordinary {
         let (entry, _registered) = register(&shard, at(10));
         let checking = Arc::new(LockCheckingWaker {
             shard: Arc::clone(&shard),
+            invoked: AtomicBool::new(false),
             acquired: AtomicBool::new(false),
         });
         let checking_waker = waker(Arc::clone(&checking));
@@ -774,6 +783,30 @@ mod ordinary {
         // Successful acquisition proves callback execution happened outside the lock.
         assert!(checking.acquired.load(AtomicOrdering::Acquire));
         assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FIRED);
+    }
+
+    #[test]
+    fn fatal_notification_callback_runs_after_releasing_the_shard_lock() {
+        // Poll root interruption with a waker that attempts to acquire the shard lock.
+        let (shard, _control, panicked) = observed_fake_shard();
+        let checking = Arc::new(LockCheckingWaker {
+            shard: Arc::clone(&shard),
+            invoked: AtomicBool::new(false),
+            acquired: AtomicBool::new(false),
+        });
+        let checking_waker = waker(Arc::clone(&checking));
+        let mut context = Context::from_waker(&checking_waker);
+        let mut interrupted = Box::pin(panicked.interrupt(future::pending::<()>()));
+        assert_eq!(interrupted.as_mut().poll(&mut context), Poll::Pending);
+
+        // Publishing fatal interruption may invoke the registered root waker synchronously.
+        shard.fail(DriverFailure::io(
+            "injected operation",
+            injected_error("root cause"),
+        ));
+
+        assert!(checking.invoked.load(AtomicOrdering::Acquire));
+        assert!(checking.acquired.load(AtomicOrdering::Acquire));
     }
 
     #[test]
@@ -862,13 +895,13 @@ mod ordinary {
         drop(sleeps[3].1.take());
         assert_eq!(
             sleeps[3].0.state.load(AtomicOrdering::Acquire),
-            ENTRY_CANCELED
+            ENTRY_QUIESCENT
         );
         assert_eq!(shard.state.lock().entries.len(), 4);
         drop(sleeps[0].1.take());
         assert_eq!(
             sleeps[0].0.state.load(AtomicOrdering::Acquire),
-            ENTRY_CANCELED
+            ENTRY_QUIESCENT
         );
         assert_eq!(shard.state.lock().entries.len(), 3);
 
@@ -877,7 +910,7 @@ mod ordinary {
         thread::spawn(move || drop(cross_thread)).join().unwrap();
         assert_eq!(
             sleeps[2].0.state.load(AtomicOrdering::Acquire),
-            ENTRY_CANCELED
+            ENTRY_QUIESCENT
         );
         assert_eq!(shard.state.lock().entries.len(), 2);
 
@@ -889,7 +922,7 @@ mod ordinary {
             };
             drop(sleep);
             live -= 1;
-            assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_CANCELED);
+            assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_QUIESCENT);
             assert_eq!(entry.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
             assert_eq!(shard.state.lock().entries.len(), live);
         }
@@ -920,11 +953,11 @@ mod ordinary {
         assert_eq!(shard.state.lock().entries.len(), 0);
         assert_eq!(
             first_entry.state.load(AtomicOrdering::Acquire),
-            ENTRY_STOPPED
+            ENTRY_QUIESCENT
         );
         assert_eq!(
             second_entry.state.load(AtomicOrdering::Acquire),
-            ENTRY_STOPPED
+            ENTRY_QUIESCENT
         );
         assert_eq!(counter.wakes.load(AtomicOrdering::Relaxed), 0);
         assert!(first_entry.take_waker().is_none());
@@ -940,11 +973,11 @@ mod ordinary {
         // Repeated stop is idempotent and does not renotify the driver.
         assert_eq!(
             first_entry.state.load(AtomicOrdering::Acquire),
-            ENTRY_STOPPED
+            ENTRY_QUIESCENT
         );
         assert_eq!(
             second_entry.state.load(AtomicOrdering::Acquire),
-            ENTRY_STOPPED
+            ENTRY_QUIESCENT
         );
         assert_eq!(shard.state.lock().entries.len(), 0);
         assert!(!shard.signal.is_notified());
@@ -1047,7 +1080,7 @@ mod ordinary {
         // A stopped shard must reject registration without mutating its heap or signal.
         assert_eq!(
             stopped_entry.state.load(AtomicOrdering::Acquire),
-            ENTRY_STOPPED
+            ENTRY_QUIESCENT
         );
         assert_eq!(
             stopped_entry.heap_index.load(AtomicOrdering::Acquire),
@@ -1529,6 +1562,57 @@ mod ordinary {
     }
 
     #[test]
+    fn timer_build_waits_for_every_initial_worker_claim() {
+        const WORKERS: usize = 2;
+
+        // Hold the second Tokio pool thread before it can run and park its worker core.
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let callback_started = Arc::clone(&started);
+        let callback_release = Arc::clone(&release);
+        let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+        runtime_builder
+            .worker_threads(WORKERS)
+            .max_blocking_threads(WORKERS)
+            .on_thread_start(move || {
+                let ordinal = callback_started.fetch_add(1, AtomicOrdering::AcqRel);
+                if ordinal == 1 {
+                    while !callback_release.load(AtomicOrdering::Acquire) {
+                        thread::yield_now();
+                    }
+                }
+            })
+            .enable_all();
+        let timer_builder = super::super::Builder::install(&mut runtime_builder, WORKERS);
+        let runtime = runtime_builder.build().expect("Tokio runtime must build");
+
+        // Release the delayed worker only after an early timer build would have returned.
+        let releaser = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while started.load(AtomicOrdering::Acquire) < WORKERS {
+                assert!(
+                    Instant::now() < deadline,
+                    "Tokio did not start both initial pool threads"
+                );
+                thread::yield_now();
+            }
+            thread::sleep(Duration::from_millis(100));
+            release.store(true, AtomicOrdering::Release);
+        });
+
+        let (panicker, _panicked) = Panicker::new(true);
+        let timer = timer_builder.build(&runtime, panicker);
+        let claims_at_return = timer.allocator_claims();
+        releaser.join().expect("worker releaser must complete");
+
+        // Timer construction must not expose user work until every original
+        // worker owns one unique shard claim.
+        assert_eq!(claims_at_return, (WORKERS, 0));
+        drop(timer);
+        drop(runtime);
+    }
+
+    #[test]
     fn thread_assignment_cache_prunes_dropped_runtimes_on_cold_paths() {
         // Cache two live runtimes, leaving the first assignment inactive.
         let mut assignments = ThreadAssignments::new();
@@ -1684,8 +1768,8 @@ mod ordinary {
 #[cfg(feature = "loom")]
 mod loom_tests {
     use super::super::{
-        Alarm, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_CANCELED, ENTRY_FAILED,
-        ENTRY_FIRED, ENTRY_STOPPED, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard, ShardLifecycle,
+        Alarm, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_FAILED, ENTRY_FIRED,
+        ENTRY_QUIESCENT, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard, ShardLifecycle,
     };
     use crate::utils::{Panicker, extract_panic_message};
     use loom::{
@@ -1923,7 +2007,7 @@ mod loom_tests {
                 let mut batch = Batch::new();
                 batch.entries.push(LoomArc::clone(&entry));
                 thread::spawn(move || {
-                    assert!(batch.complete(ENTRY_STOPPED).is_none());
+                    assert!(batch.complete(ENTRY_QUIESCENT).is_none());
                 })
             };
             poller.join().unwrap();
@@ -1931,7 +2015,7 @@ mod loom_tests {
 
             // Every interleaving leaves the stopped future quiescent and releases
             // a waker installed between the production state checks.
-            assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_STOPPED);
+            assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_QUIESCENT);
             assert!(entry.take_waker().is_none());
         });
     }
@@ -1941,7 +2025,7 @@ mod loom_tests {
         model(|| {
             // Race every legal terminal transition through Entry::transition.
             let entry = LoomArc::new(Entry::new());
-            let contenders: Vec<_> = [ENTRY_FIRED, ENTRY_CANCELED, ENTRY_FAILED]
+            let contenders: Vec<_> = [ENTRY_FIRED, ENTRY_QUIESCENT, ENTRY_FAILED]
                 .into_iter()
                 .map(|terminal| {
                     let entry = LoomArc::clone(&entry);
@@ -1992,7 +2076,7 @@ mod loom_tests {
             // The lock winner commits one terminal state and removes the entry.
             assert!(matches!(
                 entry.state.load(Ordering::Acquire),
-                ENTRY_FIRED | ENTRY_STOPPED
+                ENTRY_FIRED | ENTRY_QUIESCENT
             ));
             let state = shard.state.lock();
             assert_eq!(state.lifecycle, ShardLifecycle::Stopped);
@@ -2027,7 +2111,7 @@ mod loom_tests {
             // and publishes the nonresident heap index.
             assert!(matches!(
                 entry.state.load(Ordering::Acquire),
-                ENTRY_CANCELED | ENTRY_FIRED
+                ENTRY_QUIESCENT | ENTRY_FIRED
             ));
             let state = shard.state.lock();
             assert_eq!(state.entries.len(), 0);
@@ -2078,7 +2162,7 @@ mod loom_tests {
             let entry = LoomArc::new(Entry::new());
             shard.register(deadline(100), LoomArc::clone(&entry));
             shard.stop();
-            assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_STOPPED);
+            assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_QUIESCENT);
 
             // Teardown owns native resource cleanup once stop is already visible.
             // Rearm must return without issuing either an arm or disarm operation.
@@ -2163,12 +2247,7 @@ mod loom_tests {
                         assert_eq!(alarm.armed(), None);
                     }
                 }
-                let expected = if matches!(update, RearmUpdate::Stop) {
-                    ENTRY_STOPPED
-                } else {
-                    ENTRY_CANCELED
-                };
-                assert_eq!(first_entry.state.load(Ordering::Acquire), expected);
+                assert_eq!(first_entry.state.load(Ordering::Acquire), ENTRY_QUIESCENT);
             });
         }
     }
