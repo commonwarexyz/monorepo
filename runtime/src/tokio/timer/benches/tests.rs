@@ -5,13 +5,10 @@
 #![allow(dead_code)]
 
 mod accuracy;
-mod backend;
-pub(crate) use backend::{BenchSleep, poll_once, sleep_for, sleep_until, sleep_until_wall};
 mod config;
 pub(crate) use config::{Backend, Config};
-mod peer_gap;
-mod producer_gate;
 mod report;
+mod utils;
 mod worst_case;
 
 use clap::error::ErrorKind;
@@ -73,8 +70,8 @@ fn cli_activates_only_for_cargo_bench_and_keeps_arguments_strict() {
 #[test]
 fn deadline_pair_preserves_each_backend_measurement_contract() {
     let target = Duration::from_millis(50);
-    let commonware = backend::DeadlinePair::new(Backend::Commonware, target);
-    let tokio = backend::DeadlinePair::new(Backend::Tokio, target);
+    let commonware = utils::DeadlinePair::new(Backend::Commonware, target);
+    let tokio = utils::DeadlinePair::new(Backend::Tokio, target);
 
     // Derive Commonware's monotonic clock-pair uncertainty.
     let span = commonware
@@ -105,7 +102,7 @@ fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
     // Let the peer run once before callbacks start.
     let start = Instant::now();
     let before_callbacks = start + Duration::from_micros(5);
-    let mut gap = peer_gap::PeerGap::new(start);
+    let mut gap = utils::PeerGap::new(start);
     let target = Duration::from_micros(10);
 
     assert!(!gap.observe(before_callbacks, false, false));
@@ -114,13 +111,13 @@ fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
     // Only the active window counts, and early dispatch is invalid.
     assert_eq!(gap.maximum(), Duration::from_micros(20));
     assert_eq!(
-        peer_gap::dispatch_lateness(Duration::from_micros(9), target)
+        utils::dispatch_lateness(Duration::from_micros(9), target)
             .unwrap_err()
             .kind(),
         io::ErrorKind::InvalidData
     );
     assert_eq!(
-        peer_gap::dispatch_lateness(Duration::from_micros(13), target).unwrap(),
+        utils::dispatch_lateness(Duration::from_micros(13), target).unwrap(),
         Duration::from_micros(3)
     );
 }
@@ -128,10 +125,10 @@ fn callback_boundaries_preserve_dispatch_lateness_and_suspended_peer_gap() {
 #[test]
 fn storm_validation_rejects_late_or_incomplete_wake_targets() {
     let deadline = Duration::from_micros(10);
-    let mut ready: Vec<BenchSleep> = vec![Box::pin(std::future::ready(()))];
+    let mut ready: Vec<utils::BenchSleep> = vec![Box::pin(std::future::ready(()))];
     worst_case::validate_storm_completion(&mut ready, deadline, deadline).unwrap();
 
-    let mut late: Vec<BenchSleep> = vec![Box::pin(std::future::ready(()))];
+    let mut late: Vec<utils::BenchSleep> = vec![Box::pin(std::future::ready(()))];
     assert_eq!(
         worst_case::validate_storm_completion(
             &mut late,
@@ -143,7 +140,7 @@ fn storm_validation_rejects_late_or_incomplete_wake_targets() {
         io::ErrorKind::TimedOut
     );
 
-    let mut incomplete: Vec<BenchSleep> = vec![Box::pin(std::future::pending())];
+    let mut incomplete: Vec<utils::BenchSleep> = vec![Box::pin(std::future::pending())];
     assert_eq!(
         worst_case::validate_storm_completion(&mut incomplete, deadline, deadline)
             .unwrap_err()

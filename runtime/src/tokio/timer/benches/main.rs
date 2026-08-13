@@ -6,14 +6,11 @@
 //! well represented by a Criterion iteration loop.
 
 mod accuracy;
-mod backend;
 mod config;
-mod peer_gap;
-mod producer_gate;
 mod report;
+mod utils;
 mod worst_case;
 
-pub(crate) use backend::{BenchSleep, poll_once, sleep_for, sleep_until, sleep_until_wall};
 use commonware_runtime::{Runner as _, tokio as commonware_tokio};
 pub(crate) use config::{Backend, Config};
 use std::{error::Error, io};

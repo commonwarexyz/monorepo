@@ -115,7 +115,10 @@ thread_local! {
     };
 }
 
-/// A monotonic deadline represented as time since the platform epoch.
+/// Absolute deadline in the platform monotonic clock domain.
+///
+/// This newtype distinguishes alarm and heap deadlines from relative
+/// [`Duration`] values while retaining their representation and ordering.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct Deadline(Duration);
 
@@ -144,7 +147,11 @@ impl Deadline {
     }
 }
 
-/// Statically dispatched boundary around a platform alarm.
+/// Platform monotonic clock and one-shot alarm owned by a scheduler shard.
+///
+/// Producers may call [`Alarm::now`] concurrently. One driver serializes
+/// arming, disarming, and waiting. [`Alarm::wait`] must be cancellation-safe
+/// because a producer signal may win while the readiness future is pending.
 pub(super) trait Alarm: Send + Sync + Sized + 'static {
     /// Largest monotonic deadline that can be armed safely.
     fn max_deadline(&self) -> Deadline;
@@ -246,7 +253,10 @@ impl Builder {
     }
 }
 
-/// Owns the production native timer scheduler.
+/// Runtime-owned facade for the native timer scheduler.
+///
+/// Dropping the facade stops every shard before the owning Tokio runtime tears
+/// down its reactor.
 pub(crate) struct Timer {
     /// Shards selected by worker or cached fallback affinity.
     shards: Vec<Arc<Shard<NativeAlarm>>>,
@@ -276,30 +286,6 @@ impl Timer {
             .unwrap_or_default();
         self.sleep(remaining)
     }
-
-    #[cfg(test)]
-    /// Returns the current resident entry count for every shard.
-    pub(crate) fn heap_lengths(&self) -> Vec<usize> {
-        self.shards
-            .iter()
-            .map(|shard| shard.state.lock().entries.len())
-            .collect()
-    }
-
-    #[cfg(test)]
-    /// Returns the worker and fallback allocator claim counts.
-    pub(crate) fn allocator_claims(&self) -> (usize, usize) {
-        (
-            self.affinity.next_worker.load(AtomicOrdering::Relaxed),
-            self.affinity.next_fallback.load(AtomicOrdering::Relaxed),
-        )
-    }
-
-    #[cfg(test)]
-    /// Returns this runtime's assignment cached on the current thread.
-    pub(crate) fn current_assignment(&self) -> Option<(usize, AssignmentKind)> {
-        THREAD_ASSIGNMENTS.with(|assignments| assignments.borrow().get(&self.affinity))
-    }
 }
 
 /// Captures a relative deadline before selecting its registration shard.
@@ -316,7 +302,7 @@ fn register_relative<A: Alarm>(
         .alarm
         .now();
     let index = select();
-    shards[index].register_after_observation(now, duration)
+    shards[index].register(now, duration)
 }
 
 impl Drop for Timer {
@@ -327,7 +313,10 @@ impl Drop for Timer {
     }
 }
 
-/// Registered sleep state that remembers its original cancellation shard.
+/// Future-side owner of an eagerly registered timer entry.
+///
+/// Dropping the future cancels against its construction-time shard without
+/// keeping that shard or its native alarm alive.
 struct RegisteredSleep<A: Alarm> {
     /// Non-owning reference to the shard selected at construction.
     shard: Weak<Shard<A>>,
@@ -339,7 +328,8 @@ impl<A: Alarm> Future for RegisteredSleep<A> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.entry.poll(context)
+        let coop = std::task::ready!(tokio::task::coop::poll_proceed(context));
+        self.entry.poll(context).map(|()| coop.made_progress())
     }
 }
 
@@ -354,7 +344,10 @@ impl<A: Alarm> Drop for RegisteredSleep<A> {
     }
 }
 
-/// Per-sleep state shared by its future and selected shard.
+/// Shared timer entry with exactly one terminal lifecycle transition.
+///
+/// The future, heap, and driver may own the entry concurrently. Its state moves
+/// once from waiting to fired, quiescent, or failed.
 pub(super) struct Entry {
     /// Waiting or terminal lifecycle state.
     state: AtomicU8,
@@ -427,7 +420,10 @@ impl Entry {
     }
 }
 
-/// One timer shard and its authoritative heap state.
+/// One independently locked timer heap and its serialized native-alarm driver.
+///
+/// Producers register and cancel through [`Shard::state`]. The driver performs
+/// alarm operations and invokes entry wakers only after releasing that lock.
 struct Shard<A: Alarm> {
     /// Zero-based diagnostic index.
     index: usize,
@@ -457,15 +453,8 @@ impl<A: Alarm> Shard<A> {
         }
     }
 
-    #[cfg(test)]
-    /// Reads monotonic time and eagerly registers a relative sleep.
-    fn register_after(self: &Arc<Self>, duration: Duration) -> RegisteredSleep<A> {
-        let now = self.alarm.now();
-        self.register_after_observation(now, duration)
-    }
-
-    /// Eagerly registers a relative sleep from a captured monotonic observation.
-    fn register_after_observation(
+    /// Eagerly registers a relative sleep from a prior monotonic observation.
+    fn register(
         self: &Arc<Self>,
         now: io::Result<Deadline>,
         duration: Duration,
@@ -487,15 +476,6 @@ impl<A: Alarm> Shard<A> {
                 };
             }
         };
-        self.register(deadline, EntryArc::clone(&entry));
-        RegisteredSleep {
-            shard: Arc::downgrade(self),
-            entry,
-        }
-    }
-
-    /// Inserts an entry and signals only when the current arm is insufficient.
-    fn register(&self, deadline: Deadline, entry: EntryArc<Entry>) {
         let notify = {
             let mut state = self.state.lock();
             match state.lifecycle {
@@ -511,7 +491,7 @@ impl<A: Alarm> Shard<A> {
                 }
                 ShardLifecycle::Running => {
                     let previous = state.entries.peek();
-                    state.entries.push(deadline, entry);
+                    state.entries.push(deadline, EntryArc::clone(&entry));
                     let desired = state.entries.peek();
                     previous != desired && !arm_covers(state.armed_deadline, desired)
                 }
@@ -520,6 +500,10 @@ impl<A: Alarm> Shard<A> {
         if notify {
             // The heap carries the payload, so the signal only requests recomputation.
             self.signal.notify();
+        }
+        RegisteredSleep {
+            shard: Arc::downgrade(self),
+            entry,
         }
     }
 
@@ -653,7 +637,9 @@ impl<A: Alarm> Shard<A> {
             let message = format!(
                 "timer shard {} failed during {}: {}. snapshot=ShardSnapshot {{ queued: \
                  {queued}, desired: {desired:?}, armed: {armed:?}, notified: {notified} }}",
-                self.index, failure.operation, failure.cause
+                self.index,
+                failure.operation(),
+                failure,
             );
             notification.notify(Box::new(message));
         }
@@ -662,10 +648,10 @@ impl<A: Alarm> Shard<A> {
         // another panic already claimed or closed root interruption.
         tracing::error!(
             shard = self.index,
-            operation = failure.operation,
-            error = %failure.cause,
-            error_kind = ?failure.cause.error_kind(),
-            raw_os_error = ?failure.cause.raw_os_error(),
+            operation = failure.operation(),
+            error = %failure,
+            error_kind = ?failure.error_kind(),
+            raw_os_error = ?failure.raw_os_error(),
             queued,
             ?desired,
             ?armed,
@@ -693,7 +679,7 @@ enum ShardLifecycle {
     Failed,
 }
 
-/// Heap contents and alarm intent protected by one shard mutex.
+/// Heap, confirmed native arm, and lifecycle serialized by one shard mutex.
 struct ShardState {
     /// Indexed 4-ary minimum heap.
     entries: Heap,
@@ -714,62 +700,68 @@ impl ShardState {
     }
 }
 
-/// Error context returned by the driver loop.
-struct DriverFailure {
-    /// Operation active when failure occurred.
-    operation: &'static str,
-    /// Original I/O error or classified panic payload.
-    cause: DriverFailureCause,
-}
-
-/// Source retained by one fatal driver failure.
+/// Fatal error returned by a shard driver.
 #[derive(Debug, Error)]
-enum DriverFailureCause {
-    /// Original operating-system or reactor error.
-    #[error(transparent)]
-    Io(#[from] io::Error),
-    /// Stable message extracted from a panic payload or invariant failure.
-    #[error("{0}")]
-    Message(String),
+enum DriverFailure {
+    /// Operating-system or reactor failure with stable operation context.
+    #[error("{error}")]
+    Io {
+        /// Operation active when the error occurred.
+        operation: &'static str,
+        /// Original error retained for structured diagnostics.
+        #[source]
+        error: io::Error,
+    },
+    /// Panic caught at the driver containment boundary.
+    #[error("{message}")]
+    Panic {
+        /// Stable text extracted from the panic payload.
+        message: String,
+    },
 }
 
-impl DriverFailureCause {
+impl DriverFailure {
+    /// Wraps an I/O error with stable operation context.
+    const fn io(operation: &'static str, error: io::Error) -> Self {
+        Self::Io { operation, error }
+    }
+
+    /// Wraps an unwinding panic as a driver failure.
+    fn panic(panic: &(dyn Any + Send)) -> Self {
+        Self::Panic {
+            message: extract_panic_message(panic),
+        }
+    }
+
+    /// Returns the operation active when the failure occurred.
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Io { operation, .. } => operation,
+            Self::Panic { .. } => "driver panic",
+        }
+    }
+
     /// Returns the structured I/O error kind when this failure came from I/O.
     fn error_kind(&self) -> Option<io::ErrorKind> {
         match self {
-            Self::Io(error) => Some(error.kind()),
-            Self::Message(_) => None,
+            Self::Io { error, .. } => Some(error.kind()),
+            Self::Panic { .. } => None,
         }
     }
 
     /// Returns the raw operating-system error code when one is available.
     fn raw_os_error(&self) -> Option<i32> {
         match self {
-            Self::Io(error) => error.raw_os_error(),
-            Self::Message(_) => None,
+            Self::Io { error, .. } => error.raw_os_error(),
+            Self::Panic { .. } => None,
         }
     }
 }
 
-impl DriverFailure {
-    /// Wraps an I/O error with stable operation context.
-    const fn io(operation: &'static str, error: io::Error) -> Self {
-        Self {
-            operation,
-            cause: DriverFailureCause::Io(error),
-        }
-    }
-
-    /// Wraps an unwinding panic as a driver failure.
-    fn panic(panic: &(dyn Any + Send)) -> Self {
-        Self {
-            operation: "driver panic",
-            cause: DriverFailureCause::Message(extract_panic_message(panic)),
-        }
-    }
-}
-
-/// Reusable driver scratch storage with unwind and abortion cleanup.
+/// Driver-owned expirations removed from the heap but awaiting callbacks.
+///
+/// Dropping the batch completes expirations already committed under the shard
+/// lock, including when the driver is aborted or unwinds.
 struct Batch {
     /// Entries removed from the heap but not yet fully completed.
     entries: Vec<EntryArc<Entry>>,
@@ -820,7 +812,7 @@ impl Drop for Batch {
     }
 }
 
-/// Runs signal and native readiness handling until teardown.
+/// Runs fallible alarm and signal handling with wrapper-owned completion state.
 async fn run_driver_loop<A: Alarm>(
     shard: &Arc<Shard<A>>,
     batch: &mut Batch,
@@ -858,7 +850,7 @@ async fn run_driver_loop<A: Alarm>(
     }
 }
 
-/// Runs one driver with panic capture and complete failure cleanup.
+/// Catches driver failure and publishes it before completion storage is dropped.
 async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
     let mut batch = Batch::new();
     let outcome = AssertUnwindSafe(run_driver_loop(&shard, &mut batch))
@@ -872,7 +864,10 @@ async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
     shard.fail(failure);
 }
 
-/// Durable coalesced notification from any producer to one driver.
+/// Single-consumer, multi-producer signal for shard recomputation.
+///
+/// Notifications are durable and coalescing because the heap carries the
+/// desired alarm state.
 struct DriverSignal {
     /// Whether at least one notification remains unconsumed.
     notified: AtomicBool,
@@ -924,7 +919,7 @@ impl DriverSignal {
     }
 }
 
-/// Kind of shard assignment cached in thread-local state.
+/// Classification of a cached shard assignment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AssignmentKind {
     /// Temporary round-robin choice for a non-worker or pre-park worker.
@@ -933,7 +928,7 @@ pub(crate) enum AssignmentKind {
     Worker,
 }
 
-/// Shard assignment scoped to one affinity allocation.
+/// Cached shard selection keyed by one runtime's affinity allocation.
 #[derive(Debug)]
 struct ThreadAssignment {
     /// Weak ownership and allocation identity of the runtime affinity.
@@ -961,7 +956,7 @@ impl ThreadAssignment {
     }
 }
 
-/// Per-thread assignments with a fast path for the most recently used runtime.
+/// Per-thread assignments with a direct path for the most recent runtime.
 struct ThreadAssignments {
     /// Assignment for the runtime used most recently on this thread.
     current: Option<ThreadAssignment>,
@@ -976,20 +971,6 @@ impl ThreadAssignments {
             current: None,
             inactive: Vec::new(),
         }
-    }
-
-    /// Returns a cached assignment without changing the fast-path runtime.
-    #[cfg(test)]
-    fn get(&self, affinity: &Arc<Affinity>) -> Option<(usize, AssignmentKind)> {
-        self.current
-            .as_ref()
-            .filter(|assignment| assignment.belongs_to(affinity))
-            .or_else(|| {
-                self.inactive
-                    .iter()
-                    .find(|assignment| assignment.belongs_to(affinity))
-            })
-            .map(ThreadAssignment::selection)
     }
 
     /// Makes a cached runtime current and returns its assignment.
@@ -1032,7 +1013,10 @@ impl ThreadAssignments {
     }
 }
 
-/// Separate worker and fallback allocators for one runtime.
+/// Per-runtime shard allocation state and thread-cache identity.
+///
+/// Initial Tokio workers and fallback callers use separate allocators so a
+/// provisional selection cannot consume a stable worker assignment.
 struct Affinity {
     /// Number of native timer shards.
     worker_threads: usize,

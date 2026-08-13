@@ -75,11 +75,6 @@ pub(crate) fn resume_reported_panic(message: &'static str) -> ! {
     std::panic::resume_unwind(Box::new(ReportedPanic(message)))
 }
 
-/// Returns whether a panic payload has already been reported.
-fn is_reported_panic(err: &(dyn Any + Send)) -> bool {
-    err.is::<ReportedPanic>()
-}
-
 /// Extracts a message from an arbitrary panic payload.
 pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     match (
@@ -153,7 +148,7 @@ mod tests {
         }))
         .expect_err("reported panic did not unwind");
 
-        assert!(is_reported_panic(&*reported));
+        assert!(reported.is::<ReportedPanic>());
         assert_eq!(extract_panic_message(&*reported), "reported panic");
     }
 

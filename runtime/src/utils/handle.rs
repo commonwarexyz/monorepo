@@ -1,7 +1,7 @@
 use crate::{
     Error,
     telemetry::metrics::raw::Gauge,
-    utils::{extract_panic_message, is_reported_panic, supervision::Tree},
+    utils::{ReportedPanic, extract_panic_message, supervision::Tree},
 };
 use commonware_utils::{
     channel::oneshot,
@@ -371,7 +371,7 @@ impl Panicker {
     /// Notifies the [Panicker] that a panic has occurred.
     pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
         // Infrastructure failures emit richer diagnostics before their waiters unwind.
-        if !is_reported_panic(&*panic) {
+        if !panic.is::<ReportedPanic>() {
             let err = extract_panic_message(&*panic);
             error!(?err, "task panicked");
         }

@@ -1,3 +1,58 @@
+impl super::Timer {
+    /// Returns the current resident entry count for every shard.
+    pub(crate) fn heap_lengths(&self) -> Vec<usize> {
+        self.shards
+            .iter()
+            .map(|shard| shard.state.lock().entries.len())
+            .collect()
+    }
+
+    /// Returns the worker and fallback allocator claim counts.
+    pub(crate) fn allocator_claims(&self) -> (usize, usize) {
+        (
+            self.affinity
+                .next_worker
+                .load(super::AtomicOrdering::Relaxed),
+            self.affinity
+                .next_fallback
+                .load(super::AtomicOrdering::Relaxed),
+        )
+    }
+
+    /// Returns this runtime's assignment cached on the current thread.
+    pub(crate) fn current_assignment(&self) -> Option<(usize, super::AssignmentKind)> {
+        super::THREAD_ASSIGNMENTS.with(|assignments| assignments.borrow().get(&self.affinity))
+    }
+}
+
+impl<A: super::Alarm> super::Shard<A> {
+    /// Reads monotonic time and eagerly registers a relative sleep.
+    fn register_after(
+        self: &std::sync::Arc<Self>,
+        duration: std::time::Duration,
+    ) -> super::RegisteredSleep<A> {
+        self.register(self.alarm.now(), duration)
+    }
+}
+
+impl super::ThreadAssignments {
+    /// Returns a cached assignment without changing the fast-path runtime.
+    fn get(
+        &self,
+        affinity: &std::sync::Arc<super::Affinity>,
+    ) -> Option<(usize, super::AssignmentKind)> {
+        self.current
+            .as_ref()
+            .filter(|assignment| assignment.belongs_to(affinity))
+            .or_else(|| {
+                self.inactive
+                    .iter()
+                    .find(|assignment| assignment.belongs_to(affinity))
+            })
+            .map(super::ThreadAssignment::selection)
+    }
+}
+
 #[cfg(not(feature = "loom"))]
 mod ordinary {
     use super::super::{
@@ -390,7 +445,8 @@ mod ordinary {
             Ok(value) => value,
             Err(failure) => panic!(
                 "unexpected driver failure during {}: {}",
-                failure.operation, failure.cause
+                failure.operation(),
+                failure,
             ),
         }
     }
@@ -414,12 +470,8 @@ mod ordinary {
         shard: &Arc<Shard<FakeAlarm>>,
         deadline: Deadline,
     ) -> (Arc<Entry>, RegisteredSleep<FakeAlarm>) {
-        let entry = Arc::new(Entry::new());
-        shard.register(deadline, Arc::clone(&entry));
-        let sleep = RegisteredSleep {
-            shard: Arc::downgrade(shard),
-            entry: Arc::clone(&entry),
-        };
+        let sleep = shard.register(Ok(deadline), Duration::ZERO);
+        let entry = Arc::clone(&sleep.entry);
         (entry, sleep)
     }
 
@@ -486,11 +538,13 @@ mod ordinary {
     async fn final_expiry_observes_competitor(entry_count: usize) -> bool {
         assert!(entry_count > 0);
         let (shard, control) = fake_shard();
+        let mut registered = Vec::with_capacity(entry_count);
         for _ in 1..entry_count {
-            shard.register(at(10), Arc::new(Entry::new()));
+            let (_, sleep) = register(&shard, at(10));
+            registered.push(sleep);
         }
-        let final_entry = Arc::new(Entry::new());
-        shard.register(at(11), Arc::clone(&final_entry));
+        let (final_entry, final_sleep) = register(&shard, at(11));
+        registered.push(final_sleep);
 
         let competitor_ran = Arc::new(AtomicBool::new(false));
         let checking = Arc::new(YieldCheckingWaker {
@@ -725,8 +779,8 @@ mod ordinary {
             Ok(_) => panic!("expiry clock read unexpectedly succeeded"),
             Err(failure) => failure,
         };
-        assert_eq!(failure.operation, "read monotonic clock during expiry");
-        assert_eq!(failure.cause.to_string(), "injected fake alarm now failure");
+        assert_eq!(failure.operation(), "read monotonic clock during expiry");
+        assert_eq!(failure.to_string(), "injected fake alarm now failure");
         assert_eq!(shard.state.lock().entries.len(), 1);
         assert!(batch.entries.is_empty());
         assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_WAITING);
@@ -739,11 +793,11 @@ mod ordinary {
         control.set_now(at(100));
         let entries: Vec<_> = (0..=WAKE_BATCH)
             .map(|index| {
-                let entry = Arc::new(Entry::new());
-                shard.register(at(index as u64), Arc::clone(&entry));
-                entry
+                let (entry, sleep) = register(&shard, at(index as u64));
+                (entry, sleep)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let (entries, _registered): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let mut batch = Batch::new();
 
         // The first acquisition must remove exactly 32 entries and report more work.
@@ -1077,8 +1131,7 @@ mod ordinary {
         let (stopped, _stopped_control) = fake_shard();
         stopped.stop();
         consume_signal(&stopped);
-        let stopped_entry = Arc::new(Entry::new());
-        stopped.register(at(10), Arc::clone(&stopped_entry));
+        let (stopped_entry, _stopped_sleep) = register(&stopped, at(10));
 
         // A stopped shard must reject registration without mutating its heap or signal.
         assert_eq!(
@@ -1096,8 +1149,7 @@ mod ordinary {
         let (failed, _failed_control) = fake_shard();
         failed.fail(DriverFailure::io("first failure", injected_error("first")));
         consume_signal(&failed);
-        let failed_entry = Arc::new(Entry::new());
-        failed.register(at(20), Arc::clone(&failed_entry));
+        let (failed_entry, _failed_sleep) = register(&failed, at(20));
 
         // A failed shard rejects registration with the distinct failure terminal.
         assert_eq!(
@@ -1480,6 +1532,43 @@ mod ordinary {
         peer.await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn fired_sleep_loop_cooperates_with_other_tasks() {
+        // Complete a large batch before any sleep future observes readiness.
+        let (shard, control) = fake_shard();
+        let mut sleeps = Vec::with_capacity(1_024);
+        for _ in 0..1_024 {
+            sleeps.push(register(&shard, at(1)).1);
+        }
+        control.set_now(at(1));
+        let mut batch = Batch::new();
+        loop {
+            let more = driver_ok(shard.take_expired(&mut batch));
+            assert!(batch.complete(ENTRY_FIRED).is_none());
+            if !more {
+                break;
+            }
+        }
+
+        // Queue a peer behind the task draining already-fired sleeps.
+        let peer_ran = Arc::new(AtomicBool::new(false));
+        let peer_flag = Arc::clone(&peer_ran);
+        let peer = tokio::spawn(async move {
+            peer_flag.store(true, AtomicOrdering::Release);
+        });
+
+        for sleep in sleeps {
+            sleep.await;
+            if peer_ran.load(AtomicOrdering::Acquire) {
+                break;
+            }
+        }
+
+        // Ready nonzero sleeps must exhaust budget like ready Tokio sleeps.
+        assert!(peer_ran.load(AtomicOrdering::Acquire));
+        peer.await.unwrap();
+    }
+
     #[test]
     fn entry_poll_replaces_waker_and_reports_terminal_outcomes() {
         // Poll repeatedly with one task waker, then migrate polling to another task.
@@ -1767,7 +1856,7 @@ mod ordinary {
 mod loom_tests {
     use super::super::{
         Alarm, Batch, Deadline, DriverFailure, DriverSignal, ENTRY_FAILED, ENTRY_FIRED,
-        ENTRY_QUIESCENT, ENTRY_WAITING, Entry, NOT_IN_HEAP, Shard, ShardLifecycle,
+        ENTRY_QUIESCENT, ENTRY_WAITING, Entry, NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle,
     };
     use crate::utils::{Panicker, extract_panic_message};
     use loom::{
@@ -1914,13 +2003,22 @@ mod loom_tests {
         (Arc::new(Shard::new(0, alarm, panicker)), alarm_state)
     }
 
+    /// Registers one entry at an exact modeled deadline.
+    fn register(
+        shard: &Arc<Shard<ModelAlarm>>,
+        deadline: Deadline,
+    ) -> (LoomArc<Entry>, RegisteredSleep<ModelAlarm>) {
+        let sleep = shard.register(Ok(deadline), Duration::ZERO);
+        let entry = LoomArc::clone(&sleep.entry);
+        (entry, sleep)
+    }
+
     #[test]
     fn production_entry_poll_cannot_lose_firing_wake() {
         model(|| {
             // Register one already-expired entry through the production shard.
             let (shard, _alarm) = model_shard();
-            let entry = LoomArc::new(Entry::new());
-            shard.register(deadline(0), LoomArc::clone(&entry));
+            let (entry, _sleep) = register(&shard, deadline(0));
 
             // Race polling against the production split expiry and callback path.
             let completer = {
@@ -2033,8 +2131,7 @@ mod loom_tests {
         model(|| {
             // Register one expired entry through the production shard.
             let (shard, _alarm) = model_shard();
-            let entry = LoomArc::new(Entry::new());
-            shard.register(deadline(0), LoomArc::clone(&entry));
+            let (entry, _sleep) = register(&shard, deadline(0));
 
             // Race synchronous stop against the driver's pop and callback path.
             let stopper = {
@@ -2138,8 +2235,7 @@ mod loom_tests {
             let (shard, alarm) = model_shard();
             let sentinel = deadline(777);
             alarm.set_armed(sentinel);
-            let entry = LoomArc::new(Entry::new());
-            shard.register(deadline(100), LoomArc::clone(&entry));
+            let (entry, _sleep) = register(&shard, deadline(100));
             shard.stop();
             assert_eq!(entry.state.load(Ordering::Acquire), ENTRY_QUIESCENT);
 
@@ -2164,9 +2260,8 @@ mod loom_tests {
                 let (shard, alarm) = model_shard();
                 let first = shard.register_after(Duration::from_nanos(100));
                 let first_entry = LoomArc::clone(&first.entry);
-                if matches!(update, RearmUpdate::Later) {
-                    shard.register(deadline(150), LoomArc::new(Entry::new()));
-                }
+                let _later =
+                    matches!(update, RearmUpdate::Later).then(|| register(&shard, deadline(150)).1);
 
                 // Force one heap or lifecycle update while rearm is outside the
                 // production shard mutex in ModelAlarm::arm.
@@ -2175,24 +2270,23 @@ mod loom_tests {
                     let alarm = LoomArc::clone(&alarm);
                     thread::spawn(move || {
                         alarm.wait_for_first_arm();
-                        match update {
-                            RearmUpdate::Disarm | RearmUpdate::Later => {}
-                            RearmUpdate::Tolerated => {
-                                shard.register(deadline(50), LoomArc::new(Entry::new()));
-                            }
-                            RearmUpdate::Earlier => {
-                                shard.register(deadline(49), LoomArc::new(Entry::new()));
-                            }
-                            RearmUpdate::Stop => shard.stop(),
+                        let update_sleep = match update {
+                            RearmUpdate::Disarm | RearmUpdate::Later | RearmUpdate::Stop => None,
+                            RearmUpdate::Tolerated => Some(register(&shard, deadline(50)).1),
+                            RearmUpdate::Earlier => Some(register(&shard, deadline(49)).1),
+                        };
+                        if matches!(update, RearmUpdate::Stop) {
+                            shard.stop();
                         }
                         // Exercise RegisteredSleep::drop rather than reproducing its
                         // transition and shard-removal sequence in this model.
                         drop(first);
                         alarm.finish_update();
+                        update_sleep
                     })
                 };
                 assert!(shard.rearm().is_ok());
-                producer.join().unwrap();
+                let _update_sleep = producer.join().unwrap();
 
                 // The single production rearm call must converge to the update
                 // that raced its first native operation.

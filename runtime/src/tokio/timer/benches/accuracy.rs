@@ -2,9 +2,9 @@
 
 use crate::{
     Backend, Config,
-    backend::DeadlinePair,
     config::{ACCURACY_SPREAD, ACCURACY_TASKS},
-    report, sleep_for, sleep_until,
+    report,
+    utils::{DeadlinePair, sleep_for, sleep_until},
 };
 use commonware_runtime::tokio as commonware_tokio;
 use futures::future::join_all;
@@ -55,16 +55,9 @@ struct AccuracyBatch {
 
 /// Runs the small production accuracy matrix for both backends.
 pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) -> io::Result<()> {
-    println!(
-        "accuracy_note synchronized tasks share one absolute deadline at the requested 10us or 100us distance"
-    );
-    println!(
-        "accuracy_note high-concurrency synchronized lateness includes barrier release, registration, and wake run-queue fan-out because a 100us deadline can pass before every task registers"
-    );
-    println!(
-        "accuracy_note commonware synchronized lateness is an upper bound and subtracting clock_pair_span_max_ns with saturation gives the lower bound, sleep_until construction remains included in both bounds"
-    );
-
+    // Synchronized tasks share one absolute deadline. At high concurrency,
+    // lateness includes release, registration, and run-queue fan-out. Commonware
+    // reports an upper bound whose clock-pair span bounds mapping uncertainty.
     let mut scenarios = vec![
         Scenario {
             tasks: 1,

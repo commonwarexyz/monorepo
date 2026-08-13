@@ -1,16 +1,16 @@
 //! Workloads that protect production timer design decisions.
 
 use crate::{
-    Backend, BenchSleep, Config,
-    backend::DeadlinePair,
+    Backend, Config,
     config::{
         CANCEL_PERCENT, CANCELLATION_TIMERS, PEER_LEAD, REGISTRATION_STEP, REGISTRATION_TIMERS,
         STORM_LEAD, STORM_TIMERS,
     },
-    peer_gap::{PeerGap, dispatch_lateness},
-    poll_once,
-    producer_gate::ProducerGate,
-    report, sleep_until, sleep_until_wall,
+    report,
+    utils::{
+        BenchSleep, DeadlinePair, PeerGap, ProducerGate, dispatch_lateness, poll_once, sleep_until,
+        sleep_until_wall,
+    },
 };
 use commonware_runtime::{Runner as _, tokio as commonware_tokio};
 use rand::{SeedableRng, prelude::SliceRandom, rngs::StdRng};
@@ -50,9 +50,7 @@ pub(crate) fn run_fairness(config: &Config) -> io::Result<()> {
     let runtime =
         commonware_tokio::Runner::new(commonware_tokio::Config::default().with_worker_threads(1));
     runtime.start(|context| async move {
-        println!(
-            "fairness_note one worker forces the timer driver and always-runnable peer to cooperate on the same executor"
-        );
+        // One worker forces the timer driver and runnable peer to cooperate.
         benchmark_expiry_storm(config, Arc::new(context)).await
     })
 }
@@ -135,11 +133,9 @@ async fn benchmark_cancellation(
     config: &Config,
     clock: Arc<commonware_tokio::Context>,
 ) -> io::Result<()> {
-    println!(
-        "cancellation_note aggregate drain excludes registration and retains uncanceled timers until every producer finishes"
-    );
+    // Aggregate drain excludes registration and retains every survivor until
+    // all producers finish.
     for backend in config.backends() {
-        let mut one_producer_p50 = None;
         for producers in config.cancellation_producer_counts() {
             let total_canceled = CANCELLATION_TIMERS * CANCEL_PERCENT / 100;
             let mut drain = Vec::with_capacity(config.worst_batches);
@@ -160,15 +156,6 @@ async fn benchmark_cancellation(
             }
 
             let drain_distribution = report::Distribution::new(&drain)?;
-            if producers == 1 {
-                one_producer_p50 = Some(drain_distribution.p50);
-            }
-            let baseline = one_producer_p50.expect("one-producer cancellation must run first");
-            let scaling = if drain_distribution.p50.is_zero() {
-                1.0
-            } else {
-                baseline.as_secs_f64() / drain_distribution.p50.as_secs_f64()
-            };
             let name = format!(
                 "{}::cancellation/backend={} timers={} cancel_percent={} producers={} \
                  worker_threads={} timer_shards={}",
@@ -181,8 +168,7 @@ async fn benchmark_cancellation(
                 report::timer_shards_label(backend, config.shards()),
             );
             println!(
-                "{name} batches={} drain_samples={} drain_p50_us={:.3} drain_max_us={:.3} \
-                 scaling_vs_one_producer={scaling:.3}",
+                "{name} batches={} drain_samples={} drain_p50_us={:.3} drain_max_us={:.3}",
                 config.worst_batches,
                 drain.len(),
                 report::micros(drain_distribution.p50),
