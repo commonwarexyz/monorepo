@@ -1318,12 +1318,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     // contribute as ancestry. Verification and proposal go through
     // `ancestry_payload_for_child`, which picks the optimistic rule inside the
     // issuance window and the explicit rule outside it.
+    // `handoff_ancestry_payload` is the cross-term counterpart: what the
+    // outgoing term's final view may contribute to a pipelined-handoff
+    // proposal (`handoff_leader` and `handoff_parent` decide when it applies).
     //
     // The `*_parent_ready` predicates answer whether a view's immediate parent
     // is settled enough to act on. Certification and finalization require
-    // `explicit_parent_ready`. Notarize issuance uses `optimistic_parent_ready`,
-    // which delegates to `optimistic_ancestry_payload` so issuance and proposal
-    // construction share one ancestry rule.
+    // `explicit_parent_ready`. Notarize issuance uses `optimistic_parent_ready`
+    // and, for term starts, `handoff_parent_ready`; both delegate to their
+    // ancestry resolver so issuance and proposal construction share one
+    // ancestry rule.
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
     /// proposal, the strongest form of ancestry.
@@ -1953,7 +1957,7 @@ mod tests {
     }
 
     /// Like [setup_state_from_config], but opts `config` into pipelined
-    /// handoffs.
+    /// handoffs and fixes `view_retention` at 10.
     fn setup_state_with_handoff(
         context: &mut deterministic::Context,
         validators: usize,
@@ -6696,15 +6700,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with(
-                &mut context,
-                4,
-                3,
-                9,
-                10,
-                TermLength::new(NZU32!(5)),
-                ViewDelta::new(2),
-            );
+            ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // Without the opt-in, the term start waits for certified ancestry.
@@ -6837,7 +6833,7 @@ mod tests {
     fn pipelined_handoff_pipelines_rotating_terms() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let (Fixture { .. }, mut state) =
+            let (_, mut state) =
                 setup_state_with_handoff(&mut context, 4, 3, 9, <RoundRobin>::default());
 
             // With single-view terms, every view is a handoff: verifying and
