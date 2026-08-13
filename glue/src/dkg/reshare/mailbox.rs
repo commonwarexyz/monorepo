@@ -41,8 +41,8 @@ where
     Pending,
     /// The actor is following the epoch without its protocol history.
     ///
-    /// It cannot derive the artifact, but that absence is not evidence that a
-    /// proposed artifact is invalid.
+    /// It cannot derive the artifact. This is not evidence that a proposed
+    /// artifact is valid or invalid.
     Following,
     /// The actor was expected to derive the artifact but cannot produce it.
     Unavailable,

@@ -35,9 +35,8 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// When the reshare actor tracks an epoch's ceremony, the wrapper rejects a
 /// final block whose payload differs from the independently reconstructed
 /// [`EpochInfo`](crate::dkg::types::EpochInfo). An actor that starts following
-/// mid-epoch lacks the protocol history required for that comparison, so the
-/// wrapper delegates verification to the inner application rather than treating
-/// missing local state as an invalid proposal. The wrapper always rejects stray
+/// mid-epoch lacks the protocol history required for that comparison, so its
+/// final-block verification remains pending. The wrapper always rejects stray
 /// payloads carried by non-final blocks in the early dealing window.
 ///
 /// For proposals, the wrapper selects and fetches the payload for the block being
@@ -228,13 +227,12 @@ where
                         return false;
                     }
                 }
-                EpochInfoResponse::Pending => {
-                    debug!("verification pending: final block epoch info is not ready");
+                EpochInfoResponse::Pending | EpochInfoResponse::Following => {
+                    debug!(
+                        "verification pending: final block epoch info cannot be derived locally"
+                    );
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
-                }
-                EpochInfoResponse::Following => {
-                    debug!("verification delegated: follower has no final block epoch info");
                 }
                 EpochInfoResponse::Unavailable => {
                     debug!("verification rejected: final block epoch info is unavailable");
@@ -755,53 +753,38 @@ mod tests {
     }
 
     #[test]
-    fn verification_delegates_when_following_without_epoch_info() {
+    fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for expected in [true, false] {
+            for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
                 let parent = Arc::new(mocks::genesis_block(leader().public_key()));
                 let tip = final_block(&parent, Some(epoch_payload(1)));
-                let mut app = wrapper(&context, EpochInfoResponse::Following);
-                app.inner.verify_result = expected;
-                let inner = app.inner.clone();
+                let inner = RecordingApp::accepting();
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
+                );
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(1));
+                let mut verify = Box::pin(app.verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([tip, parent]),
+                ));
 
-                let verified = app
-                    .verify(
-                        (context.child("app"), block_context(&parent, 1)),
-                        ancestry::from_iter([tip, parent]),
-                    )
-                    .await;
-
-                assert_eq!(verified, expected);
-                assert_eq!(inner.verify_count(), 1);
+                assert!(verify.as_mut().now_or_never().is_none());
+                let Some(Message::EpochInfo {
+                    response: reply, ..
+                }) = receiver.recv().await
+                else {
+                    panic!("verification should request final epoch info");
+                };
+                assert!(reply.send(response).is_ok());
+                assert!(
+                    verify.as_mut().now_or_never().is_none(),
+                    "verification resolved without final epoch info"
+                );
+                assert_eq!(inner.verify_count(), 0);
             }
-        });
-    }
-
-    #[test]
-    fn verification_stays_pending_when_final_epoch_info_not_ready() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
-            let tip = final_block(&parent, Some(epoch_payload(1)));
-            let mut app = wrapper(&context, EpochInfoResponse::Pending);
-            let inner = app.inner.clone();
-
-            let verify = app.verify(
-                (context.child("app"), block_context(&parent, 1)),
-                ancestry::from_iter([tip, parent]),
-            );
-            let timeout = context.sleep(Duration::from_millis(1));
-            pin_mut!(verify);
-            pin_mut!(timeout);
-
-            match select(verify, timeout).await {
-                Either::Left((verified, _)) => {
-                    panic!("verification resolved before epoch info was ready: {verified}");
-                }
-                Either::Right(((), _)) => {}
-            }
-            assert_eq!(inner.verify_count(), 0);
         });
     }
 
