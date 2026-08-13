@@ -529,9 +529,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Drives a begun verification batch to completion and reintegrates its
-    /// result. Test-only shim over the `begin_verify_*` methods and
-    /// [Self::finish_verify].
+    /// Awaits a begun verification batch and reintegrates its result through
+    /// [Self::finish_verify]. Shared body of the test-only `try_verify_*`
+    /// shims.
     #[cfg(test)]
     async fn drive(
         &mut self,

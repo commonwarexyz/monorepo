@@ -382,15 +382,14 @@ where
 
     /// Reintegrates a completed crypto job from the dispatch pool.
     ///
-    /// A verification batch's votes return to the view's round: the batch may
-    /// have completed a quorum, or more votes may have buffered while it was
-    /// in flight. A recovered certificate is recorded on the round and
-    /// forwarded to the voter. A view pruned while its job was in flight
-    /// drops the votes but still forwards the certificate: the voter prunes
-    /// independently.
+    /// A verification batch's votes return to the view's round. A recovered
+    /// certificate is recorded on the round and forwarded to the voter. A
+    /// view pruned while its job was in flight drops the votes but still
+    /// forwards the certificate: the voter prunes independently.
     ///
     /// Returns the view to revisit when the completion may have made new
-    /// work ready.
+    /// work ready: a batch may have completed a quorum, or more votes may
+    /// have buffered while it was in flight.
     pub(super) fn handle_done(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
