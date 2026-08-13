@@ -9,9 +9,10 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Earn Your Stripes</title>
-    <meta name="description" content="Striping Reed-Solomon recovery
-across cores and avoiding a separate re-encode made worst-case decoding
-nearly 4x faster.">
+    <meta name="description" content="Sharing large blocks efficiently
+means rebuilding them from smaller pieces. That work used to run on one
+core and repeat an expensive calculation. We now spread it across cores
+and skip the duplicate step, making the slowest case nearly 4x faster.">
     <meta name="author" content="Sunghyeon Jo (QED), Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -20,13 +21,15 @@ nearly 4x faster.">
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/reed-solomon-stripes.png" />
     <meta property="og:title" content="Earn Your Stripes" />
-    <meta property="og:description" content="Striping Reed-Solomon
-recovery across cores and avoiding a separate re-encode made worst-case
-decoding nearly 4x faster." />
+    <meta property="og:description" content="Sharing large blocks
+efficiently means rebuilding them from smaller pieces. That work used to
+run on one core and repeat an expensive calculation. We now spread it
+across cores and skip the duplicate step, making the slowest case nearly
+4x faster." />
     <meta property="article:author" content="Sunghyeon Jo (QED)" />
     <meta property="article:author" content="Patrick O’Grady" />
-    <meta property="article:published_time" content="2026-08-10T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-08-10T00:00:00Z" />
+    <meta property="article:published_time" content="2026-08-13T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-08-13T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/earn-your-stripes" />
 
@@ -34,9 +37,11 @@ decoding nearly 4x faster." />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/earn-your-stripes" />
     <meta property="twitter:title" content="Earn Your Stripes" />
-    <meta property="twitter:description" content="Striping Reed-Solomon
-recovery across cores and avoiding a separate re-encode made worst-case
-decoding nearly 4x faster." />
+    <meta property="twitter:description" content="Sharing large blocks
+efficiently means rebuilding them from smaller pieces. That work used to
+run on one core and repeat an expensive calculation. We now spread it
+across cores and skip the duplicate step, making the slowest case nearly
+4x faster." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/reed-solomon-stripes.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/kaizero_ainta" />
@@ -101,33 +106,32 @@ decoding nearly 4x faster." />
                         <div class="author">By <a href="https://x.com/kaizero_ainta">Sunghyeon
 Jo (QED)</a> and <a href="https://x.com/_patrickogrady">Patrick
 O’Grady</a></div>
-                        <div class="date">August 10th, 2026</div>
+                        <div class="date">August 13th, 2026</div>
         </div>
-        <p>When one leader pushes a full block to every validator, its
-        egress bounds throughput while everyone else’s bandwidth sits
+        <p>A chain can only process transactions as fast as it can
+        disseminate them. At high TPS, that means moving big blocks
+        across the network.</p>
+        <p>Sending a full copy to every validator turns the leader’s
+        upload into the bottleneck while everyone else’s bandwidth sits
         idle. <a href="/blogs/coding">Deliver Us in Pieces</a> showed
-        how erasure coding puts that idle bandwidth to work. In
-        <code>marshal::coding</code>, the leader sends each validator
-        one shard. Validators relay them and vote on the commitment
-        before anyone reconstructs the whole payload.</p>
-        <p>The expensive transforms still sit on the critical path. The
-        leader must finish encoding before it can disperse the block. At
-        <code>certify</code>, each validator must reconstruct the full
-        block before full application verification can begin. On the
-        original recovery path, it also re-encoded the recovered
-        originals to verify the commitment. Reed-Solomon recovery was
-        the most expensive step, and until recently it ran on one
-        core.</p>
+        how erasure coding spreads that load across the network: the
+        leader sends a different shard to each validator, validators
+        relay what they receive, and everyone reconstructs the full
+        block once enough pieces arrive.</p>
+        <p>Those bandwidth savings come with a computational tradeoff:
+        the leader must encode each block before sending it, and every
+        validator must reconstruct it and verify its commitment before
+        certification. That verification originally re-encoded the
+        recovered originals as well. Until recently, one core carried
+        the substantial cost of Reed-Solomon recovery, so this post is
+        about spreading that work across the hardware.</p>
         <h2 id="parallel-hashing-serial-recovery">Parallel Hashing,
         Serial Recovery</h2>
-        <p>Decode already accepted a <code>Strategy</code>, but it used
-        the worker pool only to hash missing shards for the Merkle root.
-        Reed-Solomon recovery remained one synchronous
-        <code>decoder.decode()</code> call.
-        <code>reed-solomon-simd</code> selects a SIMD backend on
-        supported CPUs, but one encode or decode call does not spawn
-        worker threads. Even at <code>conc=8</code>, the costly part
-        still ran on one core.</p>
+        <p>Reconstruction already had a worker pool, but it used those
+        workers only to hash missing shards for the Merkle root.
+        Reed-Solomon recovery remained one synchronous decoding pass.
+        SIMD accelerated that pass on supported CPUs, but it still ran
+        on one core even when eight workers were available.</p>
         <p>Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show
         where recovery stops scaling. The all-original case does no
         recovery. The full-recovery case reconstructs every
@@ -161,8 +165,8 @@ O’Grady</a></div>
         from 34.96 ms to 7.90 ms. Full recovery improved through 8
         workers, then flattened near 26 ms. The 16 to 18 ms separation
         is only a proxy for recovery because the two cases hash
-        different missing shards. Even so, concurrency was not reaching
-        the full-width decoder.</p>
+        different missing shards. Even so, adding workers did not
+        parallelize Reed-Solomon recovery.</p>
         <h2 id="from-one-decoder-to-many">From One Decoder to Many</h2>
         <p>Reed-Solomon encoding represents the block as <span
         class="math inline">k + m</span> equal-length shards, with <span
@@ -176,22 +180,20 @@ O’Grady</a></div>
         decoder only needs the corresponding symbol column from the
         available shards. We turn that into parallel work by cutting the
         shard width into contiguous byte ranges, or stripes. Each stripe
-        covers the same range across all shards, runs as its own
-        Reed-Solomon job, and is scheduled through
-        <code>Strategy</code>.</p>
+        covers the same range across all shards and runs as its own
+        Reed-Solomon job. The jobs run concurrently.</p>
         <p>Let <span class="math inline">a_i</span> be the codeword
         index of supplied shard <span class="math inline">S_i</span>,
         for <span class="math inline">i = 1, \ldots, k</span>, and write
         <span class="math inline">A = (a_1, \ldots, a_k)</span>. All
         supplied shards have the same even byte length. Split them into
         <span class="math inline">p</span> stripes at identical
-        boundaries. Every non-final boundary is aligned to
-        <code>SHARD_CHUNK_BYTES</code> (64 bytes), so the original
-        partial tail, if any, remains wholly in the final stripe. For
-        every stripe <span class="math inline">t</span>, the decoder
-        receives the indexed slices <span class="math inline">(a_i,
-        S_i^{(t)})</span>, preserving each shard’s original codeword
-        index:</p>
+        boundaries. Every non-final boundary is aligned to 64 bytes, so
+        the original partial tail, if any, remains wholly in the final
+        stripe. For every stripe <span class="math inline">t</span>, the
+        decoder receives the indexed slices <span
+        class="math inline">(a_i, S_i^{(t)})</span>, preserving each
+        shard’s original codeword index:</p>
         <p><span class="math display">
         S_i = S_i^{(0)} \mathbin\Vert S_i^{(1)} \mathbin\Vert \cdots
         \mathbin\Vert S_i^{(p-1)}.
@@ -206,11 +208,11 @@ O’Grady</a></div>
         \qquad
         D_1 = D_1^{(0)} \mathbin\Vert \cdots \mathbin\Vert D_1^{(p-1)}.
         </span></p>
-        <p>No stripe reads or writes another stripe.
-        <code>Strategy</code> can schedule the <span
-        class="math inline">p</span> decoder calls in parallel, and
-        concatenating their outputs produces the same <span
-        class="math inline">D_1</span> as one full-width call.</p>
+        <p>No stripe reads or writes another stripe. The <span
+        class="math inline">p</span> stripes can therefore be recovered
+        in parallel, and concatenating their outputs produces the same
+        <span class="math inline">D_1</span> as one full-width
+        decode.</p>
         <style>
           .cw-rs-figure {
             aspect-ratio: 800 / 570;
@@ -232,23 +234,31 @@ O’Grady</a></div>
             }
           </style>
         </noscript>
-        <div id="earn-your-stripes-fig-striping" class="cw-rs-figure" role="img" aria-label="Animated comparison of full-width and striped Reed-Solomon recovery. Checked shards D0, D2, and R0 recover missing original shard D1. Before striping, one job spans the full shard width. After striping, aligned vertical cuts divide the three inputs and D1 output into the same ranges, which run as independent Reed-Solomon jobs through Strategy and reconstruct the same D1 in parallel.">
-          <noscript>Checked shards D0, D2, and R0 recover missing original shard D1. Before striping, one Reed-Solomon job processes the full shard width. Striping applies the same byte-range cuts to the three inputs and D1 output; each range is an independent job, so Strategy can run them in parallel. Non-final cuts are aligned to 64-byte engine-block boundaries, and the reconstructed slices concatenate to the same D1.</noscript>
+        <div id="earn-your-stripes-fig-striping" class="cw-rs-figure" role="img" aria-label="Animated comparison of full-width and striped Reed-Solomon recovery. Checked shards D0, D2, and R0 recover missing original shard D1. Before striping, one job spans the full shard width. After striping, aligned vertical cuts divide the three inputs and D1 output into the same ranges, which run as independent Reed-Solomon jobs and reconstruct the same D1 in parallel.">
+          <noscript>Checked shards D0, D2, and R0 recover missing original shard D1. Before striping, one Reed-Solomon job processes the full shard width. Striping applies the same byte-range cuts to the three inputs and D1 output; each range is an independent job, so they can run in parallel. Non-final cuts are aligned to 64-byte boundaries, and the reconstructed slices concatenate to the same D1.</noscript>
         </div>
         <script type="module" src="earn-your-stripes.js"></script>
         <div class="image-caption">
-        <p>Figure 1: Recovering missing original shard <code>D1</code>
-        used to run as one full-width Reed-Solomon job. After striping,
-        each aligned range becomes its own job. <code>Strategy</code>
-        runs them in parallel, then the recovered ranges concatenate
-        into the same full-width <code>D1</code>.</p>
+        <p>Figure 1: Recovering missing original shard <span
+        class="math inline">D_1</span> used to run as one full-width
+        Reed-Solomon job. After striping, each aligned range becomes its
+        own job. The jobs run in parallel, then the recovered ranges
+        concatenate into the same full-width <span
+        class="math inline">D_1</span>.</p>
         </div>
-        <p>The alignment is specific to the vendored codec rather than
-        Reed-Solomon itself. <code>reed-solomon-simd</code> packs work
-        into 64-byte shard chunks, and cutting through one would change
-        how a sub-instance packs and pads its tail. Aligned cuts produce
-        the same output as one full-width decode, just scheduled across
-        several disjoint ranges.</p>
+        <p>Commonware’s Reed-Solomon codec uses the <a
+        href="https://doi.org/10.1109/TIT.2016.2608892">novel-polynomial-basis
+        FFT construction</a> to evaluate polynomials over a binary
+        extension field with a radix-2-style butterfly. For shard data,
+        each 16-bit symbol column is a separate evaluation vector, so
+        the butterfly never mixes one column with another. In theory, a
+        stripe can therefore end at any symbol boundary.</p>
+        <p>The optimized arithmetic processes 32 columns as one batch,
+        or 64 bytes. A short final batch is padded. Cutting an interior
+        stripe through a batch would turn that slice into a different
+        padded tail, so every non-final stripe ends between complete
+        batches. This implementation constraint preserves the
+        column-wise decomposition above.</p>
         <h2 id="recovery-scales">Recovery Scales</h2>
         <p>We reran the same worst-case decode before and after
         striping:</p>
@@ -263,13 +273,13 @@ O’Grady</a></div>
             </tbody>
           </table>
         </noscript>
-        <p>At <code>conc=1</code>, one stripe follows the original
-        full-width decode, so no parallel speedup is expected. At
-        <code>conc=8</code>, recovery finally rides the same cores as
-        everything else, and worst-case decode drops from 26.85 ms to
-        10.22 ms, a 2.63x speedup. At <code>conc=16</code>, it drops to
-        7.67 ms, a 3.38x speedup. The recovery tail that used to ignore
-        concurrency is now the part that shrinks the most.</p>
+        <p>With one worker, one stripe follows the original full-width
+        decode, so no parallel speedup is expected. With eight workers,
+        recovery finally rides the same cores as everything else, and
+        worst-case decode drops from 26.85 ms to 10.22 ms, a 2.63x
+        speedup. With 16 workers, it drops to 7.67 ms, a 3.38x speedup.
+        The recovery tail that used to ignore concurrency is now the
+        part that shrinks the most.</p>
         <h2 id="removing-the-second-transform">Removing the Second
         Transform</h2>
         <p>Striping made recovery parallel, but the verification path
@@ -282,11 +292,11 @@ O’Grady</a></div>
         committed shards form one valid Reed-Solomon codeword.</p>
         <p>Once we <a
         href="https://github.com/commonwarexyz/monorepo/pull/4092">vendored
-        <code>reed-solomon-simd</code></a>, we could extend the decoder
-        to reveal missing recovery positions and remove the second pass
+        <code>reed-solomon-simd</code></a>, we could make the decoder
+        return missing recovery positions and remove the second pass
         whenever an original shard was missing. The expensive decode
-        transform had already evaluated those positions, but the
-        existing API returned only missing originals.</p>
+        transform had already evaluated those positions, but only
+        missing originals were exposed.</p>
         <p>Write the systematic generator matrix as</p>
         <p><span class="math display">
         G = \begin{bmatrix} I_k \\ P \end{bmatrix},
@@ -310,7 +320,7 @@ O’Grady</a></div>
         = G_M G_A^{-1}
         \begin{bmatrix} D_0 \\ D_2 \\ R_0 \end{bmatrix}.
         </span></p>
-        <p>The old API returned only <span
+        <p>The old decoder returned only <span
         class="math inline">D_1</span>. Verification then rebuilt the
         original vector and ran the encoder:</p>
         <p><span class="math display">
@@ -319,14 +329,33 @@ O’Grady</a></div>
         \begin{bmatrix} D_0 \\ D_1 \\ D_2 \end{bmatrix},
         </span></p>
         <p>That re-encode repeated the expensive codeword transform to
-        materialize canonical <span class="math inline">R_1</span>. The
-        decode had already evaluated the <span
-        class="math inline">R_1</span> position. Decode-reveal applies
-        the remaining unscale and final-chunk undo, then returns
-        canonical <span class="math inline">R_1</span> alongside <span
-        class="math inline">D_1</span>. This is much faster than
-        re-encoding because it finishes the existing decode output
-        instead of running another full Reed-Solomon transform.</p>
+        materialize canonical <span class="math inline">R_1</span>.
+        Decoding had already evaluated the <span
+        class="math inline">R_1</span> position. Let <span
+        class="math inline">W_j</span> be the intermediate value at a
+        missing position <span class="math inline">j</span> after the
+        IFFT, formal derivative, and FFT. The canonical codeword value
+        differs only by the known erasure-locator scale <span
+        class="math inline">\lambda_j</span>:</p>
+        <p><span class="math display">
+        C_j = \lambda_j^{-1} W_j.
+        </span></p>
+        <p>Previously, this unscale was applied only to missing
+        originals. Decode-reveal applies it to every symbol of each
+        missing recovery shard, then normalizes a partial final 64-byte
+        batch. Algebraically, revealing <span
+        class="math inline">r</span> missing recovery shards of <span
+        class="math inline">q</span> symbols each adds <span
+        class="math inline">rq</span> field multiplications. Because the
+        arithmetic runs in 32-symbol batches, the implementation
+        touches</p>
+        <p><span class="math display">
+        r \cdot 32\left\lceil \frac{q}{32} \right\rceil
+        </span></p>
+        <p>lanes, including final-block padding. Re-encoding would
+        instead rerun the encoder’s IFFT/FFT pipeline across every
+        symbol column to recompute all <span
+        class="math inline">m</span> recovery shards.</p>
         <p>The recovery path now feeds exactly <span
         class="math inline">k</span> shards to the decoder. If more were
         received, surplus recovery shards are forgotten and
@@ -351,19 +380,21 @@ O’Grady</a></div>
           <noscript>Recovering the block needs missing original D1; rebuilding the commitment root also needs missing recovery R1. Given checked shards D0, D2, and R0, the old decoder computes D1 and R1 but returns only D1. The original shards are then re-encoded to regenerate R0 and R1 before the complete codeword is verified. Decode-reveal returns D1 and R1 from the first transform, so the separate encode is skipped. The implementation still reuses checked digests, hashes reconstructed shards, rebuilds the Merkle tree over all shards, and requires its root to match the commitment. If all original shards are already present, re-encode verification is still used.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 2: Both paths derive <code>D1</code> and
-        <code>R1</code>. The old decoder hid <code>R1</code>, so the
-        encoder derived <code>R0</code> and <code>R1</code> again before
-        verification. Decode-reveal returns the already-derived
-        <code>R1</code> with <code>D1</code>, eliminating the second
-        transform while preserving the full-root check. When all
-        <code>k</code> originals are supplied there is nothing to
-        decode, so the re-encode path remains.</p>
+        <p>Figure 2: Both paths derive <span
+        class="math inline">D_1</span> and <span
+        class="math inline">R_1</span>. The old decoder hid <span
+        class="math inline">R_1</span>, so the encoder derived <span
+        class="math inline">R_0</span> and <span
+        class="math inline">R_1</span> again before verification.
+        Decode-reveal returns the already-derived <span
+        class="math inline">R_1</span> with <span
+        class="math inline">D_1</span>, eliminating the second transform
+        while preserving the full-root check. When all <span
+        class="math inline">k</span> originals are supplied there is
+        nothing to decode, so the re-encode path remains.</p>
         </div>
-        <p>Exposing recovery positions required updating both the
-        high-rate and low-rate decoders so each revealed recovery shard
-        is byte-identical to the encoder’s output, including shard
-        widths that are not 64-byte aligned.</p>
+        <p>Revealed recovery shards are byte-identical to the encoder’s
+        output, including shard widths that are not 64-byte aligned.</p>
         <p>A back-to-back rerun of the striped-only checkpoint and the
         immediate decode-reveal change isolates the improvement:</p>
         <div id="earn-your-stripes-chart-reveal" class="cw-rs-chart" role="img" aria-label="Line chart of recovery-heavy verification latency for decode plus encode and decode plus reveal. With 8 and 16 workers, latency changes from 10.20 to 9.09 milliseconds and from 7.64 to 6.87 milliseconds, reductions of 10.8 and 10.1 percent."></div>
@@ -395,28 +426,28 @@ O’Grady</a></div>
         </noscript>
         <p>The one-worker row is an end-to-end comparison of the
         baseline and final implementations, so it does not isolate
-        either optimization. The final patch also checks that striped
-        and full-width operations produce the same codeword, that
-        revealed recovery shards match encoder output, and that tampered
+        either optimization. Tests also confirm that striped and
+        full-width operations produce the same codeword, that revealed
+        recovery shards match encoder output, and that tampered
         originals, recoveries, padding, and surplus shards are
         rejected.</p>
         <h2 id="an-ai-research-loop">An AI Research Loop</h2>
-        <p>QED’s bot, our AI research agent, found this optimization by
-        reading the coding stack and noticing that hashing the missing
-        shards in decode was parallelized, but Reed-Solomon recovery was
-        not. It then tested whether recovery could be split into
-        independent stripes and run in parallel.</p>
-        <p>The loop resembles the one used by our security audit agent.
-        It scans the code, gathers repository evidence, forms
-        hypotheses, and verifies them with tests and benchmarks. Whether
-        a finding is useful depends on repository context, since the
-        same pattern may be a known issue or an intentional design
-        choice. Lessons from continuously auditing Commonware helped the
-        bot identify a valid optimization.</p>
+        <p>The first author used QED’s AI research agent to find this
+        optimization. The agent read the coding stack and noticed that
+        hashing the missing shards in decode was parallelized, but
+        Reed-Solomon recovery was not. It then tested whether recovery
+        could be split into independent stripes and run in parallel.</p>
+        <p>The loop resembles the one QED uses for security audits. It
+        scans the code, gathers repository evidence, forms hypotheses,
+        and verifies them with tests and benchmarks. Whether a finding
+        is useful depends on repository context, since the same pattern
+        may be a known issue or an intentional design choice. Lessons
+        from continuously auditing Commonware helped the bot identify a
+        valid optimization.</p>
         <h2 id="next-steps">Next Steps</h2>
-        <p>We found similar sequential bottlenecks elsewhere in the
-        coding stack. The NTTs under ZODA are next, and that work is
-        already underway.</p>
+        <p>Reed-Solomon is not the last place to look. The NTTs under
+        ZODA pose the same question: how much latency is still hiding in
+        math that can be split across cores?</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
