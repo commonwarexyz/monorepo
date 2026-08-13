@@ -2968,8 +2968,8 @@ mod tests {
     /// Regression: the next view's proposal request dispatches before the
     /// current iteration's journal sync and vote broadcast, so the automaton
     /// builds the next block during that work. Constructing the notarize for
-    /// view 1 advances the optimistic frontier, so the view 2 request must go
-    /// out before the view 1 notarize is broadcast.
+    /// view 1 advances the optimistic frontier, so the view 2 request must
+    /// dispatch before the view 1 notarize is broadcast.
     #[test_collect_traces]
     fn test_next_propose_dispatches_before_broadcast(traces: TraceStorage) {
         let n = 5;
