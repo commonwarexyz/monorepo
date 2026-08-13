@@ -3,9 +3,8 @@
 //! [`Builder`] installs a Tokio worker park callback before runtime startup.
 //! Each initial worker claims one shard, and construction waits for every claim
 //! before exposing the timer. It then constructs and probes every native alarm
-//! before starting one driver task per shard. Other threads receive cached
-//! round-robin provisional assignments that a worker callback may later
-//! upgrade.
+//! before starting one driver task per shard. Other threads cache a round-robin
+//! shard on their first timer registration.
 //!
 //! Runtime affinity is identified by the allocation of its shared [`Affinity`].
 //! Cached assignments retain a `Weak<Affinity>`. That weak reference keeps an
@@ -188,7 +187,7 @@ impl Builder {
         let callback_affinity = Arc::clone(&affinity);
         let (worker_claimed_sender, worker_claimed) = mpsc::channel();
         runtime_builder.on_thread_park(move || {
-            if callback_affinity.assign_worker() {
+            if callback_affinity.claim_worker() {
                 let _ = worker_claimed_sender.send(());
             }
         });
@@ -919,32 +918,16 @@ impl DriverSignal {
     }
 }
 
-/// Classification of a cached shard assignment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AssignmentKind {
-    /// Temporary round-robin choice for a non-worker or pre-park worker.
-    Provisional,
-    /// Unique index claimed by one of the runtime's initial worker threads.
-    Worker,
-}
-
 /// Cached shard selection keyed by one runtime's affinity allocation.
 #[derive(Debug)]
 struct ThreadAssignment {
     /// Weak ownership and allocation identity of the runtime affinity.
     affinity: Weak<Affinity>,
-    /// Provisional or stable worker classification.
-    kind: AssignmentKind,
     /// Selected shard index.
     index: usize,
 }
 
 impl ThreadAssignment {
-    /// Returns the cached selection without cloning its liveness token.
-    const fn selection(&self) -> (usize, AssignmentKind) {
-        (self.index, self.kind)
-    }
-
     /// Returns whether this assignment belongs to `affinity`.
     fn belongs_to(&self, affinity: &Arc<Affinity>) -> bool {
         std::ptr::eq(self.affinity.as_ptr(), Arc::as_ptr(affinity))
@@ -974,11 +957,11 @@ impl ThreadAssignments {
     }
 
     /// Makes a cached runtime current and returns its assignment.
-    fn activate(&mut self, affinity: &Arc<Affinity>) -> Option<(usize, AssignmentKind)> {
+    fn activate(&mut self, affinity: &Arc<Affinity>) -> Option<usize> {
         if let Some(current) = self.current.as_ref()
             && current.belongs_to(affinity)
         {
-            return Some(current.selection());
+            return Some(current.index);
         }
         // Cache misses are already the cold path, so retire assignments whose
         // runtimes have ended before searching the inactive set.
@@ -988,20 +971,19 @@ impl ThreadAssignments {
             .iter()
             .position(|assignment| assignment.belongs_to(affinity))?;
         let assignment = self.inactive.swap_remove(position);
-        let selection = assignment.selection();
+        let index = assignment.index;
         if let Some(previous) = self.current.replace(assignment)
             && previous.is_live()
         {
             self.inactive.push(previous);
         }
-        Some(selection)
+        Some(index)
     }
 
-    /// Installs a new or upgraded assignment as the fast-path runtime.
-    fn install(&mut self, affinity: &Arc<Affinity>, kind: AssignmentKind, index: usize) {
+    /// Installs a new assignment as the fast-path runtime.
+    fn install(&mut self, affinity: &Arc<Affinity>, index: usize) {
         let assignment = ThreadAssignment {
             affinity: Arc::downgrade(affinity),
-            kind,
             index,
         };
         if let Some(previous) = self.current.replace(assignment)
@@ -1016,7 +998,7 @@ impl ThreadAssignments {
 /// Per-runtime shard allocation state and thread-cache identity.
 ///
 /// Initial Tokio workers and fallback callers use separate allocators so a
-/// provisional selection cannot consume a stable worker assignment.
+/// fallback selection cannot consume an initial worker assignment.
 struct Affinity {
     /// Number of native timer shards.
     worker_threads: usize,
@@ -1027,35 +1009,39 @@ struct Affinity {
 }
 
 impl Affinity {
-    /// Selects a cached shard or creates a provisional fallback assignment.
+    /// Selects a cached shard or creates a fallback assignment.
     fn select(self: &Arc<Self>) -> usize {
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
-            if let Some((index, _)) = assignments.activate(self) {
+            if let Some(index) = assignments.activate(self) {
                 return index;
             }
             // Relaxed ordering is sufficient because this counter allocates unique claims only.
             let index =
                 self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
-            assignments.install(self, AssignmentKind::Provisional, index);
+            assignments.install(self, index);
             index
         })
     }
 
-    /// Preserves a worker assignment or upgrades a provisional one.
+    /// Claims one unique shard for an initial Tokio worker.
     ///
     /// Returns whether this callback claimed a new worker slot.
-    fn assign_worker(self: &Arc<Self>) -> bool {
+    fn claim_worker(self: &Arc<Self>) -> bool {
+        // After startup, replacement workers need no assignment until they
+        // actually register a timer through `select`.
+        if self.next_worker.load(AtomicOrdering::Relaxed) >= self.worker_threads {
+            return false;
+        }
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
-            let existing = assignments.activate(self);
-            if matches!(existing, Some((_, AssignmentKind::Worker))) {
+            if assignments.activate(self).is_some() {
+                // Before Timer exposure, only an earlier initial-worker claim
+                // can have installed this runtime's assignment on this thread.
                 return false;
             }
 
-            // Initial workers exhaust every slot before timer construction
-            // returns. Later block_in_place replacements also invoke this park
-            // callback, but can receive only provisional fallback assignments.
+            // Initial workers exhaust every slot before timer construction returns.
             // Relaxed ordering is sufficient because this counter allocates
             // unique claims only.
             //
@@ -1072,15 +1058,9 @@ impl Affinity {
                     }
                 },
             ) else {
-                if existing.is_some() {
-                    return false;
-                }
-                let index =
-                    self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
-                assignments.install(self, AssignmentKind::Provisional, index);
                 return false;
             };
-            assignments.install(self, AssignmentKind::Worker, index);
+            assignments.install(self, index);
             true
         })
     }
@@ -1113,5 +1093,54 @@ fn complete_entries(entries: Vec<EntryArc<Entry>>, terminal: u8) {
     let _ = batch.complete(terminal);
 }
 
-#[cfg(test)]
+/// Observations shared by scheduler and runtime tests.
+#[cfg(all(test, not(feature = "loom")))]
+pub(super) mod test_helpers {
+    use super::{Affinity, THREAD_ASSIGNMENTS, ThreadAssignments, Timer};
+    use std::sync::{Arc, atomic::Ordering};
+
+    /// Returns the current resident entry count for every shard.
+    pub(crate) fn heap_lengths(timer: &Timer) -> Vec<usize> {
+        timer
+            .shards
+            .iter()
+            .map(|shard| shard.state.lock().entries.len())
+            .collect()
+    }
+
+    /// Returns the worker and fallback allocator claim counts.
+    pub(crate) fn allocator_claims(timer: &Timer) -> (usize, usize) {
+        (
+            timer.affinity.next_worker.load(Ordering::Relaxed),
+            timer.affinity.next_fallback.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Returns this runtime's assignment cached on the current thread.
+    pub(crate) fn current_assignment(timer: &Timer) -> Option<usize> {
+        THREAD_ASSIGNMENTS.with(|assignments| assignment(&assignments.borrow(), &timer.affinity))
+    }
+
+    /// Returns a cached assignment without changing the fast-path runtime.
+    pub(super) fn assignment(
+        assignments: &ThreadAssignments,
+        affinity: &Arc<Affinity>,
+    ) -> Option<usize> {
+        assignments
+            .current
+            .as_ref()
+            .filter(|assignment| assignment.belongs_to(affinity))
+            .or_else(|| {
+                assignments
+                    .inactive
+                    .iter()
+                    .find(|assignment| assignment.belongs_to(affinity))
+            })
+            .map(|assignment| assignment.index)
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests;
+#[cfg(all(test, not(feature = "loom")))]
 mod tests;

@@ -859,8 +859,8 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use crate::tokio::timer::AssignmentKind;
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(feature = "loom")))]
+    use crate::tokio::timer::{allocator_claims, current_assignment, heap_lengths};
     use crate::{
         Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
         tokio::telemetry,
@@ -874,7 +874,7 @@ mod tests {
     };
     use tracing::{Level, error};
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(feature = "loom")))]
     #[test]
     fn test_timer_timeout_winner_restores_exact_heap_occupancy() {
         let runner = Runner::new(Config::default().with_worker_threads(1));
@@ -887,11 +887,11 @@ mod tests {
 
             // Timeout cleanup removes its timer before returning.
             assert_eq!(output, 7);
-            assert_eq!(context.executor.timer.heap_lengths(), vec![0]);
+            assert_eq!(heap_lengths(&context.executor.timer), vec![0]);
         });
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(feature = "loom")))]
     #[test]
     fn test_timer_affinity_separates_workers_and_fallback_callers() {
         const WORKERS: usize = 2;
@@ -899,21 +899,17 @@ mod tests {
         let runner = Runner::new(Config::default().with_worker_threads(WORKERS));
         runner.start(|context| async move {
             // The block_on caller is not a Tokio worker. Its first timer selects
-            // one cached provisional shard without consuming a worker index.
-            assert!(context.executor.timer.current_assignment().is_none());
+            // one cached fallback shard without consuming a worker index.
+            assert!(current_assignment(&context.executor.timer).is_none());
             let block_on_sleep = context.sleep(Duration::from_secs(60));
-            let (index, kind) = context
-                .executor
-                .timer
-                .current_assignment()
+            let index = current_assignment(&context.executor.timer)
                 .expect("block_on assignment should be cached");
             assert!(index < WORKERS);
-            assert_eq!(kind, AssignmentKind::Provisional);
             drop(block_on_sleep);
 
             // Runtime startup completes every worker claim independently of
             // the block_on caller's fallback use.
-            let claims_before = context.executor.timer.allocator_claims();
+            let claims_before = allocator_claims(&context.executor.timer);
             assert_eq!(claims_before.0, WORKERS);
             assert_eq!(claims_before.1, 1);
 
@@ -924,29 +920,24 @@ mod tests {
                 let executor = Arc::clone(&context.executor);
                 tasks.push(tokio::spawn(async move {
                     let sleep = executor.timer.sleep(Duration::from_secs(60));
-                    let assignment = executor
-                        .timer
-                        .current_assignment()
+                    let assignment = current_assignment(&executor.timer)
                         .expect("worker assignment should already exist");
                     drop(sleep);
                     assignment
                 }));
             }
             for task in tasks {
-                let (index, kind) = task.await.expect("worker task should complete");
+                let index = task.await.expect("worker task should complete");
                 assert!(index < WORKERS);
-                assert_eq!(kind, AssignmentKind::Worker);
             }
-            assert_eq!(context.executor.timer.allocator_claims(), claims_before);
+            assert_eq!(allocator_claims(&context.executor.timer), claims_before);
 
-            // A blocking-pool thread gets a provisional fallback assignment.
-            // It must not be mistaken for another runtime worker.
+            // A blocking-pool thread gets a fallback assignment without
+            // consuming another runtime worker slot.
             let executor = Arc::clone(&context.executor);
-            let (index, kind) = tokio::task::spawn_blocking(move || {
+            let index = tokio::task::spawn_blocking(move || {
                 let sleep = executor.timer.sleep(Duration::from_secs(60));
-                let assignment = executor
-                    .timer
-                    .current_assignment()
+                let assignment = current_assignment(&executor.timer)
                     .expect("blocking assignment should be cached");
                 drop(sleep);
                 assignment
@@ -954,17 +945,14 @@ mod tests {
             .await
             .expect("blocking task should complete");
             assert!(index < WORKERS);
-            assert_eq!(kind, AssignmentKind::Provisional);
-            assert_eq!(context.executor.timer.allocator_claims(), (WORKERS, 2));
+            assert_eq!(allocator_claims(&context.executor.timer), (WORKERS, 2));
 
             // A dedicated external thread follows the same fallback path and
             // likewise leaves the worker allocator untouched.
             let executor = Arc::clone(&context.executor);
-            let (index, kind) = std::thread::spawn(move || {
+            let index = std::thread::spawn(move || {
                 let sleep = executor.timer.sleep(Duration::from_secs(60));
-                let assignment = executor
-                    .timer
-                    .current_assignment()
+                let assignment = current_assignment(&executor.timer)
                     .expect("dedicated-thread assignment should be cached");
                 drop(sleep);
                 assignment
@@ -972,9 +960,8 @@ mod tests {
             .join()
             .expect("dedicated thread should complete");
             assert!(index < WORKERS);
-            assert_eq!(kind, AssignmentKind::Provisional);
-            assert_eq!(context.executor.timer.allocator_claims(), (WORKERS, 3));
-            assert_eq!(context.executor.timer.heap_lengths(), vec![0; WORKERS]);
+            assert_eq!(allocator_claims(&context.executor.timer), (WORKERS, 3));
+            assert_eq!(heap_lengths(&context.executor.timer), vec![0; WORKERS]);
         });
     }
 

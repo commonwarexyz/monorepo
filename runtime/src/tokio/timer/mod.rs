@@ -71,8 +71,10 @@ cfg_if::cfg_if! {
             }
         }
 
-        #[cfg(test)]
-        pub(crate) use scheduler::AssignmentKind;
+        #[cfg(all(test, not(feature = "loom")))]
+        pub(crate) use scheduler::test_helpers::{
+            allocator_claims, current_assignment, heap_lengths,
+        };
         pub(super) use scheduler::{Builder, Timer};
     } else {
         mod fallback;
