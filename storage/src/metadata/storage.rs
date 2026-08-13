@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
+    Blob, Buf, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -90,6 +90,14 @@ struct Inner<E: Context, K: Span, V: Codec> {
 }
 
 impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
+    async fn discard(
+        blob: E::Blob,
+    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob, K>), Error> {
+        blob.resize(0).await?;
+        blob.sync().await?;
+        Ok((BTreeMap::new(), Wrapper::empty(blob)))
+    }
+
     /// See [Metadata::init].
     async fn init(
         context: E,
@@ -198,15 +206,12 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         //
         // 8 bytes for version + 4 bytes for checksum.
         if buf.len() < 8 + crc32::Digest::SIZE {
-            // Truncate and return none
             warn!(
                 blob = index,
                 len = buf.len(),
                 "blob is too short: truncating"
             );
-            blob.resize(0).await?;
-            blob.sync().await?;
-            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
+            return Self::discard(blob).await;
         }
 
         // Extract checksum
@@ -215,39 +220,61 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
         let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
         if stored_checksum != computed_checksum {
-            // Truncate and return none
             warn!(
                 blob = index,
                 stored = stored_checksum,
                 computed = computed_checksum,
                 "checksum mismatch: truncating"
             );
-            blob.resize(0).await?;
-            blob.sync().await?;
-            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
+            return Self::discard(blob).await;
         }
 
         // Get parent
         let version = u64::from_be_bytes(buf.as_ref()[..8].try_into().unwrap());
 
-        // Extract data
-        //
-        // If the checksum is correct, we assume data is correctly packed and we don't perform
-        // length checks on the cursor.
+        // Extract data. Integrity proves the bytes were written together, not that their encoding
+        // is valid for the current codec.
         let mut data = BTreeMap::new();
         let mut lengths = HashMap::new();
         let mut cursor = u64::SIZE;
-        while cursor < checksum_index {
-            // Read key
-            let key = K::read(&mut buf.as_ref()[cursor..].as_ref())
-                .expect("unable to read key from blob");
-            cursor += key.encode_size();
+        let bytes: &[u8] = buf.as_ref();
+        let mut encoded = &bytes[cursor..checksum_index];
+        while encoded.has_remaining() {
+            let entry_bytes = encoded.remaining();
+            let before = encoded.remaining();
+            let key = match K::read(&mut encoded) {
+                Ok(key) => key,
+                Err(error) => {
+                    warn!(blob = index, %error, "metadata key is malformed: truncating");
+                    return Self::discard(blob).await;
+                }
+            };
+            let key_bytes = before - encoded.remaining();
+            if key.encode_size() != key_bytes {
+                warn!(blob = index, "metadata key is non-canonical: truncating");
+                return Self::discard(blob).await;
+            }
+            cursor += key_bytes;
 
-            // Read value
-            let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
-                .expect("unable to read value from blob");
-            lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
-            cursor += value.encode_size();
+            let before = encoded.remaining();
+            let value = match V::read_cfg(&mut encoded, codec_config) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(blob = index, %error, "metadata value is malformed: truncating");
+                    return Self::discard(blob).await;
+                }
+            };
+            let value_bytes = before - encoded.remaining();
+            if value.encode_size() != value_bytes {
+                warn!(blob = index, "metadata value is non-canonical: truncating");
+                return Self::discard(blob).await;
+            }
+            if encoded.remaining() == entry_bytes {
+                warn!(blob = index, "metadata entry made no decoding progress: truncating");
+                return Self::discard(blob).await;
+            }
+            lengths.insert(key.clone(), Info::new(cursor, value_bytes));
+            cursor += value_bytes;
             data.insert(key, value);
         }
 
