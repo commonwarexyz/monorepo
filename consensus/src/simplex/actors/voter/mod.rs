@@ -9611,6 +9611,26 @@ mod tests {
         first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    fn assert_recovery_read_options(reads: &[ReadOptions]) {
+        let replay_start = reads
+            .iter()
+            .position(|options| *options == ReadOptions::DONT_CACHE)
+            .expect("replay must request DONT_CACHE");
+        assert!(replay_start > 0, "initialization must retain cached reads");
+        assert!(
+            reads[..replay_start]
+                .iter()
+                .all(|options| *options == ReadOptions::default()),
+            "unexpected initialization read options: {reads:?}"
+        );
+        assert!(
+            reads[replay_start..]
+                .iter()
+                .all(|options| *options == ReadOptions::DONT_CACHE),
+            "unexpected replay read options: {reads:?}"
+        );
+    }
+
     /// Certification and the finalize vote share one durable section sync.
     ///
     /// 1. Gate the sync and verify the finalize reaches neither batcher nor network.
@@ -10032,8 +10052,7 @@ mod tests {
             assert!(signers.contains(&me));
 
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty());
-            assert!(reads.iter().all(|options| *options == ReadOptions::default()));
+            assert_recovery_read_options(&reads);
         });
     }
 

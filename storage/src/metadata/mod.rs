@@ -143,7 +143,7 @@ mod tests {
             recordings.clear();
             pending.arm();
 
-            // Non-pipelined incremental writes retain default options and a trailing sync.
+            // Non-pipelined incremental writes request cache bypass and retain a trailing sync.
             metadata.put(key.clone(), vec![2; 8]);
             metadata = drive_pending_syncs(&pending, metadata.sync())
                 .await
@@ -152,14 +152,14 @@ mod tests {
                 &recordings,
                 &[],
                 &[
-                    WriteOptions::default(),
-                    WriteOptions::default(),
-                    WriteOptions::default(),
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
                 ],
             );
             assert_durability(&pending, 1, 0, 0);
 
-            // Pipelined incremental writes retain default options and a started sync.
+            // Pipelined incremental writes request cache bypass and retain a started sync.
             metadata.put(key.clone(), vec![3; 8]);
             let (next, handle) = metadata.start_sync().await.unwrap();
             metadata = next;
@@ -168,51 +168,55 @@ mod tests {
                 &recordings,
                 &[],
                 &[
-                    WriteOptions::default(),
-                    WriteOptions::default(),
-                    WriteOptions::default(),
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
                 ],
             );
             assert_durability(&pending, 2, 1, 1);
 
-            // A growing pipelined rewrite retains a default option and a started sync.
+            // A growing pipelined rewrite requests cache bypass and retains a started sync.
             metadata.put(extra_key.clone(), vec![4; 16]);
             let (next, handle) = metadata.start_sync().await.unwrap();
             metadata = next;
             drive_pending_syncs(&pending, handle).await.unwrap();
-            assert_options(&recordings, &[], &[WriteOptions::default()]);
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 3, 2, 2);
 
-            // A growing non-pipelined rewrite retains range-scoped durability.
+            // A growing non-pipelined rewrite requests cache bypass and retains durability.
             metadata = drive_pending_syncs(&pending, metadata.sync())
                 .await
                 .unwrap();
-            assert_options(&recordings, &[], &[WriteOptions::SYNC]);
+            assert_options(
+                &recordings,
+                &[],
+                &[WriteOptions::SYNC | WriteOptions::DONT_CACHE],
+            );
             assert_durability(&pending, 4, 2, 2);
 
-            // A shrinking pipelined rewrite retains a default option and a started sync.
+            // A shrinking pipelined rewrite requests cache bypass and retains a started sync.
             metadata.remove(&extra_key);
             let (next, handle) = metadata.start_sync().await.unwrap();
             metadata = next;
             drive_pending_syncs(&pending, handle).await.unwrap();
-            assert_options(&recordings, &[], &[WriteOptions::default()]);
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 5, 3, 3);
 
-            // A shrinking non-pipelined rewrite retains a default option and a trailing sync.
+            // A shrinking non-pipelined rewrite requests cache bypass and retains a trailing sync.
             metadata = drive_pending_syncs(&pending, metadata.sync())
                 .await
                 .unwrap();
-            assert_options(&recordings, &[], &[WriteOptions::default()]);
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 6, 3, 3);
 
-            // Both populated mirrors retain normal caching when reloaded.
+            // Both populated mirrors request cache bypass when reloaded.
             drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(recording.child("second"), cfg)
                 .await
                 .unwrap();
             assert_options(
                 &recordings,
-                &[ReadOptions::default(), ReadOptions::default()],
+                &[ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE],
                 &[],
             );
             metadata.destroy().await.unwrap();

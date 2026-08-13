@@ -833,7 +833,7 @@ impl<
         let mut certified = Vec::new();
         let mut acks = Vec::new();
         let mut replay = journal
-            .replay(0, 0, self.journal_replay_buffer, ReadOptions::default())
+            .replay(0, 0, self.journal_replay_buffer, ReadOptions::DONT_CACHE)
             .await
             .expect("replay failed");
         while let Some(msg) = replay.next().await {

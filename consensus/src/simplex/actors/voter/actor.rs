@@ -1019,7 +1019,7 @@ impl<
         let replayed;
         (self, replayed) = async {
             let mut replay = journal
-                .replay(0, 0, self.replay_buffer, ReadOptions::default())
+                .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {

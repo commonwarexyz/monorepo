@@ -203,7 +203,7 @@ where
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
             let mut replay = events
-                .replay(0, 0, READ_BUFFER, ReadOptions::default())
+                .replay(0, 0, READ_BUFFER, ReadOptions::DONT_CACHE)
                 .await
                 .expect("failed to replay reshare events");
 
@@ -765,6 +765,26 @@ mod tests {
         });
     }
 
+    fn assert_recovery_read_options(reads: &[ReadOptions]) {
+        let replay_start = reads
+            .iter()
+            .position(|options| *options == ReadOptions::DONT_CACHE)
+            .expect("replay must request DONT_CACHE");
+        assert!(replay_start > 0, "initialization must retain cached reads");
+        assert!(
+            reads[..replay_start]
+                .iter()
+                .all(|options| *options == ReadOptions::default()),
+            "unexpected initialization read options: {reads:?}"
+        );
+        assert!(
+            reads[replay_start..]
+                .iter()
+                .all(|options| *options == ReadOptions::DONT_CACHE),
+            "unexpected replay read options: {reads:?}"
+        );
+    }
+
     #[test]
     fn replay_restores_dealings_acks_and_logs() {
         let executor = deterministic::Runner::default();
@@ -832,12 +852,7 @@ mod tests {
             let (restart_context, recordings) = RecordingContext::new(context.child("restart"));
             let store = init_store(restart_context, "replay", secret_store).await;
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty());
-            assert!(
-                reads
-                    .iter()
-                    .all(|options| *options == ReadOptions::default())
-            );
+            assert_recovery_read_options(&reads);
             // The current epoch is not persisted; the setup state re-derives it from
             // finalized blocks, so a restarted store has no current epoch on its own.
             assert!(store.current().is_none());

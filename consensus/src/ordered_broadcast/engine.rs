@@ -1055,7 +1055,7 @@ impl<
 
             // Prepare the reader
             let mut replay = journal
-                .replay(0, 0, self.journal_replay_buffer, ReadOptions::default())
+                .replay(0, 0, self.journal_replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("unable to replay journal");
 

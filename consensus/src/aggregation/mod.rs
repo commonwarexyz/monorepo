@@ -246,7 +246,27 @@ mod tests {
         (oracle, registrations)
     }
 
-    fn recovery_replay_records_default_read_options<S, F>(fixture: F)
+    fn assert_recovery_read_options(reads: &[ReadOptions]) {
+        let replay_start = reads
+            .iter()
+            .position(|options| *options == ReadOptions::DONT_CACHE)
+            .expect("replay must request DONT_CACHE");
+        assert!(replay_start > 0, "initialization must retain cached reads");
+        assert!(
+            reads[..replay_start]
+                .iter()
+                .all(|options| *options == ReadOptions::default()),
+            "unexpected initialization read options: {reads:?}"
+        );
+        assert!(
+            reads[replay_start..]
+                .iter()
+                .all(|options| *options == ReadOptions::DONT_CACHE),
+            "unexpected replay read options: {reads:?}"
+        );
+    }
+
+    fn recovery_replay_records_dont_cache_read_options<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -329,19 +349,14 @@ mod tests {
             }
 
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty());
-            assert!(
-                reads
-                    .iter()
-                    .all(|options| *options == ReadOptions::default())
-            );
+            assert_recovery_read_options(&reads);
             handle.abort();
         });
     }
 
     #[test_traced("INFO")]
-    fn test_recovery_replay_records_default_read_options() {
-        recovery_replay_records_default_read_options(ed25519::fixture);
+    fn test_recovery_replay_records_dont_cache_read_options() {
+        recovery_replay_records_dont_cache_read_options(ed25519::fixture);
     }
 
     /// Spawn aggregation engines for all validators.

@@ -4100,9 +4100,11 @@ mod tests {
                 .unwrap();
 
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty());
+            assert!(reads.len() > 2);
+            let (metadata_reads, recovery_reads) = reads.split_at(2);
+            assert_eq!(metadata_reads, [ReadOptions::DONT_CACHE; 2]);
             assert!(
-                reads
+                recovery_reads
                     .iter()
                     .all(|options| *options == ReadOptions::default())
             );
