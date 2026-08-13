@@ -3341,6 +3341,114 @@ mod tests {
         });
     }
 
+    /// A pipelined handoff proposes and notarizes across the term boundary
+    /// before any certificate forms: voting for the outgoing term's final
+    /// view is enough for the incoming leader to issue its proposal.
+    #[test_traced]
+    fn test_pipelined_handoff_proposes_across_term_boundary() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_proposes_across_term_boundary".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default()
+                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
+                .with_pipelined_handoff();
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let outgoing = participants[usize::from(outgoing_idx)].clone();
+            // Views 1 and 2 form term 1; view 3 starts term 2.
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            assert_ne!(usize::from(outgoing_idx), local_index);
+
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    // Timeouts long enough that none fires within the test:
+                    // no certificate is ever delivered, so a view-3 notarize
+                    // can only come from a pipelined handoff.
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_latency_ms: 10.0,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+
+            // Feed the outgoing leader's proposals for both views of term 1.
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"pipelined_handoff_view_1"]),
+            );
+            let contents_1 = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&outgoing, Recipients::All, (proposal_1.payload, contents_1));
+            mailbox.proposal(proposal_1.clone());
+
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(&[b"pipelined_handoff_view_2"]),
+            );
+            let contents_2 = (proposal_2.round, proposal_1.payload, 1u64).encode();
+            relay.broadcast(&outgoing, Recipients::All, (proposal_2.payload, contents_2));
+            mailbox.proposal(proposal_2.clone());
+
+            let mut saw_view_2_notarize = false;
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { .. } => {}
+                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                                if notarize.view() == View::new(2) {
+                                    saw_view_2_notarize = true;
+                                }
+                                if notarize.view() == View::new(3) {
+                                    assert!(
+                                        saw_view_2_notarize,
+                                        "expected the outgoing tip's notarize before the handoff notarize"
+                                    );
+                                    assert_eq!(
+                                        notarize.proposal.parent,
+                                        View::new(2),
+                                        "handoff proposal must build on the outgoing term's final view"
+                                    );
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(8)) => {
+                        panic!("expected pipelined handoff notarize for view 3");
+                    }
+                }
+            }
+        });
+    }
+
     /// A directly notarized descendant must not hide a local certification
     /// failure in its same-term ancestry.
     #[test_traced]

@@ -17,6 +17,8 @@
 //!
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
+//! Electors that can name a leader before the certificate unlocking its round exists may
+//! implement [`Elector::elect_ahead`] to support pipelined handoffs.
 //!
 //! # Usage
 //!
@@ -227,6 +229,27 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     ///
     /// Returns the index of the selected leader in the participants list.
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant;
+
+    /// Selects the leader for `round` before the certificate that unlocks the
+    /// round exists.
+    ///
+    /// Returning `Some` opts the local participant into pipelined handoffs
+    /// (see [Pipelined Handoff]). The returned leader may propose for a term's
+    /// first view while the prior term's final view is still uncertified.
+    ///
+    /// Return `Some` only when the leader is derivable without a certificate:
+    /// the result must equal [`Self::elect`] for every certificate that can
+    /// unlock the round. Certificate-derived electors such as
+    /// [`RandomElector`] cannot elect ahead.
+    ///
+    /// This is local policy: participants with different settings interoperate.
+    /// The default opts out.
+    ///
+    /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
+    fn elect_ahead(&self, round: Round) -> Option<Participant> {
+        let _ = round;
+        None
+    }
 }
 
 /// Configuration for round-robin leader election.
@@ -240,6 +263,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
 pub struct RoundRobin<H: Hasher = Sha256> {
     seed: Option<Vec<u8>>,
     terms: Terms,
+    pipelined_handoff: bool,
     _phantom: PhantomData<H>,
 }
 
@@ -248,6 +272,7 @@ impl<H: Hasher> Clone for RoundRobin<H> {
         Self {
             seed: self.seed.clone(),
             terms: self.terms,
+            pipelined_handoff: self.pipelined_handoff,
             _phantom: PhantomData,
         }
     }
@@ -262,6 +287,7 @@ impl<H: Hasher> RoundRobin<H> {
         Self {
             seed: Some(seed.to_vec()),
             terms: Terms::rotating(),
+            pipelined_handoff: false,
             _phantom: PhantomData,
         }
     }
@@ -288,6 +314,25 @@ impl<H: Hasher> RoundRobin<H> {
         self.terms = Terms::stable(term_length, stall_timeout, optimistic_views);
         self
     }
+
+    /// Enables pipelined handoffs (see [Pipelined Handoff]). When this
+    /// participant leads the term starting at view `v`, it proposes during
+    /// view `v - 1` on that view's proposal, before the proposal notarizes.
+    ///
+    /// With rotating terms (the default), every view is a handoff: proposals
+    /// distribute in parallel with their parents' votes, and sustained view
+    /// time halves. With stable terms (see [`Self::with_term`]), the handoff
+    /// moves each term's first view one network trip earlier.
+    ///
+    /// This trusts the leader of `v - 1`: if the parent proposal never
+    /// notarizes, the pipelined proposal fails with it. Like the stall
+    /// timeout and lookahead, this is local policy.
+    ///
+    /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
+    pub const fn with_pipelined_handoff(mut self) -> Self {
+        self.pipelined_handoff = true;
+        self
+    }
 }
 
 impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
@@ -307,6 +352,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
         RoundRobinElector {
             permutation,
             terms: self.terms,
+            pipelined_handoff: self.pipelined_handoff,
             _phantom: PhantomData,
         }
     }
@@ -319,6 +365,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 pub struct RoundRobinElector<S: Scheme> {
     permutation: Vec<Participant>,
     terms: Terms,
+    pipelined_handoff: bool,
     _phantom: PhantomData<S>,
 }
 
@@ -337,6 +384,12 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
             % u64::try_from(n).expect("permutation length fits in u64");
         let idx = usize::try_from(idx).expect("leader index fits in usize");
         self.permutation[idx]
+    }
+
+    fn elect_ahead(&self, round: Round) -> Option<Participant> {
+        // Round-robin election never reads the certificate, so electing ahead
+        // is always consistent with `elect`.
+        self.pipelined_handoff.then(|| self.elect(round, None))
     }
 }
 
@@ -560,6 +613,32 @@ mod tests {
         assert_eq!(leader_v4, leader_v5);
         assert_eq!(leader_v4, leader_v6);
         assert_ne!(leader_v1, leader_v4);
+    }
+
+    #[test]
+    fn round_robin_elect_ahead_requires_optin_and_matches_elect() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let config = RoundRobin::<Sha256>::default().with_term(
+            TermLength::new(NZU32!(3)),
+            Duration::from_secs(10),
+            ViewDelta::new(1),
+        );
+        let opted_out: RoundRobinElector<ed25519::Scheme> = config.clone().build(&participants);
+        let opted_in: RoundRobinElector<ed25519::Scheme> =
+            config.with_pipelined_handoff().build(&participants);
+
+        for epoch in [0u64, 7] {
+            for view in 1..=9u64 {
+                let round = Round::new(Epoch::new(epoch), View::new(view));
+                assert_eq!(opted_out.elect_ahead(round), None);
+                assert_eq!(
+                    opted_in.elect_ahead(round),
+                    Some(opted_in.elect(round, None))
+                );
+            }
+        }
     }
 
     #[test]
