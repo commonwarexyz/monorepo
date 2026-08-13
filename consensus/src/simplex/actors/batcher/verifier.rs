@@ -1250,8 +1250,8 @@ mod tests {
         assert_eq!(verifier.notarize.verified().len(), 3);
         assert_eq!(verifier.notarize.pending().len(), 1);
 
-        // The cleared gate lets the buffered vote form the next batch, which
-        // completes the quorum.
+        // Reintegration clears the in-flight mark, so the buffered vote forms
+        // the next batch and completes the quorum.
         let (batch, job) = verifier
             .begin_verify_notarizes(&mut rng, &Sequential)
             .expect("buffered vote must batch");
