@@ -21,7 +21,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
@@ -833,7 +833,7 @@ impl<
         let mut certified = Vec::new();
         let mut acks = Vec::new();
         let mut replay = journal
-            .replay(0, 0, self.journal_replay_buffer)
+            .replay(0, 0, self.journal_replay_buffer, ReadOptions::default())
             .await
             .expect("replay failed");
         while let Some(msg) = replay.next().await {

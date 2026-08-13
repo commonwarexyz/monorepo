@@ -73,8 +73,10 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, Engine, mocks,
-        types::{ChunkSigner, ChunkVerifier},
+        Config, Engine,
+        engine::tests::recover_tip,
+        mocks,
+        types::{ChunkSigner, ChunkVerifier, Node},
     };
     use crate::{
         ordered_broadcast::scheme::{
@@ -83,7 +85,7 @@ mod tests {
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
-        Signer as _,
+        Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{self, mocks::Fixture},
         ed25519::{PrivateKey, PublicKey},
@@ -93,10 +95,12 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Quota, Runner, Spawner, Supervisor as _,
+        Clock, Quota, ReadOptions, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
+        mocks::RecordingContext,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{
         NZU16, NZU64, NZUsize,
         channel::{fallible::OneshotExt, oneshot},
@@ -230,6 +234,106 @@ mod tests {
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
         link_participants(&mut oracle, &fixture.participants, Action::Link(link), None).await;
         (oracle, registrations)
+    }
+
+    fn recovery_replay_records_default_read_options<S, F>(fixture: F)
+    where
+        S: Scheme<PublicKey, Sha256Digest>,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let fixture = fixture(&mut context, TEST_NAMESPACE, 4);
+            let epoch = Epoch::new(111);
+            let namespace = b"ordered-replay-read-options";
+            let prefix = "ordered-replay-read-options-";
+            let sequencer = fixture.participants[0].clone();
+            let partition = format!("{prefix}{sequencer}");
+
+            let journal_cfg = JConfig {
+                partition,
+                compression: Some(3),
+                codec_config: S::certificate_codec_config_unbounded(),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(4096),
+            };
+            let mut journal = Journal::<_, Node<PublicKey, S, Sha256Digest>>::init(
+                context.child("seed_journal"),
+                journal_cfg,
+            )
+            .await
+            .unwrap();
+            let mut chunk_signer = ChunkSigner::new(namespace, fixture.private_keys[0].clone());
+            let node = Node::sign(
+                &mut chunk_signer,
+                Height::zero(),
+                Sha256::hash(&[b"replayed"]),
+                None,
+            );
+            let expected_chunk = node.chunk.clone();
+            (journal, _, _) = journal.append(0, &node).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
+
+            let sequencers = mocks::Sequencers::new(vec![sequencer.clone()]);
+            let validators_provider = mocks::Provider::new();
+            assert!(validators_provider.register(epoch, fixture.schemes[0].clone()));
+            let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+            let chunk_verifier = ChunkVerifier::new(namespace);
+            let (_reporter, reporter_mailbox) = mocks::Reporter::new(
+                context.child("reporter"),
+                chunk_verifier.clone(),
+                fixture.verifier.clone(),
+                Some(1),
+            );
+            let (engine_context, recordings) = RecordingContext::new(context.child("engine"));
+            let journal_page_cache =
+                CacheRef::from_pooler(&engine_context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let engine = Engine::new(
+                engine_context,
+                Config {
+                    sequencer_signer: Some(ChunkSigner::new(
+                        namespace,
+                        fixture.private_keys[0].clone(),
+                    )),
+                    chunk_verifier,
+                    sequencers_provider: sequencers,
+                    validators_provider,
+                    automaton: automaton.clone(),
+                    relay: automaton,
+                    reporter: reporter_mailbox,
+                    monitor: mocks::Monitor::new(epoch),
+                    priority_proposals: false,
+                    priority_acks: false,
+                    rebroadcast_timeout: Duration::from_secs(1),
+                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                    height_bound: HeightDelta::new(2),
+                    journal_heights_per_section: NZU64!(10),
+                    journal_replay_buffer: NZUsize!(4096),
+                    journal_write_buffer: NZUsize!(4096),
+                    journal_name_prefix: prefix.into(),
+                    journal_compression: Some(3),
+                    journal_page_cache,
+                    strategy: Sequential,
+                },
+            );
+            let recovered = recover_tip(engine, &sequencer)
+                .await
+                .expect("seeded journal must recover a tip");
+            assert_eq!(recovered.chunk, expected_chunk);
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::default())
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_replay_records_default_read_options() {
+        recovery_replay_records_default_read_options(ed25519::fixture);
     }
 
     #[allow(clippy::too_many_arguments)]
