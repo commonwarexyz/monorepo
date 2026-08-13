@@ -713,6 +713,9 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
 /// The marshal liveness target passes `Epoch::zero()` so the disrupter shares
 /// the epoch its honest engines run in (making it an in-epoch adversary rather
 /// than wrong-epoch noise).
+// Only the mocks-gated marshal end-to-end runner calls this thin wrapper; the
+// other disrupter paths use the `_and_relay`/`_relay_and_tag` variants directly.
+#[cfg(feature = "mocks")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
     context: deterministic::Context,
