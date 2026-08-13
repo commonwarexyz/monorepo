@@ -109,9 +109,23 @@ No stripe reads or writes another stripe. The $p$ stripes can therefore be recov
 Figure 1: Recovering missing original shard $D_1$ used to run as one full-width Reed-Solomon job. After striping, each aligned range becomes its own job. The jobs run in parallel, then the recovered ranges concatenate into the same full-width $D_1$.
 :::
 
-Commonware's Reed-Solomon codec uses the [novel-polynomial-basis FFT construction](https://doi.org/10.1109/TIT.2016.2608892) to evaluate polynomials over a binary extension field with a radix-2-style butterfly. For shard data, each 16-bit symbol column is a separate evaluation vector, so the butterfly never mixes one column with another. In theory, a stripe can therefore end at any symbol boundary.
+Commonware's Reed-Solomon codec uses the [novel-polynomial-basis FFT construction](https://doi.org/10.1109/TIT.2016.2608892) to evaluate polynomials over a binary extension field with a radix-2-style butterfly. Write the shard matrix as $X = [\mathbf{x}_0 \; \cdots \; \mathbf{x}_{w-1}]$, where $\mathbf{x}_j$ is the vector formed by symbol column $j$ across the shards. If $\mathcal{T}$ is the encoding or recovery transform, the butterfly acts independently on each column:
 
-The optimized arithmetic processes 32 columns as one batch, or 64 bytes. A short final batch is padded. Cutting an interior stripe through a batch would turn that slice into a different padded tail, so every non-final stripe ends between complete batches. This implementation constraint preserves the column-wise decomposition above.
+$$
+\mathcal{T}(X)
+=
+\left[\mathcal{T}(\mathbf{x}_0) \; \cdots \; \mathcal{T}(\mathbf{x}_{w-1})\right].
+$$
+
+In theory, a stripe can therefore end at any symbol boundary.
+
+The optimized arithmetic processes 32 columns as one batch. Modern CPUs can apply the same operation to several values with one vector instruction, so this layout lets each butterfly step update several columns at once:
+
+$$
+32\ \text{columns} \times 2\ \text{bytes per column} = 64\ \text{bytes}.
+$$
+
+A short final batch is padded. Cutting an interior stripe through a batch would turn that slice into a different padded tail, so every non-final stripe ends between complete batches. This implementation constraint preserves the column-wise decomposition above.
 
 ## Recovery Scales
 

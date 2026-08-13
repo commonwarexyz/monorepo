@@ -249,16 +249,35 @@ O’Grady</a></div>
         <p>Commonware’s Reed-Solomon codec uses the <a
         href="https://doi.org/10.1109/TIT.2016.2608892">novel-polynomial-basis
         FFT construction</a> to evaluate polynomials over a binary
-        extension field with a radix-2-style butterfly. For shard data,
-        each 16-bit symbol column is a separate evaluation vector, so
-        the butterfly never mixes one column with another. In theory, a
-        stripe can therefore end at any symbol boundary.</p>
-        <p>The optimized arithmetic processes 32 columns as one batch,
-        or 64 bytes. A short final batch is padded. Cutting an interior
-        stripe through a batch would turn that slice into a different
-        padded tail, so every non-final stripe ends between complete
-        batches. This implementation constraint preserves the
-        column-wise decomposition above.</p>
+        extension field with a radix-2-style butterfly. Write the shard
+        matrix as <span class="math inline">X = [\mathbf{x}_0 \; \cdots
+        \; \mathbf{x}_{w-1}]</span>, where <span
+        class="math inline">\mathbf{x}_j</span> is the vector formed by
+        symbol column <span class="math inline">j</span> across the
+        shards. If <span class="math inline">\mathcal{T}</span> is the
+        encoding or recovery transform, the butterfly acts independently
+        on each column:</p>
+        <p><span class="math display">
+        \mathcal{T}(X)
+        =
+        \left[\mathcal{T}(\mathbf{x}_0) \; \cdots \;
+        \mathcal{T}(\mathbf{x}_{w-1})\right].
+        </span></p>
+        <p>In theory, a stripe can therefore end at any symbol
+        boundary.</p>
+        <p>The optimized arithmetic processes 32 columns as one batch.
+        Modern CPUs can apply the same operation to several values with
+        one vector instruction, so this layout lets each butterfly step
+        update several columns at once:</p>
+        <p><span class="math display">
+        32\ \text{columns} \times 2\ \text{bytes per column} = 64\
+        \text{bytes}.
+        </span></p>
+        <p>A short final batch is padded. Cutting an interior stripe
+        through a batch would turn that slice into a different padded
+        tail, so every non-final stripe ends between complete batches.
+        This implementation constraint preserves the column-wise
+        decomposition above.</p>
         <h2 id="recovery-scales">Recovery Scales</h2>
         <p>We reran the same worst-case decode before and after
         striping:</p>
