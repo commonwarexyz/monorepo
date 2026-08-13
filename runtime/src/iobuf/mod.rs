@@ -146,7 +146,8 @@ pub mod bench {
     pub struct Freelist(super::freelist::Freelist);
 
     impl Freelist {
-        /// Creates a fixed-capacity benchmark freelist.
+        /// Creates a fixed-capacity benchmark freelist with automatic traversal
+        /// policy.
         pub fn new(
             capacity: NonZeroU32,
             parallelism: NonZeroUsize,
@@ -154,6 +155,42 @@ pub mod bench {
             prefill: bool,
         ) -> Self {
             Self(super::freelist::Freelist::new(
+                capacity,
+                parallelism,
+                layout,
+                prefill,
+            ))
+        }
+
+        /// Creates a benchmark freelist that forces summary navigation.
+        ///
+        /// This bypasses the production automatic-policy cutoff so a benchmark
+        /// can compare traversal modes on identical geometry.
+        pub fn new_forced_summary(
+            capacity: NonZeroU32,
+            parallelism: NonZeroUsize,
+            layout: Layout,
+            prefill: bool,
+        ) -> Self {
+            Self(super::freelist::Freelist::new_forced_summary(
+                capacity,
+                parallelism,
+                layout,
+                prefill,
+            ))
+        }
+
+        /// Creates a benchmark freelist that forces direct leaf traversal.
+        ///
+        /// This bypasses the production automatic-policy cutoff so a benchmark
+        /// can compare traversal modes on identical geometry.
+        pub fn new_forced_bypass(
+            capacity: NonZeroU32,
+            parallelism: NonZeroUsize,
+            layout: Layout,
+            prefill: bool,
+        ) -> Self {
+            Self(super::freelist::Freelist::new_forced_bypass(
                 capacity,
                 parallelism,
                 layout,
@@ -230,6 +267,9 @@ pub mod bench {
         }
 
         /// Drops every currently available pooled buffer.
+        ///
+        /// Drained slots remain retired because creation state is monotonic.
+        /// Advisory summaries are neither consulted nor cleared.
         #[inline]
         pub fn drain(&self) -> usize {
             self.0.drain()

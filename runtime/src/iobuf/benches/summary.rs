@@ -1,8 +1,9 @@
 //! Production-integrated freelist summary benchmarks.
 //!
-//! These workloads use only the benchmark facade's production constructor and
-//! take, return, and batch operations. They intentionally do not model
-//! synthetic summary words or force unavailable oversized or multiword modes.
+//! These workloads use the benchmark facade's production operations. Boundary
+//! cases compare automatic policy with forced direct and summary traversal on
+//! the same geometry. They do not model synthetic summary words or unavailable
+//! oversized or multiword modes.
 //!
 //! Concentrated and scattered layouts around 16 and 32 physical leaf blocks
 //! exercise the x86-64 direct-scan boundary. The adjacent 33-block shape
@@ -18,6 +19,7 @@ use std::{
     mem::size_of,
     num::{NonZeroU32, NonZeroUsize},
     sync::atomic::AtomicU64,
+    time::{Duration, Instant},
 };
 
 const BENCH_BUFFER_SIZE: usize = 64;
@@ -31,11 +33,30 @@ const BENCH_LAYOUT: Layout =
 const LEAF_WORDS_PER_BLOCK: usize = size_of::<CachePadded<AtomicU64>>() / size_of::<AtomicU64>();
 const SLOTS_PER_LEAF_BLOCK: usize = LEAF_WORDS_PER_BLOCK * u64::BITS as usize;
 const BOUNDARY_BLOCKS: [usize; 6] = [15, 16, 17, 31, 32, 33];
-const BATCH_SIZES: [usize; 3] = [8, 32, 128];
+const BATCH_SIZES: [usize; 7] = [8, 32, 128, 256, 512, 1024, 2048];
 const M8_SUCCESS_CYCLES: usize = 8;
 
 const _: () = assert!(size_of::<CachePadded<AtomicU64>>().is_multiple_of(size_of::<AtomicU64>()));
 const _: () = assert!(LEAF_WORDS_PER_BLOCK.is_power_of_two());
+
+#[derive(Clone, Copy)]
+enum Policy {
+    Automatic,
+    Direct,
+    Summary,
+}
+
+impl Policy {
+    const ALL: [Self; 3] = [Self::Automatic, Self::Direct, Self::Summary];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Automatic => "auto",
+            Self::Direct => "direct",
+            Self::Summary => "summary",
+        }
+    }
+}
 
 pub fn bench(c: &mut Criterion) {
     bench_settled_empty_boundary(c);
@@ -44,6 +65,7 @@ pub fn bench(c: &mut Criterion) {
     bench_stale_cleanup(c);
     bench_batch_publication(c);
     bench_high_stripe_empty(c);
+    bench_high_stripe_construction(c);
 }
 
 fn bench_settled_empty_boundary(c: &mut Criterion) {
@@ -92,20 +114,23 @@ fn bench_successful_cycles(c: &mut Criterion) {
 fn bench_m8_boundary(c: &mut Criterion) {
     for blocks in BOUNDARY_BLOCKS {
         for (shape, capacity, parallelism) in boundary_shapes(blocks) {
-            let name = format!(
-                "{}/op=m8 shape={shape} blocks={blocks} cap={capacity} p={parallelism} cycles={M8_SUCCESS_CYCLES}",
-                module_path!(),
-            );
+            for policy in Policy::ALL {
+                let policy_name = policy.name();
+                let name = format!(
+                    "{}/op=m8 mode={policy_name} shape={shape} blocks={blocks} cap={capacity} p={parallelism}",
+                    module_path!(),
+                );
 
-            c.bench_function(&name, |b| {
-                let mut state = SparseState::new(capacity, parallelism, 1);
-                b.iter(|| {
-                    for _ in 0..M8_SUCCESS_CYCLES {
-                        state.single_cycle();
-                    }
-                    state.empty_miss();
+                c.bench_function(&name, |b| {
+                    let mut state = SparseState::new_with_policy(capacity, parallelism, 1, policy);
+                    b.iter(|| {
+                        for _ in 0..M8_SUCCESS_CYCLES {
+                            state.single_cycle();
+                        }
+                        state.empty_miss();
+                    });
                 });
-            });
+            }
         }
     }
 }
@@ -179,6 +204,28 @@ fn bench_high_stripe_empty(c: &mut Criterion) {
     }
 }
 
+fn bench_high_stripe_construction(c: &mut Criterion) {
+    for (capacity, parallelism) in [(64, 64), (4096, 1024), (4096, 4096)] {
+        let name = format!(
+            "{}/op=construct cap={capacity} p={parallelism}",
+            module_path!(),
+        );
+
+        c.bench_function(&name, |b| {
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let start = Instant::now();
+                    let freelist = black_box(new_freelist(capacity, parallelism, false));
+                    elapsed += start.elapsed();
+                    drop(freelist);
+                }
+                elapsed
+            });
+        });
+    }
+}
+
 const fn capacity_for_blocks(blocks: usize) -> usize {
     blocks
         .checked_mul(SLOTS_PER_LEAF_BLOCK)
@@ -199,13 +246,26 @@ fn boundary_shapes(blocks: usize) -> [(&'static str, usize, usize); 2] {
 }
 
 fn new_freelist(capacity: usize, parallelism: usize, prefill: bool) -> Freelist {
+    new_freelist_with_policy(capacity, parallelism, prefill, Policy::Automatic)
+}
+
+fn new_freelist_with_policy(
+    capacity: usize,
+    parallelism: usize,
+    prefill: bool,
+    policy: Policy,
+) -> Freelist {
     let capacity = u32::try_from(capacity).expect("benchmark capacity must fit in u32");
-    Freelist::new(
-        NonZeroU32::new(capacity).expect("benchmark capacity must be non-zero"),
-        NonZeroUsize::new(parallelism).expect("benchmark parallelism must be non-zero"),
-        BENCH_LAYOUT,
-        prefill,
-    )
+    let capacity = NonZeroU32::new(capacity).expect("benchmark capacity must be non-zero");
+    let parallelism =
+        NonZeroUsize::new(parallelism).expect("benchmark parallelism must be non-zero");
+    match policy {
+        Policy::Automatic => Freelist::new(capacity, parallelism, BENCH_LAYOUT, prefill),
+        Policy::Direct => Freelist::new_forced_bypass(capacity, parallelism, BENCH_LAYOUT, prefill),
+        Policy::Summary => {
+            Freelist::new_forced_summary(capacity, parallelism, BENCH_LAYOUT, prefill)
+        }
+    }
 }
 
 struct SparseState {
@@ -216,9 +276,18 @@ struct SparseState {
 
 impl SparseState {
     fn new(capacity: usize, parallelism: usize, cycling: usize) -> Self {
+        Self::new_with_policy(capacity, parallelism, cycling, Policy::Automatic)
+    }
+
+    fn new_with_policy(
+        capacity: usize,
+        parallelism: usize,
+        cycling: usize,
+        policy: Policy,
+    ) -> Self {
         assert!(cycling > 0 && cycling <= capacity);
 
-        let freelist = new_freelist(capacity, parallelism, true);
+        let freelist = new_freelist_with_policy(capacity, parallelism, true, policy);
         let mut buffers = Vec::with_capacity(capacity);
         // SAFETY: the prefilled buffers remain owned by this state and the
         // freelist outlives every handle returned to the callback.

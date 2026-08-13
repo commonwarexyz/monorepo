@@ -1724,8 +1724,9 @@ impl BufferPoolInner {
     ///
     /// Uses a three-tier strategy:
     /// 1. **Thread-local cache** (fast path): no atomics, no contention.
-    /// 2. **Global freelist**: atomic pop, then batch-refill the local cache
-    ///    when the local bin is large enough to amortize shared-queue traffic.
+    /// 2. **Global freelist**: bounded striped scan and atomic claim, then
+    ///    batch-refill the local cache when the local bin is large enough to
+    ///    amortize shared-queue traffic.
     /// 3. **New allocation**: reserve a slot in the global freelist, then
     ///    allocate from the heap.
     ///

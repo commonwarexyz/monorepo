@@ -1,14 +1,537 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! Stable slots are partitioned across cache-isolated stripes. Each stripe owns
-//! packed authoritative leaf bits, stable owner records, and one advisory state
-//! word that bounds empty searches. Lazy creation uses a separate monotonic
-//! cursor per stripe and preserves the same probe phases used for reuse.
+//! A [`Freelist`] owns the allocation layout for one [`super::pool::BufferPool`]
+//! size class and is responsible for deallocating every tracked buffer created
+//! with that layout. Buffers that are not owned by pooled views and not held in
+//! a thread-local cache are parked in the freelist, making them available for
+//! reuse by any thread in the pool. Each tracked buffer has a stable slot id
+//! within its size class.
 //!
-//! A set leaf bit exclusively owns its buffer. Summary state only navigates to
-//! leaves and may be stale. Returns publish leaves before summaries, while
-//! takes acquire leaf ownership before rebuilding a [`PooledBuffer`]. Drain and
-//! drop ignore summaries and reclaim directly from the authoritative leaves.
+//! A [`PooledBuffer`] does not carry its allocation layout. Any buffer created
+//! by this freelist, or taken from it, must eventually be returned to the same
+//! freelist before the freelist is finally dropped. [`Freelist::drain`] and
+//! [`Drop`] only release buffers currently parked here. **An outstanding buffer
+//! that is never returned will leak**.
+//!
+//! The buffer pool keeps this requirement by storing a live size-class lease in
+//! every pooled buffer outside the freelist, including buffers held in a
+//! thread-local cache. Those leases keep the owning size class, and therefore
+//! this freelist, alive until the buffer returns here.
+//!
+//! This is intentionally narrower than a general multi-producer,
+//! multi-consumer queue:
+//!
+//! - Capacity is fixed when the size class is created.
+//! - Callers only need to take any free slot, not preserve order.
+//! - Slot ownership is managed by the buffer pool.
+//! - Refill and spill paths naturally move buffers in batches.
+//!
+//! The design has three layers:
+//!
+//! 1. Packed leaf bits are the sole authority for buffer ownership.
+//! 2. One 58+6 state word per stripe bounds settled-empty searches without
+//!    becoming ownership state.
+//! 3. A separate monotonic cursor per stripe assigns uncreated slots in the
+//!    same probe order used for reuse.
+//!
+//! # Ownership model
+//!
+//! Every potential slot has a stable global id, one [`PooledOwner`] side-table
+//! entry, and one authoritative free leaf bit. The side-table entry lives for
+//! the entire size-class lifetime and stores the data pointer, capacity,
+//! routing fields, refcount, and any live size-class lease. A global admission
+//! counter and one monotonic cursor per stripe assign each slot to at most one
+//! lazy creation.
+//!
+//! For a created, live buffer, the leaf bit determines whether the freelist or
+//! an outside owner holds the allocation:
+//!
+//! ```text
+//!                              take: Acquire fetch_and
+//!  checked out or parked  <----------------------------------  globally parked
+//!  in a thread-local cache                                      in this freelist
+//!        leaf = 0           ---------------------------------->      leaf = 1
+//!                              put: Release fetch_or
+//!                                      |
+//!                                      +-- Release summary RMW
+//!                                          when summaries are enabled
+//! ```
+//!
+//! Returning a buffer removes its live lease, Release-publishes its leaf, and,
+//! when summaries are enabled, publishes the corresponding advisory group.
+//! The pool releases the lease's size-class reference only after publication is
+//! complete. Taking clears a set leaf with an Acquire RMW, rebuilds a
+//! [`PooledBuffer`] from the side-table entry, and lets the pool install a new
+//! lease before exposing it to a caller or thread-local cache.
+//!
+//! A set leaf bit therefore means the freelist exclusively owns that buffer. A
+//! clear bit does not by itself promise a live allocation. It can also mean
+//! that the slot has not been created yet or that drain permanently deallocated
+//! it. Monotonic creation state distinguishes the first case, and drain never
+//! reopens a creation ticket for the second.
+//!
+//! The owner records are allocated and metadata-initialized before the
+//! freelist is shared. Lazy creation initializes only the selected record's
+//! data allocation. The owner slices never move afterward, so handles may
+//! safely retain pointers into them while the containing size class remains
+//! alive.
+//!
+//! # Stripes and physical layout
+//!
+//! Capacity is interleaved across a power-of-two number of cache-isolated
+//! stripes. Expected parallelism supplies the normal stripe target. Capacity
+//! may raise it so that, with the current `u32` slot ids, no stripe contains
+//! more than `2^24` slots. The count is at most 4096 and never exceeds the
+//! freelist capacity.
+//!
+//! For capacity `C` and configured parallelism `P`, construction chooses:
+//!
+//! ```text
+//! parallelism stripes = min(next_power_of_two(P), 4096)
+//! capacity stripes    = min(next_power_of_two(ceil(C / 2^24)), 4096)
+//! capacity ceiling    = greatest power of two at most C
+//!
+//! S = min(max(parallelism stripes, capacity stripes), capacity ceiling)
+//! ```
+//!
+//! Checked power-of-two overflow saturates at 4096 before the capacity ceiling
+//! is applied.
+//!
+//! ```text
+//! Freelist
+//! +-- layout and fixed capacity
+//! +-- created                    cache-padded global admission counter
+//! +-- stripes[S]
+//! |   +-- Stripe 0
+//! |   |   +-- summary            [ cleaning code: 6 | availability: 58 ]
+//! |   |   +-- leaves             packed, cache-aligned blocks of AtomicU64
+//! |   |   +-- slots              stable stripe-local PooledOwner records
+//! |   |   +-- local geometry
+//! |   +-- ...
+//! |   +-- Stripe S-1
+//! +-- creation_cursors[S]        separate cache-padded cursor array
+//! ```
+//!
+//! Separating the creation cursors and global admission counter prevents lazy
+//! growth from invalidating the summary cache lines read by normal takes.
+//! Leaves are packed inside aligned [`LeafBlock`]s. Padding every individual
+//! leaf word would make metadata and empty scans scale poorly, while an
+//! ordinary boxed atomic slice would not isolate separately allocated stripes.
+//!
+//! Consecutive slot ids are not packed into one stripe. Low slot-id bits choose
+//! the stripe and high bits choose the stripe-local slot. With power-of-two
+//! stripe count `S`, the mapping is only shifts and masks:
+//!
+//! ```text
+//! stripe mask  = S - 1
+//! stripe shift = log2(S)
+//! stripe       = slot & stripe mask
+//! local        = slot >> stripe shift
+//! leaf word = local >> 6
+//! leaf bit  = local & 63
+//!
+//! slot      = (local << stripe shift) | stripe
+//! ```
+//!
+//! For an eight-stripe freelist, slots are arranged like this:
+//!
+//! ```text
+//!                stripe 0  stripe 1  stripe 2  stripe 3  stripe 4  stripe 5  stripe 6  stripe 7
+//! leaf 0 bit 0:  slot 0    slot 1    slot 2    slot 3    slot 4    slot 5    slot 6    slot 7
+//! leaf 0 bit 1:  slot 8    slot 9    slot 10   slot 11   slot 12   slot 13   slot 14   slot 15
+//! leaf 0 bit 2:  slot 16   slot 17   slot 18   slot 19   slot 20   slot 21   slot 22   slot 23
+//! ...
+//! ```
+//!
+//! This gives concurrent threads independent cache-isolated contention domains
+//! without changing the stable slot ids handed back to the pool. Within one
+//! stripe, consecutive local slots share packed leaf words and adjacent stable
+//! owner records, which keeps a successful claim and owner lookup local.
+//!
+//! Stripe capacities differ by at most one. Construction proves that every
+//! valid inverse mapping is below capacity and fits in `u32`. Physical padding
+//! words and unused bits in a final leaf are never part of slot arithmetic.
+//!
+//! # Probe affinity
+//!
+//! Lazy creation starts from the same stripe, group, word, and bit phases as
+//! reuse. The global `created` counter grants capacity admission but does not
+//! choose a slot id. If that counter's value directly selected the slot, a
+//! worker could create buffers in a stripe far from its home and then begin
+//! later reuse somewhere else. Stripe-local creation cursors instead enumerate
+//! tickets group-major from the winning probe's first position, exhausting one
+//! group before advancing to the next.
+//!
+//! Each thread gets a stable probe id. Low bits of the raw id choose its home
+//! stripe, while a mixer over the complete id supplies independent group, word,
+//! and bit phases. The first `S` long-lived workers therefore start on distinct
+//! stripes. Workers that collide on a home stripe are mixed to spread their
+//! starting positions inside it:
+//!
+//! ```text
+//! stripe count = 8
+//!
+//! raw thread id:  0  1  2  3  4  5  6  7 |  8  9 10 11 12 13 14 15
+//! home stripe:    0  1  2  3  4  5  6  7 |  0  1  2  3  4  5  6  7
+//! local phases:   <--------- mix(raw thread id) into group, word, bit -------->
+//!
+//! home_stripe = raw_thread_id & (S - 1)
+//! ```
+//!
+//! These are stable phases, not shared mutable cursors. A take selects the
+//! first advertised group at or after its group phase, starts that group at its
+//! reduced word phase, and rotates bit selection from its bit phase. Stealing
+//! into another stripe applies the same raw phases to that stripe's geometry.
+//! The first creator to initialize a stripe cursor stores its complete phase so
+//! later creation tickets preserve the same locality even if they were admitted
+//! by colliding threads.
+//!
+//! # Hot paths
+//!
+//! The hot paths are fast for a few concrete reasons:
+//!
+//! - [`Freelist::try_create`] starts from the same stable per-thread home stripe
+//!   and phases as [`Freelist::take`], so lazily created buffers tend to park
+//!   where their creating thread will look first when they later return.
+//! - [`Freelist::put`] is one leaf `fetch_or` in direct mode. Summarized mode
+//!   adds one stripe-local summary `fetch_or` to bound later empty searches.
+//! - A take starts at a stable per-thread home stripe, so long-lived threads
+//!   tend to target different contention domains.
+//! - Group, word, and bit phases keep threads sharing a stripe from converging
+//!   on the same first leaf and slot.
+//! - A take claims bits with `fetch_and` instead of a compare-and-swap loop.
+//!   Two threads removing different bits from the same leaf word can both
+//!   succeed without either restarting from scratch.
+//! - A settled-empty summarized take reads one compact state word per stripe
+//!   instead of scanning every packed leaf word.
+//! - [`Freelist::put_batch`] coalesces returned slots per leaf word and publishes
+//!   all touched groups with one summary RMW per stripe.
+//! - [`Freelist::take_batch`] claims several bits from one leaf word with one
+//!   atomic operation, matching refill into a thread-local cache.
+//!
+//! # Advisory group geometry
+//!
+//! Let `W` be the largest logical leaf-word count in any stripe. Every stripe
+//! uses the same power-of-two base chunk width:
+//!
+//! ```text
+//! K = next_power_of_two(ceil(W / 64))
+//! ```
+//!
+//! This produces at most 64 base chunks per stripe. A summary has room for 58
+//! availability groups, so only excess tail chunks are paired. A 64-chunk
+//! stripe, the widest possible geometry, is mapped as follows:
+//!
+//! ```text
+//! base chunks:  0   1   ...  50  51  52  53  54  55  ...  62  63
+//! groups:      [0] [1]  ... [50][51][  52 ][  53 ]  ... [  57 ]
+//!                                  pair    pair           pair
+//! ```
+//!
+//! Smaller geometries with at most 58 chunks use one group per chunk. Pairing
+//! only the tail keeps 52 groups at the base width in the largest geometry.
+//! Since `K <= 4096`, one selected group covers at most `2K = 8192` leaf words.
+//! The group mapping changes search granularity only. Leaf bits remain exact.
+//!
+//! # Direct and summarized modes
+//!
+//! The freelist selects one traversal mode for its complete lifetime:
+//!
+//! - On x86-64, automatic policy directly scans leaves when the whole freelist
+//!   occupies at most 32 physical leaf blocks.
+//! - Under automatic policy, larger x86-64 layouts and all other targets use
+//!   summary navigation.
+//!
+//! The cutoff is an aggregate allocation and scan budget, not a per-stripe
+//! width test. In direct mode the inline summary words remain zero and unused.
+//! A put's leaf RMW is then its complete publication. A direct-mode take scans
+//! leaf words from its phase-selected start and advances through wrapped stripes
+//! until it fills the request or exhausts the pass.
+//!
+//! In summarized mode each stripe's inline [`AtomicU64`] has this fixed layout:
+//!
+//! ```text
+//! 63                 58 57                                      0
+//! +--------------------+-----------------------------------------+
+//! | cleaning code (6)  | availability bits A_57 ... A_1 A_0 (58)|
+//! +--------------------+-----------------------------------------+
+//!
+//! code = 0      no group is being cleaned
+//! code = g + 1  group g is being validated
+//! ```
+//!
+//! Six code bits represent 59 states, idle plus one of 58 groups. An
+//! availability bit means its group may contain a free slot. It may remain set
+//! after the final leaf is claimed, so false positives are expected and are
+//! cleaned lazily. The high code is exact. At most one cleaner owns a stripe,
+//! and a nonzero code names the precise group whose low bit was temporarily
+//! replaced.
+//!
+//! The key visibility invariant is stronger than a generic hint. After a
+//! summarized put to group `g` completes, every later value in that summary's
+//! modification order has either `A_g = 1` or `code = g + 1` until the
+//! published leaf is claimed. Consequently, once operations quiesce, a zero
+//! summary implies that all authoritative leaves in that stripe are zero.
+//! Every summary mutation after sharing is a masked RMW. Only constructor and
+//! prefill initialization use stores.
+//!
+//! The complete synchronization table is:
+//!
+//! | Operation | Ordering |
+//! | --- | --- |
+//! | Single or batch leaf publication | `fetch_or(Release)` |
+//! | Summary publication or repair | masked `fetch_or(Release)` |
+//! | Summary and ordinary leaf loads | `load(Acquire)` |
+//! | Leaf ownership claim | `fetch_and(Acquire)` |
+//! | Cleanup ownership CAS | `AcqRel` success, `Acquire` failure |
+//! | Cleanup code removal | masked `fetch_and(Release)` |
+//! | Drain ownership claim | `swap(0, Acquire)` |
+//! | Creation admission and cursor reservation | `Relaxed` |
+//!
+//! # Return publication
+//!
+//! A single summarized [`Freelist::put`] publishes in this order:
+//!
+//! ```text
+//! leaf.fetch_or(slot_mask, Release)
+//!            |
+//!            v
+//! summary.fetch_or(group_mask, Release)    always, even if A_g was already 1
+//!            |
+//!            v
+//! assert that the leaf bit was previously clear
+//! ```
+//!
+//! The summary operation is an unconditional masked RMW. It cannot be replaced
+//! by a store, by transition-only publication, or by a load followed by a
+//! conditional RMW. The RMW preserves sibling availability and any active
+//! cleaning code. Placing the overlap assertion last also ensures that an
+//! invalid double return cannot unwind between leaf publication and summary
+//! notification.
+//!
+//! There is a short visibility window if a put is paused between the two RMWs.
+//! That put has not completed, and any later completed put to the same group
+//! helps publish both leaves. Direct mode has no second phase and therefore no
+//! such window.
+//!
+//! # Taking and bounded traversal
+//!
+//! Each thread receives a stable probe id. Its raw id chooses a home stripe,
+//! while a mixed form supplies independent group, word, and bit phases:
+//!
+//! ```text
+//! probe phase
+//! 38                         12 11             6 5              0
+//! +----------------------------+----------------+----------------+
+//! | raw word phase (27 bits)   | bit phase (6)  | group phase (6)|
+//! +----------------------------+----------------+----------------+
+//! ```
+//!
+//! A take visits stripes in wrapped order from its home and stops on success.
+//! An unsuccessful take visits every stripe exactly once. In summarized mode
+//! it Acquire-loads one pass-local state snapshot per stripe. Low availability
+//! candidates are selected cyclically from the group phase. A nonzero code
+//! contributes its one exact named group. Later control loads may contribute
+//! another observed code, but they never add fresh low-bit candidates from
+//! outside the original snapshot. Each selected group is processed at most
+//! once.
+//!
+//! Within a group, words are visited cyclically from the reduced raw word
+//! phase. Within a word, bits are selected cyclically from the bit phase. An
+//! Acquire `fetch_and` claims one bit for [`Freelist::take`] or a bounded set
+//! for [`Freelist::take_batch`]. The word returned by the RMW may reveal bits
+//! published after the candidate load. Those bits are added to the local
+//! candidate set, but an `attempted` mask prevents any physical bit from being
+//! tried twice during one word scan. This preserves useful finite helping while
+//! bounding a word scan to at most 64 claim attempts under concurrent handoff.
+//!
+//! A failed take is therefore one bounded, opportunistic pass. A concurrent
+//! return behind the pass can be deferred until the next call, so an empty
+//! result is not a linearizable global-empty snapshot. The protocol does
+//! provide starts-after visibility: if a completed put happens before a take
+//! begins with a happens-before edge, and its leaf remains set throughout that
+//! take, the take cannot report empty.
+//!
+//! # Exact stale-summary cleanup
+//!
+//! A taker that scans an advertised group without claiming a buffer may try to
+//! clean its stale bit. Clearing the bit and validating later would create an
+//! invisible interval, so cleanup atomically replaces the low bit with the
+//! exact high code:
+//!
+//! ```text
+//!       A_g = 1, code = 0
+//!                |
+//!                | compare_exchange(AcqRel), one attempt
+//!                v
+//!       A_g = 0, code = g + 1
+//!                |
+//!                | Acquire-load leaves until nonzero or exhausted
+//!                v
+//!       +-------------------+-------------------+
+//!       | first nonzero     | all leaves zero   |
+//!       | repair A_g        | keep A_g clear    |
+//!       +-------------------+-------------------+
+//!                |                    |
+//!                +---------+----------+
+//!                          v
+//!       clear only the code with a Release fetch_and
+//! ```
+//!
+//! Cleanup makes at most one strong CAS attempt for a selected group. A foreign
+//! code is never overwritten. A taker that observes one scans the named group
+//! instead of waiting. The code owner stops validation at its first nonzero
+//! leaf, Release-repairs `A_g` once, removes its code, and only then claims that
+//! word and scans the unvisited suffix. An observer Release-repairs `A_g`
+//! before every claim from a nonzero candidate observation while the foreign
+//! code remains installed. It never clears the code. Both paths repair before
+//! rebuilding a buffer or invoking a callback.
+//!
+//! [`CleanupGuard`] protects the interval after a successful CAS. If that
+//! interval unwinds, the guard conservatively restores `A_g` and then clears
+//! the code using only pre-resolved atomic references. On the normal path the
+//! owner disarms the guard immediately before the non-panicking code-clear RMW,
+//! so an old guard cannot erase a successor cleaner's code.
+//!
+//! The publication and cleanup orders close every completed-put race:
+//!
+//! - If the put's summary RMW precedes the cleanup CAS, the CAS acquires that
+//!   Release publication through the summary word's modification order and
+//!   release sequence. Validation therefore cannot miss the earlier leaf
+//!   publication.
+//! - If the put's summary RMW follows the cleanup CAS, it restores `A_g`, and
+//!   the masked code removal preserves that bit.
+//! - While validation is active, the code directs every observer to the exact
+//!   group whose low bit is absent.
+//!
+//! A stalled cleaner can delay convergence of unrelated stale positives in the
+//! same stripe because there is one code per stripe. It cannot hide a completed
+//! free leaf. Other takers continue to scan advertised groups and the exact
+//! coded group without waiting.
+//!
+//! # Batch return
+//!
+//! [`Freelist::put_batch`] stages the complete input and validates every
+//! in-batch duplicate before its first atomic publication. This is required for
+//! exact duplicate rejection. Segmenting a large input could let a racing taker
+//! remove an earlier duplicate before a later segment republishes it, defeating
+//! overlap detection.
+//!
+//! Two staging layouts keep the common cases allocation-free:
+//!
+//! - When `stripe_count * maximum_logical_words <= 128`, a dense stack array
+//!   accumulates one mask per logical leaf word.
+//! - Larger leaf geometries collect touched records in a 128-record inline
+//!   stage, spill to a `Vec` only when necessary, then sort and coalesce by
+//!   stripe and leaf word.
+//!
+//! After duplicate validation, publication is stripe-major:
+//!
+//! ```text
+//! for each touched stripe
+//!     Release-OR every coalesced leaf mask
+//!     Release-OR all touched group bits once when summaries are enabled
+//!     assert that no published leaf overlapped an already-free bit
+//! ```
+//!
+//! All leaf and summary references are resolved before the atomic section. No
+//! allocation, indexing, or callback occurs between a stripe's first leaf RMW
+//! and its summary RMW. If the overlap assertion panics, prior stripes are
+//! complete and the current stripe's notification is already complete. The
+//! pool retains every size-class lease until publication for all stripes has
+//! finished, so the freelist cannot be destroyed between those accesses.
+//!
+//! # Lazy creation and prefill
+//!
+//! `created` is a relaxed, monotonic capacity-admission counter. It is not a
+//! free count and ordinary reuse never changes it. After admission, creation
+//! visits stripe cursors in the same wrapped order as a take. Each cursor packs
+//! the first successful creator's complete probe phase with a next-ticket
+//! field:
+//!
+//! ```text
+//! 63                         25 24                              0
+//! +----------------------------+--------------------------------+
+//! | probe phase (39 bits)      | next ticket (25 bits)          |
+//! +----------------------------+--------------------------------+
+//!
+//! state = 0  uninitialized cursor
+//! ```
+//!
+//! The first claimant installs its phase, stores `next = 1`, and receives
+//! ticket zero. Later claimants retain that stored phase while incrementing the
+//! ticket. Constructor bounds of at most `2^24` slots per stripe keep the
+//! fields disjoint.
+//!
+//! Tickets are unranked in group-major order. Creation starts at the same
+//! phase-selected group, word, and bit as a hypothetical all-free take, exhausts
+//! that group, then advances cyclically. In direct mode the whole stripe is one
+//! creation group. Preserving the unreduced 27-bit word phase is important
+//! because singleton and paired groups have different widths.
+//!
+//! All fallible preparation occurs before global admission. Eager owner
+//! initialization and constructor-checked routing make the path after cursor
+//! reservation infallible in a surviving process. Allocation failure uses the
+//! allocator's aborting path rather than returning after consuming a permit.
+//! Lazy creation honors the caller's `zeroed` request by choosing `alloc_zeroed`
+//! or ordinary `alloc`. A reused buffer is already initialized storage but may
+//! contain old bytes. The pool zeroes the requested readable range after taking
+//! such a buffer for a zeroed allocation request.
+//!
+//! Prefill performs final initialization under exclusive construction. It
+//! analytically constructs the valid leaf masks, low summary bits, full
+//! cursors, and capacity-valued `created` counter, then initializes every data
+//! allocation with ordinary non-zeroed allocation before the freelist is
+//! shared. This construction-only order is safe because no take can observe a
+//! leaf yet. Invalid leaf and summary bits remain zero.
+//!
+//! # Drain, drop, and safety
+//!
+//! [`Freelist::drain`] ignores summaries and uses an Acquire `swap(0)` on every
+//! authoritative logical leaf word. A put ordered before a swap is drained. A
+//! put ordered after it remains in the leaf and completes its normal
+//! publication. Drain deliberately does not clear summary words because a
+//! later summary store could erase that racing publication. Continuing to use
+//! a drained freelist is ownership-correct, although stale positives may make
+//! the next take perform a full cleanup episode. Drain does not decrement
+//! `created` or rewind a creation cursor, so every drained slot remains retired.
+//!
+//! The [`Drop`] implementation drains all globally parked buffers before the
+//! stable owner storage is released. Buffers outside the freelist keep their
+//! size class and this storage alive through the pool's lease protocol.
+//!
+//! The shared leaf and summary operations are lock-free, but this is not a
+//! standalone general-purpose container. It relies on the buffer pool's
+//! ownership discipline. A live slot is checked out in pooled backing state,
+//! parked in one thread-local cache, or globally parked here. An uncreated or
+//! drained slot has no live allocation. Only non-freelist ownership paths may
+//! mutate a live slot while its leaf is clear.
+//!
+//! The manual [`Send`] and [`Sync`] implementations rely on two invariants:
+//!
+//! - A `PooledOwner` is mutated only while its leaf is clear and one caller or
+//!   one creation cursor exclusively owns the slot.
+//! - Release leaf publication and Acquire leaf claim synchronize every reuse
+//!   handoff before the new owner reads or mutates the stable entry.
+//!
+//! Summaries never grant ownership and drain never trusts them. Keeping those
+//! responsibilities separate is what allows hints to be stale without making
+//! buffer ownership approximate.
+//!
+//! # Verification strategy
+//!
+//! The Loom suite separates broad ownership coverage from targeted summary
+//! models so the additional summary atomics do not make every geometry matrix
+//! intractable.
+//!
+//! Broad small-geometry models cover Release and Acquire publication, same-word
+//! claim composition, wrapped cross-stripe scans, creation uniqueness, batch
+//! claims, and drain races. Targeted forced-summary models cover delayed and
+//! helped publication, competing cleaners, owner and observer repair ordering,
+//! cleanup unwind, batch publication and overlap panic, stale state snapshots,
+//! tail pairing, and concurrent drain. Pool and owner models separately cover
+//! the size-class lease lifetime and refcount handoff that keep the stable owner
+//! storage alive around these operations.
 
 use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
@@ -418,15 +941,24 @@ const fn group_base_range(single_groups: usize, group: usize) -> (usize, usize) 
 }
 
 #[derive(Clone, Copy)]
+enum SummaryPolicy {
+    Automatic,
+    #[cfg(any(test, feature = "bench"))]
+    ForceSummary,
+    #[cfg(feature = "bench")]
+    ForceBypass,
+}
+
+#[derive(Clone, Copy)]
 struct ConstructionOptions {
-    force_summaries: bool,
+    summary_policy: SummaryPolicy,
     max_groups: usize,
 }
 
 impl Default for ConstructionOptions {
     fn default() -> Self {
         Self {
-            force_summaries: false,
+            summary_policy: SummaryPolicy::Automatic,
             max_groups: AVAILABILITY_BITS,
         }
     }
@@ -478,6 +1010,23 @@ impl<F> TakeContext<'_, F> {
 }
 
 /// Bounded lock-free freelist of tracked buffers for one size class.
+///
+/// The freelist owns the [`Layout`] shared by every tracked buffer in the size
+/// class. Pooled backing values and thread-local caches may temporarily hold
+/// [`PooledBuffer`] handles, but those handles must eventually return here so
+/// they can be released with the correct layout. The buffer pool keeps the
+/// freelist alive for those outstanding handles with live leases stored in
+/// pooled slot entries. Draining or dropping the freelist only deallocates
+/// buffers currently parked in it.
+///
+/// The free set is striped over a power-of-two number of cache-isolated
+/// contention domains. Packed leaf bits authoritatively own parked buffers.
+/// Larger layouts use one advisory 58+6 state word per stripe to navigate those
+/// leaves, while small x86-64 layouts scan leaves directly. Stripe-local
+/// monotonic cursors assign lazy creation tickets without a reservation bitmap.
+///
+/// The module-level documentation gives the complete ownership, geometry,
+/// summary, creation, drain, and memory-ordering protocols.
 pub struct Freelist {
     layout: Layout,
     capacity: usize,
@@ -533,9 +1082,15 @@ impl Freelist {
         assert!(layout.size() > 0, "layout size must be non-zero");
         let capacity = capacity.get() as usize;
         let geometry = Geometry::new(capacity, parallelism.get());
-        let summaries_enabled = options.force_summaries
-            || !cfg!(target_arch = "x86_64")
-            || geometry.total_leaf_blocks > MAX_BYPASS_LEAF_BLOCKS;
+        let summaries_enabled = match options.summary_policy {
+            SummaryPolicy::Automatic => {
+                !cfg!(target_arch = "x86_64") || geometry.total_leaf_blocks > MAX_BYPASS_LEAF_BLOCKS
+            }
+            #[cfg(any(test, feature = "bench"))]
+            SummaryPolicy::ForceSummary => true,
+            #[cfg(feature = "bench")]
+            SummaryPolicy::ForceBypass => false,
+        };
 
         assert_allocation::<CachePadded<Stripe>>(geometry.stripe_count);
         assert_allocation::<CachePadded<CreationCursor>>(geometry.stripe_count);
@@ -630,7 +1185,7 @@ impl Freelist {
         freelist
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub(super) fn new_forced_summary(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -643,7 +1198,26 @@ impl Freelist {
             layout,
             prefill,
             ConstructionOptions {
-                force_summaries: true,
+                summary_policy: SummaryPolicy::ForceSummary,
+                max_groups: AVAILABILITY_BITS,
+            },
+        )
+    }
+
+    #[cfg(feature = "bench")]
+    pub(super) fn new_forced_bypass(
+        capacity: NonZeroU32,
+        parallelism: NonZeroUsize,
+        layout: Layout,
+        prefill: bool,
+    ) -> Self {
+        Self::new_inner(
+            capacity,
+            parallelism,
+            layout,
+            prefill,
+            ConstructionOptions {
+                summary_policy: SummaryPolicy::ForceBypass,
                 max_groups: AVAILABILITY_BITS,
             },
         )
@@ -1024,10 +1598,11 @@ impl Freelist {
     /// caller. The buffer must be returned to this same freelist before the
     /// freelist is finally dropped, otherwise it leaks.
     ///
-    /// The search starts from a stable per-thread home word and scans the other
-    /// stripes only on miss. Within a word, `fetch_and` claims one bit. That is
-    /// important: unlike a full-word CAS loop, two threads removing different
-    /// bits from the same word can both succeed.
+    /// The search starts from a stable per-thread home stripe and phase-selected
+    /// group and word, then scans other stripes only on miss. Within a word,
+    /// `fetch_and` claims one bit. That is important: unlike a full-word CAS
+    /// loop, two threads removing different bits from the same word can both
+    /// succeed.
     #[inline]
     pub fn take(&self) -> Option<PooledBuffer> {
         let mut result = None;
@@ -1115,6 +1690,17 @@ impl Freelist {
         context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
     ) {
         let state = stripe.summary.load(Ordering::Acquire);
+        self.scan_summarized_stripe_from_state(stripe_index, stripe, state, probe, context);
+    }
+
+    fn scan_summarized_stripe_from_state(
+        &self,
+        stripe_index: usize,
+        stripe: &Stripe,
+        state: u64,
+        probe: Probe,
+        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
+    ) {
         if state == 0 {
             return;
         }
@@ -1319,6 +1905,7 @@ impl Freelist {
     /// new creations. Buffers currently owned by a pooled backing or parked in
     /// thread-local caches are not visible to this method and remain the
     /// responsibility of their current owner until they are returned.
+    /// Summary words are advisory and are neither consulted nor cleared.
     ///
     /// Returns the number of drained slots.
     #[inline]
@@ -1756,7 +2343,7 @@ pub(super) mod tests {
                 TEST_LAYOUT,
                 false,
                 ConstructionOptions {
-                    force_summaries: true,
+                    summary_policy: SummaryPolicy::ForceSummary,
                     max_groups,
                 },
             );
@@ -2002,7 +2589,7 @@ pub(super) mod tests {
             TEST_LAYOUT,
             false,
             ConstructionOptions {
-                force_summaries: true,
+                summary_policy: SummaryPolicy::ForceSummary,
                 max_groups: 1,
             },
         );
@@ -2329,6 +2916,49 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn test_freelist_heap_batch_rejects_duplicate_before_publication() {
+        let set = Freelist::new(NZU32!(8193), NZUsize!(65), TEST_LAYOUT, false);
+        assert!(set.stripes.len() * set.stripes[0].logical_words > INLINE_LEAF_MASKS);
+
+        let mut batch = Vec::with_capacity(INLINE_PUT_RECORDS + 2);
+        let mut slots = Vec::with_capacity(INLINE_PUT_RECORDS + 1);
+        for _ in 0..=INLINE_PUT_RECORDS {
+            let buffer = set.try_create(false).expect("heap batch slot");
+            slots.push(buffer.slot());
+            batch.push(buffer);
+        }
+
+        // SAFETY: this alias exists only to prove that the heap-backed staging
+        // path rejects a complete-input duplicate before publishing any leaf.
+        batch.push(unsafe { PooledBuffer::from_owner(set.slot_ptr(slots[0])) });
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            set.put_batch(batch);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(len(&set), 0);
+
+        let restored = slots.iter().map(|&slot| {
+            // SAFETY: staging panicked before publication. Each slot was
+            // created by this freelist and appears exactly once in `slots`.
+            unsafe { PooledBuffer::from_owner(set.slot_ptr(slot)) }
+        });
+        set.put_batch(restored);
+
+        let mut taken = Vec::new();
+        assert_eq!(
+            set.take_batch(INLINE_PUT_RECORDS + 1, |buffer| taken.push(buffer)),
+            INLINE_PUT_RECORDS + 1
+        );
+        let mut observed = taken.iter().map(PooledBuffer::slot).collect::<Vec<_>>();
+        observed.sort_unstable();
+        slots.sort_unstable();
+        assert_eq!(observed, slots);
+        for buffer in taken {
+            set.put(buffer);
+        }
+    }
+
+    #[test]
     fn test_freelist_drain_returns_all_available_slots() {
         // Drain should drop every globally available buffer while leaving
         // outstanding created buffers owned by the caller.
@@ -2639,7 +3269,7 @@ mod loom_tests {
     // handle from the slot.
     // The models keep capacities small so loom can exhaustively explore the
     // interleavings that stress this protocol: same-word RMW composition,
-    // striped scans across independent bitmap words, stale relaxed candidate
+    // striped scans across independent bitmap words, stale Acquire candidate
     // loads, and the Release/Acquire edge that transfers slot ownership after
     // its bit is claimed. Geometry-matrix tests cover single-word/single-bit,
     // single-word/multi-bit, multi-word/single-bit, and multi-word/multi-bit
@@ -2920,6 +3550,85 @@ mod loom_tests {
     }
 
     #[test]
+    fn summary_batch_overlap_panic_conserves_concurrently_claimed_leaf() {
+        loom::model(|| {
+            let set = Arc::new(forced_summary_freelist(2));
+            let mut entries = Leases::entries(&set);
+            entries.sort_unstable_by_key(PooledBuffer::slot);
+            let duplicate = entries.remove(0);
+            let unique = entries.remove(0);
+            let duplicate_slot = duplicate.slot();
+            let unique_slot = unique.slot();
+            let (stripe_index, duplicate_local, word, duplicate_mask) =
+                set.slot_location(duplicate_slot);
+            let (_, _, unique_word, unique_mask) = set.slot_location(unique_slot);
+            assert_eq!(word, unique_word);
+            assert_eq!(duplicate_mask & unique_mask, 0);
+
+            // SAFETY: this alias exists only to exercise the overlap unwind
+            // after the same RMW publishes the distinct unique slot.
+            let duplicate_alias =
+                unsafe { PooledBuffer::from_owner(set.owner_ptr(stripe_index, duplicate_local)) };
+            set.put(duplicate);
+
+            let (writer_done_tx, writer_done_rx) = mpsc::channel();
+            let writer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || {
+                    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        set.put_batch([unique, duplicate_alias]);
+                    }));
+                    assert!(panic.is_err());
+                    writer_done_tx.send(()).unwrap();
+                })
+            };
+
+            let leases = Leases::new(Arc::clone(&set));
+            let seen = Arc::new(AtomicUsize::new(0));
+            let taker = {
+                let set = Arc::clone(&set);
+                let leases = Arc::clone(&leases);
+                let seen = Arc::clone(&seen);
+                thread::spawn(move || {
+                    let mut candidates =
+                        set.stripes[stripe_index].leaf(word).load(Ordering::Acquire) & unique_mask;
+                    if candidates == 0 {
+                        writer_done_rx.recv().unwrap();
+                        candidates = set.stripes[stripe_index].leaf(word).load(Ordering::Acquire)
+                            & unique_mask;
+                    }
+
+                    let mut on_entry = |buffer| {
+                        leases.push_expected(&seen, 1usize << unique_slot, buffer);
+                    };
+                    let mut context = TakeContext {
+                        max: 1,
+                        filled: 0,
+                        on_entry: &mut on_entry,
+                    };
+                    set.claim_word(
+                        stripe_index,
+                        &set.stripes[stripe_index],
+                        word,
+                        candidates,
+                        Probe::from_phase(stripe_index, 0),
+                        &mut context,
+                    );
+                    assert_eq!(context.filled, 1);
+                })
+            };
+
+            writer.join().unwrap();
+            taker.join().unwrap();
+            while let Some(buffer) = set.take() {
+                leases.push_expected(&seen, 0b11, buffer);
+            }
+            assert_eq!(seen.load(Ordering::Relaxed), 0b11);
+            assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
     fn summary_code_owner_repairs_and_clears_before_callback() {
         loom::model(|| {
             let set = Arc::new(forced_summary_freelist(1));
@@ -3088,6 +3797,230 @@ mod loom_tests {
     }
 
     #[test]
+    fn summary_observer_repair_and_live_put_survive_code_clear_after_drain() {
+        loom::model(|| {
+            let set = forced_summary_freelist(2);
+            let mut entries = Leases::entries(&set);
+            entries.sort_unstable_by_key(PooledBuffer::slot);
+            let drained_buffer = entries.remove(0);
+            let live_buffer = entries.remove(0);
+            let live_slot = live_buffer.slot();
+            set.put(drained_buffer);
+
+            let stripe = &set.stripes[0];
+            let group = group_mask(0);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+
+            let candidates = stripe.leaf(0).load(Ordering::Acquire);
+            assert_ne!(candidates, 0);
+            assert_eq!(set.drain(), 1);
+
+            // Continue the observer from its pass-local candidate load. Drain
+            // wins the leaf, so repair must precede a losing claim.
+            stripe.summary.fetch_or(group, Ordering::Release);
+            let mut unexpected = 0;
+            let mut on_entry = |_| unexpected += 1;
+            let mut context = TakeContext {
+                max: 1,
+                filled: 0,
+                on_entry: &mut on_entry,
+            };
+            set.claim_word(
+                0,
+                stripe,
+                0,
+                candidates,
+                Probe::from_phase(0, 0),
+                &mut context,
+            );
+            assert_eq!(context.filled, 0);
+            assert_eq!(unexpected, 0);
+
+            set.put(live_buffer);
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            assert_eq!(stripe.summary.load(Ordering::Acquire) & group, group);
+
+            let recovered = set
+                .take()
+                .expect("the later publication must remain visible");
+            assert_eq!(recovered.slot(), live_slot);
+            set.put(recovered);
+        });
+    }
+
+    #[test]
+    fn summary_successor_cleaner_finishes_before_prior_stale_claim() {
+        loom::model(|| {
+            let set = forced_summary_freelist(1);
+            let buffer = set.try_create(false).expect("slot");
+            set.put(buffer);
+
+            let stripe = &set.stripes[0];
+            let group = group_mask(0);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+            let prior_candidates = stripe.leaf(0).load(Ordering::Acquire);
+            assert_ne!(prior_candidates, 0);
+            assert_eq!(set.drain(), 1);
+
+            // The prior owner observed a nonzero leaf before drain. It repairs
+            // and clears its generation before using that stale local mask.
+            stripe.summary.fetch_or(group, Ordering::Release);
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            assert_eq!(stripe.summary.load(Ordering::Acquire), group);
+
+            // A successor owns and validates the same group while the prior
+            // owner is paused before its first claim.
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    group,
+                    encode_code(0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(group)
+            );
+            let mut successor_claims = 0;
+            let mut successor = |_| successor_claims += 1;
+            let mut successor_context = TakeContext {
+                max: 1,
+                filled: 0,
+                on_entry: &mut successor,
+            };
+            set.clean_owned_group(
+                0,
+                stripe,
+                0,
+                Probe::from_phase(0, 0),
+                &mut successor_context,
+            );
+            assert_eq!(successor_context.filled, 0);
+            assert_eq!(successor_claims, 0);
+            assert_eq!(stripe.summary.load(Ordering::Acquire), 0);
+
+            let mut prior_claims = 0;
+            let mut prior = |_| prior_claims += 1;
+            let mut prior_context = TakeContext {
+                max: 1,
+                filled: 0,
+                on_entry: &mut prior,
+            };
+            set.claim_word(
+                0,
+                stripe,
+                0,
+                prior_candidates,
+                Probe::from_phase(0, 0),
+                &mut prior_context,
+            );
+            assert_eq!(prior_context.filled, 0);
+            assert_eq!(prior_claims, 0);
+            assert!(set.take().is_none());
+        });
+    }
+
+    #[test]
+    fn summary_foreign_code_from_failed_cleanup_load_is_scanned_once() {
+        loom::model(|| {
+            let layout = Layout::from_size_align(64, 64).unwrap();
+            let set = Arc::new(Freelist::new_inner(
+                NZU32!(65),
+                NZUsize!(1),
+                layout,
+                true,
+                ConstructionOptions {
+                    summary_policy: SummaryPolicy::ForceSummary,
+                    max_groups: 2,
+                },
+            ));
+            let stripe = &set.stripes[0];
+            assert_eq!(stripe.group_count, 2);
+            assert_eq!(stripe.single_groups, 2);
+
+            let leases = Leases::new(Arc::clone(&set));
+            let mut entries = Vec::new();
+            assert_eq!(set.take_batch(65, |buffer| entries.push(buffer)), 65);
+            let mut target = None;
+            for buffer in entries {
+                if buffer.slot() == 64 {
+                    target = Some(buffer);
+                } else {
+                    leases.push(buffer);
+                }
+            }
+            assert!(set.take().is_none());
+
+            set.put(target.expect("second-group slot"));
+            let first = group_mask(0);
+            let second = group_mask(1);
+            stripe.summary.fetch_or(first, Ordering::Release);
+            let snapshot = stripe.summary.load(Ordering::Acquire);
+            assert_eq!(snapshot & (first | second), first | second);
+
+            let coded = (snapshot & AVAILABILITY_MASK & !second) | encode_code(1);
+            assert_eq!(
+                stripe.summary.compare_exchange(
+                    snapshot,
+                    coded,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ),
+                Ok(snapshot)
+            );
+
+            let mut claimed = None;
+            let mut on_entry = |buffer| {
+                let state = stripe.summary.load(Ordering::Acquire);
+                assert_eq!(state & (first | second), first | second);
+                assert_eq!(decode_code(state), Some(1));
+                claimed = Some(buffer);
+            };
+            let mut context = TakeContext {
+                max: 1,
+                filled: 0,
+                on_entry: &mut on_entry,
+            };
+            set.scan_summarized_stripe_from_state(
+                0,
+                stripe,
+                snapshot,
+                Probe::from_phase(0, 0),
+                &mut context,
+            );
+            assert_eq!(context.filled, 1);
+
+            stripe
+                .summary
+                .fetch_and(AVAILABILITY_MASK, Ordering::Release);
+            assert_eq!(
+                stripe.summary.load(Ordering::Acquire) & (first | second),
+                first | second
+            );
+            set.put(claimed.expect("the foreign coded group must be scanned"));
+            drop(leases);
+        });
+    }
+
+    #[test]
     fn summary_paired_group_reaches_partial_final_leaf() {
         loom::model(|| {
             let layout = Layout::from_size_align(64, 64).unwrap();
@@ -3097,7 +4030,7 @@ mod loom_tests {
                 layout,
                 true,
                 ConstructionOptions {
-                    force_summaries: true,
+                    summary_policy: SummaryPolicy::ForceSummary,
                     max_groups: 1,
                 },
             ));
@@ -3566,7 +4499,7 @@ mod loom_tests {
     #[test]
     fn put_and_take_batch_compose_on_partially_free_word() {
         // This is the batch-claim version of the partially-free word race:
-        // `take_batch` may speculatively choose candidates from a stale relaxed
+        // `take_batch` may speculatively choose candidates from a stale Acquire
         // load while a producer publishes a different bit in the same word.
         // Only bits actually cleared by the batch taker may drive callbacks,
         // and missed bits must remain available.
@@ -3656,11 +4589,11 @@ mod loom_tests {
 
     #[test]
     fn two_takers_cannot_claim_one_slot() {
-        // Both takers may observe the same relaxed non-zero candidate word.
+        // Both takers may observe the same stale non-zero candidate word.
         // Only one may win the later `fetch_and` claim.
         //
-        // This is the minimal stale-candidate case: the relaxed load is allowed
-        // to be old, but the returned value from `fetch_and` must decide
+        // This is the minimal stale-candidate case: the Acquire load may be
+        // old, but the returned value from `fetch_and` must decide
         // ownership.
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(2));
@@ -3696,7 +4629,7 @@ mod loom_tests {
 
     #[test]
     fn stale_candidate_can_claim_republished_same_slot() {
-        // A relaxed candidate load is not a reservation. One taker may observe
+        // An Acquire candidate load is not a reservation. One taker may observe
         // slot 0 as free, lose the first claim race, and later clear a
         // re-published bit for the same slot. The valid outcome is two
         // sequential ownership transfers of slot 0, each synchronized by the
