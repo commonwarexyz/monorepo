@@ -515,6 +515,14 @@ impl Barrier {
 ///
 /// `E` is a trait generic (not an associated type), so one set type can work
 /// across runtimes that satisfy the bounds.
+///
+/// # Mutation Safety
+///
+/// Calls to [`Self::apply`], [`Self::finalize`], [`Self::prune`], and
+/// [`Self::rewind_to_targets`] must not overlap. Implementations panic if an
+/// underlying database mutation returns an error. If a mutation panics or is
+/// cancelled after taking a database from [`Shared`], the affected cell remains
+/// empty and subsequent access panics.
 pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Tuple of [`ManagedDb::Unmerkleized`] for every database in the set.
     type Unmerkleized: Send;
@@ -571,9 +579,6 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Returns once every database exposes its batch as an independently
     /// rewindable recovery checkpoint. Durability is started separately with
     /// [`DatabaseSet::finalize`].
-    ///
-    /// Cancelling the future mid-flight loses the databases whose mutations
-    /// were in progress (see [Shared]); every later access panics.
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
     /// Begin persisting every checkpoint applied before this call.
@@ -582,19 +587,12 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// every database. Later batches may be applied while the barrier is
     /// pending, but that dirty suffix needs a subsequent finalization. The
     /// barrier must be observed before finalizing again.
-    ///
-    /// Do not race finalization with another set-wide mutation. Cancelling this
-    /// future mid-flight loses the databases being finalized (see [Shared]);
-    /// every later access panics.
     fn finalize(&self) -> impl Future<Output = Barrier> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
     /// The finalized state represented by `targets` must already be durable, and no database sync
     /// may remain active. Pruning effects must be durable before this call returns.
-    ///
-    /// Cancelling the future mid-flight loses the databases whose mutations
-    /// were in progress (see [Shared]); every later access panics.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Return the latest applied recovery targets.
@@ -605,9 +603,6 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Rewind the set to the provided per-database targets.
     ///
     /// Rewind failures are fatal for startup recovery and therefore panic.
-    ///
-    /// Cancelling the future mid-flight loses the databases whose mutations
-    /// were in progress (see [Shared]); every later access panics.
     fn rewind_to_targets(&self, targets: Self::SyncTargets) -> impl Future<Output = ()> + Send;
 }
 
@@ -782,18 +777,18 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 
     async fn apply(&self, batches: Self::Merkleized) {
-        apply_shared_or_panic::<E, T>(self, batches, None).await;
+        apply_shared::<E, T>(self, batches, None).await;
     }
 
     async fn finalize(&self) -> Barrier {
-        let handle = finalize_shared_or_panic::<E, T>(self, None).await;
+        let handle = finalize_shared::<E, T>(self, None).await;
         Barrier {
             syncs: vec![(core::any::type_name::<T>(), None, handle)],
         }
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
-        prune_shared_or_panic::<E, T>(self, target, None).await;
+        prune_shared::<E, T>(self, target, None).await;
     }
 
     async fn committed_targets(&self) -> Self::SyncTargets {
@@ -802,7 +797,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
-        rewind_shared_or_panic::<E, T>(self, target, None).await;
+        rewind_shared::<E, T>(self, target, None).await;
     }
 }
 
@@ -1028,7 +1023,7 @@ macro_rules! impl_database_set {
             ) {
                 // Each member completes its own write-lock lifecycle. Holding
                 // a partial tuple of writers can deadlock cross-database reads.
-                join!($(apply_shared_or_panic::<E, $T>(
+                join!($(apply_shared::<E, $T>(
                     &self.$idx,
                     batches.$idx,
                     Some($idx),
@@ -1036,7 +1031,7 @@ macro_rules! impl_database_set {
             }
 
             async fn finalize(&self) -> Barrier {
-                let handles = join!($(finalize_shared_or_panic::<E, $T>(
+                let handles = join!($(finalize_shared::<E, $T>(
                     &self.$idx,
                     Some($idx),
                 ),)+);
@@ -1053,7 +1048,7 @@ macro_rules! impl_database_set {
                 &self,
                 targets: &Self::SyncTargets,
             ) {
-                join!($(prune_shared_or_panic::<E, $T>(
+                join!($(prune_shared::<E, $T>(
                     &self.$idx,
                     &targets.$idx,
                     Some($idx),
@@ -1069,7 +1064,7 @@ macro_rules! impl_database_set {
                 &self,
                 targets: Self::SyncTargets,
             ) {
-                join!($(rewind_shared_or_panic::<E, $T>(
+                join!($(rewind_shared::<E, $T>(
                     &self.$idx,
                     targets.$idx,
                     Some($idx),
@@ -1814,11 +1809,7 @@ where
 }
 
 #[tracing::instrument(name = "stateful.db.apply_or_panic", level = "info", skip_all, fields(index = index))]
-async fn apply_or_panic<E, T: ManagedDb<E>>(
-    database: T,
-    batch: T::Merkleized,
-    index: Option<usize>,
-) -> T {
+async fn apply<E, T: ManagedDb<E>>(database: T, batch: T::Merkleized, index: Option<usize>) -> T {
     // Mutable apply failures are fatal because the batch may already have been
     // applied to other databases in the same set, leaving partially applied state.
     match database.apply(batch).await {
@@ -1833,19 +1824,16 @@ async fn apply_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-async fn apply_shared_or_panic<E, T: ManagedDb<E>>(
+async fn apply_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     batch: T::Merkleized,
     index: Option<usize>,
 ) {
     let (slot, database) = shared.write().await;
-    slot.put(apply_or_panic(database, batch, index).await);
+    slot.put(apply(database, batch, index).await);
 }
 
-async fn finalize_or_panic<E, T: ManagedDb<E>>(
-    database: T,
-    index: Option<usize>,
-) -> (T, Handle<()>) {
+async fn finalize<E, T: ManagedDb<E>>(database: T, index: Option<usize>) -> (T, Handle<()>) {
     match database.finalize().await {
         Ok(result) => result,
         Err(err) => {
@@ -1858,40 +1846,36 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-async fn finalize_shared_or_panic<E, T: ManagedDb<E>>(
+async fn finalize_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     index: Option<usize>,
 ) -> Handle<()> {
     let (slot, database) = shared.write().await;
-    let (database, handle) = finalize_or_panic(database, index).await;
+    let (database, handle) = finalize(database, index).await;
     slot.put(database);
     handle
 }
 
-async fn prune_shared_or_panic<E, T: ManagedDb<E>>(
+async fn prune_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     target: &T::SyncTarget,
     index: Option<usize>,
 ) {
     let (slot, database) = shared.write().await;
-    slot.put(prune_or_panic(database, target, index).await);
+    slot.put(prune(database, target, index).await);
 }
 
-async fn rewind_shared_or_panic<E, T: ManagedDb<E>>(
+async fn rewind_shared<E, T: ManagedDb<E>>(
     shared: &Shared<T>,
     target: T::SyncTarget,
     index: Option<usize>,
 ) {
     let (slot, database) = shared.write().await;
-    slot.put(rewind_or_panic(database, target, index).await);
+    slot.put(rewind(database, target, index).await);
 }
 
 #[tracing::instrument(name = "stateful.db.rewind_or_panic", level = "info", skip_all, fields(index = index))]
-async fn rewind_or_panic<E, T: ManagedDb<E>>(
-    database: T,
-    target: T::SyncTarget,
-    index: Option<usize>,
-) -> T {
+async fn rewind<E, T: ManagedDb<E>>(database: T, target: T::SyncTarget, index: Option<usize>) -> T {
     // Mutable rewind failures are fatal by design because the database handle
     // may be internally diverged after a failed rewind.
     match database.rewind_to_target(target).await {
@@ -1907,11 +1891,7 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
 }
 
 #[tracing::instrument(name = "stateful.db.prune_or_panic", level = "info", skip_all, fields(index = index))]
-async fn prune_or_panic<E, T: ManagedDb<E>>(
-    database: T,
-    target: &T::SyncTarget,
-    index: Option<usize>,
-) -> T {
+async fn prune<E, T: ManagedDb<E>>(database: T, target: &T::SyncTarget, index: Option<usize>) -> T {
     // Prune failures are fatal because pruning may already have discarded part
     // of the retained history before the error surfaced.
     match database.prune(target).await {

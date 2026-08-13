@@ -32,19 +32,31 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
+/// Work selected for one iteration of the processing actor.
 enum Step<M, P> {
+    /// A message received from the actor mailbox.
     Message(M),
+    /// Deferred pruning work ready for its database mutation boundary.
     Prune(P),
+    /// Completion of the active database durability barrier.
     Sync((Height, bool)),
 }
 
+/// Tracks the durable database prefix and marshal acknowledgements awaiting it.
+///
+/// At most one sync covers a captured prefix. Applied heights beyond that prefix remain queued
+/// for a successor sync.
 struct Durability {
+    /// Highest applied height known to be durable.
     durable: Height,
+    /// Applied heights whose marshal acknowledgements await durability.
     acknowledgements: VecDeque<(Height, Exact)>,
+    /// Active barrier, whose output includes the height of its captured prefix.
     sync: Option<Handle<(Height, bool)>>,
 }
 
 impl Durability {
+    /// Initialize tracking at a height already known to be durable.
     const fn new(height: Height) -> Self {
         Self {
             durable: height,
@@ -53,12 +65,16 @@ impl Durability {
         }
     }
 
+    /// Return the highest applied height, or the durable floor when none are pending.
     fn latest_applied(&self) -> Height {
         self.acknowledgements
             .back()
             .map_or(self.durable, |(height, _)| *height)
     }
 
+    /// Record a newly applied height and retain its acknowledgement until durability.
+    ///
+    /// Heights must be recorded in strictly increasing order.
     fn applied(&mut self, height: Height, acknowledgement: Exact) {
         assert!(
             height > self.latest_applied(),
@@ -67,10 +83,15 @@ impl Durability {
         self.acknowledgements.push_back((height, acknowledgement));
     }
 
+    /// Return whether applied state remains uncovered and no sync is active.
     fn needs_sync(&self) -> bool {
         self.sync.is_none() && self.durable < self.latest_applied()
     }
 
+    /// Record a barrier covering applied state through `height`.
+    ///
+    /// Only one barrier may be active, and `height` must extend the durable prefix without
+    /// exceeding the latest applied height.
     fn started(&mut self, height: Height, barrier: Barrier) {
         assert!(self.sync.is_none(), "sync already active");
         assert!(height > self.durable && height <= self.latest_applied());
@@ -79,6 +100,9 @@ impl Durability {
         }));
     }
 
+    /// Complete the active sync and acknowledge every height it made durable.
+    ///
+    /// Returns false without advancing the durable prefix when durability was not established.
     fn complete(&mut self, (height, durable): (Height, bool)) -> bool {
         assert!(self.sync.take().is_some(), "sync not active");
         if !durable {
@@ -97,6 +121,7 @@ impl Durability {
         true
     }
 
+    /// Return whether `height` lies within the known durable prefix.
     fn covers(&self, height: Height) -> bool {
         self.durable >= height
     }
@@ -109,7 +134,11 @@ async fn sync_completion(sync: &mut Option<Handle<(Height, bool)>>) -> (Height, 
     sync.await.expect("internal sync handle cannot fail")
 }
 
-async fn start_sync_if_needed<E, A, S, V>(
+/// Start a durability barrier for pending applied state.
+///
+/// Verification work remains driven while the database writer is acquired. Returns false if the
+/// actor stops before the barrier starts.
+async fn start_sync<E, A, S, V>(
     context: &E,
     durability: &mut Durability,
     verifications: &mut Verifications<E, A, S, V>,
@@ -223,7 +252,7 @@ where
                     return;
                 }
                 if pending_prune.is_none()
-                    && !start_sync_if_needed::<E, A, S, V>(
+                    && !start_sync::<E, A, S, V>(
                         &self.context,
                         &mut durability,
                         &mut verifications,
@@ -398,12 +427,12 @@ where
                             .await;
                         drop(boundary);
                         async {
-                            let start_sync = durability.sync.is_none();
+                            let should_start_sync = durability.sync.is_none();
                             let applied = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
                                     block.as_ref(),
-                                    start_sync,
+                                    should_start_sync,
                                 ))
                                 .await;
                             let Some(Applied { barrier, prune }) = applied else {
@@ -463,7 +492,7 @@ where
                             durability.needs_sync(),
                             "uncovered prune target must have unapplied durability",
                         );
-                        if !start_sync_if_needed::<E, A, S, V>(
+                        if !start_sync::<E, A, S, V>(
                             &self.context,
                             &mut durability,
                             &mut verifications,

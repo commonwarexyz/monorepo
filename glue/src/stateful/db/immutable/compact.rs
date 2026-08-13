@@ -258,8 +258,8 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner)?;
-        db.publish().await
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -329,8 +329,8 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner)?;
-        db.publish().await
+        let (db, _) = self.apply_batch(batch.inner).await?;
+        Ok(db)
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_apply_publishes_each_immutable_rewind_target() {
+    fn managed_db_apply_retains_each_immutable_rewind_target() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "apply-checkpoints");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
@@ -707,7 +707,7 @@ mod tests {
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(metadata), floor)
                 .await;
-            let (source, _) = source.apply_batch(batch).unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
 
             let target = source.target();
@@ -909,7 +909,7 @@ mod tests {
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
                 .await;
-            let (db, _) = db.apply_batch(batch).unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
             let mut db = db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
@@ -921,7 +921,7 @@ mod tests {
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await;
-                (db, _) = db.apply_batch(batch).unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -954,7 +954,7 @@ mod tests {
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await;
-                (db, _) = db.apply_batch(batch).unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }

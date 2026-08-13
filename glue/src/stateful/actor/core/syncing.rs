@@ -350,6 +350,8 @@ where
             }
         }
 
+        // Applied handoffs extend beyond the state-sync artifact. Release their acknowledgements
+        // only after one barrier makes the entire suffix durable.
         if !pending_acknowledgements.is_empty() {
             let barrier = processor.databases().finalize().await;
             if !barrier.durable().await {
@@ -364,6 +366,8 @@ where
             );
         }
 
+        // Completion is an irreversible startup floor. Persist it only after every handoff through
+        // `completed_height` is durable and before pruning or exposing the databases.
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;
