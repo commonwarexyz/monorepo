@@ -700,7 +700,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.explicit_ancestry_payload(parent).is_some() {
             return true;
         }
-        self.handoff_parent(parent) && self.optimistic_ancestry_payload(parent).is_some()
+        self.handoff_ancestry_payload(parent).is_some()
     }
 
     /// Construct a notarize vote for this view when we're ready to sign.
@@ -1372,11 +1372,26 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns true when a pipelined handoff may build on `parent`: `parent`
-    /// ends a term whose incoming leader is electable ahead, and no
+    /// ends a term whose incoming leader is the local signer, and no
     /// nullification has abandoned `parent`'s term.
+    ///
+    /// Only the incoming leader issues work on cross-term optimistic
+    /// ancestry. Checking the signer here makes that structural rather than
+    /// a property of the callers.
     fn handoff_parent(&self, parent: View) -> bool {
-        self.handoff_leader(parent.next()).is_some()
+        self.handoff_leader(parent.next())
+            .is_some_and(|leader| self.is_me(leader))
             && self.highest_nullification_in_term(parent).is_none()
+    }
+
+    /// Returns the payload of `parent` when a pipelined handoff may build on
+    /// it (see [`Self::handoff_parent`]): its optimistic ancestry, or its
+    /// certificate-backed payload when it is directly notarized.
+    fn handoff_ancestry_payload(&self, parent: View) -> Option<&D> {
+        if !self.handoff_parent(parent) {
+            return None;
+        }
+        self.optimistic_ancestry_payload(parent)
     }
 
     /// Returns the payload of a parent usable as *optimistic* ancestry: a
@@ -1439,8 +1454,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             self.inherit_leader(view, next);
             return;
         }
-        if !self.leader_is_set(next)
-            && let Some(leader) = self.handoff_leader(next)
+        if let Some(leader) = self.handoff_leader(next)
+            && !self.leader_is_set(next)
         {
             self.create_round(next).set_leader(leader);
         }
@@ -1548,14 +1563,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // If there are any missing nullifications, return an error.
         // Any lower certified views would also result in an error.
         // A pipelined handoff may still build on the outgoing term's final
-        // view before it certifies (see [`Self::handoff_parent`]).
+        // view before it certifies (see [`Self::handoff_ancestry_payload`]).
         if let Some(missing_view) = self.first_unnullified_view(candidate, view) {
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a previous view");
-            if self.handoff_parent(parent)
-                && let Some(payload) = self.optimistic_ancestry_payload(parent)
-            {
+            if let Some(payload) = self.handoff_ancestry_payload(parent) {
                 return Ok((parent, *payload));
             }
             return Err(missing_view);
@@ -1714,7 +1727,7 @@ mod tests {
         Sha256Digest::from([0u8; 32])
     }
 
-    /// Builds an epoch-9 proposal for the certification-fetch tests.
+    /// Builds an epoch-9 proposal.
     fn fetch_proposal(view: u64, parent: u64, payload: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
             Rnd::new(Epoch::new(9), View::new(view)),
@@ -1876,16 +1889,15 @@ mod tests {
     }
 
     /// Like [setup_state], but signs as `schemes[signer]` (rather than the
-    /// verifier) and parameterizes `optimistic_views`.
+    /// verifier) and builds the elector from `config`.
     #[allow(clippy::too_many_arguments)]
-    fn setup_state_with(
+    fn setup_state_from_config(
         context: &mut deterministic::Context,
         validators: usize,
         signer: usize,
         epoch: u64,
         view_retention: u64,
-        term_length: TermLength,
-        optimistic_views: ViewDelta,
+        config: RoundRobin,
         skip_budget: u64,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
         let namespace = b"ns".to_vec();
@@ -1895,21 +1907,11 @@ mod tests {
             validators.try_into().expect("validator count fits in u32"),
         );
         let scheme = fixture.schemes[signer].clone();
-        let elector = if term_length == TermLength::ONE {
-            round_robin(&scheme)
-        } else {
-            round_robin_with_term(
-                &scheme,
-                term_length,
-                Duration::from_secs(4),
-                optimistic_views,
-            )
-        };
         let mut state = State::new(
             context.child("state"),
             Config {
-                scheme,
-                elector,
+                scheme: scheme.clone(),
+                elector: config.build(certificate::Scheme::participants(&scheme)),
                 epoch: Epoch::new(epoch),
                 view_retention: ViewDelta::new(view_retention),
                 leader_timeout: Duration::from_secs(1),
@@ -1922,47 +1924,60 @@ mod tests {
         (fixture, state)
     }
 
-    /// Like [setup_state_with], but opts the elector into pipelined handoffs.
-    /// A `term_length` of one selects rotating terms.
+    /// Like [setup_state], but signs as `schemes[signer]` (rather than the
+    /// verifier) and parameterizes `optimistic_views`.
+    fn setup_state_with(
+        context: &mut deterministic::Context,
+        validators: usize,
+        signer: usize,
+        epoch: u64,
+        view_retention: u64,
+        term_length: TermLength,
+        optimistic_views: ViewDelta,
+        skip_budget: u64,
+    ) -> (Fixture<ed25519::Scheme>, TestState) {
+        setup_state_from_config(
+            context,
+            validators,
+            signer,
+            epoch,
+            view_retention,
+            <RoundRobin>::default().with_term(
+                term_length,
+                Duration::from_secs(4),
+                optimistic_views,
+            ),
+            skip_budget,
+        )
+    }
+
+    /// Like [setup_state_from_config], but opts `config` into pipelined
+    /// handoffs.
     fn setup_state_with_handoff(
         context: &mut deterministic::Context,
         validators: usize,
         signer: usize,
         epoch: u64,
-        term_length: u32,
-        optimistic_views: u64,
+        config: RoundRobin,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
-        let namespace = b"ns".to_vec();
-        let fixture = ed25519::fixture(
+        setup_state_from_config(
             context,
-            &namespace,
-            validators.try_into().expect("validator count fits in u32"),
-        );
-        let scheme = fixture.schemes[signer].clone();
-        let config = match term_length {
-            1 => <RoundRobin>::default(),
-            _ => <RoundRobin>::default().with_term(
-                TermLength::new(NZU32!(term_length)),
-                Duration::from_secs(4),
-                ViewDelta::new(optimistic_views),
-            ),
-        };
-        let mut state = State::new(
-            context.child("state"),
-            Config {
-                scheme: scheme.clone(),
-                elector: config
-                    .with_pipelined_handoff()
-                    .build(certificate::Scheme::participants(&scheme)),
-                epoch: Epoch::new(epoch),
-                view_retention: ViewDelta::new(10),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-            },
-        );
-        state.set_genesis(test_genesis());
-        (fixture, state)
+            validators,
+            signer,
+            epoch,
+            10,
+            config.with_pipelined_handoff(),
+            4,
+        )
+    }
+
+    /// The stable-term elector config shared by the pipelined-handoff tests.
+    fn handoff_terms() -> RoundRobin {
+        <RoundRobin>::default().with_term(
+            TermLength::new(NZU32!(5)),
+            Duration::from_secs(4),
+            ViewDelta::new(2),
+        )
     }
 
     /// Proposes `payload` at view 1 (on top of genesis) and broadcasts our
@@ -6845,11 +6860,7 @@ mod tests {
         verifier: &ed25519::Scheme,
         schemes: &[ed25519::Scheme],
     ) -> (Proposal<Sha256Digest>, Proposal<Sha256Digest>) {
-        let certified = Proposal::new(
-            Rnd::new(Epoch::new(9), View::new(4)),
-            View::new(3),
-            Sha256Digest::from([64u8; 32]),
-        );
+        let certified = fetch_proposal(4, 3, 64);
         let notarization = build_notarization(verifier, schemes, &certified);
         assert!(state.add_notarization(notarization).0);
         assert!(state.certified(View::new(4), true).is_some());
@@ -6858,11 +6869,7 @@ mod tests {
         // it later requests a parent fetch.
         let _ = state.certify_candidates();
 
-        let tip = Proposal::new(
-            Rnd::new(Epoch::new(9), View::new(5)),
-            View::new(4),
-            Sha256Digest::from([65u8; 32]),
-        );
+        let tip = fetch_proposal(5, 4, 65);
         assert!(state.set_proposal(View::new(5), tip.clone()));
         assert!(matches!(state.try_verify(), Verify::Ready(..)));
         assert!(state.verified(View::new(5)));
@@ -6879,7 +6886,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9, 5, 2);
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // Voting for the outgoing tip stamps the incoming term's leader.
@@ -6895,11 +6902,7 @@ mod tests {
             assert_eq!(state.current_view(), View::new(5));
 
             // The built proposal broadcasts its notarize vote immediately.
-            let ours = Proposal::new(
-                Rnd::new(Epoch::new(9), View::new(6)),
-                View::new(5),
-                Sha256Digest::from([66u8; 32]),
-            );
+            let ours = fetch_proposal(6, 5, 66);
             assert!(state.proposed(ours.clone()));
             let notarize = state
                 .construct_notarize(View::new(6))
@@ -6969,7 +6972,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9, 5, 2);
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             let (certified, _) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // The outgoing term is abandoned before we propose: the handoff
@@ -6996,15 +6999,11 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9, 5, 2);
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             prepare_term_boundary(&mut state, &verifier, &schemes);
 
             assert!(state.try_propose().is_some());
-            let ours = Proposal::new(
-                Rnd::new(Epoch::new(9), View::new(6)),
-                View::new(5),
-                Sha256Digest::from([66u8; 32]),
-            );
+            let ours = fetch_proposal(6, 5, 66);
             assert!(state.proposed(ours));
 
             // The tip's term is abandoned between building and voting: the
@@ -7025,15 +7024,11 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9, 5, 2);
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             assert!(state.try_propose().is_some());
-            let ours = Proposal::new(
-                Rnd::new(Epoch::new(9), View::new(6)),
-                View::new(5),
-                Sha256Digest::from([66u8; 32]),
-            );
+            let ours = fetch_proposal(6, 5, 66);
             assert!(state.proposed(ours));
 
             // Local certification rejects the tip between building and
@@ -7054,16 +7049,12 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 1, 9, 5, 2);
+            ) = setup_state_with_handoff(&mut context, 4, 1, 9, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // A validator that receives the pipelined proposal early still
             // waits for the tip's certification before verifying it.
-            let child = Proposal::new(
-                Rnd::new(Epoch::new(9), View::new(6)),
-                View::new(5),
-                Sha256Digest::from([66u8; 32]),
-            );
+            let child = fetch_proposal(6, 5, 66);
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
@@ -7086,16 +7077,13 @@ mod tests {
     fn pipelined_handoff_pipelines_rotating_terms() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let (Fixture { .. }, mut state) = setup_state_with_handoff(&mut context, 4, 3, 9, 1, 0);
+            let (Fixture { .. }, mut state) =
+                setup_state_with_handoff(&mut context, 4, 3, 9, <RoundRobin>::default());
 
             // With single-view terms, every view is a handoff: verifying and
             // voting for the view-1 proposal lets the view-2 leader propose
             // before view 1 notarizes.
-            let first = Proposal::new(
-                Rnd::new(Epoch::new(9), View::new(1)),
-                GENESIS_VIEW,
-                Sha256Digest::from([67u8; 32]),
-            );
+            let first = fetch_proposal(1, 0, 67);
             assert!(state.set_proposal(View::new(1), first.clone()));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(1)));
