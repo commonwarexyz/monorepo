@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, Copying, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
+    Blob, Buf, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
@@ -111,8 +111,24 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Find latest blob (check which includes a hash of the other). Syncs alternate copies
         // and drain the previous sync first, so at most one copy is ever mid-write: both copies
         // failing validation is corruption, and adopting a fresh store would mask it.
-        let left = Self::load(&context, &cfg.codec_config, max_blob_size, 0, left_blob, left_len).await?;
-        let right = Self::load(&context, &cfg.codec_config, max_blob_size, 1, right_blob, right_len).await?;
+        let left = Self::load(
+            &context,
+            &cfg.codec_config,
+            max_blob_size,
+            0,
+            left_blob,
+            left_len,
+        )
+        .await?;
+        let right = Self::load(
+            &context,
+            &cfg.codec_config,
+            max_blob_size,
+            1,
+            right_blob,
+            right_len,
+        )
+        .await?;
         if matches!((&left, &right), (Loaded::Invalid(_), Loaded::Invalid(_))) {
             return Err(Error::Corruption(
                 "both metadata copies failed validation".into(),
@@ -220,24 +236,48 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Get parent
         let version = u64::from_be_bytes(bytes[..8].try_into().unwrap());
 
-        // Extract data
-        //
-        // If the checksum is correct, we assume data is correctly packed and we don't perform
-        // length checks on the cursor.
+        // Extract data. Integrity proves the bytes were written together, not that their encoding
+        // is valid for the current codec.
         let mut data = BTreeMap::new();
         let mut lengths = HashMap::new();
         let mut cursor = u64::SIZE;
-        while cursor < checksum_index {
-            // Read key
-            let key =
-                K::read(&mut Copying(&bytes[cursor..])).expect("unable to read key from blob");
-            cursor += key.encode_size();
+        let mut encoded = Copying(&bytes[cursor..checksum_index]);
+        while encoded.has_remaining() {
+            let entry_bytes = encoded.remaining();
+            let before = encoded.remaining();
+            let key = match K::read(&mut encoded) {
+                Ok(key) => key,
+                Err(error) => {
+                    warn!(blob = index, %error, "metadata key is malformed");
+                    return Ok(Loaded::Invalid(blob));
+                }
+            };
+            let key_bytes = before - encoded.remaining();
+            if key.encode_size() != key_bytes {
+                warn!(blob = index, "metadata key is non-canonical");
+                return Ok(Loaded::Invalid(blob));
+            }
+            cursor += key_bytes;
 
-            // Read value
-            let value = V::read_cfg(&mut Copying(&bytes[cursor..]), codec_config)
-                .expect("unable to read value from blob");
-            lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
-            cursor += value.encode_size();
+            let before = encoded.remaining();
+            let value = match V::read_cfg(&mut encoded, codec_config) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(blob = index, %error, "metadata value is malformed");
+                    return Ok(Loaded::Invalid(blob));
+                }
+            };
+            let value_bytes = before - encoded.remaining();
+            if value.encode_size() != value_bytes {
+                warn!(blob = index, "metadata value is non-canonical");
+                return Ok(Loaded::Invalid(blob));
+            }
+            if encoded.remaining() == entry_bytes {
+                warn!(blob = index, "metadata entry made no decoding progress");
+                return Ok(Loaded::Invalid(blob));
+            }
+            lengths.insert(key.clone(), Info::new(cursor, value_bytes));
+            cursor += value_bytes;
             data.insert(key, value);
         }
 
