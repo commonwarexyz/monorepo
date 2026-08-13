@@ -369,11 +369,14 @@ impl BufferPoolConfig {
 
     /// Returns a copy of this config with a new expected parallelism.
     ///
-    /// This controls the minimum global-freelist stripe count, and controls
-    /// thread-cache capacity when the thread-cache policy is automatic. The
-    /// automatic policy reserves about half of each class for the global
+    /// The freelist derives a power-of-two stripe count from this value and each
+    /// class's capacity. The count is capped at 4,096, so larger parallelism
+    /// values do not produce more stripes. Capacity may raise the count to keep
+    /// each stripe at or below `2^24` slots with the current capacity type.
+    ///
+    /// This also controls thread-cache capacity when the thread-cache policy is
+    /// automatic. That policy reserves about half of each class for the global
     /// freelist and divides the remaining capacity across expected threads.
-    /// Capacity may raise the internal stripe count to bound each search domain.
     pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.parallelism = parallelism;
         self

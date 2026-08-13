@@ -32,7 +32,7 @@
 //! stripe stores packed free words and stable owner records for its valid local
 //! slots. A set free bit is the sole ownership authority. Larger layouts add an
 //! advisory summary word per stripe to bound settled-empty searches, while
-//! small x86-64 layouts scan free words directly. A separate monotonic cursor
+//! small layouts scan free words directly. A separate monotonic cursor
 //! for each stripe assigns uncreated slots in the same probe order used for
 //! reuse.
 //!
@@ -244,16 +244,18 @@
 //!
 //! The freelist selects one traversal mode for its complete lifetime:
 //!
-//! - On x86-64, automatic policy directly scans free words when the whole
-//!   freelist occupies at most 32 physical free-word blocks.
-//! - Under automatic policy, larger x86-64 layouts and all other targets use
-//!   summary navigation.
+//! - On every supported target, automatic policy directly scans free words
+//!   when the whole freelist occupies at most 32 physical free-word blocks.
+//! - Larger layouts use summary navigation.
 //!
 //! The cutoff is an aggregate allocation and scan budget, not a per-stripe
-//! width test. In direct mode the inline summary words remain zero and unused.
-//! A put's free-word RMW is then its complete publication. A direct-mode take
-//! scans free words from its phase-selected start and advances through wrapped
-//! stripes until it fills the request or exhausts the pass.
+//! width test. The block-count threshold is the same on every target, while
+//! the number of packed words in a block is derived from the target's
+//! production cache-padded atomic representation. In direct mode the inline
+//! summary words remain zero and unused. A put's free-word RMW is then its
+//! complete publication. A direct-mode take scans free words from its
+//! phase-selected start and advances through wrapped stripes until it fills
+//! the request or exhausts the pass.
 //!
 //! In summarized mode each stripe's inline [`AtomicU64`] has this fixed layout:
 //!
@@ -395,11 +397,11 @@
 //! code remains installed. It never clears the code. Both paths repair before
 //! rebuilding a buffer or invoking a callback.
 //!
-//! [`CleanupGuard`] protects the interval after a successful CAS. If that
-//! interval unwinds, the guard conservatively restores `A_g` and then clears
-//! the code using only pre-resolved atomic references. On the normal path the
-//! owner disarms the guard immediately before the non-panicking code-clear RMW,
-//! so an old guard cannot erase a successor cleaner's code.
+//! After the cleanup CAS succeeds, the owner performs only immutable
+//! construction-validated range arithmetic and atomic operations until it
+//! removes the code. It does not allocate, reconstruct a buffer, or invoke
+//! caller code inside that interval. The code is removed before any ownership
+//! claim or callback, so cleanup needs no unwind guard.
 //!
 //! The publication and cleanup orders close every completed-put race:
 //!
@@ -442,9 +444,10 @@
 //!     assert that no published free bit overlapped an already-free bit
 //! ```
 //!
-//! All free-word and summary references are resolved before the atomic section.
-//! No allocation, indexing, or callback occurs between a stripe's first
-//! free-word RMW and its summary RMW. If the overlap assertion panics, prior
+//! All free-word references, stripe indexes, and masks are resolved before the
+//! atomic section. Each stripe's summary reference is resolved before that
+//! stripe's first free-word RMW. No allocation, indexing, or callback occurs
+//! between that RMW and the summary RMW. If the overlap assertion panics, prior
 //! stripes are complete and the current stripe's notification is already
 //! complete. The pool retains every size-class lease until publication for all
 //! stripes has finished, so the freelist cannot be destroyed between those
@@ -537,10 +540,10 @@
 //! claim composition, wrapped cross-stripe scans, creation uniqueness, batch
 //! claims, and drain races. Targeted forced-summary models cover delayed and
 //! helped publication, competing cleaners, owner and observer repair ordering,
-//! cleanup unwind, batch publication and overlap panic, stale state snapshots,
-//! tail pairing, and concurrent drain. Pool and owner models separately cover
-//! the size-class lease lifetime and refcount handoff that keep the stable owner
-//! storage alive around these operations.
+//! batch publication and overlap panic, stale state snapshots, tail pairing,
+//! and concurrent drain. Pool and owner models separately cover the size-class
+//! lease lifetime and refcount handoff that keep the stable owner storage alive
+//! around these operations.
 
 use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
@@ -567,35 +570,58 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Number of slots represented by one authoritative free word.
 const SLOT_WORD_BITS: usize = u64::BITS as usize;
+/// Shift that maps a stripe-local slot index to its logical free word.
 const SLOT_WORD_SHIFT: u32 = SLOT_WORD_BITS.trailing_zeros();
+/// Maximum power-of-two stripe count for one freelist.
 const MAX_FREELIST_STRIPES: usize = 4096;
+/// Maximum slots assigned to one stripe before capacity requires more stripes.
 const TARGET_MAX_SLOTS_PER_STRIPE: usize = 1 << 24;
+/// Low summary bits reserved for advisory group availability.
 const AVAILABILITY_BITS: usize = 58;
+/// Bit position where the exact summary cleaning code begins.
 const CODE_SHIFT: u32 = AVAILABILITY_BITS as u32;
+/// Mask for all advisory availability bits in a summary word.
 const AVAILABILITY_MASK: u64 = (1u64 << CODE_SHIFT) - 1;
+/// Mask for the exact cleaning code in a summary word.
 const CODE_MASK: u64 = !AVAILABILITY_MASK;
+/// Width of the next-ticket field in a packed creation cursor.
 const CURSOR_NEXT_BITS: u32 = 25;
+/// Mask for the next-ticket field in a packed creation cursor.
 const CURSOR_NEXT_MASK: u64 = (1u64 << CURSOR_NEXT_BITS) - 1;
+/// Width of the group, bit, and word phases retained by a creation cursor.
 const PROBE_PHASE_BITS: u32 = 39;
+/// Mask for the complete packed probe phase.
 const PROBE_PHASE_MASK: u64 = (1u64 << PROBE_PHASE_BITS) - 1;
+/// Width of the unreduced word phase supplied by the probe mixer.
 const WORD_PHASE_BITS: u32 = 27;
+/// Mask for the unreduced word phase.
 const WORD_PHASE_MASK: u64 = (1u64 << WORD_PHASE_BITS) - 1;
+/// Maximum dense free-word mask table staged on the stack by `put_batch`.
 const INLINE_FREE_WORD_MASKS: usize = 128;
+/// Number of sparse put records retained inline before spilling to the heap.
 const INLINE_PUT_RECORDS: usize = 128;
+/// Aggregate physical free-word block cutoff for direct scanning.
 const MAX_DIRECT_FREE_WORD_BLOCKS: usize = 32;
 
-// Derive the packed block width from the production atomic representation.
-// Loom atomics deliberately have a different size, so Loom models retain the
-// production logical width while using Loom storage for each modeled word.
+/// Production cache-padded atomic footprint used to size packed blocks.
+///
+/// Loom atomics deliberately have a different size. Deriving this value from
+/// the production atomic keeps Loom's logical geometry equal to production.
 const CACHE_PADDING_BYTES: usize = size_of::<CachePadded<std::sync::atomic::AtomicU64>>();
+/// Number of packed atomic free words stored in one cache-padded block.
 const FREE_WORDS_PER_BLOCK: usize = CACHE_PADDING_BYTES / size_of::<std::sync::atomic::AtomicU64>();
 
+/// Cache-isolated storage block containing packed authoritative free words.
 type FreeWordBlock = CachePadded<[AtomicU64; FREE_WORDS_PER_BLOCK]>;
 
+// Block offsets use a mask, so the derived width must be a power of two.
 const _: () = assert!(FREE_WORDS_PER_BLOCK.is_power_of_two());
 
 #[cfg(not(feature = "loom"))]
+// Native blocks must occupy exactly one production padding quantum. Loom uses
+// different atomic storage and therefore checks only the logical block width.
 const _: () = {
     assert!(size_of::<FreeWordBlock>() == CACHE_PADDING_BYTES);
     assert!(
@@ -603,20 +629,31 @@ const _: () = {
     );
 };
 
+/// Validated allocation and navigation geometry for one freelist.
+///
+/// Construction computes this compact proof object before allocating any
+/// capacity-sized owner or free-word storage.
 #[derive(Clone, Copy)]
 struct Geometry {
+    /// Total number of stable global slots.
     capacity: usize,
+    /// Power-of-two count of cache-isolated stripes.
     stripe_count: usize,
-    stripe_mask: usize,
+    /// Shift between global slot ids and stripe-local slot indices.
     stripe_shift: u32,
+    /// Largest logical free-word count among all stripes.
     max_logical_words: usize,
+    /// Common power-of-two width of one unpaired summary chunk.
     base_chunk_words: usize,
-    base_chunk_shift: u32,
+    /// Aggregate physical free-word blocks across every stripe.
     total_free_word_blocks: usize,
 }
 
 impl Geometry {
+    /// Computes and validates geometry for `capacity` and expected parallelism.
     fn new(capacity: usize, parallelism: usize) -> Self {
+        // Parallelism chooses the normal contention-domain count. Capacity may
+        // raise it so every stripe remains encodable by the cursor ticket.
         let parallelism_stripes = parallelism
             .checked_next_power_of_two()
             .unwrap_or(MAX_FREELIST_STRIPES)
@@ -631,16 +668,16 @@ impl Geometry {
             .max(capacity_stripes)
             .min(capacity_ceiling);
         let stripe_shift = stripe_count.trailing_zeros();
-        let stripe_mask = stripe_count - 1;
         let max_stripe_capacity = Self::stripe_capacity_for(capacity, stripe_shift, 0);
         let max_logical_words = max_stripe_capacity.div_ceil(SLOT_WORD_BITS);
         let base_chunk_words = max_logical_words
             .div_ceil(64)
             .checked_next_power_of_two()
             .expect("base chunk width must be representable");
-        let base_chunk_shift = base_chunk_words.trailing_zeros();
         let mut total_free_word_blocks = 0usize;
 
+        // The traversal policy is based on the aggregate physical scan budget,
+        // including partially populated final blocks in each stripe.
         for stripe in 0..stripe_count {
             let stripe_capacity = Self::stripe_capacity_for(capacity, stripe_shift, stripe);
             let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
@@ -652,32 +689,34 @@ impl Geometry {
         let geometry = Self {
             capacity,
             stripe_count,
-            stripe_mask,
             stripe_shift,
             max_logical_words,
             base_chunk_words,
-            base_chunk_shift,
             total_free_word_blocks,
         };
         geometry.validate();
         geometry
     }
 
+    /// Computes one stripe's exact capacity under interleaved slot mapping.
     #[inline(always)]
     const fn stripe_capacity_for(capacity: usize, stripe_shift: u32, stripe: usize) -> usize {
         ((capacity - 1 - stripe) >> stripe_shift) + 1
     }
 
+    /// Returns one stripe's exact capacity in this geometry.
     #[inline(always)]
     const fn stripe_capacity(&self, stripe: usize) -> usize {
         Self::stripe_capacity_for(self.capacity, self.stripe_shift, stripe)
     }
 
+    /// Maps a stripe-local slot index back to its stable global slot id.
     #[inline(always)]
     const fn slot(&self, stripe: usize, local: usize) -> usize {
         (local << self.stripe_shift) | stripe
     }
 
+    /// Proves the geometry bounds and complete interleaved capacity mapping.
     fn validate(&self) {
         assert!(self.stripe_count.is_power_of_two());
         assert!(self.stripe_count <= self.capacity.min(MAX_FREELIST_STRIPES));
@@ -685,6 +724,8 @@ impl Geometry {
         assert!(self.base_chunk_words <= 1 << 12);
         assert!(self.total_free_word_blocks > 0);
 
+        // Checking each final local slot proves that every inverse mapping is
+        // below capacity and representable by the public u32 slot id.
         let mut total_capacity = 0usize;
         for stripe in 0..self.stripe_count {
             let stripe_capacity = self.stripe_capacity(stripe);
@@ -700,40 +741,52 @@ impl Geometry {
     }
 }
 
+/// One cache-isolated contention and navigation domain.
 struct Stripe {
+    /// Advisory 58+6 availability and cleaning state.
     summary: AtomicU64,
+    /// Packed cache-padded blocks containing authoritative free words.
     free_word_blocks: Box<[FreeWordBlock]>,
+    /// Stable owner records for every valid stripe-local slot.
     slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    /// Number of valid stripe-local slots.
     capacity: usize,
+    /// Number of logical free words, excluding physical block padding.
     logical_words: usize,
-    valid_group_mask: u64,
+    /// Number of valid advisory summary groups.
     group_count: u32,
+    /// Leading groups that each map to one base chunk before tail pairing.
     single_groups: u32,
 }
 
 impl Stripe {
+    /// Returns one authoritative free word from packed block storage.
     #[inline(always)]
     fn free_word(&self, logical_word: usize) -> &AtomicU64 {
         let block = logical_word / FREE_WORDS_PER_BLOCK;
+        // The compile-time power-of-two proof makes masking equivalent to the
+        // remainder while keeping this lookup cheap on the hot path.
         let offset = logical_word & (FREE_WORDS_PER_BLOCK - 1);
         &self.free_word_blocks[block][offset]
     }
 
+    /// Returns the valid slot-bit mask for one logical free word.
     #[inline(always)]
     fn valid_free_word_mask(&self, logical_word: usize) -> u64 {
+        // A partial final word excludes physical padding from candidate scans.
         let remaining = self.capacity - logical_word * SLOT_WORD_BITS;
         low_bits(remaining.min(SLOT_WORD_BITS))
     }
 }
 
-#[cfg(not(feature = "loom"))]
-const _: () = assert!(size_of::<CachePadded<Stripe>>() == CACHE_PADDING_BYTES);
-
+/// Packed monotonic creation state for one stripe.
 struct CreationCursor {
+    /// First creator's probe phase and the next unassigned local ticket.
     state: AtomicU64,
 }
 
 impl CreationCursor {
+    /// Initializes a cursor from an already encoded state.
     #[inline(always)]
     #[allow(clippy::missing_const_for_fn)]
     fn new(state: u64) -> Self {
@@ -742,8 +795,14 @@ impl CreationCursor {
         }
     }
 
+    /// Reserves the next ticket while retaining the first claimant's phase.
+    ///
+    /// Returns the retained phase and claimed zero-based ticket, or `None` when
+    /// every ticket below `capacity` has already been assigned.
     #[inline(always)]
     fn claim(&self, probe_phase: u64, capacity: usize) -> Option<(u64, usize)> {
+        // Creation state does not publish a buffer. Relaxed ordering is enough
+        // for the atomic ticket assignment and one-time phase installation.
         #[allow(deprecated)]
         let previous = self
             .state
@@ -769,28 +828,43 @@ impl CreationCursor {
     }
 }
 
+/// Pre-resolved publication data for one touched free word in a put batch.
+///
+/// The authoritative atomic reference is resolved before publication begins.
+/// The containing summary is shared by all records with the same stripe index.
 #[derive(Clone, Copy)]
 struct PutRecord<'a> {
+    /// Stripe index used for sorting and publication grouping.
     stripe: usize,
+    /// Logical free-word index used for sorting and coalescing.
     word: usize,
+    /// Authoritative slot bits to publish in `free_word`.
     mask: u64,
+    /// Advisory group bit corresponding to this logical word.
     group_mask: u64,
+    /// Pre-resolved authoritative free word.
     free_word: &'a AtomicU64,
-    summary: &'a AtomicU64,
 }
 
-// The inline variant is intentionally stack-resident. Boxing it would add an
-// allocation to ordinary large-geometry spill batches.
+/// Inline-first storage for sparse put-batch publication records.
+///
+/// The inline variant is intentionally stack-resident. Boxing it would add an
+/// allocation to ordinary large-geometry spill batches.
 #[allow(clippy::large_enum_variant)]
 enum PutRecords<'a> {
+    /// Fixed stack storage for ordinary batches.
     Inline {
+        /// Record storage whose prefix through `len` is initialized.
         records: [MaybeUninit<PutRecord<'a>>; INLINE_PUT_RECORDS],
+        /// Number of initialized entries in `records`.
         len: usize,
     },
+    /// Heap storage for a batch larger than the inline capacity.
     Heap(Vec<PutRecord<'a>>),
 }
 
 impl<'a> PutRecords<'a> {
+    /// Creates an empty inline record stage.
     #[inline(always)]
     const fn new() -> Self {
         Self::Inline {
@@ -799,6 +873,7 @@ impl<'a> PutRecords<'a> {
         }
     }
 
+    /// Chooses inline or heap storage for an expected record capacity.
     #[inline(always)]
     fn with_capacity(capacity: usize) -> Self {
         if capacity <= INLINE_PUT_RECORDS {
@@ -808,6 +883,7 @@ impl<'a> PutRecords<'a> {
         }
     }
 
+    /// Appends one record, promoting the initialized prefix when it overflows.
     #[inline(always)]
     fn push(&mut self, record: PutRecord<'a>) {
         match self {
@@ -829,6 +905,7 @@ impl<'a> PutRecords<'a> {
         }
     }
 
+    /// Returns exactly the initialized records as a mutable slice.
     #[inline(always)]
     const fn as_mut_slice(&mut self) -> &mut [PutRecord<'a>] {
         match self {
@@ -843,6 +920,9 @@ impl<'a> PutRecords<'a> {
     }
 }
 
+/// Builds a mask containing the lowest `bits` bits.
+///
+/// `bits` must be in `1..=64`.
 #[inline(always)]
 const fn low_bits(bits: usize) -> u64 {
     assert!(bits > 0 && bits <= SLOT_WORD_BITS);
@@ -853,48 +933,51 @@ const fn low_bits(bits: usize) -> u64 {
     }
 }
 
+/// Builds the advisory availability mask for one summary group.
 #[inline(always)]
 const fn group_mask(group: usize) -> u64 {
     1u64 << group
 }
 
+/// Encodes a group as the nonzero exact cleaning code in a summary word.
 #[inline(always)]
 const fn encode_code(group: usize) -> u64 {
     ((group as u64) + 1) << CODE_SHIFT
 }
 
-#[inline(always)]
-const fn raw_code(state: u64) -> usize {
-    ((state & CODE_MASK) >> CODE_SHIFT) as usize
-}
-
+/// Decodes the exact summary cleaning code, with zero representing no cleaner.
 #[inline(always)]
 const fn decode_code(state: u64) -> Option<usize> {
-    let raw = raw_code(state);
+    let raw = ((state & CODE_MASK) >> CODE_SHIFT) as usize;
     assert!(raw <= AVAILABILITY_BITS);
     if raw == 0 { None } else { Some(raw - 1) }
 }
 
+/// Packs a retained probe phase and the next ticket into cursor state.
 #[inline(always)]
 const fn encode_cursor(probe_phase: u64, next: usize) -> u64 {
     (probe_phase << CURSOR_NEXT_BITS) | next as u64
 }
 
+/// Extracts the next creation ticket from packed cursor state.
 #[inline(always)]
 const fn decode_cursor_next(state: u64) -> usize {
     (state & CURSOR_NEXT_MASK) as usize
 }
 
+/// Extracts the retained probe phase from packed cursor state.
 #[inline(always)]
 const fn decode_cursor_phase(state: u64) -> u64 {
     (state >> CURSOR_NEXT_BITS) & PROBE_PHASE_MASK
 }
 
+/// Maps an unreduced word phase uniformly into a nonzero word count.
 #[inline(always)]
 const fn reduce_word_phase(word_phase: u32, words: usize) -> usize {
     (((word_phase as u64) * (words as u64)) >> WORD_PHASE_BITS) as usize
 }
 
+/// Returns the next admitted creation count without overflowing at capacity.
 #[inline(always)]
 const fn next_admission(created: usize, capacity: usize) -> Option<usize> {
     if created < capacity {
@@ -904,6 +987,7 @@ const fn next_admission(created: usize, capacity: usize) -> Option<usize> {
     }
 }
 
+/// Mixes a monotonic probe id into independent navigation phase bits.
 #[inline(always)]
 const fn mix_probe_id(id: u64) -> u64 {
     let mut mixed = id;
@@ -914,25 +998,29 @@ const fn mix_probe_id(id: u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
+/// Asserts that an array of `len` values has a representable allocation layout.
 fn assert_allocation<T>(len: usize) {
     Layout::array::<T>(len).expect("freelist allocation must be representable");
 }
 
-fn group_geometry(
-    logical_words: usize,
-    base_chunk_words: usize,
-    max_groups: usize,
-) -> (u32, u32, u64) {
+/// Derives the summary group count and unpaired prefix for a word extent.
+///
+/// Each leading group owns one `base_chunk_words` chunk. Excess tail chunks
+/// are paired so at most `max_groups` groups are required.
+fn group_geometry(logical_words: usize, base_chunk_words: usize, max_groups: usize) -> (u32, u32) {
     assert!(max_groups > 0 && max_groups <= AVAILABILITY_BITS);
     let base_chunks = logical_words.div_ceil(base_chunk_words);
     assert!(base_chunks <= max_groups * 2);
+    // Every chunk beyond the group budget consumes a second tail chunk. The
+    // remaining prefix keeps one chunk per group.
     let paired = base_chunks.saturating_sub(max_groups);
     let single = base_chunks - paired * 2;
     let groups = single + paired;
     assert!(groups > 0 && groups <= max_groups);
-    (groups as u32, single as u32, low_bits(groups))
+    (groups as u32, single as u32)
 }
 
+/// Maps a base chunk to its unpaired or paired summary group.
 #[inline(always)]
 const fn group_for_base(single_groups: usize, base: usize) -> usize {
     if base < single_groups {
@@ -942,6 +1030,7 @@ const fn group_for_base(single_groups: usize, base: usize) -> usize {
     }
 }
 
+/// Returns the first base chunk and chunk count represented by one group.
 #[inline(always)]
 const fn group_base_range(single_groups: usize, group: usize) -> (usize, usize) {
     if group < single_groups {
@@ -951,13 +1040,17 @@ const fn group_base_range(single_groups: usize, group: usize) -> (usize, usize) 
     }
 }
 
+/// Internal construction policy for automatic and verification geometries.
 #[derive(Clone, Copy)]
 struct ConstructionOptions {
+    /// Enables summary navigation below the automatic block cutoff.
     force_summaries: bool,
+    /// Maximum availability groups exposed by each summary.
     max_groups: usize,
 }
 
 impl Default for ConstructionOptions {
+    /// Selects automatic traversal policy and the full 58-group geometry.
     fn default() -> Self {
         Self {
             force_summaries: false,
@@ -966,48 +1059,19 @@ impl Default for ConstructionOptions {
     }
 }
 
-struct CleanupGuard<'a> {
-    summary: &'a AtomicU64,
-    group_mask: u64,
-    armed: bool,
-}
-
-impl<'a> CleanupGuard<'a> {
-    #[inline(always)]
-    const fn new(summary: &'a AtomicU64, group_mask: u64) -> Self {
-        Self {
-            summary,
-            group_mask,
-            armed: true,
-        }
-    }
-
-    #[inline(always)]
-    const fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CleanupGuard<'_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        self.summary.fetch_or(self.group_mask, Ordering::Release);
-        self.summary.fetch_and(AVAILABILITY_MASK, Ordering::Release);
-    }
-}
-
+/// Mutable result state threaded through one bounded take traversal.
 struct TakeContext<'a, F> {
-    max: usize,
-    filled: usize,
+    /// Buffers the traversal may still deliver.
+    remaining: usize,
+    /// Caller callback that receives each claimed buffer.
     on_entry: &'a mut F,
 }
 
 impl<F> TakeContext<'_, F> {
+    /// Returns whether the requested batch size has been filled.
     #[inline(always)]
     const fn is_full(&self) -> bool {
-        self.filled == self.max
+        self.remaining == 0
     }
 }
 
@@ -1024,21 +1088,29 @@ impl<F> TakeContext<'_, F> {
 /// The free set is striped over a power-of-two number of cache-isolated
 /// contention domains. Packed free bits authoritatively own parked buffers.
 /// Larger layouts use one advisory 58+6 state word per stripe to navigate those
-/// free words, while small x86-64 layouts scan free words directly. Stripe-local
+/// free words, while small layouts scan free words directly. Stripe-local
 /// monotonic cursors assign lazy creation tickets without a reservation bitmap.
 ///
 /// The module-level documentation gives the complete ownership, geometry,
 /// summary, creation, drain, and memory-ordering protocols.
 pub struct Freelist {
+    /// Allocation layout shared by every tracked buffer.
     layout: Layout,
+    /// Fixed total number of stable slots.
     capacity: usize,
+    /// Monotonic global admission count for lazy creation.
     created: CachePadded<AtomicUsize>,
+    /// Cache-isolated ownership and navigation domains.
     stripes: Box<[CachePadded<Stripe>]>,
+    /// Monotonic creation cursor for each stripe.
     creation_cursors: Box<[CachePadded<CreationCursor>]>,
+    /// Mask used for wrapped stripe routing.
     stripe_mask: usize,
+    /// Shift used to recover a stripe-local index from a global slot id.
     stripe_shift: u32,
-    base_chunk_words: usize,
+    /// Shift for the common power-of-two base summary chunk width.
     base_chunk_shift: u32,
+    /// Whether takes navigate through summaries instead of scanning directly.
     summaries_enabled: bool,
 }
 
@@ -1050,10 +1122,12 @@ unsafe impl Send for Freelist {}
 // access. Stripe-local owner pointees remain stable until the freelist drops.
 unsafe impl Sync for Freelist {}
 
+/// Construction helpers used by targeted protocol tests.
 #[cfg(test)]
 pub(super) mod test_helpers {
     use super::*;
 
+    /// Builds a freelist that exercises summary navigation at any capacity.
     pub(in crate::iobuf) fn forced_summary(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -1097,6 +1171,7 @@ impl Freelist {
         )
     }
 
+    /// Builds the complete freelist storage from validated policy options.
     fn new_inner(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -1107,8 +1182,9 @@ impl Freelist {
         assert!(layout.size() > 0, "layout size must be non-zero");
         let capacity = capacity.get() as usize;
         let geometry = Geometry::new(capacity, parallelism.get());
+        // The physical block budget is target-adaptive because block width is
+        // derived from the target's production atomic representation.
         let summaries_enabled = options.force_summaries
-            || !cfg!(target_arch = "x86_64")
             || geometry.total_free_word_blocks > MAX_DIRECT_FREE_WORD_BLOCKS;
 
         assert_allocation::<CachePadded<Stripe>>(geometry.stripe_count);
@@ -1117,11 +1193,13 @@ impl Freelist {
         let mut stripes = Vec::with_capacity(geometry.stripe_count);
         let mut creation_cursors = Vec::with_capacity(geometry.stripe_count);
 
+        // Every owner record and every atomic is initialized before `Self` can
+        // be shared. Stripe-local owner slices never move after this loop.
         for stripe_index in 0..geometry.stripe_count {
             let stripe_capacity = geometry.stripe_capacity(stripe_index);
             let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
             let free_word_blocks = logical_words.div_ceil(FREE_WORDS_PER_BLOCK);
-            let (group_count, single_groups, valid_group_mask) =
+            let (group_count, single_groups) =
                 group_geometry(logical_words, geometry.base_chunk_words, options.max_groups);
 
             assert_allocation::<FreeWordBlock>(free_word_blocks);
@@ -1152,10 +1230,12 @@ impl Freelist {
                 .collect::<Vec<_>>()
                 .into_boxed_slice();
             let summary = if prefill && summaries_enabled {
-                valid_group_mask
+                low_bits(group_count as usize)
             } else {
                 0
             };
+            // Prefill consumes every creation ticket and advertises every
+            // valid group. Empty construction leaves both states at zero.
             let cursor = if prefill {
                 encode_cursor(0, stripe_capacity)
             } else {
@@ -1168,7 +1248,6 @@ impl Freelist {
                 slots,
                 capacity: stripe_capacity,
                 logical_words,
-                valid_group_mask,
                 group_count,
                 single_groups,
             }));
@@ -1181,10 +1260,9 @@ impl Freelist {
             created: CachePadded::new(AtomicUsize::new(if prefill { capacity } else { 0 })),
             stripes: stripes.into_boxed_slice(),
             creation_cursors: creation_cursors.into_boxed_slice(),
-            stripe_mask: geometry.stripe_mask,
+            stripe_mask: geometry.stripe_count - 1,
             stripe_shift: geometry.stripe_shift,
-            base_chunk_words: geometry.base_chunk_words,
-            base_chunk_shift: geometry.base_chunk_shift,
+            base_chunk_shift: geometry.base_chunk_words.trailing_zeros(),
             summaries_enabled,
         };
 
@@ -1241,6 +1319,8 @@ impl Freelist {
                 continue;
             };
             let cursor_probe = Probe::from_phase(stripe_index, probe_phase);
+            // Unranking uses the cursor's retained phase, keeping creation in
+            // the same group-major order that later reuse probes.
             let local = self.unrank_local(stripe, cursor_probe, ticket);
 
             // SAFETY: the cursor assigned this local owner exactly once. All
@@ -1254,6 +1334,7 @@ impl Freelist {
         unreachable!("creation permit guarantees one cursor with capacity")
     }
 
+    /// Decodes a global slot into stripe, local, word, and bit locations.
     #[inline(always)]
     const fn slot_location(&self, slot: u32) -> (usize, usize, usize, u64) {
         let slot = slot as usize;
@@ -1264,27 +1345,31 @@ impl Freelist {
         (stripe, local, word, mask)
     }
 
+    /// Maps one logical free word to its advisory summary group.
     #[inline(always)]
     const fn group_for_word(&self, stripe: &Stripe, word: usize) -> usize {
         let base = word >> self.base_chunk_shift;
         group_for_base(stripe.single_groups as usize, base)
     }
 
+    /// Returns a group's logical word range and its untruncated full width.
     #[inline(always)]
     fn group_word_range(&self, stripe: &Stripe, group: usize) -> (usize, usize, usize) {
         let (base, base_count) = group_base_range(stripe.single_groups as usize, group);
         let start = base << self.base_chunk_shift;
-        let full_words = base_count * self.base_chunk_words;
+        let full_words = base_count << self.base_chunk_shift;
         let end = start.saturating_add(full_words).min(stripe.logical_words);
         (start, end, full_words)
     }
 
+    /// Counts valid slots represented by one summary group.
     #[inline(always)]
     fn group_slot_count(&self, stripe: &Stripe, group: usize) -> usize {
         let (start, end, _) = self.group_word_range(stripe, group);
         (end * SLOT_WORD_BITS).min(stripe.capacity) - start * SLOT_WORD_BITS
     }
 
+    /// Chooses the probe's starting offset inside a word span.
     #[inline(always)]
     const fn word_offset(probe: Probe, words: usize, full_words: Option<usize>) -> usize {
         if let Some(full_words) = full_words
@@ -1295,12 +1380,15 @@ impl Freelist {
         reduce_word_phase(probe.word_phase, words)
     }
 
+    /// Maps one stripe-local creation ticket to a phase-affine local slot.
     fn unrank_local(&self, stripe: &Stripe, probe: Probe, mut ticket: usize) -> usize {
         if !self.summaries_enabled {
             return self.unrank_span(stripe, probe, 0, stripe.logical_words, None, ticket);
         }
 
         let group_count = stripe.group_count as usize;
+        // Summarized creation consumes complete groups in wrapped probe order.
+        // Singleton and paired groups contribute their exact valid slot count.
         for offset in 0..group_count {
             let group = probe.group(offset, group_count);
             let slots = self.group_slot_count(stripe, group);
@@ -1314,6 +1402,7 @@ impl Freelist {
         unreachable!("cursor ticket must map to one local slot")
     }
 
+    /// Unranks a ticket across a word span wrapped at its probe-selected start.
     fn unrank_span(
         &self,
         stripe: &Stripe,
@@ -1334,6 +1423,7 @@ impl Freelist {
             .unwrap_or_else(|_| unreachable!("span ticket must map to one local slot"))
     }
 
+    /// Unranks within one contiguous run and returns any unconsumed ticket.
     const fn unrank_run(
         &self,
         stripe: &Stripe,
@@ -1351,6 +1441,8 @@ impl Freelist {
         let full_end = if has_partial { end - 1 } else { end };
         let full_slots = (full_end - start) * SLOT_WORD_BITS;
         if ticket < full_slots {
+            // Full words rotate all 64 bit positions directly. A partial tail
+            // instead ranks only its valid bits below.
             let word = start + ticket / SLOT_WORD_BITS;
             let rank = ticket & (SLOT_WORD_BITS - 1);
             let bit = (rank + probe.bit_phase as usize) & (SLOT_WORD_BITS - 1);
@@ -1433,6 +1525,9 @@ impl Freelist {
             return;
         };
 
+        // Small aggregate geometries validate the complete batch in a dense
+        // stack table. Larger geometries stage only touched words, then sort
+        // and coalesce them before the first atomic publication.
         let dense_len = self.stripes.len() * self.stripes[0].logical_words;
         if dense_len <= INLINE_FREE_WORD_MASKS {
             let mut masks = MaybeUninit::<[u64; INLINE_FREE_WORD_MASKS]>::uninit();
@@ -1473,12 +1568,15 @@ impl Freelist {
             }
 
             let records = records.as_mut_slice();
+            // Sorting makes every equal stripe and word key contiguous. The
+            // mask tie-breaker also makes duplicate slot records adjacent.
             records.sort_unstable_by_key(|record| (record.stripe, record.word, record.mask));
             let len = Self::coalesce_records(records);
             self.publish_records(&records[..len]);
         }
     }
 
+    /// Stages one returned slot in a dense stripe-major free-word table.
     #[inline(always)]
     fn stage_dense(&self, masks: &mut [u64], stride: usize, buffer: PooledBuffer) {
         let (stripe, _, word, mask) = self.slot_location(buffer.slot());
@@ -1487,12 +1585,14 @@ impl Freelist {
         masks[index] |= mask;
     }
 
+    /// Resolves one returned slot into a sparse publication record.
     #[inline(always)]
     fn stage_record<'a>(&'a self, records: &mut PutRecords<'a>, buffer: PooledBuffer) {
         let (stripe, _, word, mask) = self.slot_location(buffer.slot());
         records.push(self.put_record(stripe, word, mask));
     }
 
+    /// Resolves the masks and authoritative atomic for one word publication.
     #[inline(always)]
     fn put_record(&self, stripe_index: usize, word: usize, mask: u64) -> PutRecord<'_> {
         let stripe = &self.stripes[stripe_index];
@@ -1502,10 +1602,12 @@ impl Freelist {
             mask,
             group_mask: group_mask(self.group_for_word(stripe, word)),
             free_word: stripe.free_word(word),
-            summary: &stripe.summary,
         }
     }
 
+    /// Coalesces sorted same-word records and rejects duplicate slot bits.
+    ///
+    /// Returns the length of the coalesced prefix.
     #[inline(always)]
     fn coalesce_records(records: &mut [PutRecord<'_>]) -> usize {
         let mut len = 0;
@@ -1521,7 +1623,6 @@ impl Freelist {
                     "duplicate slot in put_batch"
                 );
                 records[len - 1].mask |= record.mask;
-                records[len - 1].group_mask |= record.group_mask;
             } else {
                 records[len] = record;
                 len += 1;
@@ -1530,17 +1631,20 @@ impl Freelist {
         len
     }
 
+    /// Publishes staged words, then advisory groups, in stripe-major order.
     fn publish_records(&self, records: &[PutRecord<'_>]) {
         let Some(first) = records.first() else {
             return;
         };
         let mut stripe = first.stripe;
-        let mut summary = first.summary;
+        let mut summary = &self.stripes[stripe].summary;
         let mut groups = 0u64;
         let mut overlap = 0u64;
 
         for record in records {
             if record.stripe != stripe {
+                // Complete all publication for the previous stripe before
+                // validating overlap and advancing to the next stripe.
                 if self.summaries_enabled {
                     summary.fetch_or(groups, Ordering::Release);
                 }
@@ -1549,7 +1653,9 @@ impl Freelist {
                     "returned slot batch must not already contain a free slot"
                 );
                 stripe = record.stripe;
-                summary = record.summary;
+                // Resolve the next summary before publishing that stripe's
+                // first free word, preserving the non-panicking interval.
+                summary = &self.stripes[stripe].summary;
                 groups = 0;
                 overlap = 0;
             }
@@ -1610,6 +1716,7 @@ impl Freelist {
         self.take_with_probe(Probe::new(self.stripe_mask), max, &mut on_entry)
     }
 
+    /// Scans every stripe once from `probe` until `max` buffers are delivered.
     fn take_with_probe(
         &self,
         probe: Probe,
@@ -1617,15 +1724,21 @@ impl Freelist {
         on_entry: &mut impl FnMut(PooledBuffer),
     ) -> usize {
         let mut context = TakeContext {
-            max,
-            filled: 0,
+            remaining: max,
             on_entry,
         };
         for scanned in 0..self.stripes.len() {
             let stripe_index = probe.stripe(scanned, self.stripe_mask);
             let stripe = &self.stripes[stripe_index];
             if self.summaries_enabled {
-                self.scan_summarized_stripe(stripe_index, stripe, probe, &mut context);
+                let state = stripe.summary.load(Ordering::Acquire);
+                self.scan_summarized_stripe_from_state(
+                    stripe_index,
+                    stripe,
+                    state,
+                    probe,
+                    &mut context,
+                );
             } else {
                 self.scan_bypass_stripe(stripe_index, stripe, probe, &mut context);
             }
@@ -1633,9 +1746,10 @@ impl Freelist {
                 break;
             }
         }
-        context.filled
+        max - context.remaining
     }
 
+    /// Scans all authoritative free words in one direct-mode stripe.
     fn scan_bypass_stripe(
         &self,
         stripe_index: usize,
@@ -1657,17 +1771,10 @@ impl Freelist {
         }
     }
 
-    fn scan_summarized_stripe(
-        &self,
-        stripe_index: usize,
-        stripe: &Stripe,
-        probe: Probe,
-        context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
-    ) {
-        let state = stripe.summary.load(Ordering::Acquire);
-        self.scan_summarized_stripe_from_state(stripe_index, stripe, state, probe, context);
-    }
-
+    /// Scans one stripe from an acquired summary snapshot.
+    ///
+    /// Low availability bits are advisory candidates. A nonzero high code is
+    /// one exact additional group that must be visited or repaired.
     fn scan_summarized_stripe_from_state(
         &self,
         stripe_index: usize,
@@ -1680,7 +1787,9 @@ impl Freelist {
             return;
         }
 
-        let mut low_pending = state & stripe.valid_group_mask;
+        // One pass-local snapshot supplies the low candidates. Later loads may
+        // contribute exact coded groups, but never introduce fresh low bits.
+        let mut low_pending = state & low_bits(stripe.group_count as usize);
         let mut code_pending = 0u64;
         let mut processed = 0u64;
         if let Some(group) = decode_code(state) {
@@ -1695,12 +1804,12 @@ impl Freelist {
             let repair = code_pending & mask != 0;
             code_pending &= !mask;
 
-            let before = context.filled;
+            let before = context.remaining;
             self.scan_group(stripe_index, stripe, group, probe, repair, context);
             if context.is_full() {
                 return;
             }
-            if context.filled != before {
+            if context.remaining != before {
                 continue;
             }
 
@@ -1728,12 +1837,17 @@ impl Freelist {
         }
     }
 
+    /// Adds an exact coded group unless this pass already processed it.
     #[inline(always)]
     fn add_code_candidate(stripe: &Stripe, group: usize, processed: u64, pending: &mut u64) {
         assert!(group < stripe.group_count as usize);
         *pending |= group_mask(group) & !processed;
     }
 
+    /// Attempts to replace one availability bit with its exact cleaning code.
+    ///
+    /// A foreign code is preserved and added to `code_pending`. The method
+    /// returns true only when this caller owns cleanup for `group`.
     #[inline(always)]
     fn try_claim_cleanup(
         stripe: &Stripe,
@@ -1752,6 +1866,8 @@ impl Freelist {
             return false;
         }
 
+        // The replacement preserves sibling availability while atomically
+        // removing only this group's low bit and installing its exact code.
         let desired = (current & AVAILABILITY_MASK & !mask) | encode_code(group);
         match stripe
             .summary
@@ -1767,6 +1883,7 @@ impl Freelist {
         }
     }
 
+    /// Scans one summary group and optionally repairs it before each claim.
     fn scan_group(
         &self,
         stripe_index: usize,
@@ -1785,6 +1902,8 @@ impl Freelist {
         for _ in 0..words {
             let candidates = stripe.free_word(word).load(Ordering::Acquire);
             if repair && candidates != 0 {
+                // An observer of a foreign code republishes availability before
+                // a claim, so clearing the code cannot hide a concurrent put.
                 stripe.summary.fetch_or(mask, Ordering::Release);
             }
             self.claim_word(stripe_index, stripe, word, candidates, probe, context);
@@ -1798,6 +1917,10 @@ impl Freelist {
         }
     }
 
+    /// Validates a group while owning its exact summary cleaning code.
+    ///
+    /// The first nonzero word is repaired before the code is removed. If every
+    /// word is zero, the code is removed while availability stays clear.
     fn clean_owned_group(
         &self,
         stripe_index: usize,
@@ -1807,7 +1930,6 @@ impl Freelist {
         context: &mut TakeContext<'_, impl FnMut(PooledBuffer)>,
     ) {
         let mask = group_mask(group);
-        let mut guard = CleanupGuard::new(&stripe.summary, mask);
         let (start, end, full_words) = self.group_word_range(stripe, group);
         let words = end - start;
         let offset = Self::word_offset(probe, words, Some(full_words));
@@ -1816,8 +1938,9 @@ impl Freelist {
         for visited in 0..words {
             let candidates = stripe.free_word(word).load(Ordering::Acquire);
             if candidates != 0 {
+                // Repair availability before removing the exact code. The
+                // remaining scan can then use ordinary authoritative claims.
                 stripe.summary.fetch_or(mask, Ordering::Release);
-                guard.disarm();
                 stripe
                     .summary
                     .fetch_and(AVAILABILITY_MASK, Ordering::Release);
@@ -1850,12 +1973,15 @@ impl Freelist {
             }
         }
 
-        guard.disarm();
         stripe
             .summary
             .fetch_and(AVAILABILITY_MASK, Ordering::Release);
     }
 
+    /// Claims valid candidate bits and delivers each exclusively owned slot.
+    ///
+    /// The word value returned by each RMW may add newly published candidates.
+    /// `attempted` bounds every physical bit to one attempt in this invocation.
     fn claim_word(
         &self,
         stripe_index: usize,
@@ -1870,7 +1996,7 @@ impl Freelist {
         let mut attempted = 0u64;
 
         while candidates != 0 && !context.is_full() {
-            let claim = probe.select_set_bits(candidates, context.max - context.filled);
+            let claim = probe.select_set_bits(candidates, context.remaining);
             attempted |= claim;
             let observed = stripe.free_word(word).fetch_and(!claim, Ordering::Acquire);
             let mut claimed = observed & claim;
@@ -1880,9 +2006,11 @@ impl Freelist {
                 let local = word * SLOT_WORD_BITS + bit;
                 (context.on_entry)(self.buffer(stripe_index, local));
                 claimed &= !(1u64 << bit);
-                context.filled += 1;
+                context.remaining -= 1;
             }
 
+            // The returned state enables finite helping for bits published
+            // after the candidate load without retrying an attempted bit.
             candidates |= observed & valid & !attempted;
             candidates &= !attempted;
         }
@@ -1903,6 +2031,8 @@ impl Freelist {
 
         for (stripe_index, stripe) in self.stripes.iter().enumerate() {
             for word in 0..stripe.logical_words {
+                // The Acquire swap claims authoritative ownership of every set
+                // bit. Advisory summaries are intentionally left untouched.
                 let mut claimed = stripe.free_word(word).swap(0, Ordering::Acquire);
 
                 while claimed != 0 {
@@ -1920,6 +2050,7 @@ impl Freelist {
         drained
     }
 
+    /// Returns the stable non-null owner pointer for one stripe-local slot.
     #[inline(always)]
     fn owner_ptr(&self, stripe: usize, local: usize) -> ptr::NonNull<PooledOwner> {
         let cell = self.stripes[stripe]
@@ -1927,6 +2058,8 @@ impl Freelist {
             .get(local)
             .expect("slot id must refer to an allocated slot");
 
+        // Both access paths address the same stable boxed owner slice. Loom's
+        // UnsafeCell API exposes the pointer only inside its tracking closure.
         cfg_if::cfg_if! {
             if #[cfg(not(feature = "loom"))] {
                 ptr::NonNull::new(cell.get()).expect("slot pointers are non-null")
@@ -1955,6 +2088,7 @@ impl Freelist {
 }
 
 impl Drop for Freelist {
+    /// Drains parked allocations before stable owner storage is released.
     fn drop(&mut self) {
         // Any slot still free in the freelist owns a live pooled allocation.
         // Drain it explicitly before the side-table storage goes away.
@@ -1962,26 +2096,35 @@ impl Drop for Freelist {
     }
 }
 
+/// Raw and mixed forms of one thread's stable probe identity.
 #[derive(Clone, Copy)]
 struct ProbeId {
+    /// Monotonic id whose low bits choose the home stripe.
     raw: usize,
+    /// Mixed id whose fields supply local navigation phases.
     mixed: u64,
 }
 
+/// Stable home stripe and cyclic navigation phases for one operation.
 #[derive(Clone, Copy)]
 struct Probe {
+    /// First stripe visited by this thread.
     home_stripe: usize,
+    /// Unreduced six-bit starting phase for summary groups.
     group_phase: u32,
+    /// Unreduced 27-bit starting phase for free words.
     word_phase: u32,
+    /// Six-bit rotation applied to slot selection within a free word.
     bit_phase: u32,
 }
 
-// Monotonic source for per-thread probe ids.
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
+        /// Monotonic process-wide source for per-thread probe ids.
         static NEXT_PROBE_ID: AtomicUsize = AtomicUsize::new(0);
     } else {
         loom::lazy_static! {
+            /// Monotonic modeled source for per-thread probe ids.
             static ref NEXT_PROBE_ID: AtomicUsize = AtomicUsize::new(0);
         }
     }
@@ -1990,16 +2133,19 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
         thread_local! {
+            /// Lazily assigned stable probe identity for this native thread.
             static TLS_PROBE_ID: Cell<Option<ProbeId>> = const { Cell::new(None) };
         }
     } else {
         loom::thread_local! {
+            /// Lazily assigned stable probe identity for this modeled thread.
             static TLS_PROBE_ID: Cell<Option<ProbeId>> = Cell::new(None);
         }
     }
 }
 
 impl Probe {
+    /// Returns the current thread's stable probe for a stripe geometry.
     #[inline(always)]
     fn new(stripe_mask: usize) -> Self {
         let id = TLS_PROBE_ID.with(|probe_id| {
@@ -2018,6 +2164,7 @@ impl Probe {
         Self::from_id(id, stripe_mask)
     }
 
+    /// Decodes a raw and mixed identity for the supplied stripe mask.
     #[inline(always)]
     const fn from_id(id: ProbeId, stripe_mask: usize) -> Self {
         Self {
@@ -2028,6 +2175,7 @@ impl Probe {
         }
     }
 
+    /// Rebuilds a probe from a retained phase and explicit home stripe.
     #[inline(always)]
     const fn from_phase(home_stripe: usize, phase: u64) -> Self {
         Self {
@@ -2038,16 +2186,19 @@ impl Probe {
         }
     }
 
+    /// Packs the group, bit, and word phases for creation-cursor retention.
     #[inline(always)]
     const fn phase(self) -> u64 {
         self.group_phase as u64 | ((self.bit_phase as u64) << 6) | ((self.word_phase as u64) << 12)
     }
 
+    /// Returns the `scanned`th stripe in wrapped order from the home stripe.
     #[inline(always)]
     const fn stripe(self, scanned: usize, stripe_mask: usize) -> usize {
         (self.home_stripe + scanned) & stripe_mask
     }
 
+    /// Returns the `offset`th group in wrapped order from the group phase.
     #[inline(always)]
     const fn group(self, offset: usize, group_count: usize) -> usize {
         let start = (self.group_phase as usize * group_count) >> 6;
@@ -2059,21 +2210,28 @@ impl Probe {
         }
     }
 
+    /// Selects the first set group at or after the phase-derived start.
     #[inline(always)]
     const fn select_group(self, groups: u64, group_count: usize) -> usize {
         let start = (self.group_phase as usize * group_count) >> 6;
+        // Rotation makes trailing-zero selection cyclic from the reduced home
+        // group without iterating over absent groups.
         let rotated = groups.rotate_right(start as u32);
         ((rotated.trailing_zeros() as usize) + start) & (SLOT_WORD_BITS - 1)
     }
 
+    /// Selects the first set slot bit at or after the bit phase.
     #[inline(always)]
     const fn select_set_bit(self, word: u64) -> usize {
         let rotated = word.rotate_right(self.bit_phase);
         ((rotated.trailing_zeros() + self.bit_phase) & (SLOT_WORD_BITS as u32 - 1)) as usize
     }
 
+    /// Selects up to `limit` set bits in cyclic order from the bit phase.
     #[inline]
     const fn select_set_bits(self, word: u64, limit: usize) -> u64 {
+        // Select in the rotated coordinate system, then restore physical bit
+        // positions for the authoritative fetch-and mask.
         let mut remaining = word.rotate_right(self.bit_phase);
         let mut selected = 0u64;
         let mut taken = 0;
@@ -2089,6 +2247,7 @@ impl Probe {
         selected.rotate_left(self.bit_phase)
     }
 
+    /// Selects a zero-based set-bit rank after rotating from the bit phase.
     #[inline(always)]
     const fn select_ranked_bit(self, word: u64, rank: usize) -> usize {
         let mut rotated = word.rotate_right(self.bit_phase);
@@ -2101,6 +2260,7 @@ impl Probe {
     }
 }
 
+/// Native unit tests and read-only test inspection helpers.
 #[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
@@ -2110,10 +2270,12 @@ pub(super) mod tests {
         atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
     };
 
+    /// Returns the number of lazy-creation permits that have been admitted.
     pub fn created(freelist: &Freelist) -> usize {
         freelist.created.load(Ordering::Relaxed)
     }
 
+    /// Counts authoritative free bits across all logical words.
     pub fn len(freelist: &Freelist) -> usize {
         freelist
             .stripes
@@ -2128,6 +2290,7 @@ pub(super) mod tests {
             .sum()
     }
 
+    /// Counts logical free words across all stripes.
     pub fn num_words(freelist: &Freelist) -> usize {
         freelist
             .stripes
@@ -2136,19 +2299,23 @@ pub(super) mod tests {
             .sum()
     }
 
+    /// Returns the constructed stripe count.
     pub fn num_stripes(freelist: &Freelist) -> usize {
         freelist.stripes.len()
     }
 
+    /// Maps a stripe-local test coordinate to a global slot id.
     const fn slot_index(freelist: &Freelist, stripe: usize, local: usize) -> u32 {
         ((local << freelist.stripe_shift) | stripe) as u32
     }
 
+    /// Resolves a test slot id to its stable owner pointer.
     fn slot_ptr(freelist: &Freelist, slot: u32) -> ptr::NonNull<PooledOwner> {
         let (stripe, local, _, _) = freelist.slot_location(slot);
         freelist.owner_ptr(stripe, local)
     }
 
+    /// Creates every slot and returns buffers indexed by their stable slot ids.
     fn reserve_by_slot(freelist: &Freelist, capacity: usize) -> Vec<Option<PooledBuffer>> {
         let mut entries = (0..capacity).map(|_| None).collect::<Vec<_>>();
         for _ in 0..capacity {
@@ -2160,11 +2327,13 @@ pub(super) mod tests {
         entries
     }
 
+    /// Shared nonzero cache-aligned allocation layout for native tests.
     const TEST_LAYOUT: Layout = match Layout::from_size_align(64, 64) {
         Ok(layout) => layout,
         Err(_) => unreachable!(),
     };
 
+    /// Builds metadata-only freelist state for pure group-mapping tests.
     fn mapping_shell(base_chunk_words: usize) -> Freelist {
         Freelist {
             layout: TEST_LAYOUT,
@@ -2174,15 +2343,15 @@ pub(super) mod tests {
             creation_cursors: Vec::<CachePadded<CreationCursor>>::new().into_boxed_slice(),
             stripe_mask: 0,
             stripe_shift: 0,
-            base_chunk_words,
             base_chunk_shift: base_chunk_words.trailing_zeros(),
             summaries_enabled: true,
         }
     }
 
+    /// Builds metadata-only stripe state for pure group-mapping tests.
     fn mapping_stripe(capacity: usize, base_chunk_words: usize) -> Stripe {
         let logical_words = capacity.div_ceil(SLOT_WORD_BITS);
-        let (group_count, single_groups, valid_group_mask) =
+        let (group_count, single_groups) =
             group_geometry(logical_words, base_chunk_words, AVAILABILITY_BITS);
         Stripe {
             summary: AtomicU64::new(0),
@@ -2190,12 +2359,12 @@ pub(super) mod tests {
             slots: Vec::new().into_boxed_slice(),
             capacity,
             logical_words,
-            valid_group_mask,
             group_count,
             single_groups,
         }
     }
 
+    /// Verifies stripe bounds across capacity and parallelism extremes.
     #[test]
     fn test_geometry_bounds_stripes_for_capacity_and_parallelism() {
         let target = TARGET_MAX_SLOTS_PER_STRIPE;
@@ -2230,14 +2399,15 @@ pub(super) mod tests {
                 let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
                 let base_chunks = logical_words.div_ceil(geometry.base_chunk_words);
                 assert!(base_chunks <= 64);
-                let (groups, _, mask) =
+                let (groups, _) =
                     group_geometry(logical_words, geometry.base_chunk_words, AVAILABILITY_BITS);
                 assert!(groups <= AVAILABILITY_BITS as u32);
-                assert_eq!(mask & CODE_MASK, 0);
+                assert_eq!(low_bits(groups as usize) & CODE_MASK, 0);
             }
         }
     }
 
+    /// Verifies logical word counts at slot and word boundaries.
     #[test]
     fn test_geometry_capacity_and_word_boundaries() {
         for (capacity, expected_words) in [(1, 1), (63, 1), (64, 1), (65, 2)] {
@@ -2252,6 +2422,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies concentrated and scattered aggregate block accounting.
     #[test]
     fn test_geometry_counts_aggregate_free_word_blocks() {
         for blocks in [15, 16, 17, 31, 32, 33] {
@@ -2268,6 +2439,32 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies target-neutral automatic policy at the 32 and 33 block boundary.
+    #[test]
+    fn test_freelist_automatic_policy_switches_after_aggregate_block_cutoff() {
+        for (blocks, expected_summaries) in [(32, false), (33, true)] {
+            let concentrated = blocks * FREE_WORDS_PER_BLOCK * SLOT_WORD_BITS;
+            let stripes = 1usize << blocks.ilog2();
+            let extra_blocks = blocks - stripes;
+            let scattered = stripes * FREE_WORDS_PER_BLOCK * SLOT_WORD_BITS + extra_blocks;
+
+            for (capacity, parallelism) in [(concentrated, 1), (scattered, stripes)] {
+                let geometry = Geometry::new(capacity, parallelism);
+                assert_eq!(geometry.total_free_word_blocks, blocks);
+
+                let capacity = NonZeroU32::new(
+                    u32::try_from(capacity).expect("policy boundary capacity must fit in u32"),
+                )
+                .expect("policy boundary capacity must be non-zero");
+                let parallelism = NonZeroUsize::new(parallelism)
+                    .expect("policy boundary parallelism must be non-zero");
+                let freelist = Freelist::new(capacity, parallelism, TEST_LAYOUT, false);
+                assert_eq!(freelist.summaries_enabled, expected_summaries);
+            }
+        }
+    }
+
+    /// Verifies that only excess tail chunks are paired into summary groups.
     #[test]
     fn test_group_geometry_pairs_only_the_tail() {
         let cases = [
@@ -2281,10 +2478,9 @@ pub(super) mod tests {
 
         for (base_chunks, expected_groups, expected_single) in cases {
             for logical_words in [base_chunks * 4, (base_chunks - 1) * 4 + 1] {
-                let (groups, single, mask) = group_geometry(logical_words, 4, AVAILABILITY_BITS);
+                let (groups, single) = group_geometry(logical_words, 4, AVAILABILITY_BITS);
                 assert_eq!(groups as usize, expected_groups);
                 assert_eq!(single as usize, expected_single);
-                assert_eq!(mask, low_bits(expected_groups));
 
                 for base in 0..base_chunks {
                     let group = group_for_base(expected_single, base);
@@ -2295,6 +2491,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies packed masks, cleaning codes, and overflow-safe admission.
     #[test]
     fn test_masks_codes_and_admission_boundaries() {
         assert_eq!(low_bits(64), u64::MAX);
@@ -2313,6 +2510,7 @@ pub(super) mod tests {
         assert_eq!(next_admission(usize::MAX - 1, usize::MAX), Some(usize::MAX));
     }
 
+    /// Verifies cursor packing and group-major creation bijections.
     #[test]
     fn test_cursor_encoding_and_group_major_bijection() {
         let phase = PROBE_PHASE_MASK;
@@ -2359,6 +2557,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies that creation retains the full word phase across group widths.
     #[test]
     fn test_cursor_retains_unreduced_phase_across_group_widths() {
         let set = mapping_shell(4096);
@@ -2392,6 +2591,7 @@ pub(super) mod tests {
         assert_eq!(first_pair / SLOT_WORD_BITS - pair_start, 4896);
     }
 
+    /// Verifies fixed probe prefixes stay within their selected first group.
     #[test]
     fn test_fixed_probe_prefixes_remain_in_the_first_group() {
         let set = mapping_shell(4096);
@@ -2413,6 +2613,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies lazy creation capacity and eager prefill state.
     #[test]
     fn test_freelist_try_create_tracks_capacity_and_prefill() {
         // Creation should reserve exactly the configured capacity, whether
@@ -2473,6 +2674,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies forced summary publication and settled-empty cleanup.
     #[test]
     fn test_freelist_forced_summary_publishes_and_cleans() {
         let set = test_helpers::forced_summary(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
@@ -2496,6 +2698,7 @@ pub(super) mod tests {
         set.put(taken);
     }
 
+    /// Verifies batch summary publication and overlap detection ordering.
     #[test]
     fn test_freelist_summary_batch_publication_and_overlap_panic() {
         let set = test_helpers::forced_summary(NZU32!(3), NZUsize!(1), TEST_LAYOUT, false);
@@ -2526,6 +2729,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies a cleaning-code observer repairs availability before claiming.
     #[test]
     fn test_freelist_summary_code_observer_repairs_before_claim() {
         let set = test_helpers::forced_summary(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false);
@@ -2548,20 +2752,7 @@ pub(super) mod tests {
         set.put(taken);
     }
 
-    #[test]
-    fn test_freelist_cleanup_guard_restores_navigation_on_unwind() {
-        let summary = AtomicU64::new(encode_code(0) | group_mask(1));
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = CleanupGuard::new(&summary, group_mask(0));
-            panic!("injected cleanup failure");
-        }));
-        assert!(panic.is_err());
-        assert_eq!(
-            summary.load(Ordering::Acquire),
-            group_mask(0) | group_mask(1)
-        );
-    }
-
+    /// Verifies drain never mutates advisory summary state.
     #[test]
     fn test_freelist_drain_preserves_summary_state() {
         let set = test_helpers::forced_summary(NZU32!(2), NZUsize!(1), TEST_LAYOUT, true);
@@ -2573,6 +2764,7 @@ pub(super) mod tests {
         assert_eq!(set.stripes[0].summary.load(Ordering::Acquire), 0);
     }
 
+    /// Verifies a forced paired group reaches both base chunks.
     #[test]
     fn test_freelist_forced_pair_group_reaches_both_chunks() {
         let set = Freelist::new_inner(
@@ -2597,6 +2789,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies single puts reject a slot that is already free.
     #[test]
     #[should_panic(expected = "returned slot must not already be marked free")]
     fn test_freelist_put_rejects_double_return() {
@@ -2610,6 +2803,7 @@ pub(super) mod tests {
         set.put(duplicate);
     }
 
+    /// Verifies batch puts reject a slot that was already free.
     #[test]
     #[should_panic(expected = "returned slot batch must not already contain a free slot")]
     fn test_freelist_put_batch_rejects_double_return() {
@@ -2628,6 +2822,7 @@ pub(super) mod tests {
         set.put_batch([other, duplicate]);
     }
 
+    /// Verifies batch staging rejects duplicate slots before publication.
     #[test]
     fn test_freelist_put_batch_rejects_duplicate_within_batch() {
         // A duplicate inside one batch trips the staging assert before any
@@ -2662,6 +2857,7 @@ pub(super) mod tests {
         set.put(unsafe { PooledBuffer::from_owner(slot_ptr(&set, slot)) });
     }
 
+    /// Verifies every available slot is transferred exactly once.
     #[test]
     fn test_freelist_returns_each_slot_once() {
         // Use a non-power-of-two capacity to cover partial final words while
@@ -2700,6 +2896,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies creation follows the current thread's probe order.
     #[test]
     fn test_freelist_try_create_uses_thread_probe_order() {
         // Lazy creation follows the same group, word, and bit phases as reuse.
@@ -2724,10 +2921,10 @@ pub(super) mod tests {
         set.put(buffer1);
     }
 
+    /// Verifies concurrent creators reserve distinct stable slots.
     #[test]
     fn test_freelist_concurrent_try_create_reserves_unique_slots() {
-        // Multiple creators racing to grow the same size class must reserve
-        // every slot at most once and stop exactly at capacity.
+        /// Capacity used to force repeated cursor contention across workers.
         const CAPACITY: usize = 128;
 
         // Cover capacity-wide creation with real threads. The Loom sibling
@@ -2784,6 +2981,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies stripe counts remain bounded powers of two.
     #[test]
     fn test_freelist_uses_bounded_power_of_two_stripes() {
         let cases = [
@@ -2822,6 +3020,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies empty, single-entry, and multi-entry batch paths.
     #[test]
     fn test_freelist_put_batch_handles_empty_single_and_multi_entry_paths() {
         // Exercise all batch insertion paths while keeping ownership explicit:
@@ -2873,6 +3072,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies large geometries use touched-only sparse batch records.
     #[test]
     fn test_freelist_put_batch_uses_sparse_records_for_large_free_word_layout() {
         let set = Freelist::new(NZU32!(8193), NZUsize!(65), TEST_LAYOUT, false);
@@ -2907,6 +3107,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies heap-backed staging rejects duplicates before publication.
     #[test]
     fn test_freelist_heap_batch_rejects_duplicate_before_publication() {
         let set = Freelist::new(NZU32!(8193), NZUsize!(65), TEST_LAYOUT, false);
@@ -2950,6 +3151,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies drain claims and releases every globally available slot.
     #[test]
     fn test_freelist_drain_returns_all_available_slots() {
         // Drain should drop every globally available buffer while leaving
@@ -2971,6 +3173,7 @@ pub(super) mod tests {
         set.put(held);
     }
 
+    /// Verifies zero, single, and partial batch-take results.
     #[test]
     fn test_freelist_take_batch_handles_zero_single_and_partial_fill() {
         // Put fewer slots than the largest requested batch to cover exact,
@@ -3012,6 +3215,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies a filled batch stops within the home word.
     #[test]
     fn test_freelist_take_batch_breaks_after_filling_target_in_home_word() {
         let set = Freelist::new(NZU32!(16), NZUsize!(8), TEST_LAYOUT, true);
@@ -3035,6 +3239,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies a word claim honors a batch limit smaller than occupancy.
     #[test]
     fn test_freelist_take_batch_stops_mid_word_when_limit_is_reached() {
         let set = Freelist::new(NZU32!(24), NZUsize!(8), TEST_LAYOUT, true);
@@ -3065,6 +3270,7 @@ pub(super) mod tests {
         set.put(remaining);
     }
 
+    /// Verifies probe rotations, ranks, and selection limits.
     #[test]
     fn test_probe_selectors_respect_phase_and_limit() {
         // The probe offset should rotate priority without selecting bits that
@@ -3101,6 +3307,7 @@ pub(super) mod tests {
         assert_eq!(selected, wrap_word);
     }
 
+    /// Verifies stable mixer vectors and decoded probe fields.
     #[test]
     fn test_probe_mixer_vectors_and_fields() {
         let vectors = [
@@ -3143,6 +3350,7 @@ pub(super) mod tests {
         assert_eq!(wrapped_id.home_stripe, usize::MAX & 31);
     }
 
+    /// Verifies stale same-bit candidates cannot duplicate ownership.
     #[test]
     fn test_freelist_take_retries_after_losing_a_same_bit_race() {
         // Force repeated same-word contention on a single free slot. Some
@@ -3189,6 +3397,7 @@ pub(super) mod tests {
         }
     }
 
+    /// Verifies dropping a freelist drains all parked buffers.
     #[test]
     fn test_freelist_drop_drains_remaining_buffers() {
         // Dropping a non-empty freelist must drop any buffers still parked in
@@ -3202,6 +3411,7 @@ pub(super) mod tests {
     }
 }
 
+/// Exhaustive Loom models for ownership transfer and summary navigation.
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
@@ -3224,6 +3434,7 @@ mod loom_tests {
     /// the put-Release or take-Acquire edge makes loom report a data race
     /// here, which the slot-accounting assertions alone cannot detect.
     struct SlotStamps {
+        /// One Loom-tracked non-atomic cell per modeled slot.
         cells: Vec<UnsafeCell<usize>>,
     }
 
@@ -3234,6 +3445,7 @@ mod loom_tests {
     unsafe impl Sync for SlotStamps {}
 
     impl SlotStamps {
+        /// Allocates zeroed stamps for `slots` modeled owners.
         fn new(slots: usize) -> Arc<Self> {
             Arc::new(Self {
                 cells: (0..slots).map(|_| UnsafeCell::new(0)).collect(),
@@ -3267,19 +3479,22 @@ mod loom_tests {
     // single-word/multi-bit, multi-word/single-bit, and multi-word/multi-bit
     // layouts so both degenerate and striped cases stay exercised.
 
+    /// Builds a one-stripe direct-mode freelist for compact ownership models.
     fn single_word_freelist(capacity: u32) -> Freelist {
         let layout = Layout::from_size_align(64, 64).unwrap();
         Freelist::new(NZU32!(capacity), NZUsize!(1), layout, false)
     }
 
+    /// Builds a one-stripe summarized freelist for targeted summary models.
     fn forced_summary_freelist(capacity: u32) -> Freelist {
         let layout = Layout::from_size_align(64, 64).unwrap();
         test_helpers::forced_summary(NZU32!(capacity), NZUsize!(1), layout, false)
     }
 
-    // Performs a put's authoritative free-word RMW, but delays its summary
-    // publication. `PooledBuffer` has no drop glue, so the set free bit owns the
-    // allocation when this helper returns.
+    /// Performs a put's free-word RMW while delaying summary publication.
+    ///
+    /// `PooledBuffer` has no drop glue, so the set free bit owns the allocation
+    /// when this helper returns.
     fn stall_put_after_free_word(freelist: &Freelist, buffer: PooledBuffer) -> (usize, u64) {
         let (stripe_index, _, word, mask) = freelist.slot_location(buffer.slot());
         let stripe = &freelist.stripes[stripe_index];
@@ -3291,9 +3506,10 @@ mod loom_tests {
         )
     }
 
-    // Claims one known published slot without consulting advisory navigation.
-    // This lets returned-state models place exact free-word transitions around
-    // one real `claim_word` invocation.
+    /// Claims one known published slot without advisory navigation.
+    ///
+    /// Returned-state models use this to place exact free-word transitions
+    /// around one real `claim_word` invocation.
     fn claim_published_slot(freelist: &Freelist, slot: u32) -> PooledBuffer {
         let (stripe_index, local, word, mask) = freelist.slot_location(slot);
         let stripe = &freelist.stripes[stripe_index];
@@ -3302,6 +3518,7 @@ mod loom_tests {
         freelist.buffer(stripe_index, local)
     }
 
+    /// Proves a completed put remains discoverable through an exact cleaning code.
     #[test]
     fn summary_starts_after_completed_publication_uses_exact_code() {
         loom::model(|| {
@@ -3349,6 +3566,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a later put helps publish a return delayed before summary publication.
     #[test]
     fn summary_second_put_publishes_while_first_is_delayed() {
         loom::model(|| {
@@ -3403,6 +3621,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves competing takers safely converge one stale advertised group.
     #[test]
     fn summary_competing_takes_clean_one_stale_group() {
         loom::model(|| {
@@ -3431,6 +3650,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a code observer repairs navigation before exposing a claimed buffer.
     #[test]
     fn summary_code_observer_repairs_before_claim_callback() {
         loom::model(|| {
@@ -3468,6 +3688,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves batch publication composes with a concurrent summarized take.
     #[test]
     fn summary_batch_publication_races_take() {
         loom::model(|| {
@@ -3513,6 +3734,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves batch publication survives concurrent stale-group cleanup.
     #[test]
     fn summary_batch_publication_races_stale_group_cleanup() {
         loom::model(|| {
@@ -3552,6 +3774,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves overlap panic handling conserves a concurrently claimed free bit.
     #[test]
     fn summary_batch_overlap_panic_conserves_concurrently_claimed_free_bit() {
         loom::model(|| {
@@ -3609,8 +3832,7 @@ mod loom_tests {
                         leases.push_expected(&seen, 1usize << unique_slot, buffer);
                     };
                     let mut context = TakeContext {
-                        max: 1,
-                        filled: 0,
+                        remaining: 1,
                         on_entry: &mut on_entry,
                     };
                     set.claim_word(
@@ -3621,7 +3843,7 @@ mod loom_tests {
                         Probe::from_phase(stripe_index, 0),
                         &mut context,
                     );
-                    assert_eq!(context.filled, 1);
+                    assert_eq!(context.remaining, 0);
                 })
             };
 
@@ -3635,6 +3857,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a code owner repairs and clears navigation before callback delivery.
     #[test]
     fn summary_code_owner_repairs_and_clears_before_callback() {
         loom::model(|| {
@@ -3677,12 +3900,11 @@ mod loom_tests {
                     claimed = Some(buffer);
                 };
                 let mut context = TakeContext {
-                    max: 1,
-                    filled: 0,
+                    remaining: 1,
                     on_entry: &mut on_entry,
                 };
                 set.clean_owned_group(0, stripe, 0, Probe::from_phase(0, 0), &mut context);
-                assert_eq!(context.filled, 1);
+                assert_eq!(context.remaining, 0);
             }
 
             resume_tx.send(()).unwrap();
@@ -3691,6 +3913,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves competing code observers deliver one candidate at most once.
     #[test]
     fn summary_code_observers_losing_one_candidate_deliver_once() {
         loom::model(|| {
@@ -3740,6 +3963,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves code observation and drain partition ownership without loss.
     #[test]
     fn summary_code_observer_and_drain_conserve_the_free_bit() {
         loom::model(|| {
@@ -3803,6 +4027,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves observer repair and a live put survive code removal after drain.
     #[test]
     fn summary_observer_repair_and_live_put_survive_code_clear_after_drain() {
         loom::model(|| {
@@ -3836,8 +4061,7 @@ mod loom_tests {
             let mut unexpected = 0;
             let mut on_entry = |_| unexpected += 1;
             let mut context = TakeContext {
-                max: 1,
-                filled: 0,
+                remaining: 1,
                 on_entry: &mut on_entry,
             };
             set.claim_word(
@@ -3848,7 +4072,7 @@ mod loom_tests {
                 Probe::from_phase(0, 0),
                 &mut context,
             );
-            assert_eq!(context.filled, 0);
+            assert_eq!(context.remaining, 1);
             assert_eq!(unexpected, 0);
 
             set.put(live_buffer);
@@ -3865,6 +4089,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a successor cleaner cannot be erased by a prior stale claimant.
     #[test]
     fn summary_successor_cleaner_finishes_before_prior_stale_claim() {
         loom::model(|| {
@@ -3909,8 +4134,7 @@ mod loom_tests {
             let mut successor_claims = 0;
             let mut successor = |_| successor_claims += 1;
             let mut successor_context = TakeContext {
-                max: 1,
-                filled: 0,
+                remaining: 1,
                 on_entry: &mut successor,
             };
             set.clean_owned_group(
@@ -3920,15 +4144,14 @@ mod loom_tests {
                 Probe::from_phase(0, 0),
                 &mut successor_context,
             );
-            assert_eq!(successor_context.filled, 0);
+            assert_eq!(successor_context.remaining, 1);
             assert_eq!(successor_claims, 0);
             assert_eq!(stripe.summary.load(Ordering::Acquire), 0);
 
             let mut prior_claims = 0;
             let mut prior = |_| prior_claims += 1;
             let mut prior_context = TakeContext {
-                max: 1,
-                filled: 0,
+                remaining: 1,
                 on_entry: &mut prior,
             };
             set.claim_word(
@@ -3939,12 +4162,13 @@ mod loom_tests {
                 Probe::from_phase(0, 0),
                 &mut prior_context,
             );
-            assert_eq!(prior_context.filled, 0);
+            assert_eq!(prior_context.remaining, 1);
             assert_eq!(prior_claims, 0);
             assert!(set.take().is_none());
         });
     }
 
+    /// Proves a foreign code observed after failed cleanup is scanned once.
     #[test]
     fn summary_foreign_code_from_failed_cleanup_load_is_scanned_once() {
         loom::model(|| {
@@ -4002,8 +4226,7 @@ mod loom_tests {
                 claimed = Some(buffer);
             };
             let mut context = TakeContext {
-                max: 1,
-                filled: 0,
+                remaining: 1,
                 on_entry: &mut on_entry,
             };
             set.scan_summarized_stripe_from_state(
@@ -4013,7 +4236,7 @@ mod loom_tests {
                 Probe::from_phase(0, 0),
                 &mut context,
             );
-            assert_eq!(context.filled, 1);
+            assert_eq!(context.remaining, 0);
 
             stripe
                 .summary
@@ -4027,6 +4250,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a failed cleanup CAS contributes the returned foreign code.
     #[test]
     fn summary_failed_cleanup_cas_contributes_returned_foreign_code() {
         // Capture group 0's cleanup state, then let a competing cleaner replace
@@ -4098,8 +4322,7 @@ mod loom_tests {
             let mut claimed = None;
             let mut on_entry = |buffer| claimed = Some(buffer);
             let mut context = TakeContext {
-                max: 1,
-                filled: 0,
+                remaining: 1,
                 on_entry: &mut on_entry,
             };
             set.scan_summarized_stripe_from_state(
@@ -4109,7 +4332,7 @@ mod loom_tests {
                 Probe::from_phase(0, 0),
                 &mut context,
             );
-            assert_eq!(context.filled, 1);
+            assert_eq!(context.remaining, 0);
             assert_eq!(claimed.as_ref().map(PooledBuffer::slot), Some(64));
 
             stripe
@@ -4119,6 +4342,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves paired-group navigation reaches a partial final free word.
     #[test]
     fn summary_paired_group_reaches_partial_final_free_word() {
         loom::model(|| {
@@ -4157,6 +4381,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves drain and put compose without drain mutating advisory navigation.
     #[test]
     fn summary_drain_races_put_without_touching_navigation() {
         loom::model(|| {
@@ -4196,92 +4421,7 @@ mod loom_tests {
         });
     }
 
-    #[test]
-    fn summary_cleanup_guard_restores_state_during_unwind() {
-        loom::model(|| {
-            let summary = AtomicU64::new(encode_code(0) | group_mask(1));
-            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _guard = CleanupGuard::new(&summary, group_mask(0));
-                panic!("injected cleanup failure");
-            }));
-
-            assert!(panic.is_err());
-            assert_eq!(
-                summary.load(Ordering::Acquire),
-                group_mask(0) | group_mask(1)
-            );
-        });
-    }
-
-    #[test]
-    fn summary_cleanup_unwind_cannot_clear_successor_code() {
-        // Race the old owner's unwind repair and clear with another repair and
-        // a successor trying to reinstall the same code. A successful successor
-        // CAS can occur only after the old code clear, and no old-guard action
-        // may then erase the new generation.
-        loom::model(|| {
-            let group = group_mask(0);
-            let summary = Arc::new(AtomicU64::new(encode_code(0)));
-            let (guard_ready_tx, guard_ready_rx) = mpsc::channel();
-            let (unwind_tx, unwind_rx) = mpsc::channel();
-            let (owner_done_tx, owner_done_rx) = mpsc::channel();
-
-            let owner = {
-                let summary = Arc::clone(&summary);
-                thread::spawn(move || {
-                    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _guard = CleanupGuard::new(&summary, group);
-                        guard_ready_tx.send(()).unwrap();
-                        unwind_rx.recv().unwrap();
-                        panic!("injected cleanup failure");
-                    }));
-                    assert!(panic.is_err());
-                    owner_done_tx.send(()).unwrap();
-                })
-            };
-
-            guard_ready_rx.recv().unwrap();
-            let observer = {
-                let summary = Arc::clone(&summary);
-                thread::spawn(move || {
-                    summary.fetch_or(group, Ordering::Release);
-                })
-            };
-            let successor = {
-                let summary = Arc::clone(&summary);
-                thread::spawn(move || {
-                    let try_install = || {
-                        let current = summary.load(Ordering::Acquire);
-                        if decode_code(current).is_some() || current & group == 0 {
-                            return false;
-                        }
-                        let desired = (current & AVAILABILITY_MASK & !group) | encode_code(0);
-                        summary
-                            .compare_exchange(current, desired, Ordering::AcqRel, Ordering::Acquire)
-                            .is_ok()
-                    };
-
-                    let installed_while_owner_finishes = try_install();
-                    owner_done_rx.recv().unwrap();
-                    if !installed_while_owner_finishes {
-                        assert!(try_install());
-                    }
-                    assert_eq!(decode_code(summary.load(Ordering::Acquire)), Some(0));
-                })
-            };
-
-            unwind_tx.send(()).unwrap();
-            owner.join().unwrap();
-            observer.join().unwrap();
-            successor.join().unwrap();
-            assert_eq!(decode_code(summary.load(Ordering::Acquire)), Some(0));
-
-            summary.fetch_or(group, Ordering::Release);
-            summary.fetch_and(AVAILABILITY_MASK, Ordering::Release);
-            assert_eq!(summary.load(Ordering::Acquire), group);
-        });
-    }
-
+    /// Proves the first cursor claimant installs the phase inherited by followers.
     #[test]
     fn creation_cursor_first_claim_installs_phase_for_followers() {
         loom::model(|| {
@@ -4322,20 +4462,25 @@ mod loom_tests {
         });
     }
 
-    // Each geometry gives a model a small bitmap layout: one or more active
-    // bitmap words, with either one or multiple free bits per active word.
-    // The names spell out that words-by-bits matrix.
+    /// Small direct-mode ownership geometries for the broad Loom matrices.
+    ///
+    /// The variants cover one or multiple active words crossed with one or
+    /// multiple active bits per word.
     #[allow(clippy::enum_variant_names)]
     #[derive(Clone, Copy, Debug)]
     enum Geometry {
+        /// One active word containing one active bit.
         SingleWordSingleBit,
+        /// One active word containing multiple active bits.
         SingleWordMultiBit,
+        /// Multiple active words containing one active bit each.
         MultiWordSingleBit,
+        /// Multiple active words containing multiple active bits.
         MultiWordMultiBit,
     }
 
     impl Geometry {
-        // Builds a freelist with this geometry's bitmap shape.
+        /// Builds a freelist with this geometry's free-word shape.
         fn freelist(self) -> Freelist {
             match self {
                 Self::SingleWordSingleBit => single_word_freelist(1),
@@ -4351,8 +4496,7 @@ mod loom_tests {
             }
         }
 
-        // Returns the slot ids that are active in this geometry. Models use
-        // only the first id and the id set. The order is not significant.
+        /// Returns the active slot ids, with no semantic ordering guarantee.
         const fn slots(self) -> &'static [u32] {
             match self {
                 Self::SingleWordSingleBit => &[0],
@@ -4362,8 +4506,7 @@ mod loom_tests {
             }
         }
 
-        // Returns a bit mask of active slot ids for duplicate and completeness
-        // checks in the models.
+        /// Returns an active-slot mask for duplicate and completeness checks.
         fn slot_mask(self) -> usize {
             self.slots()
                 .iter()
@@ -4371,6 +4514,7 @@ mod loom_tests {
         }
     }
 
+    /// Complete direct-mode ownership geometry matrix.
     const ALL_GEOMETRIES: [Geometry; 4] = [
         Geometry::SingleWordSingleBit,
         Geometry::SingleWordMultiBit,
@@ -4378,18 +4522,22 @@ mod loom_tests {
         Geometry::MultiWordMultiBit,
     ];
 
+    /// Geometries with enough slots to exercise batch operations.
     const BATCH_GEOMETRIES: [Geometry; 3] = [
         Geometry::SingleWordMultiBit,
         Geometry::MultiWordSingleBit,
         Geometry::MultiWordMultiBit,
     ];
 
+    /// Geometries whose active words span multiple stripes.
     const STRIPED_GEOMETRIES: [Geometry; 2] =
         [Geometry::MultiWordSingleBit, Geometry::MultiWordMultiBit];
 
+    /// Geometries with multiple active bits in at least one word.
     const MULTI_BIT_GEOMETRIES: [Geometry; 2] =
         [Geometry::SingleWordMultiBit, Geometry::MultiWordMultiBit];
 
+    /// Runs one cloned Loom model over each supplied direct-mode geometry.
     fn model<F>(geometries: &[Geometry], test: F)
     where
         F: Fn(Geometry, Arc<Freelist>) + Clone + Send + Sync + 'static,
@@ -4402,15 +4550,19 @@ mod loom_tests {
         }
     }
 
-    // Owns buffers that a loom model has taken from the freelist. This
-    // keeps the test-side ownership rule in one place: every created buffer
-    // must be returned to the same freelist before that freelist is dropped.
+    /// Owns buffers taken by a Loom model until they can be returned safely.
+    ///
+    /// This centralizes the test-side rule that every created buffer returns to
+    /// the same freelist before that freelist is dropped.
     struct Leases {
+        /// Freelist that owns every retained buffer.
         freelist: Arc<Freelist>,
+        /// Buffers currently held outside the freelist by the model.
         buffers: Mutex<Vec<PooledBuffer>>,
     }
 
     impl Leases {
+        /// Creates an empty external-owner collection.
         fn new(freelist: Arc<Freelist>) -> Arc<Self> {
             Arc::new(Self {
                 freelist,
@@ -4418,11 +4570,13 @@ mod loom_tests {
             })
         }
 
+        /// Creates every buffer and returns them beside an empty lease owner.
         fn reserve(freelist: Arc<Freelist>) -> (Arc<Self>, Vec<PooledBuffer>) {
             let entries = Self::entries(&freelist);
             (Self::new(freelist), entries)
         }
 
+        /// Lazily creates every buffer admitted by `freelist`.
         fn entries(freelist: &Freelist) -> Vec<PooledBuffer> {
             let mut entries = Vec::new();
             while let Some(entry) = freelist.try_create(false) {
@@ -4431,10 +4585,12 @@ mod loom_tests {
             entries
         }
 
+        /// Retains one externally owned buffer for later return.
         fn push(&self, buffer: PooledBuffer) {
             self.buffers.lock().push(buffer);
         }
 
+        /// Records a unique expected slot and retains its claimed buffer.
         fn push_expected(&self, seen: &AtomicUsize, expected: usize, buffer: PooledBuffer) {
             let slot = buffer.slot();
             let mask = 1usize << slot;
@@ -4446,6 +4602,7 @@ mod loom_tests {
     }
 
     impl Drop for Leases {
+        /// Returns every retained buffer before releasing the owning freelist.
         fn drop(&mut self) {
             for buffer in self.buffers.lock().drain(..) {
                 self.freelist.put(buffer);
@@ -4453,6 +4610,7 @@ mod loom_tests {
         }
     }
 
+    /// Proves concurrent creation tickets never duplicate stable slots.
     #[test]
     fn concurrent_creates_do_not_duplicate_slots() {
         // `created` admits the two creators, then relaxed stripe cursors choose
@@ -4496,6 +4654,7 @@ mod loom_tests {
         }
     }
 
+    /// Proves Release put publication transfers side-table writes to an Acquire take.
     #[test]
     fn put_publishes_before_take() {
         // `put` publishes the returned slot with a Release RMW. The taker
@@ -4540,6 +4699,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves concurrent single puts merge disjoint bits in one free word.
     #[test]
     fn concurrent_puts_merge_disjoint_bits() {
         // Two producers return different slots that live in the same bitmap
@@ -4581,6 +4741,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves concurrent batch puts merge disjoint masks in one free word.
     #[test]
     fn concurrent_put_batches_merge_disjoint_bits() {
         // Each producer stages two slots and then publishes its per-word mask
@@ -4618,6 +4779,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves single put and take RMWs compose on a partially free word.
     #[test]
     fn put_and_take_compose_on_partially_free_word() {
         // One slot starts free, then a producer returns another slot while
@@ -4666,6 +4828,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves put and batch take compose on a partially free word.
     #[test]
     fn put_and_take_batch_compose_on_partially_free_word() {
         // This is the batch-claim version of the partially-free word race:
@@ -4715,6 +4878,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves batch put and drain compose on a partially free word.
     #[test]
     fn put_batch_and_drain_compose_on_partially_free_word() {
         // One slot starts free, then a batch producer stages two more slots and
@@ -4757,6 +4921,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves two takers cannot both claim one stale candidate bit.
     #[test]
     fn two_takers_cannot_claim_one_slot() {
         // Both takers may observe the same stale non-zero candidate word.
@@ -4797,6 +4962,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a stale candidate can claim a later valid republication exactly once.
     #[test]
     fn stale_candidate_can_claim_republished_same_slot() {
         // An Acquire candidate load is not a reservation. One taker may observe
@@ -4845,6 +5011,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves returned RMW state can help distinct new bits in one bounded scan.
     #[test]
     fn returned_state_helping_follows_distinct_bits_in_one_word_scan() {
         // The primary scan starts with D. The first claim returns D | A, so A
@@ -4905,8 +5072,7 @@ mod loom_tests {
                 }
             };
             let mut context = TakeContext {
-                max: 2,
-                filled: 0,
+                remaining: 2,
                 on_entry: &mut on_entry,
             };
             freelist.claim_word(
@@ -4919,12 +5085,13 @@ mod loom_tests {
             );
 
             transition.join().unwrap();
-            assert_eq!(context.filled, 2);
+            assert_eq!(context.remaining, 0);
             assert_eq!(seen.load(Ordering::Relaxed), expected);
             assert_eq!(freelist.stripes[0].free_word(0).load(Ordering::Acquire), 0);
         });
     }
 
+    /// Proves returned-state helping never retries a republished attempted bit.
     #[test]
     fn returned_state_helping_attempts_republished_bit_only_once() {
         // The primary scan starts with D and learns about A from its first RMW.
@@ -4971,8 +5138,7 @@ mod loom_tests {
                 d_ready_rx.recv().unwrap();
             };
             let mut context = TakeContext {
-                max: 2,
-                filled: 0,
+                remaining: 2,
                 on_entry: &mut on_entry,
             };
             freelist.claim_word(
@@ -4985,7 +5151,7 @@ mod loom_tests {
             );
 
             transition.join().unwrap();
-            assert_eq!(context.filled, 1);
+            assert_eq!(context.remaining, 1);
             assert_eq!(callbacks.load(Ordering::Relaxed), 1);
             assert_eq!(
                 freelist.stripes[0].free_word(0).load(Ordering::Acquire),
@@ -4996,6 +5162,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves batch claims survive an intervening same-word RMW sequence.
     #[test]
     fn batch_claims_survive_intervening_rmw_sequence() {
         // `put_batch` publishes both bits with one Release RMW. This model
@@ -5037,6 +5204,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves single and batch takers cannot duplicate slot ownership.
     #[test]
     fn take_and_take_batch_do_not_duplicate_slots() {
         // A single-slot claim and a batch claim race over the same free set.
@@ -5097,6 +5265,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves concurrent batch takers cannot duplicate slot ownership.
     #[test]
     fn two_take_batches_do_not_duplicate_slots() {
         // Two batch refill paths can speculatively choose stale candidate bits
@@ -5136,6 +5305,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a batch taker continues after losing its selected bits.
     #[test]
     fn two_take_batches_continue_after_losing_selected_bits() {
         // Both batch takers can speculatively select the same first two bits
@@ -5178,6 +5348,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves batch Release publication transfers ownership to batch Acquire claims.
     #[test]
     fn put_batch_publishes_to_take_batch() {
         // This exercises the batch-specific publish and claim path end to end
@@ -5238,6 +5409,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves a put publication transfers ownership to an Acquire drain.
     #[test]
     fn put_publishes_to_drain() {
         // `drain` uses an Acquire whole-word swap. Run it concurrently with
@@ -5290,6 +5462,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves batch publication transfers every returned slot to drain.
     #[test]
     fn put_batch_publishes_to_drain() {
         // A batch publish stages multiple returned slots before publishing the
@@ -5335,6 +5508,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves direct takes discover independent puts across all stripes.
     #[test]
     fn puts_and_take_scan_across_stripes() {
         // Publish slots across multiple bitmap words using the single-entry
@@ -5383,6 +5557,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves drain and take partition free slots without duplication or loss.
     #[test]
     fn drain_and_take_do_not_duplicate_or_lose_slots() {
         // `drain` clears a whole word with `swap(0)` while `take` clears one
@@ -5436,6 +5611,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves concurrent drains partition free slots without duplication or loss.
     #[test]
     fn two_drains_do_not_duplicate_or_lose_slots() {
         // `drain` is a public whole-word `swap(0)` operation over every bitmap
@@ -5470,6 +5646,7 @@ mod loom_tests {
         });
     }
 
+    /// Proves drain and batch take partition slots without duplication or loss.
     #[test]
     fn drain_and_take_batch_do_not_duplicate_or_lose_slots() {
         // This is the same whole-word `swap(0)` race as the single-slot drain

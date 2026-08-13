@@ -15,9 +15,11 @@
 //! buffers, keeping occupancy stable throughout the run. This matches the
 //! steady-state shape of multi-threaded freelist reuse.
 //!
-//! Freelist-only cases at 32 and 33 physical free-word blocks also benchmark
-//! successful reuse and settled-empty scans across the automatic x86-64
-//! traversal-policy boundary.
+//! Freelist-only cases sweep 15, 16, 17, 31, 32, and 33 aggregate physical
+//! free-word blocks in both concentrated and scattered layouts. Each measured
+//! iteration performs eight successful put/take cycles followed by one empty
+//! take, exercising the automatically selected traversal policy around its
+//! 32-block boundary.
 //!
 //! The benchmarked values are [`PooledBuffer`] handles backed by initialized
 //! benchmark slots, keeping the baseline container shape close to the real
@@ -41,7 +43,7 @@ use std::{
 
 const SLOTS: &[usize] = &[16, 64, 512];
 const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
-const AUTO_POLICY_BLOCKS: [usize; 2] = [32, 33];
+const AUTOMATIC_POLICY_BLOCKS: [usize; 6] = [15, 16, 17, 31, 32, 33];
 
 const FREE_WORDS_PER_BLOCK: usize = size_of::<CachePadded<AtomicU64>>() / size_of::<AtomicU64>();
 const SLOTS_PER_FREE_WORD_BLOCK: usize = FREE_WORDS_PER_BLOCK * u64::BITS as usize;
@@ -142,39 +144,98 @@ pub fn bench(c: &mut Criterion) {
         }
     }
 
-    bench_automatic_policy_boundary(c);
+    bench_automatic_policy_matrix(c);
 }
 
-fn bench_automatic_policy_boundary(c: &mut Criterion) {
-    for blocks in AUTO_POLICY_BLOCKS {
+/// Benchmarks automatic traversal across the aggregate block policy matrix.
+fn bench_automatic_policy_matrix(c: &mut Criterion) {
+    for blocks in AUTOMATIC_POLICY_BLOCKS {
+        for (shape, scattered) in [("concentrated", false), ("scattered", true)] {
+            let (slots, parallelism) = automatic_policy_geometry(blocks, scattered);
+            let name = format!(
+                "{}/impl=freelist op=m8 slots={slots} threads=1 p={parallelism} blocks={blocks} shape={shape}",
+                module_path!(),
+            );
+            c.bench_function(&name, |b| {
+                let freelist = Freelist::new(
+                    NonZeroU32::new(
+                        u32::try_from(slots).expect("benchmark capacity must fit in u32"),
+                    )
+                    .expect("benchmark capacity must be non-zero"),
+                    NonZeroUsize::new(parallelism).expect("benchmark parallelism must be non-zero"),
+                    BENCH_LAYOUT,
+                    true,
+                );
+
+                // Check out every slot so each successful cycle publishes the
+                // only free buffer and the final take observes an empty list.
+                let mut checked_out = Vec::with_capacity(slots);
+                // SAFETY: the freelist remains alive until all buffers are
+                // returned below, and the callback cannot panic.
+                let taken = unsafe {
+                    freelist.take_batch(slots, |buffer| {
+                        checked_out.push(buffer);
+                    })
+                };
+                assert_eq!(taken, slots);
+                // Cycle the first slot selected by this thread's stable probe
+                // so successful operations measure the intended hot path.
+                let mut cycling = Some(checked_out.swap_remove(0));
+
+                b.iter(|| {
+                    let mut buffer = cycling
+                        .take()
+                        .expect("the previous iteration must retain its buffer");
+                    for _ in 0..8 {
+                        // SAFETY: this buffer was taken from this freelist and
+                        // is not currently available in it.
+                        unsafe { freelist.put(buffer) };
+                        // SAFETY: all returned buffers reference owner records
+                        // kept alive by this freelist.
+                        buffer = unsafe { freelist.take() }
+                            .expect("the cycle must reclaim its only free buffer");
+                    }
+
+                    // SAFETY: every created buffer is currently checked out.
+                    assert!(black_box(unsafe { freelist.take() }).is_none());
+                    cycling = Some(black_box(buffer));
+                });
+
+                // SAFETY: every buffer was taken from this freelist, all slots
+                // are distinct, and none is currently available.
+                unsafe {
+                    freelist.put(
+                        cycling
+                            .take()
+                            .expect("the final iteration must retain its buffer"),
+                    );
+                    freelist.put_batch(checked_out.drain(..));
+                }
+            });
+        }
+    }
+}
+
+/// Returns capacity and parallelism for an aggregate physical block shape.
+fn automatic_policy_geometry(blocks: usize, scattered: bool) -> (usize, usize) {
+    assert!(blocks > 0, "automatic policy geometry needs one block");
+    if !scattered {
         let slots = blocks
             .checked_mul(SLOTS_PER_FREE_WORD_BLOCK)
             .expect("benchmark capacity must be representable");
-
-        bench_case::<Freelist>(c, slots, Threading::Single, 1);
-
-        let name = format!(
-            "{}/impl=freelist op=empty slots={slots} threads=1 blocks={blocks}",
-            module_path!(),
-        );
-        c.bench_function(&name, |b| {
-            let freelist = Freelist::new(
-                NonZeroU32::new(u32::try_from(slots).expect("benchmark capacity must fit in u32"))
-                    .expect("benchmark capacity must be non-zero"),
-                NonZeroUsize::MIN,
-                BENCH_LAYOUT,
-                false,
-            );
-            // SAFETY: no buffer has been created for this freelist.
-            assert!(unsafe { freelist.take() }.is_none());
-
-            b.iter(|| {
-                // SAFETY: no buffer has been created, and the freelist remains
-                // alive for the duration of the call.
-                black_box(unsafe { freelist.take() })
-            });
-        });
+        return (slots, 1);
     }
+
+    let stripes = 1usize << blocks.ilog2();
+    let extra_blocks = blocks - stripes;
+    // One block worth of slots gives every stripe one physical block. Each
+    // additional slot crosses the logical-word boundary in one stripe, which
+    // adds exactly one more physical block.
+    let slots = stripes
+        .checked_mul(SLOTS_PER_FREE_WORD_BLOCK)
+        .and_then(|base| base.checked_add(extra_blocks))
+        .expect("benchmark capacity must be representable");
+    (slots, stripes)
 }
 
 fn bench_case<S: FreelistImplementation>(
