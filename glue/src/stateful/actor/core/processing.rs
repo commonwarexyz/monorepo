@@ -22,14 +22,15 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt, futures::Pool,
+    Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
+    futures::OptionFuture,
 };
 use futures::{
     FutureExt as _,
-    future::{Either, ready},
+    future::{BoxFuture, Either, ready},
 };
 use rand_core::Rng;
-use std::{collections::VecDeque, sync::mpsc::TryRecvError};
+use std::{collections::VecDeque, future::Future, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
 enum Step<M, P> {
@@ -39,67 +40,60 @@ enum Step<M, P> {
 }
 
 struct Durability {
-    applied: Height,
     durable: Height,
-    active: Option<Height>,
     acknowledgements: VecDeque<(Height, Exact)>,
+    sync: OptionFuture<BoxFuture<'static, (Height, bool)>>,
 }
 
 impl Durability {
-    const fn new(height: Height) -> Self {
+    fn new(height: Height) -> Self {
         Self {
-            applied: height,
             durable: height,
-            active: None,
             acknowledgements: VecDeque::new(),
+            sync: OptionFuture::default(),
         }
     }
 
+    fn latest_applied(&self) -> Height {
+        self.acknowledgements
+            .back()
+            .map_or(self.durable, |(height, _)| *height)
+    }
+
     fn applied(&mut self, height: Height, acknowledgement: Exact) {
-        assert!(height > self.applied, "finalized heights must increase");
-        self.applied = height;
+        assert!(
+            height > self.latest_applied(),
+            "finalized heights must increase"
+        );
         self.acknowledgements.push_back((height, acknowledgement));
     }
 
     fn needs_sync(&self) -> bool {
-        self.active.is_none() && self.durable < self.applied
+        !self.syncing() && self.durable < self.latest_applied()
     }
 
-    const fn syncing(&self) -> bool {
-        self.active.is_some()
+    fn syncing(&self) -> bool {
+        self.sync.is_some()
     }
 
-    fn started(&mut self, height: Height) {
-        assert!(self.active.replace(height).is_none(), "sync already active");
-        assert!(height > self.durable && height <= self.applied);
+    fn started(&mut self, height: Height, completion: impl Future<Output = bool> + Send + 'static) {
+        assert!(!self.syncing(), "sync already active");
+        assert!(height > self.durable && height <= self.latest_applied());
+        self.sync = Some(async move { (height, completion.await) }.boxed()).into();
     }
 
     fn complete(&mut self, (height, durable): (Height, bool)) -> bool {
-        assert_eq!(self.active.take(), Some(height));
+        assert!(self.sync.take().is_some(), "sync not active");
         if !durable {
             return false;
         }
-        assert!(height > self.durable && height <= self.applied);
+        assert!(height > self.durable && height <= self.latest_applied());
         self.durable = height;
         let covered = self
             .acknowledgements
             .iter()
             .take_while(|(height, _)| *height <= self.durable)
             .count();
-
-        // Keep Marshal from persisting an intermediate recovery height that compact databases
-        // did not publish while coalescing this prefix.
-        let mut acknowledgements = self
-            .acknowledgements
-            .iter()
-            .take(covered)
-            .map(|(_, acknowledgement)| acknowledgement);
-        if let Some(mut previous) = acknowledgements.next() {
-            for acknowledgement in acknowledgements {
-                previous.defer_until(acknowledgement);
-                previous = acknowledgement;
-            }
-        }
         for (_, acknowledgement) in self.acknowledgements.drain(..covered) {
             acknowledgement.acknowledge();
         }
@@ -114,7 +108,6 @@ impl Durability {
 async fn start_sync_if_needed<E, A, S, V>(
     context: &E,
     durability: &mut Durability,
-    syncs: &mut Pool<(Height, bool)>,
     verifications: &mut Verifications<E, A, S, V>,
     databases: &A::Databases,
 ) -> bool
@@ -128,13 +121,12 @@ where
     if !durability.needs_sync() {
         return true;
     }
-    let height = durability.applied;
+    let height = durability.latest_applied();
     let barrier = select! {
         _ = context.stopped() => return false,
         barrier = verifications.drive(databases.finalize()) => barrier,
     };
-    durability.started(height);
-    syncs.push(async move { (height, barrier.durable().await) });
+    durability.started(height, barrier.durable());
     true
 }
 
@@ -215,14 +207,13 @@ where
         // One database sync stays active while later finalized state accumulates behind it.
         // Completion starts a successor for that suffix unless a pending prune must establish
         // the next storage-mutation boundary first.
-        let mut syncs = Pool::<(Height, bool)>::default();
         let mut durability = Durability::new(self.processor.last_processed().height);
         select_loop! {
             self.context,
             on_start => {
                 // Observe completed durability before taking more work. A queued prune suppresses
                 // an automatic dirty-suffix successor until it has released database readers.
-                if let Some(completion) = syncs.next_completed().now_or_never()
+                if let Some(completion) = (&mut durability.sync).now_or_never()
                     && !durability.complete(completion)
                 {
                     return;
@@ -231,7 +222,6 @@ where
                     && !start_sync_if_needed::<E, A, S, V>(
                         &self.context,
                         &mut durability,
-                        &mut syncs,
                         &mut verifications,
                         self.processor.databases(),
                     ).await
@@ -264,7 +254,7 @@ where
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         None => {
                             let mailbox = &mut self.mailbox;
-                            let syncs = &mut syncs;
+                            let sync = &mut durability.sync;
                             let verifications = &mut verifications;
                             Either::Right(async move {
                                 loop {
@@ -272,7 +262,7 @@ where
                                         message = mailbox.recv() => {
                                             break message.map(Step::Message);
                                         },
-                                        completion = syncs.next_completed() => {
+                                        completion = &mut *sync => {
                                             break Some(Step::Sync(completion));
                                         },
                                         _ = verifications.next_completed() => {
@@ -427,8 +417,7 @@ where
                             let height = block.height();
                             durability.applied(height, acknowledgement);
                             if let Some(barrier) = barrier {
-                                durability.started(height);
-                                syncs.push(async move { (height, barrier.durable().await) });
+                                durability.started(height, barrier.durable());
                             }
                             if let Some(prune) = prune {
                                 pending_prune = Some((prune, retry_mailbox.clone()));
@@ -450,7 +439,7 @@ where
                     // before quiescing readers, then run storage maintenance with no sync active.
                     while durability.syncing() {
                         select! {
-                            completion = syncs.next_completed() => {
+                            completion = &mut durability.sync => {
                                 if !durability.complete(completion) {
                                     return;
                                 }
@@ -473,13 +462,13 @@ where
                         if !start_sync_if_needed::<E, A, S, V>(
                             &self.context,
                             &mut durability,
-                            &mut syncs,
                             &mut verifications,
                             self.processor.databases(),
                         ).await {
                             return;
                         }
-                        if !durability.complete(syncs.next_completed().await) {
+                        let completion = (&mut durability.sync).await;
+                        if !durability.complete(completion) {
                             return;
                         }
                         assert!(durability.covers(prune.barrier_height));
@@ -515,7 +504,7 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{Durability, Message, Processing, VerificationRequest, skip_finalized_block};
+    use super::{Message, Processing, VerificationRequest, skip_finalized_block};
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
@@ -549,14 +538,11 @@ mod tests {
     };
     use commonware_utils::{
         NZUsize,
-        acknowledgement::{Acknowledgement as _, Exact, ExactWaiter},
+        acknowledgement::{Acknowledgement as _, Exact},
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{
-        FutureExt as _, StreamExt as _, poll,
-        task::{ArcWake, waker_ref},
-    };
+    use futures::{StreamExt as _, poll};
     use std::{
         collections::VecDeque,
         sync::{
@@ -565,73 +551,6 @@ mod tests {
         },
         time::Duration,
     };
-
-    struct SuccessorObserver {
-        waiter: Mutex<ExactWaiter>,
-        wakes: AtomicUsize,
-    }
-
-    impl ArcWake for SuccessorObserver {
-        fn wake_by_ref(observer: &Arc<Self>) {
-            let mut waiter = observer.waiter.lock();
-            assert!(
-                (&mut *waiter).now_or_never().unwrap().is_ok(),
-                "FIFO head woke before its covered successor",
-            );
-            observer.wakes.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[test]
-    fn coalesced_acknowledgements_hide_intermediate_recovery_height() {
-        let (first, mut first_waiter) = Exact::handle();
-        let (second, second_waiter) = Exact::handle();
-        let first_clone = first.clone();
-        let second_clone = second.clone();
-        let observer = Arc::new(SuccessorObserver {
-            waiter: Mutex::new(second_waiter),
-            wakes: AtomicUsize::new(0),
-        });
-        let waker = waker_ref(&observer);
-        let mut context = std::task::Context::from_waker(&waker);
-        assert!(
-            std::future::Future::poll(std::pin::Pin::new(&mut first_waiter), &mut context)
-                .is_pending()
-        );
-        first_clone.acknowledge();
-
-        let mut durability = Durability::new(Height::new(1));
-        durability.applied(Height::new(2), first);
-        durability.applied(Height::new(3), second);
-        durability.started(Height::new(3));
-        assert!(durability.complete((Height::new(3), true)));
-        assert_eq!(observer.wakes.load(Ordering::Relaxed), 0);
-
-        second_clone.acknowledge();
-        assert_eq!(observer.wakes.load(Ordering::Relaxed), 1);
-        assert!((&mut first_waiter).now_or_never().unwrap().is_ok());
-    }
-
-    #[test]
-    fn coalesced_acknowledgement_edges_are_shared_across_reporters() {
-        let (first, first_waiter) = Exact::handle();
-        let (second, second_waiter) = Exact::handle();
-
-        let mut first_reporter = Durability::new(Height::new(1));
-        first_reporter.applied(Height::new(2), first.clone());
-        first_reporter.applied(Height::new(3), second.clone());
-        first_reporter.started(Height::new(3));
-
-        let mut second_reporter = Durability::new(Height::new(1));
-        second_reporter.applied(Height::new(2), first);
-        second_reporter.applied(Height::new(3), second);
-        second_reporter.started(Height::new(3));
-
-        assert!(first_reporter.complete((Height::new(3), true)));
-        assert!(second_reporter.complete((Height::new(3), true)));
-        assert!(first_waiter.now_or_never().unwrap().is_ok());
-        assert!(second_waiter.now_or_never().unwrap().is_ok());
-    }
 
     struct ApplicationGate {
         started: oneshot::Sender<()>,

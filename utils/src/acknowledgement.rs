@@ -1,6 +1,5 @@
 //! Utilities for providing acknowledgement.
 
-use crate::sync::Mutex;
 use core::{
     fmt::Debug,
     pin::Pin,
@@ -11,7 +10,7 @@ use futures::task::AtomicWaker;
 use std::{
     future::Future,
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -42,25 +41,6 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 pub struct Exact {
     state: Arc<ExactState>,
     acknowledged: bool,
-}
-
-impl Exact {
-    /// Delay `self` until every clone of `later` is acknowledged.
-    ///
-    /// Cancellation propagates from `later` to `self`. Registering the same
-    /// dependency more than once is a no-op. Dependencies must be acyclic.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self` and `later` refer to the same acknowledgement or a
-    /// different dependency remains attached to `later`.
-    pub fn defer_until(&self, later: &Self) {
-        assert!(
-            !Arc::ptr_eq(&self.state, &later.state),
-            "an acknowledgement cannot depend on itself",
-        );
-        later.state.defer(self.state.clone());
-    }
 }
 
 impl Debug for Exact {
@@ -95,8 +75,8 @@ impl Drop for Exact {
         }
 
         // If not yet acknowledged, cancel the acknowledgement.
+        self.state.cancel();
         self.acknowledged = true;
-        ExactState::cancel_chain(&self.state);
     }
 }
 
@@ -117,8 +97,8 @@ impl Acknowledgement for Exact {
     }
 
     fn acknowledge(mut self) {
+        self.state.acknowledge();
         self.acknowledged = true;
-        ExactState::acknowledge_chain(&self.state);
     }
 }
 
@@ -152,7 +132,6 @@ struct ExactState {
     remaining: AtomicUsize,
     canceled: AtomicBool,
     waker: AtomicWaker,
-    deferred: OnceLock<Box<Mutex<Option<Arc<Self>>>>>,
 }
 
 impl ExactState {
@@ -162,8 +141,18 @@ impl ExactState {
             remaining: AtomicUsize::new(1),
             canceled: AtomicBool::new(false),
             waker: AtomicWaker::new(),
-            deferred: OnceLock::new(),
         }
+    }
+
+    /// Acknowledge the completion of a task.
+    fn acknowledge(&self) {
+        // Decrement the remaining count and check if it was the last acknowledgement.
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+
+        // On last acknowledgement, wake the waiter.
+        self.waker.wake();
     }
 
     /// Increment the remaining count.
@@ -171,81 +160,10 @@ impl ExactState {
         self.remaining.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn defer(&self, predecessor: Arc<Self>) {
-        let deferred = self.deferred.get_or_init(|| Box::new(Mutex::new(None)));
-        let mut deferred = deferred.lock();
-        if self.canceled.load(Ordering::Acquire) {
-            drop(deferred);
-            Self::cancel_chain(&predecessor);
-            return;
-        }
-        if let Some(existing) = deferred.as_ref() {
-            assert!(
-                Arc::ptr_eq(existing, &predecessor),
-                "different acknowledgement dependency already set",
-            );
-            return;
-        }
-        predecessor.increment();
-        *deferred = Some(predecessor);
-    }
-
-    fn take_deferred(&self) -> Option<Arc<Self>> {
-        self.deferred
-            .get()
-            .and_then(|deferred| deferred.lock().take())
-    }
-
-    fn acknowledge_chain(root: &Arc<Self>) {
-        if root.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
-            return;
-        }
-        let Some(mut state) = root.take_deferred() else {
-            root.waker.wake();
-            return;
-        };
-
-        let mut completed = vec![root.clone()];
-        loop {
-            if state.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
-                break;
-            }
-            let predecessor = state.take_deferred();
-            completed.push(state);
-            let Some(predecessor) = predecessor else {
-                break;
-            };
-            state = predecessor;
-        }
-
-        // Every linked state is complete before the FIFO head wakes.
-        for state in completed.into_iter().rev() {
-            state.waker.wake();
-        }
-    }
-
-    fn cancel_chain(root: &Arc<Self>) {
-        root.canceled.store(true, Ordering::Release);
-        let Some(mut state) = root.take_deferred() else {
-            root.waker.wake();
-            return;
-        };
-
-        let mut canceled = vec![root.clone()];
-        loop {
-            state.canceled.store(true, Ordering::Release);
-            let predecessor = state.take_deferred();
-            canceled.push(state);
-            let Some(predecessor) = predecessor else {
-                break;
-            };
-            state = predecessor;
-        }
-
-        // Every linked state is canceled before the FIFO head wakes.
-        for state in canceled.into_iter().rev() {
-            state.waker.wake();
-        }
+    /// Cancel the acknowledgement.
+    fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        self.waker.wake();
     }
 }
 
@@ -264,51 +182,6 @@ mod tests {
         assert!(!waiter.is_terminated());
         ack2.acknowledge();
         assert!(waiter.now_or_never().unwrap().is_ok());
-    }
-
-    #[test]
-    fn deferred_acknowledgement_waits_for_all_later_clones() {
-        let (first, mut first_waiter) = Exact::handle();
-        let (second, mut second_waiter) = Exact::handle();
-        let second_clone = second.clone();
-        first.defer_until(&second);
-
-        first.acknowledge();
-        second.acknowledge();
-        assert!((&mut first_waiter).now_or_never().is_none());
-        assert!((&mut second_waiter).now_or_never().is_none());
-
-        second_clone.acknowledge();
-        assert!((&mut first_waiter).now_or_never().unwrap().is_ok());
-        assert!((&mut second_waiter).now_or_never().unwrap().is_ok());
-    }
-
-    #[test]
-    fn canceling_later_acknowledgement_cancels_deferred_acknowledgement() {
-        let (first, mut first_waiter) = Exact::handle();
-        let (second, mut second_waiter) = Exact::handle();
-        let (third, mut third_waiter) = Exact::handle();
-        first.defer_until(&second);
-        second.defer_until(&third);
-
-        first.acknowledge();
-        second.acknowledge();
-        drop(third);
-        assert!((&mut first_waiter).now_or_never().unwrap().is_err());
-        assert!((&mut second_waiter).now_or_never().unwrap().is_err());
-        assert!((&mut third_waiter).now_or_never().unwrap().is_err());
-    }
-
-    #[test]
-    fn deferred_acknowledgement_inherits_existing_cancellation() {
-        let (first, mut first_waiter) = Exact::handle();
-        let (second, mut second_waiter) = Exact::handle();
-        drop(second.clone());
-
-        first.defer_until(&second);
-        first.acknowledge();
-        assert!((&mut first_waiter).now_or_never().unwrap().is_err());
-        assert!((&mut second_waiter).now_or_never().unwrap().is_err());
     }
 
     #[test]

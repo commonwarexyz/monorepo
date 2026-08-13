@@ -390,13 +390,15 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
     /// a `Changeset`, then `db.apply_batch(changeset)`. The returned database
-    /// reflects the batch immediately but is not necessarily durable.
+    /// must expose the batch as an independently rewindable recovery checkpoint.
+    /// The checkpoint need not be durable until the handle returned by
+    /// [`Self::finalize`] resolves.
     fn apply(
         self,
         batch: Self::Merkleized,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Begin persisting the database's current applied state.
+    /// Begin persisting every checkpoint applied before this call.
     ///
     /// Awaiting the returned handle proves the state applied before this call
     /// durable. Later batches may be applied while the handle is pending, but
@@ -416,11 +418,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
-    /// Return the database's current recovery target.
+    /// Return the latest applied recovery target.
     ///
-    /// Implementations may report a target that lags live applied state until
-    /// [`Self::finalize`] publishes it. Returning a target does not by itself
-    /// prove that target durable.
+    /// Returning a target does not by itself prove that target durable.
     fn sync_target(&self) -> Self::SyncTarget;
 
     /// Rewind applied state to `target`.
@@ -568,14 +568,15 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Apply each merkleized batch's changeset.
     ///
-    /// Returns once every database reflects its batch. Durability is started
-    /// separately with [`DatabaseSet::finalize`].
+    /// Returns once every database exposes its batch as an independently
+    /// rewindable recovery checkpoint. Durability is started separately with
+    /// [`DatabaseSet::finalize`].
     ///
     /// Cancelling the future mid-flight loses the databases whose mutations
     /// were in progress (see [Shared]); every later access panics.
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
-    /// Begin persisting the current applied state of every database.
+    /// Begin persisting every checkpoint applied before this call.
     ///
     /// The returned [`Barrier`] resolves once the captured state is durable in
     /// every database. Later batches may be applied while the barrier is
@@ -596,10 +597,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// were in progress (see [Shared]); every later access panics.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return the recovery targets currently reported by the database set.
+    /// Return the latest applied recovery targets.
     ///
-    /// A target may lag live applied state until [`DatabaseSet::finalize`]
-    /// publishes it, and does not by itself prove durability.
+    /// A target does not by itself prove durability.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Rewind the set to the provided per-database targets.
@@ -1883,10 +1883,6 @@ async fn rewind_shared_or_panic<E, T: ManagedDb<E>>(
     index: Option<usize>,
 ) {
     let (slot, database) = shared.write().await;
-    if T::sync_target(&database) == target {
-        slot.put(database);
-        return;
-    }
     slot.put(rewind_or_panic(database, target, index).await);
 }
 
@@ -2665,7 +2661,7 @@ mod tests {
     }
 
     #[test]
-    fn tuple_rewind_to_targets_skips_already_aligned_databases() {
+    fn tuple_rewind_to_targets_validates_already_aligned_databases() {
         deterministic::Runner::default().start(|_context| async move {
             type DbSet = (Shared<CountingRewindDb>, Shared<CountingRewindDb>);
 
@@ -2694,7 +2690,7 @@ mod tests {
 
             let right = right.read().await;
             assert_eq!(right.current_target, 1);
-            assert_eq!(right.rewind_count, 0);
+            assert_eq!(right.rewind_count, 1);
         });
     }
 

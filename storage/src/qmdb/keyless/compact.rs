@@ -2,7 +2,8 @@
 //! for each published commit.
 //!
 //! Mirrors the API of [`crate::qmdb::keyless::Keyless`] (`new_batch -> merkleize ->
-//! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
+//! apply_batch -> publish / commit / sync / start_sync`, pipelined batch chains, `StaleBatch`
+//! validation)
 //! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
 //! there are no `get` / `proof` / `bounds` methods. Use the full variant if you need them.
 //!
@@ -278,9 +279,9 @@ where
 
     /// Build a compact db from state fetched by the sync engine.
     ///
-    /// The witness lives only in memory until the first [`Self::commit`], [`Self::sync`], or
-    /// [`Self::start_sync`]. Until then, dropping the handle leaves the previous on-disk state
-    /// untouched, and rewind/prune are rejected.
+    /// The witness lives only in memory until the first [`Self::publish`], [`Self::commit`],
+    /// [`Self::sync`], or [`Self::start_sync`]. Until then, rewind and prune are rejected.
+    /// Publishing makes the witness available to those operations but does not make it durable.
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
@@ -392,9 +393,9 @@ where
     /// Return the compact-sync target described by the current witness.
     ///
     /// This reflects the last commit handed to the witness journal, which may lag behind live
-    /// in-memory mutations until [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] is
-    /// called. A target published by [`Self::start_sync`] is proven durable only when its
-    /// handle completes.
+    /// in-memory mutations until [`Self::publish`] or a durability method is called. Publishing
+    /// alone does not make a target durable. A target covered by [`Self::start_sync`] is durable
+    /// when its handle completes.
     pub fn target(&self) -> CompactTarget<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
@@ -439,8 +440,8 @@ where
     /// Apply a merkleized batch to the database.
     ///
     /// Returns the range of locations written. The state is updated in memory only. Call
-    /// [`Self::commit`] or [`Self::sync`], or await the handle returned by [`Self::start_sync`],
-    /// to persist it.
+    /// [`Self::publish`] to expose a non-durable rewind checkpoint, or use a durability method
+    /// to publish and persist the current state together.
     ///
     /// # Errors
     ///
@@ -464,6 +465,22 @@ where
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         Ok((self, start_loc..batch.bounds.tip.size))
+    }
+
+    /// Append the current state to the witness journal without making it durable.
+    ///
+    /// A later [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] covers every checkpoint
+    /// published before that durability operation starts.
+    pub async fn publish(mut self) -> Result<Self, Error<F>> {
+        let last_commit_metadata = self.last_commit_metadata.clone();
+        let inactivity_floor_loc = self.inactivity_floor_loc;
+        self.witness = self
+            .witness
+            .publish::<H, S>(&self.merkle, inactivity_floor_loc, || {
+                Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
+            })
+            .await?;
+        Ok(self)
     }
 
     /// Begin durably persisting the current db state to disk.
@@ -530,11 +547,11 @@ where
     where
         F: Family,
     {
-        // Fast path: already at `target` with no uncommitted state. Wait for any pipelined sync
-        // to prove the tip durable before returning.
+        // A clean current target only needs to settle its pipelined sync. An uncommitted target
+        // takes the regular rewind path so the witness journal becomes durable before return.
         if self.size() == target
             && self.witness.with(|w| w.size()) == target
-            && !self.witness.import_pending()
+            && !self.witness.has_uncommitted_state()
         {
             self.witness.wait_for_sync().await?;
             return Ok(self);
@@ -563,8 +580,7 @@ where
     ///
     /// # Errors
     ///
-    /// Fails if a compact-sync import has not yet been persisted by [`Self::commit`],
-    /// [`Self::sync`], or [`Self::start_sync`].
+    /// Fails if a compact-sync import has not yet been published.
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.witness = self.witness.prune(pruning_boundary).await?;
         Ok(self)
@@ -788,9 +804,9 @@ mod tests {
         db
     }
 
-    /// A sync handle must not block database use while the witness sync is pending.
+    /// Publishing a successor does not wait for the witness sync already in flight.
     #[test_traced]
-    fn test_compact_start_sync_overlaps_work() {
+    fn test_compact_publish_overlaps_start_sync() {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-overlap";
             let pending = PendingSyncs::default();
@@ -814,9 +830,10 @@ mod tests {
                 reschedule().await;
             }
 
-            db = apply_append(db, 2).await;
+            db = apply_append(db, 2).await.publish().await.unwrap();
             assert_ne!(db.root(), first_target.root);
-            assert_eq!(db.target(), first_target);
+            let second_target = db.target();
+            assert_ne!(second_target, first_target);
             assert_eq!(
                 pending.completions(),
                 completions_before,
@@ -826,21 +843,19 @@ mod tests {
             pending.unblock();
             waiter.await.unwrap();
 
-            // The mid-sync batch becomes the servable durable state after the next start_sync
-            // handle completes.
+            // The successor becomes durable after the next start_sync handle completes.
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
-            let root = db.root();
-            let target = db.target();
             drop(db);
 
             let db = open_delayed_db(&ctx, "reopen", partition, &pending)
                 .await
                 .unwrap();
-            assert_eq!(db.root(), root);
-            assert_eq!(db.target(), target);
+            assert_eq!(db.target(), second_target);
             assert_eq!(db.get_metadata(), Some(U64::new(2)));
+            let db = db.rewind(first_target.size).await.unwrap();
+            assert_eq!(db.target(), first_target);
             db.destroy().await.unwrap();
         });
     }

@@ -248,7 +248,7 @@ where
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        Ok(db)
+        db.publish().await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -318,7 +318,7 @@ where
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        Ok(db)
+        db.publish().await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -593,6 +593,65 @@ mod tests {
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.size, mmr::Location::new(3));
+        });
+    }
+
+    #[test]
+    fn managed_db_apply_publishes_each_keyless_rewind_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "apply-checkpoints");
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_metadata(U64::new(11));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            let first_target = sync::CompactTarget {
+                root: first.root(),
+                size: first.bounds().tip.size,
+            };
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                .await
+                .unwrap();
+            slot.put(database);
+
+            let second = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(8))
+                .with_metadata(U64::new(22));
+            let second = crate::stateful::db::Unmerkleized::merkleize(second)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, second)
+                .await
+                .unwrap();
+            let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+            sync.await.expect("database sync failed");
+            slot.put(database);
+            drop(db);
+
+            let database = FixedDb::init(
+                context.child("reopen"),
+                fixed_config(&context, "apply-checkpoints"),
+            )
+            .await
+            .unwrap();
+            let database =
+                <FixedDb as ManagedDb<_>>::rewind_to_target(database, first_target.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                <FixedDb as ManagedDb<_>>::sync_target(&database),
+                first_target,
+            );
         });
     }
 
