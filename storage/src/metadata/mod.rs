@@ -102,9 +102,36 @@ mod tests {
             WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::sequence::U64;
+    use commonware_utils::sequence::{U64, Unit};
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
+    use std::num::NonZeroUsize;
+
+    #[test_traced]
+    fn test_bounded_init_discards_oversized_blob() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.resize(65).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let metadata = Metadata::<_, Unit, Unit>::init_bounded(
+                context.child("open"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: (),
+                },
+                NonZeroUsize::new(64).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&Unit), None);
+            drop(metadata);
+
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
 
     fn assert_options(recordings: &Recordings, reads: &[ReadOptions], writes: &[WriteOptions]) {
         let snapshot = recordings.snapshot();
