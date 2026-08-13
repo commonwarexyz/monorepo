@@ -45,7 +45,7 @@ where
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     db: Shared<CompactDb<F, E, K, V, H, C, S>>,
     metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
+    inactivity_floor: Location<F>,
 }
 
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
@@ -87,7 +87,7 @@ where
 
     /// Set the inactivity floor included in the next merkleization.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+        self.inactivity_floor = floor;
         self
     }
 
@@ -174,11 +174,7 @@ where
         let db = self.db.read().await;
         let merkleized = self
             .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
+            .merkleize(&db, self.metadata, self.inactivity_floor)
             .await;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
@@ -211,7 +207,7 @@ where
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inner.bounds().inactivity_floor,
         }
     }
 }
@@ -249,7 +245,7 @@ where
             batch: database.new_batch(),
             db: shared,
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: database.inactivity_floor_loc(),
         }
     }
 
@@ -316,7 +312,7 @@ where
             batch: database.new_batch(),
             db: shared,
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: database.inactivity_floor_loc(),
         }
     }
 
