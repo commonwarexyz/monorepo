@@ -203,7 +203,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 
 // Keep subscriptions alive without spawning one task per receiver. Ready
 // subscriptions are validated, while unresolved ones remain pending.
-fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
+fn drain_ready_subscriptions(pending: &mut Pool<'_, Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
         if let Ok(message) = result {
             assert_eq!(message.digest(), digest);

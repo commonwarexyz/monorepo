@@ -130,7 +130,7 @@ pub struct Engine<
     //
     // There is no limit to the number of futures in this pool, so the automaton
     // can apply backpressure by dropping the verification requests if necessary.
-    pending_verifies: FuturesPool<Verify<C::PublicKey, D>>,
+    pending_verifies: FuturesPool<'static, Verify<C::PublicKey, D>>,
 
     ////////////////////////////////////////
     // Storage
