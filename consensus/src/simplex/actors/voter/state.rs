@@ -1404,8 +1404,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns the payload of `parent` when a pipelined handoff may build on
-    /// it (see [`Self::handoff_parent`]): its optimistic ancestry, or its
-    /// certificate-backed payload when it is directly notarized.
+    /// it: `parent` must satisfy [`Self::handoff_parent`] and have usable
+    /// optimistic ancestry.
+    ///
+    /// The [`Self::handoff_parent`] check runs first because
+    /// [`Self::optimistic_ancestry_payload`] serves a directly notarized
+    /// `parent` without consulting it.
     fn handoff_ancestry_payload(&self, parent: View) -> Option<&D> {
         if !self.handoff_parent(parent) {
             return None;
