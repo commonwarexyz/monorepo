@@ -345,7 +345,12 @@ where
     /// Results arrive through the pool's completion branch, which reintegrates
     /// them and marks the view dirty so this dispatch runs again (e.g. to
     /// recover a certificate from a quorum a batch just completed).
-    fn dispatch_view(&mut self, pool: &mut Pool<Done<S, D>>, view: View, round: &mut Round<S, B, D, Re>) {
+    fn dispatch_view(
+        &mut self,
+        pool: &mut Pool<Done<S, D>>,
+        view: View,
+        round: &mut Round<S, B, D, Re>,
+    ) {
         // Begin a verification batch for every vote kind with work worth
         // verifying.
         while let Some((batch, job)) = round.begin_verify(self.context.as_mut(), &self.strategy) {
