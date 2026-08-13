@@ -1,5 +1,6 @@
 use crate::{
-    FuzzInput, MAX_REQUIRED_CONTAINERS, N4F3C1, PublicKeyOf, StrategyChoice, simplex,
+    BlockFilterChoice, FuzzInput, MAX_REQUIRED_CONTAINERS, N4F3C1, PublicKeyOf, StrategyChoice,
+    simplex,
     strategy::{SmallScope, Strategy},
     utils::Partition,
 };
@@ -1525,6 +1526,7 @@ where
         mailbox_size: input.mailbox_size,
         forwarding: input.forwarding,
         certify: input.certify,
+        block_filter: BlockFilterChoice::None,
         reporting: input.reporting,
     };
 

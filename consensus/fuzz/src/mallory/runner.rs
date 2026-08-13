@@ -1541,7 +1541,7 @@ fn run_inner<P: Simplex>(
 mod tests {
     use super::*;
     use crate::{
-        CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
+        BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
         strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
@@ -1569,6 +1569,7 @@ mod tests {
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
+            block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
         }
     }

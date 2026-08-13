@@ -7,10 +7,10 @@
 use super::BYZANTINE_IDX;
 use crate::{
     CertifyChoice, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, PublicKeyOf, SniffChannel,
-    SniffingReceiver,
+    SniffingReceiver, block_relay,
     byzzfuzz::{
         ByzzFuzz,
-        fault::ProcessFault,
+        fault::{NetworkFault, ProcessFault},
         forwarder,
         injector::ByzzFuzzInjector,
         intercept::{self, FaultGate, SenderViewCell},
@@ -20,14 +20,14 @@ use crate::{
     },
     happens_before, invariants,
     simplex::Simplex,
-    sniff_sink, spawn_honest_validator,
+    sniff_sink, spawn_filtered_honest_validator,
     utils::Partition,
 };
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::{
     Monitor as _,
-    simplex::mocks::{relay, reporter::Reporter},
+    simplex::mocks::reporter::Reporter,
     types::{Epoch, View},
 };
 use commonware_cryptography::{
@@ -75,6 +75,23 @@ struct EngineSetup<P: Simplex> {
 
 fn genesis_payload() -> Sha256Digest {
     Sha256::hash(&[&(Bytes::from_static(b"genesis"), Epoch::new(EPOCH)).encode()])
+}
+
+fn block_partition_allows<P: commonware_cryptography::PublicKey>(
+    participants: &[P],
+    sender_idx: usize,
+    recipient: &P,
+    schedule: &[NetworkFault],
+    view: u64,
+) -> bool {
+    let mut active = schedule
+        .iter()
+        .filter(|fault| fault.view.get() == view)
+        .map(|fault| fault.partition);
+    let Some(recipient_idx) = participants.iter().position(|p| p == recipient) else {
+        return true;
+    };
+    active.all(|partition| partition.connected(sender_idx, recipient_idx))
 }
 
 /// Sample `(c, d, r)` from `context` and build the per-validator
@@ -172,10 +189,44 @@ where
     // replay the genesis payload and parent view before any proposal is seen.
     let pool = ObservedState::new_with_genesis(genesis_payload());
 
-    let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
+    let relay = Arc::new(block_relay::Relay::new());
     let mut reporters = Vec::new();
     let config = input.configuration;
     let mut byzantine_view = None;
+    let sender_views: Arc<[SenderViewCell]> = (0..config.n as usize)
+        .map(|_| SenderViewCell::new())
+        .collect::<Vec<_>>()
+        .into();
+    {
+        let gate = gate.clone();
+        let network_schedule = network_schedule.clone();
+        let participants = participants_arc.clone();
+        let sender_views = sender_views.clone();
+        relay.set_filter(move |sender, _, recipient, _, _, contents| {
+            let Some(sender_idx) = participants.iter().position(|p| p == sender) else {
+                return true;
+            };
+            if let Some(view) = block_relay::mock_block_view(contents) {
+                sender_views[sender_idx].update(view.get());
+            }
+            if gate.gst_reached() {
+                return true;
+            }
+            let view = sender_views[sender_idx].get();
+            let schedule = network_schedule.lock();
+            let allowed =
+                block_partition_allows(participants.as_ref(), sender_idx, recipient, &schedule, view);
+            if !allowed {
+                let recipient_idx = participants
+                    .iter()
+                    .position(|participant| participant == recipient);
+                log::push(format!(
+                    "byzzfuzz: drop channel=Block view={view} sender={sender_idx} recipient={recipient_idx:?} reason=partition",
+                ));
+            }
+            allowed
+        });
+    }
 
     // Cloned byzantine vote sender for the injector. Grabbed BEFORE
     // split_with so injector emissions bypass the forwarder. Cert and
@@ -194,7 +245,7 @@ where
             injector_vote_sender = Some(vote_sender.clone());
         }
 
-        let sender_view = intercept::SenderViewCell::new();
+        let sender_view = sender_views[i].clone();
         if i == BYZANTINE_IDX {
             byzantine_view = Some(sender_view.clone());
         }
@@ -295,7 +346,7 @@ where
             .child("validator")
             .with_attribute("public_key", &validator);
         let spawn = || {
-            spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+            spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
@@ -573,7 +624,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
+        BlockFilterChoice, CertifyChoice, FuzzInput, N4F0C4, ReporterWiring, simplex::SimplexId,
         strategy::StrategyChoice, utils::Partition,
     };
     use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
@@ -594,6 +645,7 @@ mod tests {
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
+            block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
         }
     }

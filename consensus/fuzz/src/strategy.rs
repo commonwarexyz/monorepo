@@ -77,6 +77,12 @@ pub trait Strategy: Send + Sync {
 
     fn repeated_proposal_index(&self, rng: &mut impl Rng, proposals_len: usize) -> Option<usize>;
 
+    /// Whether proposal mutations are specifically probing header changes and
+    /// must preserve the payload digest exactly.
+    fn preserves_proposal_payload(&self) -> bool {
+        false
+    }
+
     fn network_faults(
         &self,
         required_containers: u64,
@@ -962,6 +968,10 @@ macro_rules! impl_header_scope {
                 proposals_len: usize,
             ) -> Option<usize> {
                 self.inner().repeated_proposal_index(rng, proposals_len)
+            }
+
+            fn preserves_proposal_payload(&self) -> bool {
+                true
             }
 
             fn network_faults(

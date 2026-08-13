@@ -1,4 +1,9 @@
-use crate::{EPOCH, strategy::Strategy, types::Message};
+use crate::{
+    EPOCH,
+    block_relay::{self, Relay as BlockRelay},
+    strategy::Strategy,
+    types::Message,
+};
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     Viewable,
@@ -11,11 +16,13 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Handle, IoBuf, Spawner, spawn_cell};
+use commonware_utils::ordered::Quorum;
 use rand::RngExt as _;
 use rand_core::CryptoRng;
 use std::{
     collections::VecDeque,
     future::{Future as _, poll_fn},
+    sync::Arc,
     task::Poll,
     time::Duration,
 };
@@ -58,6 +65,8 @@ pub struct Disrupter<
     last_nullified_view: u64,
     last_notarized_view: u64,
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
+    block_relay: Option<Arc<BlockRelay<S::PublicKey>>>,
+    block_relay_tag: Option<u64>,
 }
 
 impl<E: Clock + Spawner + CryptoRng, S: Scheme<Sha256Digest>, St: Strategy + 'static>
@@ -78,11 +87,46 @@ where
     /// Like [`Self::new`] but stamps emitted messages with `epoch` instead of the
     /// harness-wide [`EPOCH`].
     pub fn new_with_epoch(
+        context: E,
+        scheme: S,
+        strategy: St,
+        required_containers: u64,
+        epoch: Epoch,
+    ) -> Self {
+        Self::new_with_epoch_and_relay(context, scheme, strategy, required_containers, epoch, None)
+    }
+
+    /// Like [`Self::new_with_epoch`] but also publishes generated mock blocks
+    /// through the fuzz-local block relay.
+    pub(crate) fn new_with_epoch_and_relay(
+        context: E,
+        scheme: S,
+        strategy: St,
+        required_containers: u64,
+        epoch: Epoch,
+        block_relay: Option<Arc<BlockRelay<S::PublicKey>>>,
+    ) -> Self {
+        Self::new_with_epoch_relay_and_tag(
+            context,
+            scheme,
+            strategy,
+            required_containers,
+            epoch,
+            block_relay,
+            None,
+        )
+    }
+
+    /// Like [`Self::new_with_epoch_and_relay`] but tags generated block relay
+    /// broadcasts as one half of a simulated twin identity.
+    pub(crate) fn new_with_epoch_relay_and_tag(
         mut context: E,
         scheme: S,
         strategy: St,
         required_containers: u64,
         epoch: Epoch,
+        block_relay: Option<Arc<BlockRelay<S::PublicKey>>>,
+        block_relay_tag: Option<u64>,
     ) -> Self {
         let faulty_views = strategy.disrupter_faults(required_containers, &mut context);
         Self {
@@ -96,6 +140,8 @@ where
             strategy,
             faulty_views,
             epoch,
+            block_relay,
+            block_relay_tag,
         }
     }
 
@@ -108,6 +154,41 @@ where
             proposal.parent,
             proposal.payload,
         )
+    }
+
+    fn attach_mock_block(
+        &mut self,
+        proposal: Proposal<Sha256Digest>,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Proposal<Sha256Digest> {
+        let proposal = self.normalize_epoch(proposal);
+        let Some(block_relay) = &self.block_relay else {
+            return proposal;
+        };
+        if self.strategy.preserves_proposal_payload() {
+            return proposal;
+        }
+        let Some(me) = self.scheme.me() else {
+            return proposal;
+        };
+        let Some(sender) = self.scheme.participants().key(me).cloned() else {
+            return proposal;
+        };
+        let Some((proposal, contents)) =
+            block_relay::genesis_backed_mock_block(&proposal, self.context.random::<u64>())
+        else {
+            return proposal;
+        };
+        match self.block_relay_tag {
+            Some(tag) => block_relay.broadcast_with_tag(
+                &sender,
+                tag,
+                recipients,
+                (proposal.payload, contents),
+            ),
+            None => block_relay.broadcast(&sender, recipients, (proposal.payload, contents)),
+        }
+        proposal
     }
 
     fn message(&mut self) -> Message {
@@ -331,7 +412,8 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(v) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                let proposal = self.attach_mock_block(proposal, Recipients::All);
+                if let Some(v) = Notarize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(v).encode();
                     let _ = sender.send(Recipients::All, msg, true);
                 }
@@ -345,7 +427,8 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(v) = Finalize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                let proposal = self.attach_mock_block(proposal, Recipients::All);
+                if let Some(v) = Finalize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
                     let _ = sender.send(Recipients::All, msg, true);
                 }
@@ -452,7 +535,8 @@ where
                 self.last_notarized_view,
                 self.last_nullified_view,
             );
-            if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+            let proposal = self.attach_mock_block(proposal, Recipients::One(victim.clone()));
+            if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
                 let message = Vote::<S, Sha256Digest>::Notarize(vote).encode();
                 let _ = sender.send(Recipients::One(victim.clone()), message, true);
             }
@@ -472,7 +556,8 @@ where
             self.last_notarized_view,
             self.last_nullified_view,
         );
-        if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+        let proposal = self.attach_mock_block(proposal, Recipients::All);
+        if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
             let message = Vote::<S, Sha256Digest>::Notarize(vote).encode();
             let _ = sender.send(Recipients::All, message, true);
         }
@@ -502,7 +587,8 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                let proposal = self.attach_mock_block(proposal, recipients.clone());
+                if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
                     let _ = sender.send(recipients, msg, true);
                 }
@@ -516,7 +602,8 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(vote) = Finalize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                let proposal = self.attach_mock_block(proposal, recipients.clone());
+                if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
                     let _ = sender.send(recipients, msg, true);
                 }
@@ -544,11 +631,84 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
+                let proposal = self.attach_mock_block(proposal, recipients.clone());
+                if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
                     let message = Vote::<S, Sha256Digest>::Notarize(vote).encode();
                     let _ = sender.send(recipients, message, true);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        id_mock,
+        strategy::{HeaderMutation, HeaderScope, SmallScope, SplitHeader},
+    };
+    use commonware_runtime::{Runner as _, Supervisor as _};
+
+    fn genesis_parent_proposal(payload: Sha256Digest) -> Proposal<Sha256Digest> {
+        Proposal::new(
+            Round::new(Epoch::new(EPOCH), View::new(1)),
+            View::new(0),
+            payload,
+        )
+    }
+
+    #[test]
+    fn attach_mock_block_preserves_header_strategy_payloads() {
+        let executor = commonware_runtime::deterministic::Runner::seeded(17);
+        executor.start(|mut context| async move {
+            let (_, schemes) = id_mock::fixture(&mut context, b"disrupter_attach", 4);
+            let payload = Sha256Digest::from([7u8; 32]);
+            let proposal = genesis_parent_proposal(payload);
+
+            let relay = Arc::new(BlockRelay::new());
+            let mut header = Disrupter::new_with_epoch_and_relay(
+                context.child("header"),
+                schemes[0].clone(),
+                HeaderScope {
+                    fault_rounds: 1,
+                    fault_rounds_bound: 1,
+                    mutation: HeaderMutation::PreviousParent,
+                },
+                1,
+                Epoch::new(EPOCH),
+                Some(relay.clone()),
+            );
+            let attached = header.attach_mock_block(proposal.clone(), Recipients::All);
+            assert_eq!(attached.payload, payload);
+
+            let mut split = Disrupter::new_with_epoch_and_relay(
+                context.child("split"),
+                schemes[0].clone(),
+                SplitHeader {
+                    fault_rounds: 1,
+                    fault_rounds_bound: 1,
+                },
+                1,
+                Epoch::new(EPOCH),
+                Some(relay.clone()),
+            );
+            let attached = split.attach_mock_block(proposal.clone(), Recipients::All);
+            assert_eq!(attached.payload, payload);
+
+            let mut small = Disrupter::new_with_epoch_and_relay(
+                context.child("small"),
+                schemes[0].clone(),
+                SmallScope {
+                    fault_rounds: 1,
+                    fault_rounds_bound: 1,
+                },
+                1,
+                Epoch::new(EPOCH),
+                Some(relay),
+            );
+            let attached = small.attach_mock_block(proposal, Recipients::All);
+            assert_ne!(attached.payload, payload);
+        });
     }
 }

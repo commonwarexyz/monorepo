@@ -49,7 +49,7 @@ use super::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
         FaultyConfig,
     },
-    coding_disrupter,
+    block_disrupter, coding_disrupter,
     coding_stack::{
         CodingB, CodingCtx, coding_genesis, coding_marshaled, setup_validator_coding,
         start_engine_coding_with_networks,
@@ -127,6 +127,7 @@ impl fmt::Debug for MarshalDisrupterInputDebug<'_> {
             .debug_struct("MarshalDisrupterInput")
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("required_containers", &input.required_containers)
+            .field("term_length", &input.term_length)
             .field("degraded_network", &input.degraded_network)
             .field("partition", &input.partition)
             .field("strategy", &input.strategy)
@@ -295,7 +296,23 @@ async fn run_liveness_phases<BL, KEY>(
 /// deferred. Cluster: `N4F1C3`, disrupter only (no Twins). Liveness: checked.
 /// App: fixed always-accept.
 pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput) {
-    run_standard_disrupter::<P>(input, None);
+    run_standard_disrupter::<P>(input, None, None);
+}
+
+/// The cluster of [`fuzz_marshal_standard_disrupter`] with the byzantine node
+/// additionally acting as a faulty block-gossip leader on its pinned view.
+///
+/// The byzantine node leads view 1 (its parent is genesis) and disseminates the
+/// block it proposes under a fuzzer-selected [`MarshalBroadcastFault`]: it
+/// withholds the block, delivers it to only a partition, or delivers two
+/// conflicting blocks to disjoint replica sets. Honest nodes must still route
+/// around the byzantine-led view and deliver the target number of ordered
+/// blocks. Instantiate with a `P` whose elector pins the byzantine index to
+/// view 1 (see `SimplexCertificateMockByzantineFirstLeader`).
+pub fn fuzz_marshal_standard_block_dissemination<P: Simplex>(input: MarshalDisrupterInput) {
+    let mut mode_rng = FuzzRng::new(input.raw_bytes.clone());
+    let fault = block_disrupter::MarshalBroadcastFault::sample(&mut mode_rng);
+    run_standard_disrupter::<P>(input, None, Some(fault));
 }
 
 /// The cluster of [`fuzz_marshal_standard_disrupter`] with one honest node's
@@ -313,16 +330,26 @@ pub fn fuzz_marshal_standard_certificate_poison<P: Simplex>(mut input: MarshalDi
     // would move on, so lossy links are the only fault that produces one.
     input.partition = Partition::Connected;
     input.degraded_network = true;
-    run_standard_disrupter::<P>(input, Some(CertificatePoison::new()));
+    run_standard_disrupter::<P>(input, Some(CertificatePoison::new()), None);
 }
 
 fn run_standard_disrupter<P: Simplex>(
     input: MarshalDisrupterInput,
     poison: Option<CertificatePoison<PublicKeyOf<P>>>,
+    broadcast_fault: Option<block_disrupter::MarshalBroadcastFault>,
 ) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+
+    // Only the block-dissemination target honors the fuzzed term length (its
+    // elector makes the byzantine a stable leader of the first term); the plain
+    // disrupter and poison targets keep single-view rotating terms.
+    let term_length = if broadcast_fault.is_some() {
+        input.term_length
+    } else {
+        TermLength::ONE
+    };
 
     executor.start(|mut context| async move {
         // Shared fixture: the same participants/schemes drive the byzantine
@@ -373,19 +400,45 @@ fn run_standard_disrupter<P: Simplex>(
                 register_engine_networks::<P>(&oracle, validator.clone()).await;
 
             if idx == BYZANTINE_IDX {
-                start_disrupter_with_epoch::<P>(
-                    context
-                        .child("validator")
-                        .with_attribute("public_key", validator)
-                        .child("disrupter"),
-                    scheme,
-                    &input.strategy,
-                    required,
-                    Epoch::zero(),
-                    vote,
-                    certificate,
-                    resolver,
-                );
+                let validator_ctx = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                if let Some(fault) = broadcast_fault {
+                    // Block-dissemination leader: the byzantine acts solely as a
+                    // faulty block-gossip leader over its stable term. Running the
+                    // generic Disrupter alongside would let its view-1 proposal
+                    // shadow the coordinated one (the batcher makes the first
+                    // leader proposal authoritative), silently degrading the
+                    // dissemination fault; vote/certificate/resolver faults are
+                    // covered by the sibling disrupter target instead. The
+                    // byzantine is silent past view 1, so honest nodes nullify the
+                    // first view of its term on the per-view timeout and that
+                    // term-covering nullification advances them past the rest.
+                    let (vote_sender, _vote_receiver) = vote;
+                    block_disrupter::start::<P>(
+                        validator_ctx.child("block_disrupter"),
+                        &oracle,
+                        scheme,
+                        validator.clone(),
+                        participants.clone(),
+                        vote_sender,
+                        genesis_commitment,
+                        View::new(1),
+                        fault,
+                    )
+                    .await;
+                } else {
+                    start_disrupter_with_epoch::<P>(
+                        validator_ctx.child("disrupter"),
+                        scheme,
+                        &input.strategy,
+                        required,
+                        Epoch::zero(),
+                        vote,
+                        certificate,
+                        resolver,
+                    );
+                }
                 continue;
             }
 
@@ -462,7 +515,7 @@ fn run_standard_disrupter<P: Simplex>(
                 &oracle,
                 validator.clone(),
                 scheme,
-                P::elector(TermLength::ONE),
+                P::elector(term_length),
                 observed,
                 builder,
                 node.mailbox.clone(),
@@ -637,11 +690,34 @@ mod tests {
     use crate::{SimplexId, strategy::StrategyChoice, utils::Partition};
     use commonware_consensus::simplex::ForwardingPolicy;
 
+    #[cfg(feature = "mocks")]
+    #[test]
+    fn block_dissemination_runs_under_byzantine_first_leader() {
+        use commonware_consensus::types::TermLength;
+        for term_length in [
+            TermLength::ONE,
+            TermLength::new(commonware_utils::NZU32!(2)),
+        ] {
+            fuzz_marshal_standard_block_dissemination::<
+                crate::SimplexCertificateMockByzantineFirstLeader,
+            >(MarshalDisrupterInput {
+                raw_bytes: vec![],
+                required_containers: 1,
+                term_length,
+                degraded_network: true,
+                partition: Partition::Connected,
+                strategy: StrategyChoice::AnyScope,
+                forwarding: ForwardingPolicy::Disabled,
+            });
+        }
+    }
+
     #[test]
     fn coding_disrupter_runs_under_strict_id_certificates() {
         fuzz_marshal_coding_disrupter::<SimplexId>(MarshalDisrupterInput {
             raw_bytes: vec![0],
             required_containers: 1,
+            term_length: commonware_consensus::types::TermLength::ONE,
             degraded_network: false,
             partition: Partition::Connected,
             strategy: StrategyChoice::SmallScope {

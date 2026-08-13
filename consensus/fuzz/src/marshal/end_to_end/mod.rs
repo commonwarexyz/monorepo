@@ -33,6 +33,7 @@
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
 mod app;
+mod block_disrupter;
 mod coding_disrupter;
 pub(crate) mod coding_stack;
 mod input;
@@ -43,8 +44,8 @@ pub(crate) mod twins;
 
 pub use input::{MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput};
 pub use runner::{
-    fuzz_marshal_coding_disrupter, fuzz_marshal_standard_certificate_poison,
-    fuzz_marshal_standard_disrupter,
+    fuzz_marshal_coding_disrupter, fuzz_marshal_standard_block_dissemination,
+    fuzz_marshal_standard_certificate_poison, fuzz_marshal_standard_disrupter,
 };
 pub use scenario::{
     DropRule, PreGstAction, Role, ScenarioTemplate, fuzz_marshal_standard_scenarios,
