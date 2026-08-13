@@ -86,10 +86,7 @@ mod tests {
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Strategizer as _, Supervisor as _, deterministic,
         telemetry::{
-            metrics::{
-                MetricsExt as _,
-                histogram::{Buckets, Timed},
-            },
+            metrics::histogram::Timed,
             traces::{TracedExt as _, collector::TraceStorage},
         },
         tokio,
@@ -540,11 +537,7 @@ mod tests {
                 NZUsize!(8),
             );
             let mut voter = voter::Mailbox::new(voter_sender);
-            let timed = Timed::new(context.histogram(
-                "test_latency",
-                "test latency",
-                Buckets::CRYPTOGRAPHY,
-            ));
+            let timed = Timed::register(&context, "test_latency", "test latency");
 
             // Track two rounds with distinct proposals.
             let mut work = BTreeMap::new();
@@ -569,17 +562,15 @@ mod tests {
             }
 
             // Reintegrate the higher view's batch first.
-            let mut dirty_views = Vec::new();
             for (view, proposal) in [(2u64, &proposals[1]), (1u64, &proposals[0])] {
                 let votes = schemes
                     .iter()
                     .take(quorum)
                     .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                actor.handle_done(
+                let dirty = actor.handle_done(
                     &mut voter,
                     &mut work,
-                    &mut dirty_views,
                     Done::Verified {
                         view: View::new(view),
                         batch: quorum,
@@ -588,8 +579,8 @@ mod tests {
                         invalid: vec![],
                     },
                 );
+                assert_eq!(dirty, Some(View::new(view)));
             }
-            assert_eq!(dirty_views, vec![View::new(2), View::new(1)]);
 
             // Each round holds exactly its own quorum: recovery yields the
             // matching proposal.
@@ -629,11 +620,7 @@ mod tests {
                     NZUsize!(8),
                 );
             let mut voter = voter::Mailbox::new(voter_sender);
-            let timed = Timed::new(context.histogram(
-                "test_latency",
-                "test latency",
-                Buckets::CRYPTOGRAPHY,
-            ));
+            let timed = Timed::register(&context, "test_latency", "test latency");
 
             let view = View::new(9);
             let proposal =
@@ -643,39 +630,34 @@ mod tests {
                 .take(quorum)
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                 .collect();
+            let notarization = build_notarization(&schemes, &proposal, quorum);
 
             // No round tracks the view.
             let mut work = BTreeMap::new();
-            let mut dirty_views = Vec::new();
-            actor.handle_done(
+            let dirty = actor.handle_done(
                 &mut voter,
                 &mut work,
-                &mut dirty_views,
                 Done::Verified {
                     view,
                     batch: quorum,
                     timer: timed.timer(&context),
-                    votes: VerifiedVotes::Notarizes(votes.clone()),
+                    votes: VerifiedVotes::Notarizes(votes),
                     invalid: vec![],
                 },
             );
-            assert!(dirty_views.is_empty());
+            assert!(dirty.is_none());
 
             // A recovered certificate still reaches the voter.
-            let notarization =
-                Notarization::from_owned_notarizes(&schemes[0], votes, &Sequential)
-                    .expect("quorum must assemble");
-            actor.handle_done(
+            let dirty = actor.handle_done(
                 &mut voter,
                 &mut work,
-                &mut dirty_views,
                 Done::Recovered {
                     view,
                     timer: timed.timer(&context),
                     certificate: Certificate::Notarization(notarization.clone()),
                 },
             );
-            assert!(dirty_views.is_empty());
+            assert!(dirty.is_none());
             let voter::Message::Verified {
                 certificate: Certificate::Notarization(received),
                 ..

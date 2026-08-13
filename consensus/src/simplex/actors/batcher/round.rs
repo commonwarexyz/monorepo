@@ -376,10 +376,8 @@ impl<
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        let (batch, job) = self.begin_verify(rng, strategy)?;
-        let (votes, invalid) = job.await;
-        self.finish_verify(votes);
-        Some((batch, invalid))
+        let begun = self.begin_verify(rng, strategy);
+        self.verifier.drive(begun).await
     }
 
     /// Begins a batch verification of the first kind of vote worth verifying
@@ -458,16 +456,12 @@ impl<
         Some(certificate)
     }
 
-    /// Begins recovery of a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an
-    /// unconsumed verified quorum. Call repeatedly to drain every
-    /// constructible kind.
+    /// Begins recovery of a certificate from verified votes (see
+    /// [Verifier::begin_construct_certificate]).
     ///
-    /// Returns an owned future that resolves to the certificate. Recovery
-    /// consumes the verified votes when it begins; do not drop the future
-    /// unless the round will also be discarded. The caller must pass the
-    /// resolved certificate to [Self::record_certificate] so the round
-    /// completes the certified phase and applies its retention policy.
+    /// The caller must pass the resolved certificate to
+    /// [Self::record_certificate] so the round completes the certified phase
+    /// and applies its retention policy.
     pub fn begin_construct_certificate(
         &mut self,
         strategy: &impl Strategy,

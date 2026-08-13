@@ -535,32 +535,30 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Batch verifies pending [Vote::Notarize] messages, if worthwhile: the
-    /// proposal is known (notarizes reference one proposal) and the buffers
-    /// warrant a batch (see [Certification::should_verify]).
-    ///
-    /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
-    /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
-    /// instead of occupying the calling task.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The number of votes processed and the signer indices for whom verification
-    /// failed, or `None` if verification was not worthwhile.
+    /// Drives a begun verification batch to completion and reintegrates its
+    /// result. Test-only shim over the `begin_verify_*` methods and
+    /// [Self::finish_verify].
+    #[cfg(test)]
+    pub(super) async fn drive(
+        &mut self,
+        begun: Option<(usize, VerifyJob<S, D>)>,
+    ) -> Option<(usize, Vec<Participant>)> {
+        let (batch, job) = begun?;
+        let (votes, invalid) = job.await;
+        self.finish_verify(votes);
+        Some((batch, invalid))
+    }
+
+    /// Test-only shim over [Self::begin_verify_notarizes] and
+    /// [Self::finish_verify].
     #[cfg(test)]
     pub async fn try_verify_notarizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        let (batch, job) = self.begin_verify_notarizes(rng, strategy)?;
-        let (votes, invalid) = job.await;
-        self.finish_verify(votes);
-        Some((batch, invalid))
+        let begun = self.begin_verify_notarizes(rng, strategy);
+        self.drive(begun).await
     }
 
     /// Begins a batch verification of pending [Vote::Notarize] messages, if
@@ -615,31 +613,16 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         Some((batch, Box::pin(job) as VerifyJob<S, D>))
     }
 
-    /// Batch verifies pending [Vote::Nullify] messages, if worthwhile (see
-    /// [Certification::should_verify]).
-    ///
-    /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
-    /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
-    /// instead of occupying the calling task.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The number of votes processed and the signer indices for whom verification
-    /// failed, or `None` if verification was not worthwhile.
+    /// Test-only shim over [Self::begin_verify_nullifies] and
+    /// [Self::finish_verify].
     #[cfg(test)]
     pub async fn try_verify_nullifies<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        let (batch, job) = self.begin_verify_nullifies(rng, strategy)?;
-        let (votes, invalid) = job.await;
-        self.finish_verify(votes);
-        Some((batch, invalid))
+        let begun = self.begin_verify_nullifies(rng, strategy);
+        self.drive(begun).await
     }
 
     /// Begins a batch verification of pending [Vote::Nullify] messages, if
@@ -681,32 +664,16 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         Some((batch, Box::pin(job) as VerifyJob<S, D>))
     }
 
-    /// Batch verifies pending [Vote::Finalize] messages, if worthwhile: the
-    /// proposal is known (finalizes reference one proposal) and the buffers
-    /// warrant a batch (see [Certification::should_verify]).
-    ///
-    /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
-    /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
-    /// instead of occupying the calling task.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The number of votes processed and the signer indices for whom verification
-    /// failed, or `None` if verification was not worthwhile.
+    /// Test-only shim over [Self::begin_verify_finalizes] and
+    /// [Self::finish_verify].
     #[cfg(test)]
     pub async fn try_verify_finalizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        let (batch, job) = self.begin_verify_finalizes(rng, strategy)?;
-        let (votes, invalid) = job.await;
-        self.finish_verify(votes);
-        Some((batch, invalid))
+        let begun = self.begin_verify_finalizes(rng, strategy);
+        self.drive(begun).await
     }
 
     /// Begins a batch verification of pending [Vote::Finalize] messages, if

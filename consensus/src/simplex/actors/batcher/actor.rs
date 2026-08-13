@@ -382,19 +382,21 @@ where
 
     /// Reintegrates a completed crypto job from the dispatch pool.
     ///
-    /// A verification batch's votes return to the view's round and mark it
-    /// dirty: the batch may have completed a quorum, or more votes may have
-    /// buffered while it was in flight. A recovered certificate is recorded
-    /// on the round and forwarded to the voter. A view pruned while its job
-    /// was in flight drops the votes but still forwards the certificate: the
-    /// voter prunes independently.
+    /// A verification batch's votes return to the view's round: the batch may
+    /// have completed a quorum, or more votes may have buffered while it was
+    /// in flight. A recovered certificate is recorded on the round and
+    /// forwarded to the voter. A view pruned while its job was in flight
+    /// drops the votes but still forwards the certificate: the voter prunes
+    /// independently.
+    ///
+    /// Returns the view to revisit when the completion may have made new
+    /// work ready.
     pub(super) fn handle_done(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
         work: &mut BTreeMap<View, Round<S, B, D, Re>>,
-        dirty_views: &mut Vec<View>,
         done: Done<S, D>,
-    ) {
+    ) -> Option<View> {
         match done {
             Done::Verified {
                 view,
@@ -415,9 +417,7 @@ where
 
                 // The round may have been pruned while the batch was in
                 // flight; its votes are no longer needed.
-                let Some(round) = work.get_mut(&view) else {
-                    return;
-                };
+                let round = work.get_mut(&view)?;
                 let _guard = round.span().entered();
                 trace!(%view, batch, "batch verified votes");
                 round.finish_verify(votes);
@@ -425,7 +425,7 @@ where
                 // Revisit the view: the batch may have completed a
                 // quorum (certificate recovery) or more votes may have
                 // buffered while it was in flight (another batch).
-                dirty_views.push(view);
+                Some(view)
             }
             Done::Recovered {
                 view,
@@ -439,14 +439,16 @@ where
                 // certified phase and applying the retention policy)
                 // unless the round was pruned while recovery was in
                 // flight. Recording may unlock already-buffered votes.
+                let mut dirty = None;
                 if let Some(round) = work.get_mut(&view) {
                     let _guard = round.span().entered();
                     debug!(%view, %kind, "constructed certificate, forwarding to voter");
                     if round.record_certificate(&certificate) {
-                        dirty_views.push(view);
+                        dirty = Some(view);
                     }
                 }
                 voter.recovered(certificate);
+                dirty
             }
         }
     }
@@ -620,7 +622,9 @@ where
             // Handle completed crypto work (verification batches and
             // certificate recoveries)
             done = crypto_pool.next_completed() => {
-                self.handle_done(&mut voter, &mut work, &mut dirty_views, done);
+                if let Some(view) = self.handle_done(&mut voter, &mut work, done) {
+                    dirty_views.push(view);
+                }
             },
             // Handle certificates from the network
             Ok((sender, message)) = certificate_receiver.recv() else break => {
