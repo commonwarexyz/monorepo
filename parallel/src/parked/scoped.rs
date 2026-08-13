@@ -35,8 +35,13 @@ use std::panic::{self, AssertUnwindSafe};
 
 /// Minimum items per claim: bounds the per-item share of claim/handshake overhead on
 /// small jobs while leaving straggler rebalancing intact at realistic sizes. Set by the
-/// burst-train gate bench alongside `SEARCH_ROUNDS`.
-const MIN_CHUNK: usize = 32;
+/// burst-train gate bench alongside `SEARCH_ROUNDS`. Under loom the floor is 1 so tiny
+/// models still produce multiple claimable chunks: the chunking POLICY differs from
+/// production there, but the claim/close/completion PROTOCOL under test is identical.
+#[cfg(not(feature = "loom"))]
+pub(super) const MIN_CHUNK: usize = 32;
+#[cfg(feature = "loom")]
+pub(super) const MIN_CHUNK: usize = 1;
 
 /// Payload of a caught chunk panic.
 type Payload = Box<dyn core::any::Any + Send + 'static>;
@@ -139,7 +144,11 @@ impl Job {
         // Executing-vs-close handshake (see drive).
         fence(Ordering::SeqCst);
         if let Some(payload) = losing {
-            let _ = panic::catch_unwind(AssertUnwindSafe(move || drop(payload)));
+            if let Err(second) = panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+                // A payload whose Drop panics with ANOTHER Drop-panicking payload: leak it
+                // rather than let any depth of malice unwind out of a worker.
+                core::mem::forget(second);
+            }
         }
     }
 
@@ -403,6 +412,7 @@ pub(super) struct Outcome {
 pub(super) fn run<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(
     pool: &super::pool::Shared,
     len: usize,
+    parallelism: usize,
     body: &F,
 ) -> Outcome {
     if len == 0 {
@@ -412,17 +422,21 @@ pub(super) fn run<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(
         };
     }
 
-    // The participant cap equals the pool's parallelism: the caller plus at most
-    // `workers - 1` woken helpers, and late-arriving scanners fill in only if a helper
-    // never claimed.
-    let job = Job::new(body, len, pool.workers().max(1));
+    // The participant cap is the STRATEGY's parallelism (the caller plus helpers), which
+    // may differ from the pool's worker count (`with_parallelism`); a single job never
+    // runs on more executors than the strategy plans for.
+    let cap = parallelism.max(1);
+    let job = Job::new(body, len, cap);
     // Publish before waking so woken workers find the job. Overflow (no empty slot) means
     // the caller executes the whole job inline: submission never blocks on capacity.
     let slot = pool.try_install(&job);
     if slot.is_some() {
-        // Wake at most workers-1 helpers: the caller is an executor too, so a single job's
-        // executor count stays at the pool's parallelism.
-        let budget = pool.workers().saturating_sub(1).min(len.saturating_sub(1));
+        // Wake only as many helpers as can actually claim a chunk: the caller is one
+        // executor, chunks are at least MIN_CHUNK items, and helpers beyond the pool's
+        // worker count do not exist. Waking more would unpark workers into an immediate
+        // bounce (scan, fail to claim, search window, re-park) -- the idle tax itself.
+        let usable = len.div_ceil(MIN_CHUNK).min(cap);
+        let budget = usable.saturating_sub(1).min(pool.workers());
         pool.wake(budget);
     }
 

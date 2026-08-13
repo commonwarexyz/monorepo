@@ -8,9 +8,10 @@
 //! thread count stays small.
 //!
 //! Race coverage (numbering per the plan):
-//! - Races 1/2/3/7 (submit-vs-park, spurious wakes, wake claiming, registration
-//!   withdrawal) and the sync-caller half of race 5 are interleavings of
-//!   [`loom_map_completes`] and [`loom_concurrent_submitters`].
+//! - Races 1/2 (submit-vs-park, spurious wakes) and the sync-caller half of race 5 are
+//!   interleavings of [`loom_map_completes`] and [`loom_concurrent_submitters`].
+//! - Races 3/7 (wake claiming, registration withdrawal) require a nonzero wake budget and
+//!   are exercised by [`loom_wake_dispatch`] (two workers, so `wake` runs its CAS loop).
 //! - Race 4 (shutdown vs parked worker): [`loom_shutdown_with_parked_worker`].
 //! - Race 6 (caller-only completion): explored within [`loom_map_completes`] whenever the
 //!   scheduler never runs the worker.
@@ -98,6 +99,21 @@ fn loom_concurrent_submitters() {
         let out = strategy.manual().map_collect_vec(0..1u64, |i| i + 200);
         assert_eq!(out, vec![200]);
         t.join().unwrap();
+        drop(strategy);
+    });
+}
+
+#[test]
+fn loom_wake_dispatch() {
+    model(|| {
+        // Two workers and a two-chunk job (MIN_CHUNK=1 under loom): the wake budget is
+        // nonzero, so the submitter's CAS claim of a REGISTERED worker, the claimant-side
+        // idle_count decrement, the token deposit, and the failed-withdraw/stale-token
+        // paths are all explored, together with two executors concurrently inside one
+        // job (was_last arbitration, concurrent completed accumulation).
+        let strategy = Parked::new(NonZeroUsize::new(2).unwrap());
+        let out = strategy.manual().map_collect_vec(0..2u64, |i| i + 1);
+        assert_eq!(out, vec![1, 2]);
         drop(strategy);
     });
 }

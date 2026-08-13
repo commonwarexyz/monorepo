@@ -25,6 +25,9 @@ impl Drop for Tok {
 }
 
 fn parked(workers: usize) -> Parked {
+    // Miri interprets every worker thread; two are enough to exercise the concurrent
+    // protocol paths without hour-long runs.
+    let workers = if cfg!(miri) { workers.min(2) } else { workers };
     Parked::new(NonZeroUsize::new(workers).unwrap())
 }
 

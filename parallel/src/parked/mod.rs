@@ -185,6 +185,7 @@ unsafe impl<T: Send> Sync for Ptr<T> {}
 /// once; the first error (or first panic payload) wins.
 fn scoped_map<T, S, R, E, INIT, F>(
     shared: &Shared,
+    parallelism: usize,
     items: Vec<T>,
     init: INIT,
     map_op: F,
@@ -269,7 +270,7 @@ where
         }
     };
 
-    let outcome = scoped::run(shared, n, &body);
+    let outcome = scoped::run(shared, n, parallelism, &body);
 
     // Quiescent: no executor can touch the buffers anymore.
     let error = error.into_inner().unwrap();
@@ -290,9 +291,19 @@ where
             }
         }));
         if let Some(payload) = outcome.panic {
+            // The chunk payload wins; leak secondary payloads rather than panic-in-unwind.
+            if let Err(second) = cleanup {
+                core::mem::forget(second);
+            }
+            if let Some(e) = error {
+                core::mem::forget(e);
+            }
             panic::resume_unwind(payload);
         }
         if let Err(payload) = cleanup {
+            if let Some(e) = error {
+                core::mem::forget(e);
+            }
             panic::resume_unwind(payload);
         }
         return Err(error.expect("failure without panic must carry an error"));
@@ -307,6 +318,7 @@ where
 /// partials for the caller to reduce. Same exact-once ownership discipline as [`scoped_map`].
 fn scoped_fold<T, S, R, E, INIT, ID, F>(
     shared: &Shared,
+    parallelism: usize,
     items: Vec<T>,
     init: INIT,
     identity: ID,
@@ -371,20 +383,35 @@ where
         }
     };
 
-    let outcome = scoped::run(shared, n, &body);
+    let outcome = scoped::run(shared, n, parallelism, &body);
 
     let error = error.into_inner().unwrap();
     if outcome.panic.is_some() || error.is_some() {
+        // All user Drop code (unclaimed inputs AND accumulated partials) runs under the
+        // guard so a panicking Drop cannot race the payload hand-off below.
+        let partials = partials.into_inner().unwrap();
         let cleanup = panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(partials);
             for j in outcome.claimed..n {
                 // SAFETY: never claimed, never read.
                 unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
             }
         }));
         if let Some(payload) = outcome.panic {
+            // The chunk payload wins; a cleanup panic during unwind would abort, so leak
+            // its payload instead.
+            if let Err(second) = cleanup {
+                core::mem::forget(second);
+            }
+            if let Some(e) = error {
+                core::mem::forget(e);
+            }
             panic::resume_unwind(payload);
         }
         if let Err(payload) = cleanup {
+            if let Some(e) = error {
+                core::mem::forget(e);
+            }
             panic::resume_unwind(payload);
         }
         return Err(error.expect("failure without panic must carry an error"));
@@ -472,10 +499,14 @@ impl Strategy for Parked {
                 Sequential.fold_init(items, init, identity, fold_op, reduce_op)
             }
             policy::Execution::Parallel => {
-                let partials =
-                    scoped_fold(&self.shared, items, &init, &identity, |acc, state, item| {
-                        Ok::<_, Infallible>(fold_op(acc, state, item))
-                    });
+                let partials = scoped_fold(
+                    &self.shared,
+                    self.parallelism,
+                    items,
+                    &init,
+                    &identity,
+                    |acc, state, item| Ok::<_, Infallible>(fold_op(acc, state, item)),
+                );
                 match partials {
                     Ok(partials) => partials.into_iter().fold(identity(), &reduce_op),
                     Err(e) => match e {},
@@ -506,6 +537,7 @@ impl Strategy for Parked {
             policy::Execution::Parallel => {
                 let partials = scoped_fold(
                     &self.shared,
+                    self.parallelism,
                     items,
                     || (),
                     &identity,
@@ -529,6 +561,7 @@ impl Strategy for Parked {
             policy::Execution::Parallel => {
                 let out = scoped_map(
                     &self.shared,
+                    self.parallelism,
                     items,
                     || (),
                     |_state: &mut (), item| Ok::<_, Infallible>(map_op(item)),
@@ -554,6 +587,7 @@ impl Strategy for Parked {
             policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
             policy::Execution::Parallel => scoped_map(
                 &self.shared,
+                self.parallelism,
                 items,
                 || (),
                 |_state: &mut (), item| map_op(item),
@@ -574,9 +608,13 @@ impl Strategy for Parked {
         self.execute(items.len(), 1, |execution| match execution {
             policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
             policy::Execution::Parallel => {
-                let out = scoped_map(&self.shared, items, &init, |state, item| {
-                    Ok::<_, Infallible>(map_op(state, item))
-                });
+                let out = scoped_map(
+                    &self.shared,
+                    self.parallelism,
+                    items,
+                    &init,
+                    |state, item| Ok::<_, Infallible>(map_op(state, item)),
+                );
                 match out {
                     Ok(out) => out,
                     Err(e) => match e {},
@@ -604,9 +642,13 @@ impl Strategy for Parked {
         self.execute(items.len(), multiplier, |execution| match execution {
             policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
             policy::Execution::Parallel => {
-                let out = scoped_map(&self.shared, items, &init, |state, item| {
-                    Ok::<_, Infallible>(map_op(state, item))
-                });
+                let out = scoped_map(
+                    &self.shared,
+                    self.parallelism,
+                    items,
+                    &init,
+                    |state, item| Ok::<_, Infallible>(map_op(state, item)),
+                );
                 match out {
                     Ok(out) => out,
                     Err(e) => match e {},
