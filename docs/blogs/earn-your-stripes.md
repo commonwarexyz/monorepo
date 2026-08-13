@@ -255,6 +255,6 @@ Sunghyeon used QED's research agent to find this optimization. The agent read th
 
 The loop resembles the one QED uses for security audits. It scans the code, gathers repository evidence, forms hypotheses, and verifies them with tests and benchmarks. Repository context separates a useful finding from a known issue or an intentional design choice. QED had built that context by [continuously auditing Commonware](https://qedaudit.io/blog/commonware/).
 
-## Next Steps
+## Tuning to the Limit
 
-It is more practical than ever to tune low-level primitives to run at the limits of modern hardware. We plan to bring that same focus to more of the Commonware Library, from our recent [SHA-256 optimizations](https://github.com/commonwarexyz/monorepo/pull/4187) to upcoming work on [faster Ed25519 signature verification](https://github.com/commonwarexyz/monorepo/pull/4467).
+It is more practical than ever to tune low-level primitives to run at the limits of modern hardware. We are continuing to invest in low-level tuning across the Commonware Library, from our recent [SHA-256 optimizations](https://github.com/commonwarexyz/monorepo/pull/4187) to ongoing work on [faster Ed25519 signature verification](https://github.com/commonwarexyz/monorepo/pull/4467).
