@@ -450,6 +450,8 @@ pub(super) struct ReadAtRequest {
     pub(super) read: usize,
     /// Destination buffer owned by the request.
     pub(super) buf: IoBufMut,
+    /// Page-cache policy for this request.
+    pub(super) cache: Cache,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
     pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
@@ -457,6 +459,16 @@ pub(super) struct ReadAtRequest {
 }
 
 impl ReadAtRequest {
+    /// Return the flags for the next positioned read.
+    fn rw_flags(&mut self) -> i32 {
+        self.cache.rw_flag()
+    }
+
+    /// Fall back to normal caching when the cache-bypass hint is unsupported.
+    fn retry_cached(&mut self, code: i32) -> bool {
+        code == -libc::EOPNOTSUPP && self.cache.fallback()
+    }
+
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -468,6 +480,7 @@ impl ReadAtRequest {
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = self.len - self.read;
         let offset = self.offset + self.read as u64;
+        let rw_flags = self.rw_flags();
         opcode::Read::new(
             fd,
             ptr,
@@ -476,6 +489,7 @@ impl ReadAtRequest {
                 .expect("single-buffer SQE length exceeds u32"),
         )
         .offset(offset)
+        .rw_flags(rw_flags)
         .build()
     }
 
@@ -484,6 +498,7 @@ impl ReadAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => false,
+            CqeResult::Error(code) if self.retry_cached(code) => false,
             CqeResult::Cancelled | CqeResult::Error(_) => {
                 self.result = Some(Err(Error::ReadFailed));
                 true
@@ -510,7 +525,7 @@ impl ReadAtRequest {
     }
 }
 
-/// Page-cache policy for a positioned write request.
+/// Page-cache policy for a positioned I/O request.
 pub(crate) enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
@@ -538,7 +553,9 @@ impl Cache {
     fn fallback(&mut self) -> bool {
         match std::mem::replace(self, Self::Enabled) {
             Self::Disabled(supported) => {
-                supported.store(false, Ordering::Relaxed);
+                if supported.swap(false, Ordering::Relaxed) {
+                    tracing::debug!("RWF_DONTCACHE unsupported, falling back to cached I/O");
+                }
                 true
             }
             Self::Enabled => false,
@@ -729,6 +746,8 @@ impl SyncRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::traces::collector::TraceStorage;
+    use commonware_macros::test_collect_traces;
     use commonware_utils::channel::oneshot;
     use futures::executor::block_on;
     use std::{
@@ -749,6 +768,32 @@ mod tests {
         // SAFETY: `left` is a valid owned fd and is transferred into `File`.
         let file = unsafe { File::from_raw_fd(left.into_raw_fd()) };
         Arc::new(file)
+    }
+
+    fn make_read_request(cache: Cache) -> ReadAtRequest {
+        ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            cache,
+            result: None,
+            sender: oneshot::channel().0,
+        }
+    }
+
+    fn make_write_request(cache: Cache) -> WriteAtRequest {
+        WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            state: WriteAtState::Writing,
+            cache,
+            result: None,
+            sender: oneshot::channel().0,
+        }
     }
 
     #[test]
@@ -804,6 +849,7 @@ mod tests {
             len: 4,
             read: 0,
             buf: IoBufMut::with_capacity(4),
+            cache: Cache::Enabled,
             result: None,
             sender: oneshot::channel().0,
         });
@@ -849,6 +895,7 @@ mod tests {
                 len: 5,
                 read: 0,
                 buf: IoBufMut::with_capacity(4),
+                cache: Cache::Enabled,
                 result: None,
                 sender: oneshot::channel().0,
             });
@@ -863,6 +910,7 @@ mod tests {
                 len: 4,
                 read: 5,
                 buf: IoBufMut::with_capacity(8),
+                cache: Cache::Enabled,
                 result: None,
                 sender: oneshot::channel().0,
             });
@@ -1184,6 +1232,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1197,6 +1246,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1215,6 +1265,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1232,6 +1283,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1250,6 +1302,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1259,6 +1312,61 @@ mod tests {
             block_on(rx).expect("missing timeout-cancel failure"),
             Err((_, Error::ReadFailed))
         ));
+    }
+
+    #[test]
+    fn test_uncached_read_fallback_preserves_progress_and_is_shared_with_writes() {
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut read = make_read_request(Cache::Disabled(supported.clone()));
+
+        assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(!read.on_cqe(WaiterState::Active { target_tick: None }, 2));
+        assert_eq!(read.read, 2);
+        assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
+
+        assert!(!read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert_eq!(read.read, 2);
+        assert!(!supported.load(Ordering::Relaxed));
+        assert_eq!(read.rw_flags(), 0);
+
+        let mut sibling_write = make_write_request(Cache::Disabled(supported));
+        assert_eq!(sibling_write.rw_flags(), 0);
+
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut write = make_write_request(Cache::Disabled(supported.clone()));
+        assert_eq!(write.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(!write.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        let mut sibling_read = make_read_request(Cache::Disabled(supported));
+        assert_eq!(sibling_read.rw_flags(), 0);
+
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut failing_read = make_read_request(Cache::Disabled(supported.clone()));
+        assert_eq!(failing_read.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(failing_read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
+        assert!(supported.load(Ordering::Relaxed));
+        assert!(matches!(failing_read.result, Some(Err(Error::ReadFailed))));
+    }
+
+    #[test_collect_traces]
+    fn test_queued_cache_fallbacks_retry_and_log_once(traces: TraceStorage) {
+        let supported = Arc::new(AtomicBool::new(true));
+        let mut first = make_read_request(Cache::Disabled(supported.clone()));
+        let mut second = make_read_request(Cache::Disabled(supported.clone()));
+
+        assert_eq!(first.rw_flags(), libc::RWF_DONTCACHE);
+        assert_eq!(second.rw_flags(), libc::RWF_DONTCACHE);
+        assert!(!first.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(!second.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(!supported.load(Ordering::Relaxed));
+        assert_eq!(first.rw_flags(), 0);
+        assert_eq!(second.rw_flags(), 0);
+
+        let transition_logs = traces
+            .get_all()
+            .iter()
+            .filter(|event| event.metadata.content.contains("RWF_DONTCACHE unsupported"))
+            .count();
+        assert_eq!(transition_logs, 1);
     }
 
     #[test]
@@ -1554,6 +1662,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });
@@ -1640,6 +1749,7 @@ mod tests {
             len: 5,
             read: 0,
             buf: IoBufMut::with_capacity(5),
+            cache: Cache::Enabled,
             result: None,
             sender: tx,
         });

@@ -42,7 +42,7 @@ use super::{
     view::View,
 };
 use crate::{
-    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, WriteOptions,
+    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions, WriteOptions,
     buffer::{
         SyncState,
         paged::{ActiveChecksum, CHECKSUM_SIZE, CacheRef, Checksum, Slot},
@@ -207,7 +207,11 @@ impl<B: Blob> Writer<B> {
             // Read the last page and parse its CRC record.
             let page_start = last_page_end - physical_page_size;
             let buf = blob
-                .read_at(page_start, physical_page_size as usize)
+                .read_at(
+                    page_start,
+                    physical_page_size as usize,
+                    ReadOptions::default(),
+                )
                 .await?
                 .coalesce()
                 .freeze();
@@ -777,10 +781,15 @@ impl<B: Blob> Writer<B> {
     ///
     /// The returned replay can be used to sequentially read all pages from the blob while ensuring
     /// all data passes integrity verification. CRCs are validated but not included in the output.
+    /// `read_options` is applied to every underlying blob read as a best-effort policy.
     ///
     /// This is not a durable operation. Buffered data may be plainly written so the replay can
     /// read it, but callers must still use [`sync`](Self::sync) if that data must survive a crash.
-    pub async fn replay(&mut self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
+    pub async fn replay(
+        &mut self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<Replay<B>, Error> {
         let page_size = self.cache_ref.page_size();
         let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
 
@@ -817,6 +826,7 @@ impl<B: Blob> Writer<B> {
             logical_blob_size,
             prefetch_pages,
             page_size_nz,
+            read_options,
         );
         Ok(Replay::new(reader))
     }
@@ -875,7 +885,13 @@ impl<B: Blob> Writer<B> {
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
         let mut valid_len = 0u64;
         for page in 0..total_pages {
-            match super::get_page_with_checksum_from_blob(&self.blob, page, logical_page_size).await
+            match super::get_page_with_checksum_from_blob(
+                &self.blob,
+                page,
+                logical_page_size,
+                ReadOptions::default(),
+            )
+            .await
             {
                 Ok((logical, _)) => {
                     let len = logical.len() as u64;
@@ -1003,8 +1019,13 @@ impl<B: Blob> Writer<B> {
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
 
-        let (page_data, old_checksum) =
-            super::get_page_with_checksum_from_blob(&self.blob, full_pages, page_size).await?;
+        let (page_data, old_checksum) = super::get_page_with_checksum_from_blob(
+            &self.blob,
+            full_pages,
+            page_size,
+            ReadOptions::DONT_CACHE,
+        )
+        .await?;
 
         // Ensure the validated data covers what we need.
         if (page_data.len() as u64) < partial_bytes {
@@ -1083,7 +1104,7 @@ mod tests {
             tests::SyncTrackingBlob,
         },
         deterministic,
-        mocks::{DelayedSyncBlob, next_pending_sync},
+        mocks::{DelayedSyncBlob, RecordingContext, next_pending_sync},
         telemetry::metrics::Registry,
     };
     use commonware_codec::ReadExt;
@@ -1128,12 +1149,13 @@ mod tests {
     fn test_recoverable_prefix_len_clean() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
+            let (context, recordings) = RecordingContext::new(context);
             let (blob, blob_size) = context
                 .open("test_partition", b"prefix_clean")
                 .await
                 .unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 0);
@@ -1142,7 +1164,33 @@ mod tests {
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
+
+            recordings.clear();
             assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::default())
+            );
+
+            drop(writer);
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_clean")
+                .await
+                .unwrap();
+            recordings.clear();
+            let _recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::default())
+            );
         });
     }
 
@@ -1168,7 +1216,11 @@ mod tests {
             // Tear page 1, leaving pages 0 and 2+ valid.
             let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
             let offset = physical_page_size + 7;
-            let byte = blob.read_at(offset, 1).await.unwrap().coalesce();
+            let byte = blob
+                .read_at(offset, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             blob.write_at(
                 offset,
                 vec![byte.as_ref()[0] ^ 0xFF],
@@ -1207,7 +1259,7 @@ mod tests {
             writer.sync().await.unwrap();
             let physical_page_size = (PAGE_SIZE.get() as u64 + CHECKSUM_SIZE) as usize;
             let stale = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -2093,8 +2145,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_a, size_b);
-            let bytes_a = blob_a.read_at(0, size_a as usize).await.unwrap().coalesce();
-            let bytes_b = blob_b.read_at(0, size_b as usize).await.unwrap().coalesce();
+            let bytes_a = blob_a
+                .read_at(0, size_a as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let bytes_b = blob_b
+                .read_at(0, size_b as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(bytes_a.as_ref(), bytes_b.as_ref());
         });
     }
@@ -2503,7 +2563,10 @@ mod tests {
 
             let replay = context.child("replay").spawn(move |_| async move {
                 {
-                    let mut replay = writer.replay(NZUsize!(BUFFER_SIZE)).await.unwrap();
+                    let mut replay = writer
+                        .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                        .await
+                        .unwrap();
                     assert!(replay.ensure(1).await.unwrap());
                     assert_eq!(replay.chunk()[0], b'h');
                 }
@@ -2708,7 +2771,10 @@ mod tests {
             append.append(b"replayed").await.unwrap();
 
             // Replay flushes buffered data for reading, but does not make that write durable.
-            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             assert!(replay.ensure(b"replayed".len()).await.unwrap());
             assert_eq!(replay.remaining(), b"replayed".len());
             assert_eq!(replay.chunk(), b"replayed");
@@ -2728,6 +2794,43 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_replay_uses_read_options_for_refills_and_seek() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, size) = context
+                .open("test_partition", b"replay_read_options")
+                .await
+                .unwrap();
+            let blob = PartialWriteBlob::new(blob, usize::MAX, 0);
+            let read_options = blob.read_options();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data = vec![3; page_size * 2];
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            read_options.lock().clear();
+
+            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+            let mut replay = writer
+                .replay(NZUsize!(physical_page_size), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(replay.ensure(1).await.unwrap());
+            replay.advance(page_size);
+            assert!(replay.ensure(1).await.unwrap());
+
+            replay.seek_to(0).unwrap();
+            assert!(replay.ensure(1).await.unwrap());
+
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 3]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_recreated_sync_preserves_replay_plain_flush_barrier() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2738,7 +2841,10 @@ mod tests {
                 .unwrap();
 
             append.append(b"replayed").await.unwrap();
-            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             assert!(replay.ensure(b"replayed".len()).await.unwrap());
             assert_eq!(replay.remaining(), b"replayed".len());
             assert_eq!(replay.chunk(), b"replayed");
@@ -2827,7 +2933,7 @@ mod tests {
             let slot0_offset = PAGE_SIZE.get() as u64;
             let slot1_offset = slot0_offset + CHECKSUM_SLOT_SIZE as u64;
             let slot0_before: Vec<u8> = blob
-                .read_at(slot0_offset, CHECKSUM_SLOT_SIZE)
+                .read_at(slot0_offset, CHECKSUM_SLOT_SIZE, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -2846,7 +2952,7 @@ mod tests {
             assert_eq!(range_syncs, 2);
 
             let slot0_after: Vec<u8> = blob
-                .read_at(slot0_offset, CHECKSUM_SLOT_SIZE)
+                .read_at(slot0_offset, CHECKSUM_SLOT_SIZE, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -2857,7 +2963,7 @@ mod tests {
                 "protected slot must be resubmitted byte-identically"
             );
             let slot1_between: Vec<u8> = blob
-                .read_at(slot1_offset, CHECKSUM_SLOT_SIZE)
+                .read_at(slot1_offset, CHECKSUM_SLOT_SIZE, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -2874,7 +2980,7 @@ mod tests {
             assert_eq!(range_syncs, 3);
 
             let slot1_after: Vec<u8> = blob
-                .read_at(slot1_offset, CHECKSUM_SLOT_SIZE)
+                .read_at(slot1_offset, CHECKSUM_SLOT_SIZE, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -2935,6 +3041,7 @@ mod tests {
     struct PartialWriteBlob<B: Blob> {
         inner: B,
         writes: Arc<AtomicUsize>,
+        read_options: Arc<Mutex<Vec<ReadOptions>>>,
         failed_write_len: Arc<AtomicUsize>,
         fail_on: usize,
         partial_len: usize,
@@ -2945,6 +3052,7 @@ mod tests {
             Self {
                 inner,
                 writes: Arc::new(AtomicUsize::new(0)),
+                read_options: Arc::new(Mutex::new(Vec::new())),
                 failed_write_len: Arc::new(AtomicUsize::new(0)),
                 fail_on,
                 partial_len,
@@ -2958,11 +3066,21 @@ mod tests {
         fn write_count(&self) -> Arc<AtomicUsize> {
             self.writes.clone()
         }
+
+        fn read_options(&self) -> Arc<Mutex<Vec<ReadOptions>>> {
+            self.read_options.clone()
+        }
     }
 
     impl<B: Blob> crate::Blob for PartialWriteBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_options.lock().push(options);
+            self.inner.read_at(offset, len, options).await
         }
 
         async fn read_at_buf(
@@ -2970,8 +3088,10 @@ mod tests {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, bufs).await
+            self.read_options.lock().push(options);
+            self.inner.read_at_buf(offset, len, bufs, options).await
         }
 
         async fn write_at(
@@ -3023,8 +3143,13 @@ mod tests {
     }
 
     impl<B: Blob> crate::Blob for TornExtensionBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len, options).await
         }
 
         async fn read_at_buf(
@@ -3032,8 +3157,9 @@ mod tests {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, bufs).await
+            self.inner.read_at_buf(offset, len, bufs, options).await
         }
 
         async fn write_at(
@@ -3119,7 +3245,7 @@ mod tests {
 
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3173,12 +3299,17 @@ mod tests {
     }
 
     impl<B: Blob> crate::Blob for DelayedReadBlob<B> {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
             if offset == self.offset
                 && len == self.len
                 && self.reads.fetch_add(1, Ordering::SeqCst) == 0
             {
-                let bytes = self.inner.read_at(offset, len).await?;
+                let bytes = self.inner.read_at(offset, len, options).await?;
 
                 let sender = self
                     .started
@@ -3197,7 +3328,7 @@ mod tests {
                 return Ok(bytes);
             }
 
-            self.inner.read_at(offset, len).await
+            self.inner.read_at(offset, len, options).await
         }
 
         async fn read_at_buf(
@@ -3205,12 +3336,13 @@ mod tests {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             if offset == self.offset
                 && len == self.len
                 && self.reads.fetch_add(1, Ordering::SeqCst) == 0
             {
-                let bytes = self.inner.read_at_buf(offset, len, bufs).await?;
+                let bytes = self.inner.read_at_buf(offset, len, bufs, options).await?;
 
                 let sender = self
                     .started
@@ -3229,7 +3361,7 @@ mod tests {
                 return Ok(bytes);
             }
 
-            self.inner.read_at_buf(offset, len, bufs).await
+            self.inner.read_at_buf(offset, len, bufs, options).await
         }
 
         async fn write_at(
@@ -3391,7 +3523,7 @@ mod tests {
             // Verify slot 1 is now authoritative
             let (blob, size) = context.open("test_partition", b"slot1_prot").await.unwrap();
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3405,7 +3537,7 @@ mod tests {
 
             // Capture slot 1 bytes before mangling slot 0
             let slot1_before: Vec<u8> = blob
-                .read_at(slot1_offset, 6)
+                .read_at(slot1_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3420,7 +3552,7 @@ mod tests {
 
             // Verify mangle worked
             let slot0_mangled: Vec<u8> = blob
-                .read_at(slot0_offset, 6)
+                .read_at(slot0_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3444,7 +3576,7 @@ mod tests {
 
             // Slot 0 should have new CRC (not our dummy marker)
             let slot0_after: Vec<u8> = blob
-                .read_at(slot0_offset, 6)
+                .read_at(slot0_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3457,7 +3589,7 @@ mod tests {
 
             // Slot 1 should be UNCHANGED (protected)
             let slot1_after: Vec<u8> = blob
-                .read_at(slot1_offset, 6)
+                .read_at(slot1_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3470,7 +3602,7 @@ mod tests {
 
             // Verify the new CRC in slot 0 has len=50
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3529,7 +3661,7 @@ mod tests {
             // Verify slot 0 is now authoritative
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3543,7 +3675,7 @@ mod tests {
 
             // Capture slot 0 bytes before mangling slot 1
             let slot0_before: Vec<u8> = blob
-                .read_at(slot0_offset, 6)
+                .read_at(slot0_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3558,7 +3690,7 @@ mod tests {
 
             // Verify mangle worked
             let slot1_mangled: Vec<u8> = blob
-                .read_at(slot1_offset, 6)
+                .read_at(slot1_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3582,7 +3714,7 @@ mod tests {
 
             // Slot 1 should have new CRC (not our dummy marker)
             let slot1_after: Vec<u8> = blob
-                .read_at(slot1_offset, 6)
+                .read_at(slot1_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3595,7 +3727,7 @@ mod tests {
 
             // Slot 0 should be UNCHANGED (protected)
             let slot0_after: Vec<u8> = blob
-                .read_at(slot0_offset, 6)
+                .read_at(slot0_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3608,7 +3740,7 @@ mod tests {
 
             // Verify the new CRC in slot 1 has len=70
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3651,7 +3783,7 @@ mod tests {
             assert_eq!(size, physical_page_size as u64);
 
             let prefix_before: Vec<u8> = blob
-                .read_at(0, 20)
+                .read_at(0, 20, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3683,7 +3815,7 @@ mod tests {
 
             // Original 20 bytes should be unchanged
             let prefix_after: Vec<u8> = blob
-                .read_at(0, 20)
+                .read_at(0, 20, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3693,7 +3825,7 @@ mod tests {
 
             // Bytes at offset 25-30: data (21..=40) starts at offset 20, so offset 25 has value 26
             let overwritten: Vec<u8> = blob
-                .read_at(25, 6)
+                .read_at(25, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3745,7 +3877,7 @@ mod tests {
             // Verify slot 1 is authoritative
             let (blob, size) = context.open("test_partition", b"boundary").await.unwrap();
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3754,7 +3886,7 @@ mod tests {
 
             // Capture slot 1 before extending past page boundary
             let slot1_before: Vec<u8> = blob
-                .read_at(slot1_offset, 6)
+                .read_at(slot1_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3784,7 +3916,7 @@ mod tests {
 
             // Slot 0 should have been overwritten with full-page CRC (not dummy marker)
             let slot0_after: Vec<u8> = blob
-                .read_at(slot0_offset, 6)
+                .read_at(slot0_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3797,7 +3929,7 @@ mod tests {
 
             // Slot 1 should be UNCHANGED (protected during boundary crossing)
             let slot1_after: Vec<u8> = blob
-                .read_at(slot1_offset, 6)
+                .read_at(slot1_offset, 6, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -3810,7 +3942,7 @@ mod tests {
 
             // Verify page 0 has correct CRC structure
             let page0 = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3885,7 +4017,7 @@ mod tests {
             assert_eq!(size, physical_page_size as u64);
 
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -3922,7 +4054,7 @@ mod tests {
 
             // Verify corruption: len2 should still be 30, but crc2 is now garbage
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -4009,7 +4141,7 @@ mod tests {
                 .await
                 .unwrap();
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -4067,7 +4199,7 @@ mod tests {
 
             // Verify corruption: page 0's slot 1 still has len=103 but bad CRC
             let page = blob
-                .read_at(0, physical_page_size)
+                .read_at(0, physical_page_size, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -4108,7 +4240,10 @@ mod tests {
             let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Try to fill pages - should fail on CRC validation.
             let result = replay.ensure(1).await;
@@ -4117,6 +4252,30 @@ mod tests {
                 "Reading from corrupted non-last page via Replay should fail, but got: {:?}",
                 result
             );
+        });
+    }
+
+    #[test]
+    fn test_resize_partial_shrink_uses_uncached_read_hint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (blob, size) = context
+                .open("test_partition", b"resize_read_options")
+                .await
+                .unwrap();
+            let blob = PartialWriteBlob::new(blob, usize::MAX, 0);
+            let read_options = blob.read_options();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data = vec![7; PAGE_SIZE.get() as usize];
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.resize(50).await.unwrap();
+
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE]);
         });
     }
 

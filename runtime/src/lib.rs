@@ -680,6 +680,46 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
+    /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
+    ///
+    /// [`ReadOptions::default`] applies no options.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct ReadOptions(u8);
+
+    impl ReadOptions {
+        /// Advise that data brought in by this read need not remain in the OS page cache.
+        ///
+        /// This is a best-effort performance hint for callers that retain the data or
+        /// do not expect to read it again soon. Implementations may ignore it.
+        pub const DONT_CACHE: Self = Self(1 << 0);
+
+        /// Return whether all of `options` are set.
+        #[must_use]
+        pub const fn contains(self, options: Self) -> bool {
+            self.0 & options.0 == options.0
+        }
+
+        /// Return these options with `options` cleared.
+        #[must_use]
+        pub const fn without(self, options: Self) -> Self {
+            Self(self.0 & !options.0)
+        }
+    }
+
+    impl std::ops::BitOr for ReadOptions {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+
+    impl std::ops::BitOrAssign for ReadOptions {
+        fn bitor_assign(&mut self, rhs: Self) {
+            self.0 |= rhs.0;
+        }
+    }
+
     /// Options that alter one [`Blob::write_at`] operation.
     ///
     /// [`WriteOptions::default`] applies no options.
@@ -753,6 +793,11 @@ stability_scope!(BETA {
         /// - The returned buffers reuse caller-provided storage, with exactly `len`
         ///   bytes filled from `offset`.
         /// - Caller-provided chunk layout is preserved.
+        /// - [`ReadOptions::DONT_CACHE`] is a best-effort hint and does not guarantee
+        ///   that the range is absent from the OS page cache.
+        /// - Unsupported options are transparent to the caller.
+        /// - Zero-length reads preserve implementation-specific offset validation but
+        ///   do not issue I/O or probe option support.
         ///
         /// # Panics
         ///
@@ -762,24 +807,45 @@ stability_scope!(BETA {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
         /// of data read from the blob starting at `offset`.
         ///
         /// To reuse a buffer(s), use [`Blob::read_at_buf`].
+        ///
+        /// # Contract
+        ///
+        /// - A successful read returns exactly `len` bytes beginning at `offset`.
+        /// - [`ReadOptions::DONT_CACHE`] is a best-effort hint and does not guarantee
+        ///   that the range is absent from the OS page cache.
+        /// - An unsupported [`ReadOptions::DONT_CACHE`] hint is transparent to the caller.
+        /// - Zero-length reads preserve implementation-specific offset validation but do not
+        ///   issue I/O or probe option support.
         fn read_at(
             &self,
             offset: u64,
             len: usize,
+            options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
         ///
-        /// With [`WriteOptions::SYNC`], the submitted bytes are durably persisted before this
-        /// operation returns. This is not a durability barrier for previous operations: earlier
-        /// writes without [`WriteOptions::SYNC`] and earlier [`Blob::resize`] calls require
-        /// [`Blob::sync`] to become durable.
+        /// The buffers are treated as one logical byte sequence in chunk order.
+        ///
+        /// # Contract
+        ///
+        /// - A successful write stores every remaining byte from `bufs`, in chunk order,
+        ///   beginning at `offset`.
+        /// - [`WriteOptions::SYNC`] durably persists the submitted bytes before this operation
+        ///   returns. It is not a durability barrier for earlier writes without
+        ///   [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
+        /// - [`WriteOptions::DONT_CACHE`] is a best-effort hint and does not change visibility
+        ///   or durability, or guarantee that the range is absent from the OS page cache.
+        /// - An unsupported [`WriteOptions::DONT_CACHE`] hint is transparent to the caller.
+        /// - Zero-length writes preserve implementation-specific offset validation but do not
+        ///   issue I/O or probe option support.
         fn write_at(
             &self,
             offset: u64,
@@ -898,6 +964,20 @@ mod tests {
         task::{Context as TContext, Poll, Waker},
     };
     use utils::reschedule;
+
+    #[test]
+    fn test_read_options_compose() {
+        let options = ReadOptions::default() | ReadOptions::DONT_CACHE;
+        let mut assigned = ReadOptions::default();
+        assigned |= ReadOptions::DONT_CACHE;
+        assert!(options.contains(ReadOptions::DONT_CACHE));
+        assert_eq!(assigned, options);
+        assert_eq!(
+            options.without(ReadOptions::DONT_CACHE),
+            ReadOptions::default()
+        );
+        assert!(!ReadOptions::default().contains(ReadOptions::DONT_CACHE));
+    }
 
     #[test]
     fn test_write_options_compose() {
@@ -1308,7 +1388,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, data.len())
+                .read_at(0, data.len(), ReadOptions::default())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1331,7 +1411,10 @@ mod tests {
             assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
-            let read = blob.read_at(7, 7).await.expect("Failed to read data");
+            let read = blob
+                .read_at(7, 7, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
@@ -1390,13 +1473,16 @@ mod tests {
                 .expect("Failed to write data2");
 
             // Read data back
-            let read = blob.read_at(0, 10).await.expect("Failed to read data");
+            let read = blob
+                .read_at(0, 10, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(10, 10).await;
+            let result = blob.read_at(10, 10, ReadOptions::default()).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
@@ -1406,13 +1492,16 @@ mod tests {
                 .expect("Failed to write data3");
 
             // Read data back
-            let read = blob.read_at(0, 10).await.expect("Failed to read data");
+            let read = blob
+                .read_at(0, 10, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(10, 10).await;
+            let result = blob.read_at(10, 10, ReadOptions::default()).await;
             assert!(result.is_err());
         });
     }
@@ -1456,11 +1545,17 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(0, data.len()).await.unwrap();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
-            let extended_part = blob.read_at(data.len() as u64, data.len()).await.unwrap();
+            let extended_part = blob
+                .read_at(data.len() as u64, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
@@ -1472,7 +1567,10 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(0, data.len()).await.unwrap();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
@@ -1520,7 +1618,7 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(0, 10 + additional)
+                    .read_at(0, 10 + additional, ReadOptions::default())
                     .await
                     .expect("Failed to read data");
                 let read = read.coalesce();
@@ -1548,7 +1646,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(0, 10).await;
+            let result = blob.read_at(0, 10, ReadOptions::default()).await;
             assert!(result.is_err());
 
             // Write data to the blob
@@ -1558,7 +1656,7 @@ mod tests {
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(0, 20).await;
+            let result = blob.read_at(0, 20, ReadOptions::default()).await;
             assert!(result.is_err());
         })
     }
@@ -1595,7 +1693,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, data_len)
+                        .read_at(0, data_len, ReadOptions::default())
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1606,7 +1704,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, data_len)
+                        .read_at(0, data_len, ReadOptions::default())
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1620,7 +1718,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, data.len())
+                .read_at(0, data.len(), ReadOptions::default())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
