@@ -242,6 +242,9 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// unlock the round. Certificate-derived electors such as
     /// [`RandomElector`] cannot elect ahead.
     ///
+    /// The voter may call this several times per view, so implementations
+    /// should answer from precomputed state.
+    ///
     /// This is local policy: participants with different settings interoperate.
     /// The default opts out.
     ///
@@ -318,11 +321,7 @@ impl<H: Hasher> RoundRobin<H> {
     /// Enables pipelined handoffs (see [Pipelined Handoff]). When this
     /// participant leads the term starting at view `v`, it proposes during
     /// view `v - 1` on that view's proposal, before the proposal notarizes.
-    ///
-    /// With rotating terms (the default), every view is a handoff: proposals
-    /// distribute in parallel with their parents' votes, and sustained view
-    /// time halves. With stable terms (see [`Self::with_term`]), the handoff
-    /// moves each term's first view one network trip earlier.
+    /// Rotating terms (the default) benefit most: every view is a handoff.
     ///
     /// This trusts the leader of `v - 1`: if the parent proposal never
     /// notarizes, the pipelined proposal fails with it. Like the stall
