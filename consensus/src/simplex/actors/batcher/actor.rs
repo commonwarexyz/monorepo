@@ -48,7 +48,7 @@ struct Current {
 }
 
 /// A completed crypto job from the actor's dispatch pool.
-enum Done<S: Scheme<D>, D: Digest> {
+pub(super) enum Done<S: Scheme<D>, D: Digest> {
     /// A verification batch completed: its verified votes must be
     /// reintegrated into the view's round (see [Round::finish_verify]) and
     /// invalid signers blocked.
@@ -375,6 +375,77 @@ where
         }
     }
 
+    /// Reintegrates a completed crypto job from the dispatch pool.
+    ///
+    /// A verification batch's votes return to the view's round and mark it
+    /// dirty: the batch may have completed a quorum, or more votes may have
+    /// buffered while it was in flight. A recovered certificate is recorded
+    /// on the round and forwarded to the voter. A view pruned while its job
+    /// was in flight drops the votes but still forwards the certificate: the
+    /// voter prunes independently.
+    pub(super) fn handle_done(
+        &mut self,
+        voter: &mut voter::Mailbox<S, D>,
+        work: &mut BTreeMap<View, Round<S, B, D, Re>>,
+        dirty_views: &mut Vec<View>,
+        done: Done<S, D>,
+    ) {
+        match done {
+            Done::Verified {
+                view,
+                batch,
+                timer,
+                votes,
+                invalid,
+            } => {
+                timer.observe(self.context.as_ref());
+                self.verified.inc_by(batch as u64);
+                self.batch_size.observe(batch as f64);
+
+                for signer in invalid {
+                    if let Some(signer) = self.scheme.participants().key(signer) {
+                        commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+                    }
+                }
+
+                // The round may have been pruned while the batch was in
+                // flight; its votes are no longer needed.
+                let Some(round) = work.get_mut(&view) else {
+                    return;
+                };
+                let _guard = round.span().entered();
+                trace!(%view, batch, "batch verified votes");
+                round.finish_verify(votes);
+
+                // Revisit the view: the batch may have completed a
+                // quorum (certificate recovery) or more votes may have
+                // buffered while it was in flight (another batch).
+                dirty_views.push(view);
+            }
+            Done::Recovered {
+                view,
+                timer,
+                certificate,
+            } => {
+                timer.observe(self.context.as_ref());
+                let kind = certificate.kind();
+
+                // Record the certificate on its round (completing the
+                // certified phase and applying the retention policy)
+                // unless the round was pruned while recovery was in
+                // flight. Recording may unlock already-buffered votes.
+                if let Some(round) = work.get_mut(&view) {
+                    let _guard = round.span().entered();
+                    debug!(%view, %kind, "constructed certificate, forwarding to voter");
+                    if round.record_certificate(&certificate) {
+                        dirty_views.push(view);
+                    }
+                }
+                voter.recovered(certificate);
+            }
+        }
+    }
+
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
@@ -544,50 +615,7 @@ where
             // Handle completed crypto work (verification batches and
             // certificate recoveries)
             done = crypto_pool.next_completed() => {
-                match done {
-                    Done::Verified { view, batch, timer, votes, invalid } => {
-                        timer.observe(self.context.as_ref());
-                        self.verified.inc_by(batch as u64);
-                        self.batch_size.observe(batch as f64);
-
-                        for signer in invalid {
-                            if let Some(signer) = self.scheme.participants().key(signer) {
-                                commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
-                            }
-                        }
-
-                        // The round may have been pruned while the batch was in
-                        // flight; its votes are no longer needed.
-                        let Some(round) = work.get_mut(&view) else {
-                            continue;
-                        };
-                        let _guard = round.span().entered();
-                        trace!(%view, batch, "batch verified votes");
-                        round.finish_verify(votes);
-
-                        // Revisit the view: the batch may have completed a
-                        // quorum (certificate recovery) or more votes may have
-                        // buffered while it was in flight (another batch).
-                        dirty_views.push(view);
-                    }
-                    Done::Recovered { view, timer, certificate } => {
-                        timer.observe(self.context.as_ref());
-                        let kind = certificate.kind();
-
-                        // Record the certificate on its round (completing the
-                        // certified phase and applying the retention policy)
-                        // unless the round was pruned while recovery was in
-                        // flight. Recording may unlock already-buffered votes.
-                        if let Some(round) = work.get_mut(&view) {
-                            let _guard = round.span().entered();
-                            debug!(%view, %kind, "constructed certificate, forwarding to voter");
-                            if round.record_certificate(&certificate) {
-                                dirty_views.push(view);
-                            }
-                        }
-                        voter.recovered(certificate);
-                    }
-                }
+                self.handle_done(&mut voter, &mut work, &mut dirty_views, done);
             },
             // Handle certificates from the network
             Ok((sender, message)) = certificate_receiver.recv() else break => {
