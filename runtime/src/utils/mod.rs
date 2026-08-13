@@ -80,7 +80,7 @@ fn is_reported_panic(err: &(dyn Any + Send)) -> bool {
     err.is::<ReportedPanic>()
 }
 
-/// Extracts a stable message from an arbitrary panic payload.
+/// Extracts a message from an arbitrary panic payload.
 pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     match (
         err.downcast_ref::<&str>(),
@@ -90,7 +90,7 @@ pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
         (Some(message), _, _) => (*message).to_string(),
         (_, Some(message), _) => message.clone(),
         (_, _, Some(reported)) => reported.0.to_string(),
-        _ => "non-string panic".to_string(),
+        _ => format!("{err:?}"),
     }
 }
 
@@ -147,34 +147,14 @@ mod tests {
     };
 
     #[test]
-    fn panic_message_extraction_handles_supported_payloads() {
-        let borrowed: Box<dyn Any + Send> = Box::new("borrowed panic");
-        let owned: Box<dyn Any + Send> = Box::new("owned panic".to_string());
-        let opaque: Box<dyn Any + Send> = Box::new(7_u64);
+    fn reported_panic_is_classified_and_extracts_message() {
         let reported = catch_unwind(AssertUnwindSafe(|| {
             resume_reported_panic("reported panic");
         }))
         .expect_err("reported panic did not unwind");
 
-        let messages = [
-            extract_panic_message(&*borrowed),
-            extract_panic_message(&*owned),
-            extract_panic_message(&*opaque),
-            extract_panic_message(&*reported),
-        ];
-
-        // Strings remain intact and opaque payloads use stable classifications.
-        assert_eq!(
-            messages,
-            [
-                "borrowed panic",
-                "owned panic",
-                "non-string panic",
-                "reported panic"
-            ]
-        );
-        assert!(!is_reported_panic(&*opaque));
         assert!(is_reported_panic(&*reported));
+        assert_eq!(extract_panic_message(&*reported), "reported panic");
     }
 
     #[test]

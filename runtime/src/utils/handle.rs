@@ -342,33 +342,23 @@ impl PanicNotification {
     }
 }
 
-/// Arbitration state for the single root-interrupting notification.
-enum PanicSlot {
-    /// Root interruption remains available to a sender.
-    Open(oneshot::Sender<Panic>),
-    /// A sender owns the channel but has not published yet.
-    Claimed,
-    /// Root completion closed interruption before a sender claimed it.
-    Closed,
-}
-
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.
 #[derive(Clone)]
 pub(crate) struct Panicker {
     catch: bool,
-    slot: Arc<Mutex<PanicSlot>>,
+    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
 }
 
 impl Panicker {
     /// Creates a new [Panicker].
     pub(crate) fn new(catch: bool) -> (Self, Panicked) {
         let (sender, receiver) = oneshot::channel();
-        let slot = Arc::new(Mutex::new(PanicSlot::Open(sender)));
+        let sender = Arc::new(Mutex::new(Some(sender)));
         let panicker = Self {
             catch,
-            slot: Arc::clone(&slot),
+            sender: Arc::clone(&sender),
         };
-        let panicked = Panicked { receiver, slot };
+        let panicked = Panicked { receiver, sender };
         (panicker, panicked)
     }
 
@@ -410,21 +400,15 @@ impl Panicker {
 
     /// Claims the first root-interrupting notification.
     fn claim(&self) -> Option<PanicNotification> {
-        let mut slot = self.slot.lock();
-        if !matches!(&*slot, PanicSlot::Open(_)) {
-            return None;
-        }
-        let PanicSlot::Open(sender) = std::mem::replace(&mut *slot, PanicSlot::Claimed) else {
-            unreachable!("open panic slot changed while locked");
-        };
-        Some(PanicNotification(sender))
+        let sender = self.sender.lock().take();
+        sender.map(PanicNotification)
     }
 }
 
 /// A handle that will be notified when a panic occurs.
 pub(crate) struct Panicked {
     receiver: oneshot::Receiver<Panic>,
-    slot: Arc<Mutex<PanicSlot>>,
+    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
 }
 
 impl Panicked {
@@ -435,7 +419,7 @@ impl Panicked {
     {
         // Capture root-task panics long enough to arbitrate them against a
         // detailed infrastructure failure published during the same poll.
-        let Self { receiver, slot } = self;
+        let Self { receiver, sender } = self;
         let mut panicked = std::pin::pin!(receiver);
         let mut task = std::pin::pin!(AssertUnwindSafe(task).catch_unwind());
         let mut task_result = None;
@@ -461,26 +445,12 @@ impl Panicked {
                 // Atomically arbitrate root completion against a sender claim.
                 // A claimed sender may publish after this poll, so retain the
                 // completed root result until the channel resolves.
-                let sender = {
-                    let mut slot = slot.lock();
-                    if matches!(&*slot, PanicSlot::Claimed) {
-                        return Poll::Pending;
-                    }
-                    match std::mem::replace(&mut *slot, PanicSlot::Closed) {
-                        PanicSlot::Open(sender) => Some(sender),
-                        PanicSlot::Closed => None,
-                        PanicSlot::Claimed => {
-                            unreachable!("claimed panic slot changed while locked")
-                        }
-                    }
+                let unclaimed = sender.lock().take();
+                let Some(unclaimed) = unclaimed else {
+                    return Poll::Pending;
                 };
-                let panicked = panicked.as_mut().get_mut();
-                panicked.close();
                 // Dropping the unclaimed sender may invoke the root waker.
-                drop(sender);
-                if let Ok(panic) = panicked.try_recv() {
-                    resume_unwind(panic);
-                }
+                drop(unclaimed);
             }
 
             match task_result
@@ -643,21 +613,42 @@ mod tests {
     }
 
     #[test]
-    fn closed_interruption_sender_allows_ready_task_completion() {
-        // Close the only panic sender before polling an otherwise ready root task.
+    fn ready_root_completion_closes_unclaimed_interruption() {
+        // Keep interruption unclaimed while polling an otherwise ready root task.
         let (panicker, panicked) = Panicker::new(false);
-        drop(panicker);
 
-        // Receiver closure disables interruption and preserves the task output.
+        // Root completion claims and drops the sender before preserving the task output.
         let output = futures::executor::block_on(panicked.interrupt(future::ready(7)));
         assert_eq!(output, 7);
+        assert!(panicker.claim_fatal().is_none());
+    }
+
+    #[test]
+    fn abandoned_fatal_notification_releases_ready_root() {
+        let (panicker, panicked) = Panicker::new(false);
+        let notification = panicker
+            .claim_fatal()
+            .expect("fatal notification must remain available");
+        let mut interrupted = Box::pin(panicked.interrupt(future::ready(7)));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // Retain the ready root result until the claimed sender resolves.
+        assert_eq!(
+            std::future::Future::poll(interrupted.as_mut(), &mut context),
+            Poll::Pending
+        );
+        drop(notification);
+
+        // Sender abandonment closes interruption and releases the retained result.
+        assert_eq!(futures::executor::block_on(interrupted), 7);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn exhausted_cooperative_budget_allows_ready_task_completion() {
         // Build enough ready Tokio receivers for the root task to exhaust its
         // cooperative budget and still return Ready from that same poll.
-        let (panicker, panicked) = Panicker::new(false);
+        let (_panicker, panicked) = Panicker::new(false);
         let mut budget_consumers = std::collections::VecDeque::new();
         for _ in 0..1_024 {
             let (sender, receiver) = oneshot::channel();
@@ -682,7 +673,6 @@ mod tests {
         // Final interruption arbitration must not poll the budget-aware channel.
         let output = panicked.interrupt(task).await;
         assert_eq!(output, 7);
-        drop(panicker);
     }
 
     #[test]
