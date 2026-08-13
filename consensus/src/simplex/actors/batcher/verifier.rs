@@ -1190,6 +1190,96 @@ mod tests {
         ready_and_verify_notarizes(secp256r1::fixture).await;
     }
 
+    async fn buffer_votes_while_batch_in_flight<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let mut verifier = Verifier::<S, Sha256>::new(
+            Round::new(Epoch::new(0), View::new(1)),
+            schemes[0].clone(),
+            quorum,
+        );
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| create_notarize(scheme, round, View::new(0), 1))
+            .collect();
+
+        verifier.set_leader(notarizes[0].signer(), None);
+        for notarize in &notarizes[..4] {
+            verifier.add(Vote::Notarize(notarize.clone()), false);
+        }
+
+        // The batch takes every pending vote and marks the kind in flight:
+        // no second batch may begin until the first reintegrates.
+        let (batch, job) = verifier
+            .begin_verify_notarizes(&mut rng, &Sequential)
+            .expect("batch must begin");
+        assert_eq!(batch, 4);
+        assert!(verifier.notarize.pending().is_empty());
+        assert!(
+            verifier
+                .begin_verify_notarizes(&mut rng, &Sequential)
+                .is_none()
+        );
+
+        // A vote arriving while the batch is in flight buffers as pending
+        // without opening a second batch.
+        verifier.add(Vote::Notarize(notarizes[4].clone()), false);
+        assert_eq!(verifier.notarize.pending().len(), 1);
+        assert!(
+            verifier
+                .begin_verify_notarizes(&mut rng, &Sequential)
+                .is_none()
+        );
+
+        // Reintegrate the batch one vote short of a quorum, as if one vote
+        // had failed verification.
+        let (votes, invalid) = job.await;
+        assert!(invalid.is_empty());
+        let VerifiedVotes::Notarizes(mut verified) = votes else {
+            panic!("expected notarizes");
+        };
+        assert_eq!(verified.len(), 4);
+        verified.truncate(3);
+        verifier.finish_verify(VerifiedVotes::Notarizes(verified));
+        assert_eq!(verifier.notarize.verified().len(), 3);
+        assert_eq!(verifier.notarize.pending().len(), 1);
+
+        // The cleared gate lets the buffered vote form the next batch, which
+        // completes the quorum.
+        let (batch, job) = verifier
+            .begin_verify_notarizes(&mut rng, &Sequential)
+            .expect("buffered vote must batch");
+        assert_eq!(batch, 1);
+        let (votes, invalid) = job.await;
+        assert!(invalid.is_empty());
+        verifier.finish_verify(votes);
+        assert_eq!(verifier.notarize.verified().len(), quorum as usize);
+
+        let certificate = verifier
+            .try_construct_certificate(&Sequential)
+            .await
+            .expect("quorum must recover a certificate");
+        assert!(matches!(certificate, Certificate::Notarization(_)));
+    }
+
+    #[test_async]
+    async fn test_buffer_votes_while_batch_in_flight() {
+        buffer_votes_while_batch_in_flight(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_multisig::fixture::<MinSig, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_multisig::fixture::<MinPk, _>).await;
+        buffer_votes_while_batch_in_flight(ed25519::fixture).await;
+        buffer_votes_while_batch_in_flight(secp256r1::fixture).await;
+    }
+
     fn add_nullify<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
