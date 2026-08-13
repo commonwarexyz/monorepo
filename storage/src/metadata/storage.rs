@@ -8,7 +8,10 @@ use commonware_runtime::{
 };
 use commonware_utils::Span;
 use futures::{FutureExt as _, future::try_join_all};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroUsize,
+};
 use tracing::{debug, warn};
 
 /// The names of the two blobs that store metadata.
@@ -88,16 +91,36 @@ struct Inner<E: Context, K: Span, V: Codec> {
 
 impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
     /// See [Metadata::init].
-    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+    async fn init(
+        context: E,
+        cfg: Config<V::Cfg>,
+        max_blob_size: Option<NonZeroUsize>,
+    ) -> Result<Self, Error> {
         // Open dedicated blobs
         let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
         let (left_map, left_wrapper) =
-            Self::load(&context, &cfg.codec_config, 0, left_blob, left_len).await?;
+            Self::load(
+                &context,
+                &cfg.codec_config,
+                max_blob_size,
+                0,
+                left_blob,
+                left_len,
+            )
+            .await?;
         let (right_map, right_wrapper) =
-            Self::load(&context, &cfg.codec_config, 1, right_blob, right_len).await?;
+            Self::load(
+                &context,
+                &cfg.codec_config,
+                max_blob_size,
+                1,
+                right_blob,
+                right_len,
+            )
+            .await?;
 
         // Choose latest blob
         let mut map = left_map;
@@ -143,6 +166,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
     async fn load(
         context: &E,
         codec_config: &V::Cfg,
+        max_blob_size: Option<NonZeroUsize>,
         index: usize,
         blob: E::Blob,
         len: u64,
@@ -151,6 +175,16 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         if len == 0 {
             // Empty blob
             return Ok((BTreeMap::new(), Wrapper::empty(blob)));
+        }
+
+        if max_blob_size.is_some_and(|max| len > max.get() as u64) {
+            warn!(
+                blob = index,
+                len,
+                max = max_blob_size.expect("checked as present"),
+                "blob exceeds configured size: truncating"
+            );
+            return Self::discard(blob).await;
         }
 
         // Read blob
@@ -588,7 +622,21 @@ impl<E: Context, K: Span, V: Codec> std::fmt::Debug for Metadata<E, K, V> {
 impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+        Ok(Self(Box::new(Inner::init(context, cfg, None).await?)))
+    }
+
+    /// Initialize a new [Metadata] instance without reading blobs larger than `max_blob_size`.
+    ///
+    /// An oversized copy is treated like any other malformed atomic copy: it is truncated before
+    /// allocation and the other copy remains eligible for recovery.
+    pub async fn init_bounded(
+        context: E,
+        cfg: Config<V::Cfg>,
+        max_blob_size: NonZeroUsize,
+    ) -> Result<Self, Error> {
+        Ok(Self(Box::new(
+            Inner::init(context, cfg, Some(max_blob_size)).await?,
+        )))
     }
 
     /// Get a value from [Metadata] (if it exists).
