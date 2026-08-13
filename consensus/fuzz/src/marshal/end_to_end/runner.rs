@@ -303,7 +303,7 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
 /// additionally acting as a faulty block-gossip leader on its pinned view.
 ///
 /// The byzantine node leads view 1 (its parent is genesis) and disseminates the
-/// block it proposes under a fuzzer-selected [`MarshalBroadcastFault`]: it
+/// block it proposes under a fuzzer-selected `MarshalBroadcastFault`: it
 /// withholds the block, delivers it to only a partition, or delivers two
 /// conflicting blocks to disjoint replica sets. Honest nodes must still route
 /// around the byzantine-led view and deliver the target number of ordered

@@ -3,7 +3,8 @@
 //! In the standard disrupter target the byzantine node (index [`BYZANTINE_IDX`])
 //! runs only a simplex [`Disrupter`](crate::disrupter::Disrupter) on the
 //! vote/certificate/resolver channels and no marshal stack, so it never emits on
-//! the block-gossip channel (id 2). This actor gives it a [`buffered::Engine`] on
+//! the block-gossip channel (id 2). This actor gives it a
+//! [`buffered::Engine`](commonware_broadcast::buffered::Engine) on
 //! that channel and, at the first view of the term it is pinned to lead (view 1,
 //! whose parent is genesis), acts as a byzantine leader that either delivers
 //! different blocks to disjoint replica sets, withholds the block entirely, or
