@@ -7,7 +7,7 @@ use crate::stateful::{
         },
         processor::{Applied, Processor},
     },
-    db::DatabaseSet,
+    db::{Barrier, DatabaseSet},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -20,17 +20,16 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
-    futures::OptionFuture,
 };
 use futures::{
     FutureExt as _,
-    future::{BoxFuture, Either, ready},
+    future::{Either, pending, ready},
 };
 use rand_core::Rng;
-use std::{collections::VecDeque, future::Future, sync::mpsc::TryRecvError};
+use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
 enum Step<M, P> {
@@ -42,15 +41,15 @@ enum Step<M, P> {
 struct Durability {
     durable: Height,
     acknowledgements: VecDeque<(Height, Exact)>,
-    sync: OptionFuture<BoxFuture<'static, (Height, bool)>>,
+    sync: Option<Handle<(Height, bool)>>,
 }
 
 impl Durability {
-    fn new(height: Height) -> Self {
+    const fn new(height: Height) -> Self {
         Self {
             durable: height,
             acknowledgements: VecDeque::new(),
-            sync: OptionFuture::default(),
+            sync: None,
         }
     }
 
@@ -69,17 +68,15 @@ impl Durability {
     }
 
     fn needs_sync(&self) -> bool {
-        !self.syncing() && self.durable < self.latest_applied()
+        self.sync.is_none() && self.durable < self.latest_applied()
     }
 
-    fn syncing(&self) -> bool {
-        self.sync.is_some()
-    }
-
-    fn started(&mut self, height: Height, completion: impl Future<Output = bool> + Send + 'static) {
-        assert!(!self.syncing(), "sync already active");
+    fn started(&mut self, height: Height, barrier: Barrier) {
+        assert!(self.sync.is_none(), "sync already active");
         assert!(height > self.durable && height <= self.latest_applied());
-        self.sync = Some(async move { (height, completion.await) }.boxed()).into();
+        self.sync = Some(Handle::from_future(async move {
+            Ok((height, barrier.durable().await))
+        }));
     }
 
     fn complete(&mut self, (height, durable): (Height, bool)) -> bool {
@@ -105,6 +102,13 @@ impl Durability {
     }
 }
 
+async fn sync_completion(sync: &mut Option<Handle<(Height, bool)>>) -> (Height, bool) {
+    let Some(sync) = sync else {
+        return pending().await;
+    };
+    sync.await.expect("internal sync handle cannot fail")
+}
+
 async fn start_sync_if_needed<E, A, S, V>(
     context: &E,
     durability: &mut Durability,
@@ -126,7 +130,7 @@ where
         _ = context.stopped() => return false,
         barrier = verifications.drive(databases.finalize()) => barrier,
     };
-    durability.started(height, barrier.durable());
+    durability.started(height, barrier);
     true
 }
 
@@ -213,7 +217,7 @@ where
             on_start => {
                 // Observe completed durability before taking more work. A queued prune suppresses
                 // an automatic dirty-suffix successor until it has released database readers.
-                if let Some(completion) = (&mut durability.sync).now_or_never()
+                if let Some(completion) = sync_completion(&mut durability.sync).now_or_never()
                     && !durability.complete(completion)
                 {
                     return;
@@ -262,7 +266,7 @@ where
                                         message = mailbox.recv() => {
                                             break message.map(Step::Message);
                                         },
-                                        completion = &mut *sync => {
+                                        completion = sync_completion(sync) => {
                                             break Some(Step::Sync(completion));
                                         },
                                         _ = verifications.next_completed() => {
@@ -394,7 +398,7 @@ where
                             .await;
                         drop(boundary);
                         async {
-                            let start_sync = !durability.syncing();
+                            let start_sync = durability.sync.is_none();
                             let applied = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
@@ -417,7 +421,7 @@ where
                             let height = block.height();
                             durability.applied(height, acknowledgement);
                             if let Some(barrier) = barrier {
-                                durability.started(height, barrier.durable());
+                                durability.started(height, barrier);
                             }
                             if let Some(prune) = prune {
                                 pending_prune = Some((prune, retry_mailbox.clone()));
@@ -437,9 +441,9 @@ where
                 Step::Prune((prune, retry_mailbox)) => {
                     // Pruning owns a strict database mutation boundary. Observe an existing sync
                     // before quiescing readers, then run storage maintenance with no sync active.
-                    while durability.syncing() {
+                    while durability.sync.is_some() {
                         select! {
-                            completion = &mut durability.sync => {
+                            completion = sync_completion(&mut durability.sync) => {
                                 if !durability.complete(completion) {
                                     return;
                                 }
@@ -467,7 +471,7 @@ where
                         ).await {
                             return;
                         }
-                        let completion = (&mut durability.sync).await;
+                        let completion = sync_completion(&mut durability.sync).await;
                         if !durability.complete(completion) {
                             return;
                         }
