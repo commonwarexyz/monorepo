@@ -600,6 +600,17 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// next section. The exception is [Error::ReplayInterrupted], which ends the
     /// replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
+        self.next_bounded(usize::MAX).await
+    }
+
+    /// Returns the next item when its encoded body is at most `max_item_size` bytes.
+    ///
+    /// The limit is checked from the frame header before the body is read. Exceeding it is fatal to
+    /// the replay and returns [Error::ItemTooLarge].
+    pub async fn next_bounded(
+        &mut self,
+        max_item_size: usize,
+    ) -> Option<Result<(u64, u64, u32, V), Error>> {
         // A dropped future can interrupt a repair, leaving the section's writer with
         // in-memory state that no longer matches the blob. Fail the replay rather than
         // repair or decode over it.
@@ -689,6 +700,11 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                     }
                 }
             };
+
+            if item_size > max_item_size {
+                self.sections.pop_front();
+                return self.fail(Error::ItemTooLarge(item_size));
+            }
 
             // Ensure we have enough data for item body
             match current.reader.ensure(item_size).await {
