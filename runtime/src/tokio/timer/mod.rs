@@ -34,10 +34,12 @@
 //! and sleeper callbacks always run after releasing that mutex. This prevents
 //! kernel latency and arbitrary waker code from blocking producers. Sharding
 //! by worker keeps unrelated registration and cancellation paths independent.
-//! Each sleep retains its construction-time shard, while the future and that
-//! shard share the entry until one terminal transition wins. Expiry commits
-//! `FIRED` while removing an entry, then invokes or releases its waker from
-//! reusable driver scratch storage after unlocking the shard.
+//! Each sleep remembers its construction-time shard through a weak reference,
+//! so migration cancels against the original shard without keeping its native
+//! alarm alive. The future owns the entry while the heap or driver scratch
+//! storage holds another shared owner as needed. Expiry removes elapsed entries
+//! and attempts `FIRED` while holding the shard mutex, then invokes a waker only
+//! for entries whose transition won. Callback work runs after unlocking.
 //! `QUIESCENT` covers both a dropped sleep and orderly scheduler shutdown.
 //!
 //! Wall-clock deadlines are converted once to a fixed monotonic deadline.

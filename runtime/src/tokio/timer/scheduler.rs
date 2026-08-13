@@ -1,4 +1,56 @@
-//! Native sharded timer scheduler and concurrency protocols.
+//! Native sharded timer scheduler shared by the Linux and macOS backends.
+//!
+//! [`Builder`] installs a Tokio worker park callback before runtime startup.
+//! Each initial worker claims one shard, and construction waits for every claim
+//! before exposing the timer. It then constructs and probes every native alarm
+//! before starting one driver task per shard. Other threads receive cached
+//! round-robin provisional assignments that a worker callback may later
+//! upgrade.
+//!
+//! Runtime affinity is identified by the allocation of its shared [`Affinity`].
+//! Cached assignments retain a `Weak<Affinity>`. That weak reference keeps an
+//! old allocation reserved until the stale assignment is pruned, so allocation
+//! pointer reuse cannot alias a different runtime.
+//!
+//! ```text
+//! Timer --Arc--> Shard <---------------- Arc -- driver task
+//!                 |
+//!                 +-- NativeAlarm
+//!                 +-- DriverSignal
+//!                 +-- Mutex<ShardState> --> Heap --Arc--> Entry
+//!                                                    ^
+//!                                                    |
+//!                               RegisteredSleep --Arc+
+//!                                      |
+//!                                      +--Weak--> original Shard
+//! ```
+//!
+//! A nonzero sleep reads the shared platform monotonic clock before affinity
+//! selection, then eagerly registers on the selected shard. Selection work
+//! therefore cannot extend the requested duration. Immediate sleeps still
+//! consume Tokio cooperative budget. Wall deadlines are sampled once and then
+//! follow the same relative path.
+//!
+//! The shard mutex owns heap residency, lifecycle, and the deadline most
+//! recently confirmed at the native alarm. Native alarm mutations, readiness
+//! waits, and arbitrary waker code run outside that mutex. Producers update the
+//! heap and send a durable coalesced signal. The driver snapshots the desired
+//! minimum, performs the native operation without the lock, then relocks and
+//! repeats if a producer changed the minimum. A 50 nanosecond tolerance accepts
+//! an existing alarm that is only slightly later than a newly earlier minimum.
+//!
+//! Expiry removes at most 32 entries per lock acquisition and attempts `FIRED`
+//! before unlocking. A prior cancellation may already have won `QUIESCENT`.
+//! [`Batch`] invokes or releases wakers afterward and completes committed
+//! entries even if the driver is dropped. The driver yields after 512
+//! expirations only when more elapsed work remains.
+//!
+//! Each entry has one terminal transition from `WAITING` to `FIRED`,
+//! `QUIESCENT`, or `FAILED`. Each shard similarly moves from `Running` to either
+//! orderly `Stopped` or fatal `Failed`. Failure claims root interruption while
+//! holding the shard lock, then unlocks before publishing the diagnostic and
+//! waking failed sleepers. This preserves the infrastructure failure as the
+//! root cause without invoking callbacks under scheduler locks.
 
 #[cfg(target_os = "linux")]
 use super::linux::NativeAlarm;
@@ -10,7 +62,7 @@ use super::{
 };
 use crate::utils::{Panicker, extract_panic_message, resume_reported_panic};
 use commonware_macros::select;
-use futures::FutureExt as _;
+use futures::{FutureExt as _, future::Either};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 #[cfg(not(feature = "loom"))]
@@ -22,7 +74,7 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::{Arc, Weak, atomic::AtomicU64, mpsc},
+    sync::{Arc, Weak, mpsc},
     task::{Context, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
@@ -55,19 +107,6 @@ const ENTRY_FAILED: u8 = 3;
 
 /// Heap index used by entries that are not resident.
 pub(super) const NOT_IN_HEAP: usize = usize::MAX;
-
-/// Allocates identities that distinguish runtimes sharing a thread.
-static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Claims one runtime identity without allowing the allocator to wrap.
-fn allocate_runtime_id() -> u64 {
-    // Relaxed ordering is sufficient because the counter provides uniqueness only.
-    NEXT_RUNTIME_ID
-        .try_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |next| {
-            next.checked_add(1)
-        })
-        .expect("timer runtime identity space exhausted")
-}
 
 thread_local! {
     /// Cached assignments for every timer runtime used by this thread.
@@ -134,10 +173,7 @@ pub(crate) struct Builder {
 impl Builder {
     /// Allocates shard affinity and installs its worker callback before runtime startup.
     pub(crate) fn install(runtime_builder: &mut TokioBuilder, worker_threads: usize) -> Self {
-        let runtime_id = allocate_runtime_id();
         let affinity = Arc::new(Affinity {
-            runtime_id,
-            lifetime: Arc::new(()),
             worker_threads,
             next_worker: AtomicUsize::new(0),
             next_fallback: AtomicUsize::new(0),
@@ -181,22 +217,22 @@ impl Builder {
         // operation panics, unwinding drops its alarm and all prior shards.
         let mut shards = Vec::with_capacity(self.affinity.worker_threads);
         for index in 0..self.affinity.worker_threads {
-            let alarm = NativeAlarm::new();
+            let shard = Arc::new(Shard::new(index, NativeAlarm::new(), panicker.clone()));
 
             // Fail during runtime startup rather than the first user timer.
-            alarm.now().unwrap_or_else(|error| {
+            shard.alarm.now().unwrap_or_else(|error| {
                 panic!(
                     "failed to initialize timer shard {index} during read monotonic clock: {error}"
                 )
             });
-            alarm.arm(alarm.max_deadline()).unwrap_or_else(|error| {
+            shard.alarm.arm(shard.max_deadline).unwrap_or_else(|error| {
                 panic!("failed to initialize timer shard {index} during initial arm: {error}")
             });
-            alarm.disarm().unwrap_or_else(|error| {
+            shard.alarm.disarm().unwrap_or_else(|error| {
                 panic!("failed to initialize timer shard {index} during initial disarm: {error}")
             });
 
-            shards.push(Arc::new(Shard::new(index, alarm, panicker.clone())));
+            shards.push(shard);
         }
 
         for shard in &shards {
@@ -222,11 +258,12 @@ impl Timer {
     /// Eagerly registers a sleep measured from this method call.
     pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         if duration.is_zero() {
-            return Sleep::Ready;
+            Either::Left(tokio::task::coop::consume_budget())
+        } else {
+            Either::Right(register_relative(&self.shards, duration, || {
+                self.affinity.select()
+            }))
         }
-        Sleep::Registered(register_relative(&self.shards, duration, || {
-            self.affinity.select()
-        }))
     }
 
     /// Eagerly converts one wall-clock deadline and registers its sleep.
@@ -261,7 +298,7 @@ impl Timer {
     #[cfg(test)]
     /// Returns this runtime's assignment cached on the current thread.
     pub(crate) fn current_assignment(&self) -> Option<(usize, AssignmentKind)> {
-        THREAD_ASSIGNMENTS.with(|assignments| assignments.borrow().get(self.affinity.runtime_id))
+        THREAD_ASSIGNMENTS.with(|assignments| assignments.borrow().get(&self.affinity))
     }
 }
 
@@ -290,37 +327,20 @@ impl Drop for Timer {
     }
 }
 
-/// Concrete future returned by the native timer facade.
-enum Sleep {
-    /// A zero-duration or past-deadline sleep.
-    Ready,
-    /// A sleep registered in one native shard.
-    Registered(RegisteredSleep<NativeAlarm>),
-}
-
-impl Future for Sleep {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            Self::Ready => poll_cooperative_ready(context),
-            Self::Registered(sleep) => sleep.entry.poll(context),
-        }
-    }
-}
-
-/// Consumes scheduler budget before completing an otherwise immediate sleep.
-fn poll_cooperative_ready(context: &mut Context<'_>) -> Poll<()> {
-    let mut budget = std::pin::pin!(tokio::task::coop::consume_budget());
-    budget.as_mut().poll(context)
-}
-
 /// Registered sleep state that remembers its original cancellation shard.
 struct RegisteredSleep<A: Alarm> {
     /// Non-owning reference to the shard selected at construction.
     shard: Weak<Shard<A>>,
     /// Heap entry shared with the driver.
     entry: EntryArc<Entry>,
+}
+
+impl<A: Alarm> Future for RegisteredSleep<A> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.entry.poll(context)
+    }
 }
 
 impl<A: Alarm> Drop for RegisteredSleep<A> {
@@ -411,7 +431,7 @@ impl Entry {
 struct Shard<A: Alarm> {
     /// Zero-based diagnostic index.
     index: usize,
-    /// Platform alarm used only by this shard's driver.
+    /// Platform clock shared with producers and alarm serialized by the driver.
     alarm: A,
     /// Largest deadline accepted by this shard's platform alarm.
     max_deadline: Deadline,
@@ -424,7 +444,7 @@ struct Shard<A: Alarm> {
 }
 
 impl<A: Alarm> Shard<A> {
-    /// Creates an empty running shard around one validated alarm.
+    /// Creates an empty running shard and caches its platform deadline limit.
     fn new(index: usize, alarm: A, panicker: Panicker) -> Self {
         let max_deadline = alarm.max_deadline();
         Self {
@@ -583,9 +603,9 @@ impl<A: Alarm> Shard<A> {
             && state.entries.peek().is_some_and(|deadline| deadline <= now)
         {
             let entry = state.entries.pop().expect("timer heap minimum disappeared");
-            // Commit expiry before teardown can observe the removed entry.
-            // Cancellation may win the atomic transition, but not mutate the
-            // heap concurrently. Callbacks and final release remain deferred.
+            // Attempt expiry while heap removal is still serialized. A prior
+            // cancellation may already have won QUIESCENT, but cannot mutate
+            // the heap concurrently. Callbacks and final release stay deferred.
             let _ = entry.transition(ENTRY_FIRED);
             batch.entries.push(entry);
         }
@@ -656,8 +676,8 @@ impl<A: Alarm> Shard<A> {
         self.signal.notify();
     }
 
-    /// Returns whether shutdown has made normal driver work invalid.
-    fn is_stopped(&self) -> bool {
+    /// Returns whether normal driver work has ended.
+    fn is_terminal(&self) -> bool {
         self.state.lock().lifecycle != ShardLifecycle::Running
     }
 }
@@ -769,7 +789,7 @@ impl Batch {
         for entry in self.entries.drain(..) {
             // Waking or releasing the final user waker may unwind.
             let completion = catch_unwind(AssertUnwindSafe(move || {
-                // Expiry commits FIRED while popping under the shard lock.
+                // Expiry attempts FIRED while popping under the shard lock.
                 // Other lifecycle paths transition their drained entries here.
                 if (entry.state.load(AtomicOrdering::Acquire) == terminal
                     || entry.transition(terminal))
@@ -807,7 +827,7 @@ async fn run_driver_loop<A: Alarm>(
 ) -> Result<(), DriverFailure> {
     shard.rearm()?;
     loop {
-        if shard.is_stopped() {
+        if shard.is_terminal() {
             return Ok(());
         }
         select! {
@@ -845,18 +865,11 @@ async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
         .catch_unwind()
         .await;
     let failure = match outcome {
-        Ok(Ok(())) if shard.is_stopped() => return,
-        Ok(Ok(())) => DriverFailure {
-            operation: "driver exit",
-            cause: DriverFailureCause::Message(
-                "driver exited while its shard was running".to_string(),
-            ),
-        },
+        Ok(Ok(())) => return,
         Ok(Err(failure)) => failure,
         Err(panic) => DriverFailure::panic(&*panic),
     };
     shard.fail(failure);
-    let _ = batch.complete(ENTRY_FIRED);
 }
 
 /// Durable coalesced notification from any producer to one driver.
@@ -920,13 +933,11 @@ pub(crate) enum AssignmentKind {
     Worker,
 }
 
-/// Shard assignment scoped to one runtime identity.
+/// Shard assignment scoped to one affinity allocation.
 #[derive(Debug)]
 struct ThreadAssignment {
-    /// Identity of the runtime that owns this assignment.
-    runtime_id: u64,
-    /// Weak token used to discard assignments after their runtime is dropped.
-    lifetime: Weak<()>,
+    /// Weak ownership and allocation identity of the runtime affinity.
+    affinity: Weak<Affinity>,
     /// Provisional or stable worker classification.
     kind: AssignmentKind,
     /// Selected shard index.
@@ -939,9 +950,14 @@ impl ThreadAssignment {
         (self.index, self.kind)
     }
 
+    /// Returns whether this assignment belongs to `affinity`.
+    fn belongs_to(&self, affinity: &Arc<Affinity>) -> bool {
+        std::ptr::eq(self.affinity.as_ptr(), Arc::as_ptr(affinity))
+    }
+
     /// Returns whether the runtime that owns this assignment is still alive.
     fn is_live(&self) -> bool {
-        self.lifetime.strong_count() != 0
+        self.affinity.strong_count() != 0
     }
 }
 
@@ -964,22 +980,22 @@ impl ThreadAssignments {
 
     /// Returns a cached assignment without changing the fast-path runtime.
     #[cfg(test)]
-    fn get(&self, runtime_id: u64) -> Option<(usize, AssignmentKind)> {
+    fn get(&self, affinity: &Arc<Affinity>) -> Option<(usize, AssignmentKind)> {
         self.current
             .as_ref()
-            .filter(|assignment| assignment.runtime_id == runtime_id)
+            .filter(|assignment| assignment.belongs_to(affinity))
             .or_else(|| {
                 self.inactive
                     .iter()
-                    .find(|assignment| assignment.runtime_id == runtime_id)
+                    .find(|assignment| assignment.belongs_to(affinity))
             })
             .map(ThreadAssignment::selection)
     }
 
     /// Makes a cached runtime current and returns its assignment.
-    fn activate(&mut self, runtime_id: u64) -> Option<(usize, AssignmentKind)> {
+    fn activate(&mut self, affinity: &Arc<Affinity>) -> Option<(usize, AssignmentKind)> {
         if let Some(current) = self.current.as_ref()
-            && current.runtime_id == runtime_id
+            && current.belongs_to(affinity)
         {
             return Some(current.selection());
         }
@@ -989,7 +1005,7 @@ impl ThreadAssignments {
         let position = self
             .inactive
             .iter()
-            .position(|assignment| assignment.runtime_id == runtime_id)?;
+            .position(|assignment| assignment.belongs_to(affinity))?;
         let assignment = self.inactive.swap_remove(position);
         let selection = assignment.selection();
         if let Some(previous) = self.current.replace(assignment)
@@ -1001,10 +1017,14 @@ impl ThreadAssignments {
     }
 
     /// Installs a new or upgraded assignment as the fast-path runtime.
-    fn install(&mut self, assignment: ThreadAssignment) {
-        let runtime_id = assignment.runtime_id;
+    fn install(&mut self, affinity: &Arc<Affinity>, kind: AssignmentKind, index: usize) {
+        let assignment = ThreadAssignment {
+            affinity: Arc::downgrade(affinity),
+            kind,
+            index,
+        };
         if let Some(previous) = self.current.replace(assignment)
-            && previous.runtime_id != runtime_id
+            && !previous.belongs_to(affinity)
             && previous.is_live()
         {
             self.inactive.push(previous);
@@ -1014,10 +1034,6 @@ impl ThreadAssignments {
 
 /// Separate worker and fallback allocators for one runtime.
 struct Affinity {
-    /// Identity checked by every thread-local lookup.
-    runtime_id: u64,
-    /// Token retained for exactly as long as this runtime's affinity exists.
-    lifetime: Arc<()>,
     /// Number of native timer shards.
     worker_threads: usize,
     /// Allocator exhausted by initial worker park callbacks during startup.
@@ -1028,21 +1044,16 @@ struct Affinity {
 
 impl Affinity {
     /// Selects a cached shard or creates a provisional fallback assignment.
-    fn select(&self) -> usize {
+    fn select(self: &Arc<Self>) -> usize {
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
-            if let Some((index, _)) = assignments.activate(self.runtime_id) {
+            if let Some((index, _)) = assignments.activate(self) {
                 return index;
             }
             // Relaxed ordering is sufficient because this counter allocates unique claims only.
             let index =
                 self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
-            assignments.install(ThreadAssignment {
-                runtime_id: self.runtime_id,
-                lifetime: Arc::downgrade(&self.lifetime),
-                kind: AssignmentKind::Provisional,
-                index,
-            });
+            assignments.install(self, AssignmentKind::Provisional, index);
             index
         })
     }
@@ -1050,10 +1061,10 @@ impl Affinity {
     /// Preserves a worker assignment or upgrades a provisional one.
     ///
     /// Returns whether this callback claimed a new worker slot.
-    fn assign_worker(&self) -> bool {
+    fn assign_worker(self: &Arc<Self>) -> bool {
         THREAD_ASSIGNMENTS.with(|assignments| {
             let mut assignments = assignments.borrow_mut();
-            let existing = assignments.activate(self.runtime_id);
+            let existing = assignments.activate(self);
             if matches!(existing, Some((_, AssignmentKind::Worker))) {
                 return false;
             }
@@ -1082,20 +1093,10 @@ impl Affinity {
                 }
                 let index =
                     self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
-                assignments.install(ThreadAssignment {
-                    runtime_id: self.runtime_id,
-                    lifetime: Arc::downgrade(&self.lifetime),
-                    kind: AssignmentKind::Provisional,
-                    index,
-                });
+                assignments.install(self, AssignmentKind::Provisional, index);
                 return false;
             };
-            assignments.install(ThreadAssignment {
-                runtime_id: self.runtime_id,
-                lifetime: Arc::downgrade(&self.lifetime),
-                kind: AssignmentKind::Worker,
-                index,
-            });
+            assignments.install(self, AssignmentKind::Worker, index);
             true
         })
     }

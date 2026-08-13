@@ -1,4 +1,24 @@
-//! macOS Mach absolute kqueue timer adapter.
+//! macOS native alarm backed by one private `kqueue` per scheduler shard.
+//!
+//! Each alarm owns its descriptor, Tokio reactor registration, and a copy of
+//! the process-wide validated Mach timebase. A fixed timer identifier is safe
+//! because every shard has a distinct `kqueue`. Arms install an absolute,
+//! critical, one-shot Mach timer.
+//!
+//! Conversions are directed so a timer never fires early. Clock observations
+//! round Mach ticks up to integral nanoseconds, arms round nanoseconds up to
+//! Mach ticks, and the maximum positive `kevent` data value is converted down
+//! to a representable deadline.
+//!
+//! Producers may read the clock concurrently. One shard driver serializes arm,
+//! disarm, and wait operations. Relaxed `installed` bookkeeping distinguishes
+//! an expected missing one-shot event from a recorded timer that disappeared.
+//! Readiness retrieval validates the private event and `EV_ERROR`, then drains
+//! the `kqueue` until `WouldBlock` so Tokio can clear cached readiness.
+//!
+//! Descriptor and timebase setup failures panic before user execution. Live
+//! conversion, alarm, descriptor, and readiness errors return to the
+//! scheduler's fatal failure path.
 
 use super::scheduler::{Alarm, Deadline};
 use std::{

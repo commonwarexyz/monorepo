@@ -114,21 +114,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relative_and_wall_sleeps_start_at_construction() {
-        // Construct relative and wall-clock sleeps without polling either.
+    async fn wall_sleep_starts_at_construction() {
+        // Construct a wall-clock sleep without polling it.
         let timer = timer();
         let duration = Duration::from_millis(20);
         let wall_deadline = SystemTime::now()
             .checked_add(duration)
             .expect("test wall deadline must be representable");
-        let relative = timer.sleep(duration);
         let wall = timer.sleep_until(wall_deadline);
 
-        // Let both eagerly created deadlines elapse through another timer.
+        // Let the eagerly created deadline elapse through another timer.
         tokio::time::sleep(duration.saturating_mul(3)).await;
 
-        // Their first polls observe the construction-time deadlines.
-        assert_eq!(relative.now_or_never(), Some(()));
+        // Its first poll observes the construction-time deadline.
         assert_eq!(wall.now_or_never(), Some(()));
     }
 }

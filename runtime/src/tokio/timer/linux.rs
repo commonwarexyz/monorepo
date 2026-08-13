@@ -1,4 +1,21 @@
-//! Linux monotonic timerfd adapter.
+//! Linux native alarm backed by one `timerfd` per scheduler shard.
+//!
+//! Each alarm owns a nonblocking, close-on-exec descriptor and its Tokio
+//! reactor registration. All shards use `CLOCK_MONOTONIC`, so their absolute
+//! [`super::scheduler::Deadline`] values share one clock domain. Arms use
+//! `TFD_TIMER_ABSTIME`, disarms install a zero specification, and the supported
+//! deadline is bounded by both `time_t` and Linux's signed nanosecond timer
+//! range.
+//!
+//! Producers may read the clock concurrently. One shard driver serializes arm,
+//! disarm, and wait operations. A wait reads expiration counts until a
+//! nonblocking read returns `WouldBlock`. Observing that empty state is what
+//! clears Tokio's cached readiness after the one-shot kernel event is drained.
+//! Interrupted system calls are retried.
+//!
+//! Descriptor creation and reactor registration are startup invariants and
+//! panic on failure. Clock, alarm, descriptor, and readiness errors after
+//! startup return to the scheduler's fatal failure path.
 
 use super::scheduler::{Alarm, Deadline};
 use std::{

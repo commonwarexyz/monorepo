@@ -3,9 +3,8 @@ mod ordinary {
     use super::super::{
         Affinity, Alarm, AssignmentKind, Batch, Deadline, DriverFailure, DriverSignal,
         ENTRY_FAILED, ENTRY_FIRED, ENTRY_QUIESCENT, ENTRY_WAITING, EXPIRY_YIELD_BUDGET, Entry,
-        NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle, Sleep, ThreadAssignment,
-        ThreadAssignments, WAKE_BATCH, allocate_runtime_id, register_relative, run_driver,
-        run_driver_loop,
+        NOT_IN_HEAP, RegisteredSleep, Shard, ShardLifecycle, ThreadAssignments, Timer, WAKE_BATCH,
+        register_relative, run_driver, run_driver_loop,
     };
     use crate::{
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -180,7 +179,6 @@ mod ordinary {
     }
 
     /// Test-side controls and observations for one [`FakeAlarm`].
-    #[derive(Clone)]
     struct FakeAlarmControl {
         /// State shared with the alarm owned by the shard.
         state: Arc<FakeAlarmState>,
@@ -461,14 +459,18 @@ mod ordinary {
         assert!(!shard.signal.is_notified());
     }
 
-    /// Polls an entry once and reports whether failure caused an unwind.
-    fn failed_poll_unwinds(entry: &Entry) -> bool {
-        catch_unwind(AssertUnwindSafe(|| {
+    /// Polls an entry once and verifies the reported failure unwind.
+    fn assert_failed_poll_unwinds(entry: &Entry) {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
             let waker = noop_waker();
             let mut context = Context::from_waker(&waker);
             let _ = entry.poll(&mut context);
         }))
-        .is_err()
+        .expect_err("failed timer entry completed without unwinding");
+        assert_eq!(
+            extract_panic_message(&*panic),
+            "high-resolution timer scheduler failed"
+        );
     }
 
     /// Observes and extracts one fatal runtime interruption.
@@ -515,15 +517,13 @@ mod ordinary {
         checking.observed_after_yield.load(AtomicOrdering::Acquire)
     }
 
-    /// Constructs an affinity allocator with a fresh runtime identity.
-    fn affinity(worker_threads: usize) -> Affinity {
-        Affinity {
-            runtime_id: allocate_runtime_id(),
-            lifetime: Arc::new(()),
+    /// Constructs one independently owned affinity allocator.
+    fn affinity(worker_threads: usize) -> Arc<Affinity> {
+        Arc::new(Affinity {
             worker_threads,
             next_worker: super::super::AtomicUsize::new(0),
             next_fallback: super::super::AtomicUsize::new(0),
-        }
+        })
     }
 
     /// Concurrently claims shard indices from fresh worker-like or fallback threads.
@@ -597,7 +597,7 @@ mod ordinary {
     fn registration_notifications_respect_current_arm_and_tolerance() {
         // Register and arm the initial minimum, then discard setup observations.
         let (shard, control) = fake_shard();
-        let (initial, _initial_sleep) = register(&shard, at(1_000));
+        let (_initial, _initial_sleep) = register(&shard, at(1_000));
         consume_signal(&shard);
         driver_ok(shard.rearm());
         control.clear_operations();
@@ -612,7 +612,6 @@ mod ordinary {
         // An earlier minimum 51 ns before the current arm must notify the driver.
         let (_uncovered, _uncovered_sleep) = register(&shard, at(949));
         assert!(shard.signal.is_notified());
-        assert!(Arc::strong_count(&initial) >= 2);
     }
 
     #[test]
@@ -689,12 +688,16 @@ mod ordinary {
         assert!(!driver_ok(shard.take_expired(&mut batch)));
         assert_eq!(batch.entries.len(), 3);
         assert!(Arc::ptr_eq(&batch.entries[0], &earliest));
-        assert!(batch.entries[1..]
-            .iter()
-            .any(|entry| Arc::ptr_eq(entry, &equal_first)));
-        assert!(batch.entries[1..]
-            .iter()
-            .any(|entry| Arc::ptr_eq(entry, &equal_second)));
+        assert!(
+            batch.entries[1..]
+                .iter()
+                .any(|entry| Arc::ptr_eq(entry, &equal_first))
+        );
+        assert!(
+            batch.entries[1..]
+                .iter()
+                .any(|entry| Arc::ptr_eq(entry, &equal_second))
+        );
         assert_eq!(shard.state.lock().entries.len(), 1);
         assert_ne!(future.heap_index.load(AtomicOrdering::Acquire), NOT_IN_HEAP);
 
@@ -1285,7 +1288,7 @@ mod ordinary {
                 .load(AtomicOrdering::Acquire),
             NOT_IN_HEAP
         );
-        assert!(failed_poll_unwinds(&failed_registration.entry));
+        assert_failed_poll_unwinds(&failed_registration.entry);
         assert!(batch.complete(ENTRY_FIRED).is_none());
 
         // Fatal propagation still preserves the operation that failed.
@@ -1352,7 +1355,7 @@ mod ordinary {
             assert_eq!(shard.state.lock().lifecycle, ShardLifecycle::Failed);
             assert_eq!(shard.state.lock().entries.len(), 0);
             assert_eq!(entry.state.load(AtomicOrdering::Acquire), ENTRY_FAILED);
-            assert!(failed_poll_unwinds(&entry));
+            assert_failed_poll_unwinds(&entry);
 
             // Fatal propagation retains each path's precise classification.
             let message = fatal_message(panicked).await;
@@ -1454,6 +1457,10 @@ mod ordinary {
     #[tokio::test(flavor = "current_thread")]
     async fn ready_sleep_loop_cooperates_with_other_tasks() {
         // Queue a peer behind a task that repeatedly awaits immediate sleeps.
+        let timer = Timer {
+            shards: Vec::new(),
+            affinity: affinity(1),
+        };
         let peer_ran = Arc::new(AtomicBool::new(false));
         let peer_flag = Arc::clone(&peer_ran);
         let peer = tokio::spawn(async move {
@@ -1462,7 +1469,7 @@ mod ordinary {
 
         // Await more immediate sleeps than one Tokio cooperative budget.
         for _ in 0..1_024 {
-            Sleep::Ready.await;
+            timer.sleep(Duration::ZERO).await;
             if peer_ran.load(AtomicOrdering::Acquire) {
                 break;
             }
@@ -1508,7 +1515,7 @@ mod ordinary {
         assert!(failed.transition(ENTRY_FAILED));
 
         // A failed entry unwinds instead of hanging.
-        assert!(failed_poll_unwinds(&failed));
+        assert_failed_poll_unwinds(&failed);
     }
 
     #[test]
@@ -1543,8 +1550,8 @@ mod ordinary {
     #[test]
     fn affinity_distributes_worker_and_fallback_claims() {
         // Create independent four-shard allocators for worker and fallback claims.
-        let workers = Arc::new(affinity(4));
-        let fallbacks = Arc::new(affinity(4));
+        let workers = affinity(4);
+        let fallbacks = affinity(4);
 
         // Concurrently claim every worker index once and two fallback rounds.
         let mut worker_indices = claim_affinity_indices(&workers, 4, true);
@@ -1616,40 +1623,31 @@ mod ordinary {
     fn thread_assignment_cache_prunes_dropped_runtimes_on_cold_paths() {
         // Cache two live runtimes, leaving the first assignment inactive.
         let mut assignments = ThreadAssignments::new();
-        let first_lifetime = Arc::new(());
-        assignments.install(ThreadAssignment {
-            runtime_id: 1,
-            lifetime: Arc::downgrade(&first_lifetime),
-            kind: AssignmentKind::Provisional,
-            index: 3,
-        });
-        let second_lifetime = Arc::new(());
-        assignments.install(ThreadAssignment {
-            runtime_id: 2,
-            lifetime: Arc::downgrade(&second_lifetime),
-            kind: AssignmentKind::Worker,
-            index: 4,
-        });
-        assert_eq!(assignments.get(1), Some((3, AssignmentKind::Provisional)));
+        let first = affinity(1);
+        assignments.install(&first, AssignmentKind::Provisional, 3);
+        let second = affinity(1);
+        assignments.install(&second, AssignmentKind::Worker, 4);
+        assert_eq!(
+            assignments.get(&first),
+            Some((3, AssignmentKind::Provisional))
+        );
         assert_eq!(assignments.inactive.len(), 1);
 
         // A cache miss prunes the inactive assignment after its runtime ends.
-        drop(first_lifetime);
-        assert_eq!(assignments.activate(3), None);
+        drop(first);
+        let third = affinity(1);
+        assert_eq!(assignments.activate(&third), None);
         assert!(assignments.inactive.is_empty());
-        assert_eq!(assignments.get(2), Some((4, AssignmentKind::Worker)));
+        assert_eq!(assignments.get(&second), Some((4, AssignmentKind::Worker)));
 
         // Replacing a dead current assignment does not preserve it as inactive.
-        drop(second_lifetime);
-        let third_lifetime = Arc::new(());
-        assignments.install(ThreadAssignment {
-            runtime_id: 3,
-            lifetime: Arc::downgrade(&third_lifetime),
-            kind: AssignmentKind::Provisional,
-            index: 5,
-        });
+        drop(second);
+        assignments.install(&third, AssignmentKind::Provisional, 5);
         assert!(assignments.inactive.is_empty());
-        assert_eq!(assignments.get(3), Some((5, AssignmentKind::Provisional)));
+        assert_eq!(
+            assignments.get(&third),
+            Some((5, AssignmentKind::Provisional))
+        );
     }
 
     #[test]
@@ -1731,7 +1729,7 @@ mod ordinary {
                     let assignment = super::super::THREAD_ASSIGNMENTS.with(|assignments| {
                         assignments
                             .borrow()
-                            .get(probe_affinity.runtime_id)
+                            .get(&probe_affinity)
                             .expect("replacement worker must retain an assignment")
                     });
                     progress_tx
@@ -1782,28 +1780,13 @@ mod loom_tests {
         thread,
     };
     use std::{
-        future::{Future, pending},
+        future::{Future, pending, poll_fn},
         io,
         panic::{AssertUnwindSafe, catch_unwind},
-        pin::Pin,
         sync::Arc,
         task::{Context, Poll},
         time::Duration,
     };
-
-    /// Future adapter that polls the production timer entry.
-    struct EntryFuture {
-        /// Entry shared with the completing thread.
-        entry: LoomArc<Entry>,
-    }
-
-    impl Future for EntryFuture {
-        type Output = ();
-
-        fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-            self.entry.poll(context)
-        }
-    }
 
     /// Native-alarm state exposed to the forced rearm interleaving.
     struct ModelAlarmState {
@@ -1948,9 +1931,7 @@ mod loom_tests {
                     assert!(batch.complete(ENTRY_FIRED).is_none());
                 })
             };
-            block_on(EntryFuture {
-                entry: LoomArc::clone(&entry),
-            });
+            block_on(poll_fn(|context| entry.poll(context)));
             completer.join().unwrap();
 
             // Either state check or the registered production AtomicWaker must
@@ -1972,9 +1953,7 @@ mod loom_tests {
                 })
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
-                block_on(EntryFuture {
-                    entry: LoomArc::clone(&entry),
-                });
+                block_on(poll_fn(|context| entry.poll(context)));
             }));
             completer.join().unwrap();
 

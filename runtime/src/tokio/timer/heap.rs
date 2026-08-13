@@ -1,4 +1,17 @@
-//! Indexed 4-ary min-heap for registered timers.
+//! Indexed 4-ary minimum heap owned by one timer shard.
+//!
+//! The heap is not internally synchronized. Its owning `ShardState`
+//! mutex serializes every production operation and every residency use of
+//! [`super::scheduler::Entry::heap_index`]. At each lock boundary, every resident
+//! entry points to its exact vector slot, every nonresident entry stores
+//! [`super::scheduler::NOT_IN_HEAP`], and no child precedes its parent.
+//!
+//! Insertion, minimum removal, and indexed removal take O(log n). Each swap
+//! updates the reverse indices of the entries it moves. Indexed removal also
+//! checks pointer identity, so a stale index cannot remove a different timer
+//! that later occupies the same slot. Equal deadlines have no stable order.
+//! Relaxed index atomics are sufficient because the shard mutex publishes all
+//! residency changes.
 
 use super::{
     scheduler::{Deadline, Entry, NOT_IN_HEAP},
@@ -304,7 +317,10 @@ mod tests {
         let entry = insert(&mut heap, 7);
         assert_eq!(heap.peek(), Some(deadline(7)));
         assert!(Arc::ptr_eq(&heap.items[0].entry, &entry));
-        assert_eq!(heap.items[0].deadline.as_duration(), Duration::from_nanos(7));
+        assert_eq!(
+            heap.items[0].deadline.as_duration(),
+            Duration::from_nanos(7)
+        );
         assert_eq!(entry.heap_index.load(Ordering::Relaxed), 0);
         assert_invariants(&heap);
 

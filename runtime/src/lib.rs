@@ -1001,14 +1001,22 @@ mod tests {
         R::Context: Clock,
     {
         runner.start(|context| async move {
-            // Construct a short sleep without polling it, then advance beyond its
-            // deadline with an independently constructed longer sleep.
-            let unpolled = context.sleep(Duration::from_millis(10));
+            // Construct relative and wall sleeps without polling them, then
+            // advance beyond both deadlines with an independent longer sleep.
+            let duration = Duration::from_millis(10);
+            let relative = context.sleep(duration);
+            let wall = context.sleep_until(
+                context
+                    .current()
+                    .checked_add(duration)
+                    .expect("test wall deadline must be representable"),
+            );
             context.sleep(Duration::from_millis(20)).await;
 
-            // A single poll must now observe completion. Recomputing the deadline
-            // on first poll would incorrectly leave this future pending.
-            assert!(unpolled.now_or_never().is_some());
+            // A single poll must now observe both completions. Recomputing either
+            // deadline on first poll would incorrectly leave its future pending.
+            assert!(relative.now_or_never().is_some());
+            assert!(wall.now_or_never().is_some());
         });
     }
 
