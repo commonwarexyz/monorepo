@@ -1,6 +1,6 @@
 ---
 title: "Earn Your Stripes"
-description: "Sharing large blocks efficiently means rebuilding them from smaller pieces. That work used to run on one core and repeat an expensive calculation. We now spread it across cores and skip the duplicate step, making the slowest case nearly 4x faster."
+description: "Sharing large blocks efficiently means rebuilding them from smaller pieces. In the worst (and common) case, block recovery was limited to one core and repeated an expensive calculation. We now split that work across cores and skip the duplicate step, making it nearly 4x faster."
 date: "August 13th, 2026"
 published-time: "2026-08-13T00:00:00Z"
 modified-time: "2026-08-13T00:00:00Z"
@@ -13,15 +13,15 @@ image: "https://commonware.xyz/imgs/reed-solomon-stripes.png"
 katex: true
 ---
 
-A chain can only process transactions as fast as it can disseminate them. At high TPS, that means moving big blocks across the network.
+A blockchain can only finalize transactions as fast as it can disseminate them between validators. At high TPS, that means moving big blocks across the network.
 
-Sending a full copy to every validator turns the leader's upload into the bottleneck while everyone else's bandwidth sits idle. [Deliver Us in Pieces](/blogs/coding) showed how erasure coding spreads that load across the network: the leader sends a different shard to each validator, validators relay what they receive, and everyone reconstructs the full block once enough pieces arrive.
+Sending a full copy to every validator turns the leader's upload into the bottleneck while everyone else's bandwidth sits idle. [Deliver Us in Pieces](/blogs/coding) showed how erasure coding could be seamlessly integrated with Simplex to spread that load across the network: the leader sends a different shard to each validator, validators relay what they receive, and everyone reconstructs the full block once enough pieces arrive.
 
-Those bandwidth savings come with a computational tradeoff: the leader must encode each block before sending it, and every validator must reconstruct it and verify its commitment before certification. That verification originally re-encoded the recovered originals as well. Until recently, one core carried the substantial cost of Reed-Solomon recovery, so this post is about spreading that work across the hardware.
+Those bandwidth savings come with a computational tradeoff: the leader must encode each block before sending it, and every validator must reconstruct it and verify its commitment before certification. Until recently, Reed-Solomon recovery bottlenecked on a single core. We removed that bottleneck by cutting every shard into matching stripes and recovering them in parallel.
 
 ## Parallel Hashing, Serial Recovery
 
-Reconstruction already had a worker pool, but it used those workers only to hash missing shards for the Merkle root. Reed-Solomon recovery remained one synchronous decoding pass. SIMD accelerated that pass on supported CPUs, but it still ran on one core even when eight workers were available.
+Reconstruction was already parallelized, but only while hashing missing shards to rebuild the Merkle root. Reed-Solomon recovery itself remained a single decoding pass. Vector instructions accelerated that pass on supported CPUs, but it still ran on one core.
 
 Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show where recovery stops scaling. The all-original case does no recovery. The full-recovery case reconstructs every original:
 
@@ -53,7 +53,7 @@ Benchmarks on an Apple M5 Pro (8 MiB block, 250 chunks) show where recovery stop
 </noscript>
 ```
 
-From 1 to 16 workers, all-original end-to-end latency dropped from 34.96 ms to 7.90 ms. Full recovery improved through 8 workers, then flattened near 26 ms. The 16 to 18 ms separation is only a proxy for recovery because the two cases hash different missing shards. Even so, adding workers did not parallelize Reed-Solomon recovery.
+From 1 to 16 workers, all-original end-to-end latency dropped from 34.96 ms to 7.90 ms. Full recovery improved through 8 workers, then changed little at 16, flattening near 26 ms. Because the cases hash different sets of missing shards, the gap between them does not isolate recovery time. The relevant signal is how they scale: the all-original path keeps improving, while the recovery-heavy path barely changes beyond 8 workers.
 
 ## From One Decoder to Many
 
@@ -109,7 +109,7 @@ No stripe reads or writes another stripe. The $p$ stripes can therefore be recov
 Figure 1: Recovering missing original shard $D_1$ used to run as one full-width Reed-Solomon job. After striping, each aligned range becomes its own job. The jobs run in parallel, then the recovered ranges concatenate into the same full-width $D_1$.
 :::
 
-Commonware's Reed-Solomon codec uses the [novel-polynomial-basis FFT construction](https://doi.org/10.1109/TIT.2016.2608892) to evaluate polynomials over a binary extension field with a radix-2-style butterfly. Write the shard matrix as $X = [\mathbf{x}_0 \; \cdots \; \mathbf{x}_{w-1}]$, where $\mathbf{x}_j$ is the vector formed by symbol column $j$ across the shards. If $\mathcal{T}$ is the encoding or recovery transform, the butterfly acts independently on each column:
+[Commonware's authenticated Reed-Solomon codec](https://docs.rs/commonware-coding/latest/commonware_coding/struct.ReedSolomon.html) uses the [novel-polynomial-basis FFT construction](https://doi.org/10.1109/TIT.2016.2608892) to evaluate polynomials over a binary extension field with a radix-2-style butterfly. Write the shard matrix as $X = [\mathbf{x}_0 \; \cdots \; \mathbf{x}_{w-1}]$, where $\mathbf{x}_j$ is the vector formed by symbol column $j$ across the shards. If $\mathcal{T}$ is the encoding or recovery transform, the butterfly acts independently on each column:
 
 $$
 \mathcal{T}(X)
@@ -125,7 +125,7 @@ $$
 32\ \text{columns} \times 2\ \text{bytes per column} = 64\ \text{bytes}.
 $$
 
-A short final batch is padded. Cutting an interior stripe through a batch would turn that slice into a different padded tail, so every non-final stripe ends between complete batches. This implementation constraint preserves the column-wise decomposition above.
+*A short final batch is padded. Cutting an interior stripe through a batch would turn that slice into a different padded tail, so every non-final stripe ends between complete batches. This implementation constraint preserves the column-wise decomposition above.*
 
 ## Recovery Scales
 
@@ -145,13 +145,13 @@ We reran the same worst-case decode before and after striping:
 </noscript>
 ```
 
-With one worker, one stripe follows the original full-width decode, so no parallel speedup is expected. With eight workers, recovery finally rides the same cores as everything else, and worst-case decode drops from 26.85 ms to 10.22 ms, a 2.63x speedup. With 16 workers, it drops to 7.67 ms, a 3.38x speedup. The recovery tail that used to ignore concurrency is now the part that shrinks the most.
+With one worker, one stripe follows the original full-width decode, so no parallel speedup is expected. With eight workers, parallel recovery cuts worst-case decode from 26.85 ms to 10.22 ms, a 2.63x speedup. With 16 workers, it falls to 7.67 ms, a 3.38x speedup. The recovery work that stayed on one core now scales with the available workers.
 
 ## Removing the Second Transform
 
-Striping made recovery parallel, but the verification path still ran Reed-Solomon twice. After it decoded missing originals, it re-encoded every recovery shard, compared any provided recoveries with that output, and rebuilt the Merkle root over the complete codeword. As explained in [Deliver Us in Pieces](/blogs/coding), checking a shard against the commitment does not by itself show that all committed shards form one valid Reed-Solomon codeword.
+Splitting each shard into independent stripes made recovery parallel, but the verification path still ran Reed-Solomon twice. After it decoded missing originals, it re-encoded every recovery shard, compared any provided recoveries with that output, and rebuilt the Merkle root over the complete codeword. As explained in [Deliver Us in Pieces](/blogs/coding), checking a shard against the commitment does not by itself show that all committed shards form one valid Reed-Solomon codeword.
 
-Once we [vendored `reed-solomon-simd`](https://github.com/commonwarexyz/monorepo/pull/4092), we could make the decoder return missing recovery positions and remove the second pass whenever an original shard was missing. The expensive decode transform had already evaluated those positions, but only missing originals were exposed.
+By [vendoring `reed-solomon-simd`](https://github.com/commonwarexyz/monorepo/pull/4092), we could make the decoder return missing recovery positions and remove the second pass whenever an original shard was missing. The expensive decode transform had already evaluated those positions, but only missing originals were exposed.
 
 Write the systematic generator matrix as
 
@@ -231,7 +231,7 @@ Running the recovery-heavy benchmark first with striping alone and then with dec
 </noscript>
 ```
 
-These are end-to-end measurements of the recovery-heavy verification path, not isolated timings of the two transforms.
+*These measurements cover the entire recovery-heavy verification path, not just the transforms themselves.*
 
 The final [pull request](https://github.com/commonwarexyz/monorepo/pull/4091) combines striping with decode-reveal:
 
@@ -249,14 +249,12 @@ The final [pull request](https://github.com/commonwarexyz/monorepo/pull/4091) co
 </noscript>
 ```
 
-The one-worker row is an end-to-end comparison of the baseline and final implementations, so it does not isolate either optimization. Tests also confirm that striped and full-width operations produce the same codeword, that revealed recovery shards match encoder output, and that tampered originals, recoveries, padding, and surplus shards are rejected.
+## Finding Bugs (and Bottlenecks?)
 
-## Finding the Bottleneck
+Sunghyeon used QED's research agent to find this optimization. The agent read the coding stack and noticed that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. It then tested whether recovery could be split into independent stripes and run in parallel.
 
-Sunghyeon used QED's AI research agent to find this optimization. The agent read the coding stack and noticed that hashing the missing shards in decode was parallelized, but Reed-Solomon recovery was not. It then tested whether recovery could be split into independent stripes and run in parallel.
-
-The loop resembles the one QED uses for security audits. It scans the code, gathers repository evidence, forms hypotheses, and verifies them with tests and benchmarks. Whether a finding is useful depends on repository context, since the same pattern may be a known issue or an intentional design choice. Lessons from [continuously auditing Commonware](https://qedaudit.io/blog/commonware/) helped the bot identify a valid optimization.
+The loop resembles the one QED uses for security audits. It scans the code, gathers repository evidence, forms hypotheses, and verifies them with tests and benchmarks. Repository context separates a useful finding from a known issue or an intentional design choice. QED had built that context by [continuously auditing Commonware](https://qedaudit.io/blog/commonware/).
 
 ## Next Steps
 
-It is more practical than ever to tune low-level primitives to run closer to the limits of modern hardware. We expect to keep investing in this work across the Commonware Library, from our recent [SHA-256 optimizations](https://github.com/commonwarexyz/monorepo/pull/4187) to upcoming work on [faster Ed25519 signature verification](https://github.com/commonwarexyz/monorepo/pull/4467).
+It is more practical than ever to tune low-level primitives to run at the limits of modern hardware. We plan to bring that same focus to more of the Commonware Library, from our recent [SHA-256 optimizations](https://github.com/commonwarexyz/monorepo/pull/4187) to upcoming work on [faster Ed25519 signature verification](https://github.com/commonwarexyz/monorepo/pull/4467).
