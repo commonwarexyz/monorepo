@@ -2289,6 +2289,13 @@ fn run_standard_once<P: simplex::Simplex>(
         }
 
         let relay = Arc::new(block_relay::Relay::new());
+        // A withheld block should hold certification pending only for the
+        // DropRecipient scenario (whose liveness is left unbounded); other
+        // runs certify per the Certifier as the upstream mock does.
+        relay.set_certify_requires_block(matches!(
+            input.block_filter,
+            BlockFilterChoice::DropRecipient { .. }
+        ));
         configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
         let mut reporters = Vec::new();
         let config = input.configuration;
@@ -2535,6 +2542,13 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         }
 
         let relay = Arc::new(block_relay::Relay::new());
+        // A withheld block should hold certification pending only for the
+        // DropRecipient scenario (whose liveness is left unbounded); other
+        // runs certify per the Certifier as the upstream mock does.
+        relay.set_certify_requires_block(matches!(
+            input.block_filter,
+            BlockFilterChoice::DropRecipient { .. }
+        ));
         configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
         let mut reporters = Vec::new();
         let config = input.configuration;
@@ -2790,6 +2804,13 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
             setup_network::<P>(&mut context, &input).await;
 
         let relay = Arc::new(block_relay::Relay::new());
+        // A withheld block should hold certification pending only for the
+        // DropRecipient scenario (whose liveness is left unbounded); other
+        // runs certify per the Certifier as the upstream mock does.
+        relay.set_certify_requires_block(matches!(
+            input.block_filter,
+            BlockFilterChoice::DropRecipient { .. }
+        ));
         configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
         let mut reporters = Vec::new();
         let config = input.configuration;

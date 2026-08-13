@@ -25,7 +25,10 @@ use rand::{Rng, RngExt as _};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tracing::{debug, error, warn};
@@ -50,6 +53,7 @@ struct Listener {
 pub(crate) struct Relay<P: PublicKey> {
     recipients: Mutex<BTreeMap<P, Vec<Listener>>>,
     filter: Mutex<Option<Filter<P>>>,
+    certify_requires_block: AtomicBool,
 }
 
 impl<P: PublicKey> Relay<P> {
@@ -57,7 +61,23 @@ impl<P: PublicKey> Relay<P> {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
             filter: Mutex::new(None),
+            certify_requires_block: AtomicBool::new(false),
         }
+    }
+
+    /// When enabled, a mock [`Application`] backed by this relay holds a certify
+    /// request open until the payload's block bytes arrive, so a withheld block
+    /// yields a genuinely pending certify. Left off (the default), certification
+    /// follows the [`Certifier`] regardless of block possession, matching the
+    /// upstream mock application; harnesses whose block drops are recoverable
+    /// in-flight faults (e.g. ByzzFuzz pre-GST partitions) rely on that.
+    pub(crate) fn set_certify_requires_block(&self, requires: bool) {
+        self.certify_requires_block
+            .store(requires, Ordering::Relaxed);
+    }
+
+    pub(crate) fn certify_requires_block(&self) -> bool {
+        self.certify_requires_block.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set_filter(
@@ -467,7 +487,9 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
                         if matches!(self.should_certify, Certifier::Cancel) {
                             // Cancel: drop sender -> immediate RecvError on receiver.
                             drop(response);
-                        } else if !self.seen.contains_key(&payload) {
+                        } else if self.relay.certify_requires_block()
+                            && !self.seen.contains_key(&payload)
+                        {
                             self.certification_waiters
                                 .entry(payload)
                                 .or_default()
