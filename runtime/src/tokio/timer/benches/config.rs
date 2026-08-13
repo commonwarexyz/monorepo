@@ -1,10 +1,18 @@
 //! Command-line parsing and checked benchmark configuration.
 
-use clap::{CommandFactory, Parser, ValueEnum, builder::Styles, error::ErrorKind};
+use clap::{
+    CommandFactory, Parser, ValueEnum,
+    builder::Styles,
+    error::{ContextKind, ErrorKind},
+};
 use std::{env, ffi::OsString, fmt, io, time::Duration};
 
 /// Default number of Tokio workers and production timer shards.
 const DEFAULT_WORKER_THREADS: usize = 4;
+/// Largest worker topology supported by this diagnostic harness.
+const MAX_WORKER_THREADS: usize = 128;
+/// Largest measured batch count supported by this diagnostic harness.
+const MAX_BATCHES: usize = 100;
 /// Default batches measured for each accuracy scenario.
 const DEFAULT_ACCURACY_BATCHES: usize = 10;
 /// Default batches measured for each worst-case scenario.
@@ -154,21 +162,21 @@ pub(crate) struct Config {
     /// Timer implementations to compare.
     #[arg(long, value_enum, default_value_t = BackendSelection::All)]
     pub(crate) backend: BackendSelection,
-    /// Tokio workers and production timer shards.
+    /// Tokio workers and production timer shards, from 1 through 128.
     #[arg(
         long,
         default_value_t = DEFAULT_WORKER_THREADS,
         value_parser = parse_positive
     )]
     pub(crate) worker_threads: usize,
-    /// Measured batches for each accuracy scenario.
+    /// Measured batches for each accuracy scenario, from 1 through 100.
     #[arg(
         long,
         default_value_t = DEFAULT_ACCURACY_BATCHES,
         value_parser = parse_positive
     )]
     pub(crate) accuracy_batches: usize,
-    /// Measured batches for each worst-case scenario.
+    /// Measured batches for each worst-case scenario, from 1 through 100.
     #[arg(
         long,
         default_value_t = DEFAULT_WORST_BATCHES,
@@ -193,26 +201,23 @@ impl Config {
         let cargo_bench = arguments.iter().any(|argument| argument == "--bench");
         arguments.retain(|argument| argument != "--bench");
         let has_timer_selector = arguments.iter().any(is_timer_selector);
-
-        let config =
-            Self::try_parse_from(std::iter::once(OsString::from("timer")).chain(arguments));
-        let config = match config {
-            Ok(config) => config,
-            // Cargo passes filters and harness flags to every benchmark target.
-            // If no timer selector was present, an unknown argument belongs to
-            // that outer invocation and this expensive custom harness stays idle.
-            Err(error)
-                if cargo_bench
-                    && !has_timer_selector
-                    && matches!(
-                        error.kind(),
-                        ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
-                    ) =>
-            {
+        if !has_timer_selector {
+            if !cargo_bench && arguments.is_empty() {
                 return Ok(None);
             }
-            Err(error) => return Err(error),
-        };
+            if !arguments.is_empty() {
+                match classify_harness_arguments(&arguments) {
+                    HarnessArguments::Valid => return Ok(None),
+                    HarnessArguments::Foreign if !arguments.iter().any(is_timer_selector_typo) => {
+                        return Ok(None);
+                    }
+                    HarnessArguments::Foreign | HarnessArguments::Malformed => {}
+                }
+            }
+        }
+
+        let config =
+            Self::try_parse_from(std::iter::once(OsString::from("timer")).chain(arguments))?;
 
         if let Err(error) = config.validate() {
             return Err(Self::command().error(ErrorKind::ValueValidation, error));
@@ -222,6 +227,9 @@ impl Config {
 
     /// Validates derived counts before starting the runtime.
     fn validate(&self) -> io::Result<()> {
+        validate_maximum(self.worker_threads, MAX_WORKER_THREADS, "--worker-threads")?;
+        validate_maximum(self.accuracy_batches, MAX_BATCHES, "--accuracy-batches")?;
+        validate_maximum(self.worst_batches, MAX_BATCHES, "--worst-batches")?;
         if self.scenario.runs_accuracy() {
             for &concurrency in &ACCURACY_CONCURRENCY {
                 checked_observations(self.accuracy_batches, concurrency)?;
@@ -297,6 +305,17 @@ impl Config {
     }
 }
 
+/// Rejects a count that would create an unreasonable benchmark topology.
+fn validate_maximum(value: usize, maximum: usize, option: &str) -> io::Result<()> {
+    if value > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{option} exceeds the benchmark limit of {maximum}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns whether one argument selects this benchmark's configuration.
 fn is_timer_selector(argument: &OsString) -> bool {
     let Some(argument) = argument.to_str() else {
@@ -314,6 +333,148 @@ fn is_timer_selector(argument: &OsString) -> bool {
             | "--accuracy-batches"
             | "--worst-batches"
     )
+}
+
+/// Classification of arguments forwarded from another benchmark harness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HarnessArguments {
+    /// Every option and value is recognized and valid.
+    Valid,
+    /// At least one option belongs to another benchmark implementation.
+    Foreign,
+    /// A recognized harness option is malformed.
+    Malformed,
+}
+
+/// Classifies arguments forwarded from Rust's or another benchmark harness.
+fn classify_harness_arguments(arguments: &[OsString]) -> HarnessArguments {
+    let mut index = 0;
+    let mut positional_only = false;
+    let mut foreign = false;
+
+    while let Some(argument) = arguments.get(index) {
+        index += 1;
+        let Some(argument) = argument.to_str() else {
+            // Non-UTF-8 filters are valid outer harness inputs.
+            continue;
+        };
+        if positional_only || !argument.starts_with('-') || argument == "-" {
+            continue;
+        }
+        if argument == "--" {
+            positional_only = true;
+            continue;
+        }
+
+        let (option, has_inline_value) = argument
+            .split_once('=')
+            .map_or((argument, false), |(option, _)| (option, true));
+        if matches!(
+            option,
+            "--list"
+                | "--verbose"
+                | "-v"
+                | "--quiet"
+                | "-q"
+                | "--ignored"
+                | "--include-ignored"
+                | "--exact"
+                | "--nocapture"
+                | "--no-capture"
+                | "--show-output"
+                | "--report-time"
+                | "--ensure-time"
+                | "--shuffle"
+                | "--test"
+                | "--force-run-in-process"
+                | "--exclude-should-panic"
+                | "--fail-fast"
+                | "--version"
+                | "-V"
+        ) {
+            if has_inline_value {
+                return HarnessArguments::Malformed;
+            }
+            continue;
+        }
+        if matches!(
+            option,
+            "--color"
+                | "--format"
+                | "--logfile"
+                | "--skip"
+                | "--test-threads"
+                | "--shuffle-seed"
+                | "--output-format"
+                | "-Z"
+        ) {
+            let value = if has_inline_value {
+                argument
+                    .split_once('=')
+                    .expect("inline harness value was already detected")
+                    .1
+            } else {
+                let Some(value) = arguments.get(index).and_then(|value| value.to_str()) else {
+                    return HarnessArguments::Malformed;
+                };
+                index += 1;
+                value
+            };
+            if !is_harness_value(option, value) {
+                return HarnessArguments::Malformed;
+            }
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("-Z") {
+            if !value.is_empty() && is_harness_value("-Z", value) {
+                continue;
+            }
+            return HarnessArguments::Malformed;
+        }
+        if argument.strip_prefix('-').is_some_and(|options| {
+            !options.is_empty() && options.chars().all(|option| "qv".contains(option))
+        }) {
+            continue;
+        }
+        foreign = true;
+    }
+
+    if foreign {
+        HarnessArguments::Foreign
+    } else {
+        HarnessArguments::Valid
+    }
+}
+
+/// Returns whether clap recognizes an unknown option as a timer selector typo.
+fn is_timer_selector_typo(argument: &OsString) -> bool {
+    let Some(argument_text) = argument.to_str() else {
+        return false;
+    };
+    if !argument_text.starts_with('-') || is_timer_selector(argument) {
+        return false;
+    }
+
+    let error = Config::try_parse_from([OsString::from("timer"), argument.clone()]);
+    error.is_err_and(|error| {
+        error.kind() == ErrorKind::UnknownArgument && error.get(ContextKind::SuggestedArg).is_some()
+    })
+}
+
+/// Validates one value consumed by a recognized harness option.
+fn is_harness_value(option: &str, value: &str) -> bool {
+    if value.is_empty() || value.starts_with('-') {
+        return false;
+    }
+    match option {
+        "--color" => matches!(value, "auto" | "always" | "never"),
+        "--format" => matches!(value, "pretty" | "terse" | "json" | "junit"),
+        "--test-threads" => value.parse::<usize>().is_ok_and(|value| value > 0),
+        "--shuffle-seed" => value.parse::<u64>().is_ok(),
+        "-Z" => value == "unstable-options",
+        "--logfile" | "--skip" | "--output-format" => true,
+        _ => false,
+    }
 }
 
 /// Parses one positive platform-sized count for clap.

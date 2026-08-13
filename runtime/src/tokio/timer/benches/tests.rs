@@ -23,6 +23,125 @@ use std::{
 };
 
 #[test]
+fn harness_arguments_leave_the_custom_benchmark_idle() {
+    let cases = [
+        Vec::<&str>::new(),
+        vec!["--list"],
+        vec!["--verbose"],
+        vec!["-qv", "foreign-filter", "--bench"],
+        vec!["--nocapture", "--bench"],
+        vec!["--no-capture", "--bench"],
+        vec!["--fail-fast", "--bench"],
+        vec!["--format=terse", "--bench"],
+        vec!["--exact", "foreign-filter", "--bench"],
+        vec!["-Z", "unstable-options", "--bench"],
+        vec!["foreign-filter", "--bench"],
+        vec!["--output-format", "bencher", "--bench"],
+        vec!["--sample-size", "10", "--bench"],
+        vec!["--measurement-time=1", "--bench"],
+    ];
+
+    for arguments in cases {
+        let parsed = Config::parse_from(arguments.clone())
+            .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+        assert!(parsed.is_none(), "{arguments:?}");
+    }
+
+    // Cargo's custom-benchmark marker still selects the default timer suite.
+    assert!(Config::parse_from(["--bench"]).unwrap().is_some());
+}
+
+#[test]
+fn timer_selectors_keep_foreign_arguments_strict() {
+    for arguments in [
+        vec!["--scenario", "expiry", "--list"],
+        vec![
+            "--scenario",
+            "expiry",
+            "--output-format",
+            "bencher",
+            "--bench",
+        ],
+    ] {
+        let error = Config::parse_from(arguments.clone())
+            .expect_err("timer selector accepted a foreign argument");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
+    }
+}
+
+#[test]
+fn misspelled_timer_options_are_rejected() {
+    for arguments in [
+        vec!["--backnd", "tokio", "--bench"],
+        vec!["--backnd=tokio", "--bench"],
+        vec!["--sample-size", "10", "--backnd=tokio", "--bench"],
+    ] {
+        let error = Config::parse_from(arguments.clone())
+            .expect_err("misspelled timer option was treated as a harness argument");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
+    }
+
+    for harness_option in ["--test-threads", "--format", "--skip", "-Z"] {
+        let arguments = vec![harness_option, "--backnd=tokio", "--bench"];
+        let error = Config::parse_from(arguments.clone())
+            .expect_err("timer option typo was consumed as a harness value");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
+    }
+}
+
+#[test]
+fn malformed_harness_values_are_rejected() {
+    for arguments in [
+        vec!["--test-threads", "0", "--bench"],
+        vec!["--test-threads=0", "--bench"],
+    ] {
+        let error = Config::parse_from(arguments.clone())
+            .expect_err("malformed harness value was silently ignored");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{arguments:?}");
+    }
+}
+
+#[test]
+fn unsupported_runtime_thread_counts_are_rejected_before_construction() {
+    let worker_counts = [usize::MAX.to_string(), 129usize.to_string()];
+
+    for worker_threads in &worker_counts {
+        for scenario in ["accuracy", "registration"] {
+            let error =
+                Config::parse_from(["--scenario", scenario, "--worker-threads", worker_threads])
+                    .expect_err("unsupported thread count reached runtime construction");
+
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{scenario}");
+        }
+    }
+
+    let maximum = 128usize.to_string();
+    let config = Config::parse_from(["--scenario", "accuracy", "--worker-threads", &maximum])
+        .unwrap()
+        .expect("benchmark worker limit was rejected");
+    assert_eq!(config.worker_threads, 128);
+}
+
+#[test]
+fn excessive_batch_counts_are_rejected_before_allocation() {
+    for (scenario, option) in [
+        ("accuracy", "--accuracy-batches"),
+        ("registration", "--worst-batches"),
+    ] {
+        let error = Config::parse_from(["--scenario", scenario, option, "101"])
+            .expect_err("excessive batch count reached benchmark allocation");
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{scenario}");
+
+        assert!(
+            Config::parse_from(["--scenario", scenario, option, "100"])
+                .unwrap()
+                .is_some(),
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
 fn worst_batch_overflow_is_rejected_before_allocation() {
     let worst_batches = usize::MAX.to_string();
 
@@ -46,7 +165,7 @@ fn deadline_pair_preserves_each_backend_measurement_contract() {
         .into_std()
         .saturating_duration_since(commonware.measurement_deadline);
 
-    // Tokio is exact; Commonware retains its conservative bound.
+    // Tokio is exact, while Commonware retains its conservative bound.
     assert_eq!(tokio.measurement_deadline, tokio.tokio.into_std());
     assert_eq!(
         tokio

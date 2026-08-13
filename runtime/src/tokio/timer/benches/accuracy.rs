@@ -63,7 +63,7 @@ pub(crate) async fn run(config: &Config, clock: Arc<commonware_tokio::Context>) 
         "accuracy_note high-concurrency synchronized lateness includes barrier release, registration, and wake run-queue fan-out because a 100us deadline can pass before every task registers"
     );
     println!(
-        "accuracy_note commonware synchronized lateness is an upper bound and subtracting clock_pair_span_max_ns with saturation gives the lower bound"
+        "accuracy_note commonware synchronized lateness is an upper bound and subtracting clock_pair_span_max_ns with saturation gives the lower bound, sleep_until construction remains included in both bounds"
     );
 
     let mut scenarios = vec![

@@ -23,7 +23,8 @@ pub(crate) struct DeadlinePair {
     pub(crate) measurement_origin: Instant,
     /// Selected backend deadline used for lateness and scheduling cutoffs.
     pub(crate) measurement_deadline: Instant,
-    /// Commonware wall-clock pairing uncertainty, when applicable.
+    /// Commonware wall-to-monotonic mapping uncertainty, when applicable.
+    /// Backend sleep construction remains part of measured lateness.
     pub(crate) clock_pair_span: Option<Duration>,
 }
 
@@ -32,7 +33,8 @@ impl DeadlinePair {
     pub(crate) fn new(backend: Backend, target: Duration) -> Self {
         // The monotonic observations bracket the wall-clock snapshot. Using
         // the preceding value for Commonware prevents valid callbacks from
-        // being classified early, while the span bounds its overstatement.
+        // being classified early, while the span bounds mapping overstatement.
+        // Later backend construction remains part of observed lateness.
         let commonware_origin = Instant::now();
         let wall_origin = SystemTime::now();
         let tokio_origin = tokio::time::Instant::now();
