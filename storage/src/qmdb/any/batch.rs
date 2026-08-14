@@ -3695,6 +3695,259 @@ mod tests {
         });
     }
 
+    /// A compatible child batch must read and merkleize identically whether its
+    /// ancestor is still pending or already applied. This is the property that
+    /// lets a paused verification resume against post-apply state.
+    #[test]
+    fn merkleize_after_compatible_ancestor_apply_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("resume-after-apply", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            // Seed with churn so floor maintenance has real work at every
+            // later merkleize.
+            let hot = Sha256::hash(&[b"hot"]);
+            let cold = Sha256::hash(&[b"cold"]);
+            let doomed = Sha256::hash(&[b"doomed"]);
+            let mut db = db;
+            for round in 0u64..4 {
+                let batch = db
+                    .new_batch()
+                    .write(hot, Some(Sha256::hash(&[&round.to_be_bytes()])))
+                    .write(cold, Some(Sha256::hash(&[b"cold-value"])))
+                    .write(doomed, (round % 2 == 0).then_some(Sha256::hash(&[b"d"])))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+
+            // The parent the child forks from, merkleized but not yet applied.
+            let parent_write = Sha256::hash(&[b"parent-write"]);
+            let parent = db
+                .new_batch()
+                .write(hot, Some(parent_write))
+                .write(doomed, None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Two identical children forked from the pending parent.
+            let child_write = Sha256::hash(&[b"child-write"]);
+            let build = |parent: &Arc<MerkleizedBatch<_, _, _, _>>| {
+                parent
+                    .new_batch::<Sha256>()
+                    .write(cold, Some(child_write))
+                    .write(hot, Some(child_write))
+            };
+
+            // Path A, today's order. The child merkleizes while its parent is
+            // pending. Capture its root and a fallback read of an untouched key.
+            let child_pre = build(&parent);
+            let read_pre = child_pre.get(&doomed, &db).await.unwrap();
+            let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
+
+            // Apply the parent.
+            let (db, _) = db.apply_batch(parent.clone()).await.unwrap();
+
+            // Path B, the resume order. An identical child reads and merkleizes
+            // against the post-apply database.
+            let child_post = build(&parent);
+            let read_post = child_post.get(&doomed, &db).await.unwrap();
+            assert_eq!(read_pre, read_post, "fallback reads must not change");
+            let child_post = child_post.merkleize(&db, None).await.unwrap();
+            assert_eq!(
+                root_pre,
+                child_post.root(),
+                "merkleize must be order-independent for compatible batches",
+            );
+
+            // The post-merkleized child applies cleanly and lands the same root.
+            let (db, _) = db.apply_batch(child_post).await.unwrap();
+            assert_eq!(db.root(), root_pre);
+            assert_eq!(db.get(&hot).await.unwrap(), Some(child_write));
+            assert_eq!(db.get(&cold).await.unwrap(), Some(child_write));
+            assert_eq!(db.get(&doomed).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning happens while batches are live, so a batch must keep reading and
+    /// merkleizing across one. Pruning only discards operations below the
+    /// inactivity floor, which are superseded, and leaves the root untouched.
+    #[test]
+    fn batch_reads_and_merkleizes_across_a_prune() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("prune-under-batch", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            // Churn so the inactivity floor advances and history is prunable.
+            let hot = Sha256::hash(&[b"hot"]);
+            let cold = Sha256::hash(&[b"cold"]);
+            let mut db = db;
+            for round in 0u64..8 {
+                let batch = db
+                    .new_batch()
+                    .write(hot, Some(Sha256::hash(&[&round.to_be_bytes()])))
+                    .write(cold, Some(Sha256::hash(&[b"cold-value"])))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+            let floor = db.inactivity_floor_loc();
+            assert!(*floor > 0, "the test needs prunable history");
+
+            // A batch built before the prune, plus the reference values it must
+            // still produce afterward.
+            let write = Sha256::hash(&[b"write"]);
+            let build = || db.new_batch().write(hot, Some(write));
+            let reference = build();
+            let read_before = reference.get(&cold, &db).await.unwrap();
+            let root_before = reference.merkleize(&db, None).await.unwrap().root();
+            let batch = build();
+
+            let db = db.prune(floor).await.unwrap();
+
+            assert_eq!(
+                batch.get(&cold, &db).await.unwrap(),
+                read_before,
+                "a fallback read must survive pruning",
+            );
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            assert_eq!(
+                merkleized.root(),
+                root_before,
+                "pruning must not change what a live batch merkleizes to",
+            );
+
+            // It still applies, because pruning is not a competing batch.
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.get(&hot).await.unwrap(), Some(write));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A batch on a losing fork keeps being read and merkleized after a
+    /// competing batch is applied, which is outside the branch-validity
+    /// contract. This pins down what actually happens, because callers that do
+    /// not cancel such work depend on it: no panic, keys the fork covers keep
+    /// their own branch's values, and only fallback reads of keys the fork does
+    /// not cover see the competing state.
+    #[test]
+    fn stale_fork_batch_reads_and_merkleizes_without_panicking() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("stale-fork", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let hot = Sha256::hash(&[b"hot"]);
+            let cold = Sha256::hash(&[b"cold"]);
+            let winner_only = Sha256::hash(&[b"winner-only"]);
+            let mut db = db;
+            for round in 0u64..4 {
+                let batch = db
+                    .new_batch()
+                    .write(hot, Some(Sha256::hash(&[&round.to_be_bytes()])))
+                    .write(cold, Some(Sha256::hash(&[b"cold-value"])))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+
+            // Two competing batches off the same committed prefix. Only the
+            // winner touches `winner_only`.
+            let winner_write = Sha256::hash(&[b"winner"]);
+            let winner = db
+                .new_batch()
+                .write(hot, Some(winner_write))
+                .write(winner_only, Some(winner_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let loser_write = Sha256::hash(&[b"loser"]);
+            let loser = db
+                .new_batch()
+                .write(hot, Some(loser_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // The loser's child, forked before anything is applied.
+            let child_write = Sha256::hash(&[b"child"]);
+            let build = || loser.new_batch::<Sha256>().write(cold, Some(child_write));
+            let before = build();
+            let covered_before = before.get(&hot, &db).await.unwrap();
+            let uncovered_before = before.get(&winner_only, &db).await.unwrap();
+            let root_before = before.merkleize(&db, None).await.unwrap().root();
+            assert_eq!(covered_before, Some(loser_write));
+            assert_eq!(uncovered_before, None);
+
+            // The winner lands. The loser's chain is now stale.
+            let child = build();
+            let (db, _) = db.apply_batch(winner).await.unwrap();
+
+            // Reads still answer. Keys the fork covers keep the fork's value;
+            // keys it does not cover fall through to the applied winner.
+            assert_eq!(
+                child.get(&hot, &db).await.unwrap(),
+                Some(loser_write),
+                "a covered key must keep the fork's own value",
+            );
+            assert_eq!(
+                child.get(&winner_only, &db).await.unwrap(),
+                Some(winner_write),
+                "an uncovered key falls through to the applied state",
+            );
+
+            // Merkleizing does not panic and stays on the fork's own chain.
+            let stale = child.merkleize(&db, None).await.unwrap();
+            assert_eq!(
+                stale.root(),
+                root_before,
+                "a stale fork merkleizes over its own chain, not the winner's",
+            );
+
+            // Applying it is separately rejected (see `batch_chain`).
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Instantiate the staged-vs-explicit bulk-update parity test for one `any` DB kind.
     ///
     /// The staged path (`stage` + `Staged::merkleize`) must produce a byte-identical root to an

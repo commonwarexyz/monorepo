@@ -1,6 +1,9 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Unmerkleized, UnmerkleizedOf,
+        live::{Closed, Reader, Writer},
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,11 +15,11 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{convert::Infallible, sync::Arc};
 
-pub(crate) type TestDatabases = Shared<TestDb>;
+pub(crate) type TestDatabases = crate::stateful::db::Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -66,26 +69,6 @@ pub(crate) struct FlushControl {
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
 }
 
-impl FlushControl {
-    /// Gates the next prune. The receiver reports entry, and sending on the
-    /// returned sender lets pruning continue. Only one gate may be active.
-    pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        assert!(
-            self.prune_gate
-                .lock()
-                .replace(PruneGate {
-                    started,
-                    release: release_rx,
-                })
-                .is_none(),
-            "prune gate already installed",
-        );
-        (started_rx, release)
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct TestDb {
     finalize: Mutex<Option<Handle<()>>>,
@@ -133,8 +116,8 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        TestUnmerkleized
+    async fn new_batch(_handle: Reader<Self>) -> Result<Self::Unmerkleized, Closed> {
+        Ok(TestUnmerkleized)
     }
 
     fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
@@ -307,7 +290,7 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         None
@@ -317,8 +300,8 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         None
     }
 
@@ -326,14 +309,33 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
         TestMerkleized
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb::default())
+    TestDb::default().into()
+}
+
+/// Finalize `batch` through the writer, returning the snapshot and flush handle.
+///
+/// Tests that drive [`ManagedDb`] directly wrap their database in a writer and
+/// use this instead of the set layer.
+pub(crate) async fn finalize<D: ManagedDb<deterministic::Context>>(
+    writer: Writer<D>,
+    batch: D::Merkleized,
+) -> (Writer<D>, D::Snapshot, Handle<()>) {
+    let (writer, (snapshot, sync)) = writer
+        .mutate(|db| async move {
+            let (db, snapshot, sync) = D::finalize(db, batch)
+                .await
+                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
+            (db, (snapshot, sync))
+        })
+        .await;
+    (writer, snapshot, sync)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

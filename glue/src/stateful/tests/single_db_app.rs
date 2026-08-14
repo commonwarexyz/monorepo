@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, MerkleizedOf, SyncEngineConfig, Unmerkleized as _,
+            UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -65,7 +65,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 pub(super) type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
+pub(crate) type SingleDatabaseSet<E> = crate::stateful::db::Single<Qmdb<E>>;
 
 /// Builds the QMDB configuration used by single-database tests.
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
@@ -193,8 +193,8 @@ impl App {
     /// Execute a block: increment "counter" and write `height -> height_val`.
     pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
+        mut batches: UnmerkleizedOf<SingleDatabaseSet<E>, E>,
+    ) -> MerkleizedOf<SingleDatabaseSet<E>, E> {
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
             .get(&counter)
@@ -226,7 +226,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
@@ -248,8 +248,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Option<MerkleizedOf<Self::Databases, E>> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), batches).await;
@@ -266,8 +266,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> MerkleizedOf<Self::Databases, E> {
         Self::execute(block.height(), batches).await
     }
 
@@ -553,7 +553,7 @@ impl EngineDefinition for SingleDbEngine {
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Attach the marshal to probe, entering service. A syncing node has
-        // already consumed its floor above; a source attaches without ever soliciting peers.
+        // already consumed its floor above, so serving needs no peer solicitation.
         probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {

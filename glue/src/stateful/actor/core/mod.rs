@@ -250,13 +250,12 @@ where
             sync_metadata,
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
-            database_subscribers: Vec::new(),
             artifact: None,
-            snapshot_publisher: self.snapshot_publisher,
             sync_completed,
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
+            snapshot_publisher: self.snapshot_publisher,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -281,7 +280,7 @@ where
 
         // Publish now so serving does not wait for the first post-restart
         // finalization.
-        processor
+        let processor = processor
             .publish_snapshot(&mut self.snapshot_publisher)
             .await;
         Processing {
@@ -289,12 +288,10 @@ where
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
-            processor,
             snapshot_publisher: self.snapshot_publisher,
-            deferred_verifications: Vec::new(),
             skip_finalized_until,
         }
-        .start()
+        .start(processor, Vec::new())
         .await
     }
 }

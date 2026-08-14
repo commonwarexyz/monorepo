@@ -1520,6 +1520,77 @@ mod tests {
         db.commit().await.unwrap()
     }
 
+    /// A compatible child batch must read and merkleize to the same canonical
+    /// root whether its ancestor is still pending or already applied, including
+    /// the grafted and bitmap layers. This is the property that lets a paused
+    /// verification resume against post-apply state.
+    #[test_traced]
+    fn test_merkleize_after_compatible_ancestor_apply_matches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("resume-after-apply", &ctx),
+            )
+            .await
+            .unwrap();
+            // Churn so activity bits and the floor have real work to do.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+
+            let hot = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let cold = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let untouched = Sha256::hash(&[&2u64.to_be_bytes()]);
+
+            // The parent the child forks from, merkleized but not yet applied.
+            let parent_write = Sha256::hash(&[b"parent-write"]);
+            let parent = db
+                .new_batch()
+                .write(hot, Some(parent_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Two identical children forked from the pending parent.
+            let child_write = Sha256::hash(&[b"child-write"]);
+            let build =
+                |parent: &Arc<crate::qmdb::current::batch::MerkleizedBatch<_, _, _, 32, _>>| {
+                    parent
+                        .new_batch::<Sha256>()
+                        .write(cold, Some(child_write))
+                        .write(hot, Some(child_write))
+                };
+
+            // Path A, today's order: merkleize while the parent is pending.
+            let child_pre = build(&parent);
+            let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+            let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
+
+            // Apply the parent.
+            let (db, _) = db.apply_batch(parent.clone()).await.unwrap();
+
+            // Path B, the resume order: an identical child reads and merkleizes
+            // against the post-apply database.
+            let child_post = build(&parent);
+            let read_post = child_post.get(&untouched, &db).await.unwrap();
+            assert_eq!(read_pre, read_post, "fallback reads must not change");
+            let child_post = child_post.merkleize(&db, None).await.unwrap();
+            assert_eq!(
+                root_pre,
+                child_post.root(),
+                "canonical root must be order-independent for compatible batches",
+            );
+
+            // The post-merkleized child applies cleanly and lands the same root.
+            let (db, _) = db.apply_batch(child_post).await.unwrap();
+            assert_eq!(db.root(), root_pre);
+            assert_eq!(db.get(&hot).await.unwrap(), Some(child_write));
+            assert_eq!(db.get(&cold).await.unwrap(), Some(child_write));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A snapshot's ops proofs stay byte-stable and verifiable against the captured ops root
     /// while the live database updates keys (flipping activity bits and raising the floor),
     /// commits, and prunes past it.

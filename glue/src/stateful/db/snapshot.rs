@@ -110,7 +110,7 @@ impl<S> Publisher<S> {
 
     /// Hold `snapshots`, captured at `height`, until they and all
     /// earlier-captured snapshots have been durably flushed.
-    pub fn stage(&mut self, height: Height, snapshots: S) {
+    pub(crate) fn stage(&mut self, height: Height, snapshots: S) {
         let replaced = self.staged.insert(
             height,
             Staged {
@@ -124,7 +124,7 @@ impl<S> Publisher<S> {
     /// Record that `height`'s flush finished durably, publishing the newest
     /// snapshots that are now fully on disk and dropping any older ones still
     /// held.
-    pub fn complete(&mut self, height: Height) {
+    pub(crate) fn complete(&mut self, height: Height) {
         let staged = self
             .staged
             .get_mut(&height)
@@ -153,7 +153,7 @@ impl<S> Publisher<S> {
     ///
     /// Only for state that is already on disk, whether recovered at startup,
     /// synced at transition, or captured after every flush finished.
-    pub fn publish_now(&mut self, height: Height, snapshots: S) {
+    pub(crate) fn publish_now(&mut self, height: Height, snapshots: S) {
         assert!(
             self.staged.is_empty(),
             "immediate publication requires every staged flush to have drained",
@@ -191,7 +191,7 @@ impl<S> Publisher<S> {
     }
 
     /// Whether a flush at or below `barrier` is still running, blocking a prune.
-    pub fn blocks_prune(&self, barrier: Height) -> bool {
+    pub(crate) fn blocks_prune(&self, barrier: Height) -> bool {
         self.staged
             .iter()
             .find(|(_, staged)| !staged.flushed)
@@ -200,14 +200,14 @@ impl<S> Publisher<S> {
 
     /// Mark all snapshots captured so far, staged or served, as predating a
     /// prune. Check [`needs_refresh`](Self::needs_refresh) afterwards.
-    pub fn mark_stale(&mut self) {
+    pub(crate) fn mark_stale(&mut self) {
         self.stale_boundary = self.staged.keys().last().copied().or(self.last_published);
     }
 
     /// Whether the caller must capture fresh snapshots and
     /// [`publish_now`](Self::publish_now). True when the served snapshots are
     /// stale from a prune and nothing staged remains to replace them.
-    pub fn needs_refresh(&self) -> bool {
+    pub(crate) fn needs_refresh(&self) -> bool {
         self.stale_boundary.is_some() && self.staged.is_empty()
     }
 }
