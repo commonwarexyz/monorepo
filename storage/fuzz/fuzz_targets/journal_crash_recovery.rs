@@ -2,10 +2,10 @@
 
 //! Fuzz target contiguous journal crash recovery.
 //!
-//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` push data
-//! to storage, and an unclean shutdown loses anything not yet durable. On the next `init()` the
-//! journal must rebuild a consistent state from whatever survived. This target tests recovering
-//! after storage faults.
+//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` establish
+//! durability, while the configured crash policy may retain unsynchronized storage mutations. On
+//! the next `init()` the journal must rebuild a consistent state from whatever survived. This
+//! target tests recovering after storage faults.
 //!
 //! # Cycles
 //!
@@ -14,7 +14,8 @@
 //!   1. `init()` recovers the journal left by the previous cycle's crash.
 //!   2. Check it against the `Expected` carried from that crash.
 //!   3. Append and query under fault injection (the cycle's `ops`).
-//!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
+//!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
+//!      according to the configured write-retention policy.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
@@ -29,9 +30,9 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. The torn-write modes
-//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, leaving the
-//! half-finished bytes a real crash would.
+//! The operation phase runs under write/sync/resize fault injection. The torn-write settings
+//! (`write_retention_frequency`, `partial_resize_rate`) cut a write or truncation short, leaving
+//! the half-finished bytes a real crash would.
 //!
 //! # Positions
 //!
@@ -166,9 +167,9 @@ struct FuzzInput {
     /// Failure rate for write operations.
     #[arbitrary(with = bounded_rate)]
     write_failure_rate: f64,
-    /// Probability that a write failure is a partial (torn) write.
+    /// Frequency with which bytes survive a failed or unsynchronized write.
     #[arbitrary(with = bounded_rate)]
-    partial_write_rate: f64,
+    write_retention_frequency: f64,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: f64,
@@ -191,7 +192,7 @@ struct Params {
     items_per_section: u64,
     write_buffer: NonZeroUsize,
     write_rate: f64,
-    partial_write_rate: f64,
+    write_retention_frequency: f64,
     sync_rate: f64,
     resize_rate: f64,
     partial_resize_rate: f64,
@@ -202,7 +203,10 @@ impl Params {
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
             write_rate: Some(self.write_rate),
-            partial_write_rate: Some(self.partial_write_rate),
+            write_retention: Some((
+                deterministic::PartialWriteMode::Prefix,
+                self.write_retention_frequency,
+            )),
             sync_rate: Some(self.sync_rate),
             resize_rate: Some(self.resize_rate),
             partial_resize_rate: Some(self.partial_resize_rate),
@@ -821,7 +825,7 @@ where
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         write_rate: input.write_failure_rate,
-        partial_write_rate: input.partial_write_rate,
+        write_retention_frequency: input.write_retention_frequency,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,

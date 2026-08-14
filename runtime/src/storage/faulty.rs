@@ -2,12 +2,13 @@
 
 use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::BoxDynRng};
 use bytes::Buf;
-use commonware_utils::sync::{Mutex, RwLock};
+use commonware_utils::sync::{AsyncMutex, Mutex, RwLock};
 use rand::RngExt as _;
 use std::{
+    collections::BTreeMap,
     io::Error as IoError,
     sync::{
-        Arc,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -24,6 +25,16 @@ enum Op {
     Scan,
 }
 
+/// Selects how retained bytes are arranged when a write is partially preserved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PartialWriteMode {
+    /// Retain bytes from the beginning of the write until the first omitted byte.
+    Prefix,
+
+    /// Independently retain submitted byte positions.
+    Subset,
+}
+
 /// Configuration for deterministic storage fault injection.
 ///
 /// Each rate is a probability from 0.0 (never fail) to 1.0 (always fail).
@@ -38,11 +49,16 @@ pub struct Config {
     /// Failure rate for `write_at` operations.
     pub write_rate: Option<f64>,
 
-    /// Probability that a write failure is a partial write (some bytes written
-    /// before failure) rather than a complete failure (no bytes written).
-    /// Only applies when `write_rate` triggers a failure.
-    /// Value from 0.0 (always complete failure) to 1.0 (always partial write).
-    pub partial_write_rate: Option<f64>,
+    /// Byte-retention policy for failed writes and successful unsynchronized writes at a
+    /// simulated crash.
+    ///
+    /// The tuple contains the retention mode and frequency. `None`, `NaN`, and frequencies at or
+    /// below 0.0 retain no bytes, while frequencies at or above 1.0 retain every byte.
+    pub write_retention: Option<(PartialWriteMode, f64)>,
+
+    /// Probability that a successful unsynced resize survives a simulated crash.
+    /// Value from 0.0 (always lost) to 1.0 (always retained).
+    pub crash_resize_rate: Option<f64>,
 
     /// Failure rate for `sync` operations.
     pub sync_rate: Option<f64>,
@@ -96,9 +112,15 @@ impl Config {
         self
     }
 
-    /// Set the partial write rate (probability of partial vs complete write failure).
-    pub const fn partial_write(mut self, rate: f64) -> Self {
-        self.partial_write_rate = Some(rate);
+    /// Set the byte-retention policy for failed and unsynchronized writes.
+    pub const fn write_retention(mut self, mode: PartialWriteMode, frequency: f64) -> Self {
+        self.write_retention = Some((mode, frequency));
+        self
+    }
+
+    /// Set the probability that successful unsynced resizes survive a simulated crash.
+    pub const fn crash_resize(mut self, rate: f64) -> Self {
+        self.crash_resize_rate = Some(rate);
         self
     }
 
@@ -140,26 +162,199 @@ struct Oracle {
     config: Arc<RwLock<Config>>,
 }
 
+enum PendingMutation<B> {
+    Write {
+        generation: Arc<FileGeneration>,
+        blob: B,
+        offset: u64,
+        bufs: IoBufs,
+        retention: Arc<PendingWriteRetention>,
+        selection_offset: usize,
+    },
+    Resize {
+        generation: Arc<FileGeneration>,
+        blob: B,
+        len: u64,
+    },
+}
+
+/// Retention choices belong to the issued write and are shared by fragments created by later
+/// durability barriers.
+struct PendingWriteRetention {
+    policy: (PartialWriteMode, f64),
+    len: usize,
+    selected: OnceLock<Vec<bool>>,
+}
+
+impl PendingWriteRetention {
+    const fn new(policy: (PartialWriteMode, f64), len: usize) -> Self {
+        Self {
+            policy,
+            len,
+            selected: OnceLock::new(),
+        }
+    }
+}
+
+impl<B> PendingMutation<B> {
+    const fn generation(&self) -> &Arc<FileGeneration> {
+        match self {
+            Self::Write { generation, .. } | Self::Resize { generation, .. } => generation,
+        }
+    }
+}
+
+type PendingMutations<B> = Arc<Mutex<Vec<PendingMutation<B>>>>;
+type FileKey = (String, Vec<u8>);
+struct FileGeneration {
+    mutation: AsyncMutex<()>,
+}
+
+impl FileGeneration {
+    fn new() -> Self {
+        Self {
+            mutation: AsyncMutex::new(()),
+        }
+    }
+}
+
+// Every handle for one live file generation shares its durability cut and pending-mutation epoch.
+// Replacements receive a new generation object.
+type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
+
+fn clear_pending<B>(pending: &PendingMutations<B>, generation: &Arc<FileGeneration>) {
+    pending
+        .lock()
+        .retain(|mutation| !Arc::ptr_eq(mutation.generation(), generation));
+}
+
+/// Retire covered write debt and replay the durable range after any earlier resize debt.
+fn record_durable_range<B: Clone>(
+    pending: &PendingMutations<B>,
+    generation: &Arc<FileGeneration>,
+    blob: B,
+    offset: u64,
+    durable: IoBufs,
+) {
+    let len = durable.remaining() as u64;
+    if len == 0 {
+        return;
+    }
+    let end = offset
+        .checked_add(len)
+        .expect("submitted write range was validated before mutation");
+    let mut pending = pending.lock();
+    let mutations = std::mem::take(&mut *pending);
+    let mut retained = Vec::with_capacity(mutations.len() + 1);
+    let mut follows_resize = false;
+    for mutation in mutations {
+        if !Arc::ptr_eq(mutation.generation(), generation) {
+            retained.push(mutation);
+            continue;
+        }
+        let (write_generation, write_blob, write_offset, bufs, retention, selection_offset) =
+            match mutation {
+                PendingMutation::Write {
+                    generation,
+                    blob,
+                    offset,
+                    bufs,
+                    retention,
+                    selection_offset,
+                } => (generation, blob, offset, bufs, retention, selection_offset),
+                resize @ PendingMutation::Resize { .. } => {
+                    follows_resize = true;
+                    retained.push(resize);
+                    continue;
+                }
+            };
+        let write_len = bufs.remaining() as u64;
+        let write_end = write_offset
+            .checked_add(write_len)
+            .expect("pending write ranges are validated before recording");
+        let overlap_start = write_offset.max(offset);
+        let overlap_end = write_end.min(end);
+        if overlap_start >= overlap_end {
+            retained.push(PendingMutation::Write {
+                generation: write_generation,
+                blob: write_blob,
+                offset: write_offset,
+                bufs,
+                retention,
+                selection_offset,
+            });
+            continue;
+        }
+
+        let bytes = bufs.coalesce();
+        if write_offset < overlap_start {
+            let prefix_len = usize::try_from(overlap_start - write_offset)
+                .expect("a pending-write subrange fits its source buffer");
+            retained.push(PendingMutation::Write {
+                generation: write_generation.clone(),
+                blob: write_blob.clone(),
+                offset: write_offset,
+                bufs: bytes.slice(..prefix_len).into(),
+                retention: retention.clone(),
+                selection_offset,
+            });
+        }
+        if overlap_end < write_end {
+            let suffix_start = usize::try_from(overlap_end - write_offset)
+                .expect("a pending-write subrange fits its source buffer");
+            retained.push(PendingMutation::Write {
+                generation: write_generation,
+                blob: write_blob,
+                offset: overlap_end,
+                bufs: bytes.slice(suffix_start..).into(),
+                retention,
+                selection_offset: selection_offset
+                    .checked_add(suffix_start)
+                    .expect("a pending-write fragment stays within its selection"),
+            });
+        }
+    }
+    if follows_resize {
+        let retention = Arc::new(PendingWriteRetention::new(
+            (PartialWriteMode::Prefix, 1.0),
+            durable.remaining(),
+        ));
+        retained.push(PendingMutation::Write {
+            generation: generation.clone(),
+            blob,
+            offset,
+            bufs: durable,
+            retention,
+            selection_offset: 0,
+        });
+    }
+    *pending = retained;
+}
+
 impl Oracle {
     /// Check if a fault should be injected for the given operation.
     fn should_fail(&self, op: Op) -> bool {
         self.roll(Some(self.config.read().rate_for(op)))
     }
 
-    /// Check if a write fault should be injected. Returns (should_fail, partial_rate).
+    /// Check if a write fault should be injected.
     /// Reads config once to avoid nested lock acquisition.
-    fn check_write_fault(&self) -> (bool, Option<f64>) {
+    fn check_write_fault(&self) -> (bool, Option<(PartialWriteMode, f64)>) {
         let config = self.config.read();
         let fail = self.roll(Some(config.rate_for(Op::Write)));
-        (fail, config.partial_write_rate)
+        let retention = config
+            .write_retention
+            .filter(|(_, frequency)| *frequency > 0.0);
+        (fail, retention)
     }
 
-    /// Check if a resize fault should be injected. Returns (should_fail, partial_rate).
+    /// Check if a resize fault should be injected and snapshot its crash outcome.
     /// Reads config once to avoid nested lock acquisition.
-    fn check_resize_fault(&self) -> (bool, Option<f64>) {
+    fn check_resize_fault(&self) -> (bool, Option<f64>, bool) {
         let config = self.config.read();
         let fail = self.roll(Some(config.rate_for(Op::Resize)));
-        (fail, config.partial_resize_rate)
+        let retain = !fail && self.roll(config.crash_resize_rate);
+        (fail, config.partial_resize_rate, retain)
     }
 
     /// Check if an event should occur based on a probability rate.
@@ -186,6 +381,25 @@ impl Oracle {
         Some(self.rng.lock().random_range(min + 1..max))
     }
 
+    /// Select retained byte positions according to a snapshotted write policy.
+    fn retained_bytes(&self, len: usize, (mode, frequency): (PartialWriteMode, f64)) -> Vec<bool> {
+        debug_assert!(frequency > 0.0);
+        if frequency >= 1.0 {
+            return vec![true; len];
+        }
+
+        let mut rng = self.rng.lock();
+        match mode {
+            PartialWriteMode::Prefix => {
+                let retained = (0..len).take_while(|_| rng.random_bool(frequency)).count();
+                let mut positions = vec![false; len];
+                positions[..retained].fill(true);
+                positions
+            }
+            PartialWriteMode::Subset => (0..len).map(|_| rng.random_bool(frequency)).collect(),
+        }
+    }
+
     /// Try to generate a partial operation target. Returns Some if both the rate
     /// check passes and an intermediate value exists between `from` and `to`.
     fn try_partial(&self, rate: Option<f64>, from: u64, to: u64) -> Option<u64> {
@@ -204,6 +418,8 @@ impl Oracle {
 pub struct Storage<S: crate::Storage> {
     inner: S,
     ctx: Oracle,
+    pending: PendingMutations<S::Blob>,
+    generations: FileGenerations,
 }
 
 impl<S: crate::Storage> Storage<S> {
@@ -212,6 +428,8 @@ impl<S: crate::Storage> Storage<S> {
         Self {
             inner,
             ctx: Oracle { rng, config },
+            pending: Arc::new(Mutex::new(Vec::new())),
+            generations: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -223,6 +441,90 @@ impl<S: crate::Storage> Storage<S> {
     /// Get access to the fault configuration for dynamic modification.
     pub fn config(&self) -> Arc<RwLock<Config>> {
         self.ctx.config.clone()
+    }
+
+    fn wrap_blob(&self, partition: &str, name: &[u8], inner: S::Blob, size: u64) -> Blob<S::Blob> {
+        let key = (partition.to_string(), name.to_vec());
+        let generation = {
+            let mut generations = self.generations.lock();
+            generations
+                .get(&key)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let generation = Arc::new(FileGeneration::new());
+                    generations.insert(key.clone(), Arc::downgrade(&generation));
+                    generation
+                })
+        };
+        Blob::new(
+            self.ctx.clone(),
+            self.pending.clone(),
+            generation,
+            inner,
+            size,
+        )
+    }
+
+    fn retire_names(&self, partition: &str, name: Option<&[u8]>) {
+        let retired = {
+            let mut generations = self.generations.lock();
+            match name {
+                Some(name) => generations
+                    .remove(&(partition.to_string(), name.to_vec()))
+                    .and_then(|generation| generation.upgrade())
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                None => {
+                    let keys = generations
+                        .keys()
+                        .filter(|(candidate, _)| candidate == partition)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    keys.into_iter()
+                        .filter_map(|key| generations.remove(&key)?.upgrade())
+                        .collect()
+                }
+            }
+        };
+        for generation in retired {
+            clear_pending(&self.pending, &generation);
+        }
+    }
+}
+
+impl Storage<crate::storage::memory::Storage> {
+    /// Replay selected crash outcomes in issue order.
+    pub(crate) fn crash(&self) -> Result<(), Error> {
+        let pending = std::mem::take(&mut *self.pending.lock());
+        for mutation in pending {
+            match mutation {
+                PendingMutation::Write {
+                    blob,
+                    offset,
+                    bufs,
+                    retention,
+                    selection_offset,
+                    ..
+                } => {
+                    let selected = retention
+                        .selected
+                        .get_or_init(|| self.ctx.retained_bytes(retention.len, retention.policy));
+                    let selection_end = selection_offset
+                        .checked_add(bufs.remaining())
+                        .expect("a pending-write fragment stays within its selection");
+                    let mut retained = selected[selection_offset..selection_end].iter().copied();
+                    blob.retain_crash_write(offset, bufs, || {
+                        retained
+                            .next()
+                            .expect("the retention policy covers every submitted byte")
+                    })?;
+                }
+                PendingMutation::Resize { blob, len, .. } => {
+                    blob.retain_crash_resize(len)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -243,19 +545,22 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }
-        self.inner
-            .open_versioned(partition, name, versions)
-            .await
-            .map(|(blob, len, blob_version)| {
-                (Blob::new(self.ctx.clone(), blob, len), len, blob_version)
-            })
+        let (blob, len, blob_version) =
+            self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            self.wrap_blob(partition, name, blob, len),
+            len,
+            blob_version,
+        ))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         if self.ctx.should_fail(Op::Remove) {
             return Err(injected_io_error().into());
         }
-        self.inner.remove(partition, name).await
+        self.inner.remove(partition, name).await?;
+        self.retire_names(partition, name);
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -271,17 +576,64 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 pub struct Blob<B: crate::Blob> {
     inner: B,
     ctx: Oracle,
+    pending: PendingMutations<B>,
+    generation: Arc<FileGeneration>,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
 }
 
 impl<B: crate::Blob> Blob<B> {
-    fn new(ctx: Oracle, inner: B, size: u64) -> Self {
+    fn new(
+        ctx: Oracle,
+        pending: PendingMutations<B>,
+        generation: Arc<FileGeneration>,
+        inner: B,
+        size: u64,
+    ) -> Self {
         Self {
             inner,
             ctx,
+            pending,
+            generation,
             size: Arc::new(AtomicU64::new(size)),
         }
+    }
+
+    fn record_pending(&self, offset: u64, bufs: IoBufs, retention: (PartialWriteMode, f64)) {
+        if bufs.is_empty() {
+            return;
+        }
+        let retention = Arc::new(PendingWriteRetention::new(retention, bufs.remaining()));
+        self.pending.lock().push(PendingMutation::Write {
+            generation: self.generation.clone(),
+            blob: self.inner.clone(),
+            offset,
+            bufs,
+            retention,
+            selection_offset: 0,
+        });
+    }
+
+    fn record_pending_resize(&self, len: u64) {
+        self.pending.lock().push(PendingMutation::Resize {
+            generation: self.generation.clone(),
+            blob: self.inner.clone(),
+            len,
+        });
+    }
+
+    fn clear_pending(&self) {
+        clear_pending(&self.pending, &self.generation);
+    }
+
+    fn record_durable_range(&self, offset: u64, bufs: IoBufs) {
+        record_durable_range(
+            &self.pending,
+            &self.generation,
+            self.inner.clone(),
+            offset,
+            bufs,
+        )
     }
 }
 
@@ -317,52 +669,92 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if sync && total_bytes == 0 {
             return Ok(());
         }
-
-        let (should_fail, partial_rate) = self.ctx.check_write_fault();
+        offset
+            .checked_add(total_bytes)
+            .ok_or(Error::OffsetOverflow)?;
+        let (should_fail, write_retention) = self.ctx.check_write_fault();
+        let _mutation = self.generation.mutation.lock().await;
         if should_fail {
-            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
-                // Partial write: write some bytes, sync, then fail
-                let bufs = bufs.coalesce().slice(..bytes as usize);
-                self.inner.write_at(offset, bufs, options).await?;
-                if !sync {
-                    self.inner.sync().await?;
+            if let Some(retention) = write_retention {
+                let len = bufs.remaining();
+                let retained = self.ctx.retained_bytes(len, retention);
+                let bufs = bufs.coalesce();
+                let mut position = 0;
+                while position < len {
+                    if !retained[position] {
+                        position += 1;
+                        continue;
+                    }
+
+                    let start = position;
+                    while position < len && retained[position] {
+                        position += 1;
+                    }
+                    let end = position;
+                    let run_offset = offset
+                        .checked_add(start as u64)
+                        .ok_or(Error::OffsetOverflow)?;
+                    let run = bufs.slice(start..end);
+                    let durable = run.clone().into();
+                    self.inner
+                        .write_at(run_offset, run, options | WriteOptions::SYNC)
+                        .await?;
+                    self.record_durable_range(run_offset, durable);
+                    self.size.fetch_max(
+                        run_offset.saturating_add((end - start) as u64),
+                        Ordering::Relaxed,
+                    );
                 }
-                self.size
-                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
-                return Err(injected_io_error().into());
             }
             return Err(injected_io_error().into());
         }
 
         if sync && self.ctx.should_fail(Op::Sync) {
+            let pending = write_retention.map(|retention| (bufs.clone(), retention));
             self.inner
                 .write_at(offset, bufs, options.without(WriteOptions::SYNC))
                 .await?;
             self.size
                 .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+            if let Some((bufs, retention)) = pending {
+                self.record_pending(offset, bufs, retention);
+            }
             return Err(injected_io_error().into());
         }
 
+        let pending = match (sync, write_retention) {
+            (false, Some(retention)) => Some((bufs.clone(), retention)),
+            _ => None,
+        };
+        let durable = sync.then(|| bufs.clone());
         self.inner.write_at(offset, bufs, options).await?;
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        if let Some(durable) = durable {
+            self.record_durable_range(offset, durable);
+        } else if let Some((bufs, retention)) = pending {
+            self.record_pending(offset, bufs, retention);
+        }
         Ok(())
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let (should_fail, partial_rate) = self.ctx.check_resize_fault();
+        let (should_fail, partial_rate, retain) = self.ctx.check_resize_fault();
+        let _mutation = self.generation.mutation.lock().await;
         if should_fail {
             let current = self.size.load(Ordering::Relaxed);
             if let Some(len) = self.ctx.try_partial(partial_rate, current, len) {
-                // Partial resize: resize to an intermediate size, sync, then fail
                 self.inner.resize(len).await?;
-                self.inner.sync().await?;
+                self.record_pending_resize(len);
                 self.size.store(len, Ordering::Relaxed);
                 return Err(injected_io_error().into());
             }
             return Err(injected_io_error().into());
         }
         self.inner.resize(len).await?;
+        if retain {
+            self.record_pending_resize(len);
+        }
         self.size.store(len, Ordering::Relaxed);
         Ok(())
     }
@@ -371,14 +763,23 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if self.ctx.should_fail(Op::Sync) {
             return Err(injected_io_error().into());
         }
-        self.inner.sync().await
+        let _mutation = self.generation.mutation.lock().await;
+        self.inner.sync().await?;
+        self.clear_pending();
+        Ok(())
     }
 
     async fn start_sync(&self) -> Handle<()> {
         if self.ctx.should_fail(Op::Sync) {
             return Handle::ready(Err(injected_io_error().into()));
         }
-        self.inner.start_sync().await
+        let _mutation = self.generation.mutation.lock().await;
+        // A completed backing sync ends the crash epoch even if its completion is never observed.
+        let result = self.inner.start_sync().await.await;
+        if result.is_ok() {
+            self.clear_pending();
+        }
+        Handle::ready(result)
     }
 }
 
@@ -390,7 +791,89 @@ mod tests {
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
+    use futures::task::noop_waker;
     use rand::{SeedableRng, rngs::StdRng};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::AtomicBool,
+        task::{Context, Poll},
+    };
+
+    #[derive(Clone)]
+    struct OperationGate<B> {
+        inner: B,
+        pause_after_write: bool,
+        armed: Arc<AtomicBool>,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl<B> OperationGate<B> {
+        async fn pause(&self, after_write: bool) {
+            if self.pause_after_write == after_write && self.armed.swap(false, Ordering::Relaxed) {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+        }
+    }
+
+    impl<B: crate::Blob> crate::Blob for OperationGate<B> {
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs, options).await?;
+            self.pause(true).await;
+            Ok(())
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await?;
+            self.pause(false).await;
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let inner = self.inner.clone();
+            let pause_after_write = self.pause_after_write;
+            let armed = self.armed.clone();
+            let started = self.started.clone();
+            let release = self.release.clone();
+            Handle::from_future(async move {
+                inner.sync().await?;
+                if !pause_after_write && armed.swap(false, Ordering::Relaxed) {
+                    started.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        let waker = noop_waker();
+        future.poll(&mut Context::from_waker(&waker))
+    }
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -424,10 +907,568 @@ mod tests {
         }
     }
 
+    async fn run_overlapping_barrier(start: bool) {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (inner, _) = h.inner.open("partition", b"overlap").await.unwrap();
+        inner
+            .write_at(0, b"base", WriteOptions::SYNC)
+            .await
+            .unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gated = OperationGate {
+            inner,
+            pause_after_write: false,
+            armed: Arc::new(AtomicBool::new(true)),
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let blob = Blob::new(
+            h.storage.ctx.clone(),
+            pending.clone(),
+            Arc::new(FileGeneration::new()),
+            gated,
+            4,
+        );
+
+        let barrier_blob = blob.clone();
+        let barrier = tokio::spawn(async move {
+            if start {
+                drop(barrier_blob.start_sync().await);
+            } else {
+                barrier_blob.sync().await.unwrap();
+            }
+        });
+        started.notified().await;
+
+        let mut late = Box::pin(blob.write_at(0, b"late", WriteOptions::default()));
+        assert!(poll_once(late.as_mut()).is_pending());
+        release.notify_one();
+        barrier.await.unwrap();
+        late.await.unwrap();
+
+        for mutation in std::mem::take(&mut *pending.lock()) {
+            let PendingMutation::Write {
+                blob,
+                offset,
+                bufs,
+                retention,
+                ..
+            } = mutation
+            else {
+                panic!("write test recorded a resize");
+            };
+            assert_eq!(retention.policy, (PartialWriteMode::Prefix, 1.0));
+            blob.inner
+                .retain_crash_write(offset, bufs, || true)
+                .unwrap();
+        }
+        let (durable, len) = h.inner.open("partition", b"overlap").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(durable.read_at(0, 4).await.unwrap().coalesce(), b"late");
+    }
+
+    #[tokio::test]
+    async fn test_completed_backing_write_cannot_record_after_later_full_sync() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (inner, _) = h.inner.open("partition", b"late-record").await.unwrap();
+        inner
+            .write_at(0, b"base!", WriteOptions::SYNC)
+            .await
+            .unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gated = OperationGate {
+            inner,
+            pause_after_write: true,
+            armed: Arc::new(AtomicBool::new(true)),
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let blob = Blob::new(
+            h.storage.ctx.clone(),
+            pending.clone(),
+            Arc::new(FileGeneration::new()),
+            gated,
+            5,
+        );
+
+        let mut stale = Box::pin(blob.write_at(0, b"stale", WriteOptions::default()));
+        assert!(poll_once(stale.as_mut()).is_pending());
+        started.notified().await;
+
+        *h.config.write() = Config::default();
+        let fresh_blob = blob.clone();
+        let mut fresh = Box::pin(async move {
+            fresh_blob
+                .write_at(0, b"fresh", WriteOptions::default())
+                .await?;
+            fresh_blob.sync().await
+        });
+        assert!(poll_once(fresh.as_mut()).is_pending());
+
+        release.notify_one();
+        stale.await.unwrap();
+        fresh.await.unwrap();
+
+        for mutation in std::mem::take(&mut *pending.lock()) {
+            let PendingMutation::Write {
+                blob,
+                offset,
+                bufs,
+                retention,
+                ..
+            } = mutation
+            else {
+                panic!("write test recorded a resize");
+            };
+            assert_eq!(retention.policy, (PartialWriteMode::Prefix, 1.0));
+            blob.inner
+                .retain_crash_write(offset, bufs, || true)
+                .unwrap();
+        }
+        let (durable, len) = h.inner.open("partition", b"late-record").await.unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(durable.read_at(0, 5).await.unwrap().coalesce(), b"fresh");
+    }
+
+    async fn run_subset_overwrite(seed: u64, original: &[u8], replacement: &[u8]) -> Vec<u8> {
+        assert_eq!(original.len(), replacement.len());
+
+        let h = Harness::with_seed(
+            seed,
+            Config::default().write_retention(PartialWriteMode::Subset, 0.5),
+        );
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, original.to_vec(), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+
+        {
+            let mut config = h.config.write();
+            config.write_rate = Some(1.0);
+        }
+
+        let result = blob
+            .write_at(0, replacement.to_vec(), WriteOptions::default())
+            .await;
+        assert!(matches!(result, Err(Error::Io(_))));
+
+        let (inner_blob, size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(size, original.len() as u64);
+        inner_blob
+            .read_at(0, original.len())
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec()
+    }
+
+    async fn run_random_crash(seed: u64, len: usize) -> Vec<u8> {
+        let h = Harness::with_seed(
+            seed,
+            Config::default().write_retention(PartialWriteMode::Subset, 0.5),
+        );
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, vec![0; len], WriteOptions::SYNC)
+            .await
+            .unwrap();
+        blob.write_at(0, vec![1; len], WriteOptions::default())
+            .await
+            .unwrap();
+
+        // The retention policy is part of the completed write, not a global crash-time choice.
+        h.config.write().write_retention = None;
+        h.storage.crash().unwrap();
+
+        let (blob, durable_len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(durable_len, len as u64);
+        blob.read_at(0, len)
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_reopened_sync_clears_prior_handle_crash_writes() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"stale", WriteOptions::default())
+            .await
+            .unwrap();
+        drop(blob);
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"fresh", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        h.storage.crash().unwrap();
+        let (blob, len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(
+            blob.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+            b"fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dropped_completed_start_sync_clears_the_crash_epoch() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"stale", WriteOptions::default())
+            .await
+            .unwrap();
+        h.config.write().write_retention = None;
+        blob.write_at(0, b"fresh", WriteOptions::default())
+            .await
+            .unwrap();
+
+        let completion = blob.start_sync().await;
+        drop(completion);
+        h.storage.crash().unwrap();
+
+        let (blob, len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(
+            blob.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+            b"fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_write_does_not_barrier_disjoint_pending_write() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"........", WriteOptions::SYNC)
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"A", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(7, b"Z", WriteOptions::SYNC).await.unwrap();
+        h.storage.crash().unwrap();
+
+        let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(len, 8);
+        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"A......Z");
+    }
+
+    #[tokio::test]
+    async fn test_sync_write_retires_only_overlapping_pending_bytes() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let (other, _) = h.storage.open("partition", b"other").await.unwrap();
+        for candidate in [&blob, &other] {
+            candidate
+                .write_at(0, b"........", WriteOptions::SYNC)
+                .await
+                .unwrap();
+        }
+
+        blob.write_at(0, b"ABCDEFGH", WriteOptions::default())
+            .await
+            .unwrap();
+        other
+            .write_at(0, b"12345678", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(3, b"xy", WriteOptions::SYNC).await.unwrap();
+        h.storage.crash().unwrap();
+
+        let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"ABCxyFGH");
+        let (durable, _) = h.inner.open("partition", b"other").await.unwrap();
+        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"12345678");
+    }
+
+    #[tokio::test]
+    async fn test_range_sync_preserves_prefix_retention_across_pending_fragments() {
+        for seed in 0..64 {
+            let h = Harness::with_seed(
+                seed,
+                Config::default().write_retention(PartialWriteMode::Prefix, 0.5),
+            );
+            let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+            blob.write_at(0, b"........", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            blob.write_at(0, b"ABCDEFGH", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.write_at(3, b"xy", WriteOptions::SYNC).await.unwrap();
+
+            h.storage.crash().unwrap();
+            let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
+            let durable = durable.read_at(0, 8).await.unwrap().coalesce();
+            if durable.as_ref()[..3].contains(&b'.') {
+                assert_eq!(&durable.as_ref()[5..], b"...");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crash_replays_writes_and_resizes_in_issue_order() {
+        let h = Harness::new(
+            Config::default()
+                .write_retention(PartialWriteMode::Prefix, 1.0)
+                .crash_resize(1.0),
+        );
+        let (write_then_resize, _) = h.storage.open("partition", b"first").await.unwrap();
+        write_then_resize
+            .write_at(0, b"abcdef", WriteOptions::default())
+            .await
+            .unwrap();
+        write_then_resize.resize(3).await.unwrap();
+        write_then_resize.resize(5).await.unwrap();
+
+        let (resize_then_write, _) = h.storage.open("partition", b"second").await.unwrap();
+        resize_then_write
+            .write_at(0, b"abcdef", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        resize_then_write.resize(3).await.unwrap();
+        resize_then_write
+            .write_at(5, b"X", WriteOptions::default())
+            .await
+            .unwrap();
+
+        h.storage.crash().unwrap();
+
+        let (first, len) = h.inner.open("partition", b"first").await.unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(first.read_at(0, 5).await.unwrap().coalesce(), b"abc\0\0");
+        let (second, len) = h.inner.open("partition", b"second").await.unwrap();
+        assert_eq!(len, 6);
+        assert_eq!(second.read_at(0, 6).await.unwrap().coalesce(), b"abc\0\0X");
+    }
+
+    #[tokio::test]
+    async fn test_partial_sync_write_replays_after_retained_resize() {
+        let h = Harness::new(Config::default().crash_resize(1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        blob.resize(3).await.unwrap();
+        {
+            let mut config = h.config.write();
+            config.write_rate = Some(1.0);
+            config.write_retention = Some((PartialWriteMode::Subset, 0.5));
+        }
+
+        assert!(blob.write_at(6, b"WXYZ", WriteOptions::SYNC).await.is_err());
+        let (before, _) = h.inner.open("partition", b"test").await.unwrap();
+        let before = before.read_at(0, 10).await.unwrap().coalesce();
+        let mut expected = b"abc".to_vec();
+        for (index, replacement) in b"WXYZ".iter().copied().enumerate() {
+            let index = index + 6;
+            if before.as_ref()[index] != replacement {
+                continue;
+            }
+            expected.resize(index + 1, 0);
+            expected[index] = replacement;
+        }
+        assert!(expected.len() > 3);
+
+        h.storage.crash().unwrap();
+
+        let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(len, expected.len() as u64);
+        assert_eq!(
+            durable
+                .read_at(0, expected.len())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preissued_sync_write_survives_failed_partial_resize() {
+        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
+            .await
+            .unwrap();
+
+        let resize_blob = blob.clone();
+        let (resize, write) = tokio::join!(biased;
+            resize_blob.resize(0),
+            blob.write_at(10, b"X", WriteOptions::SYNC),
+        );
+        assert!(resize.is_err());
+        write.unwrap();
+
+        let retained_len = h
+            .storage
+            .pending
+            .lock()
+            .iter()
+            .find_map(|mutation| match mutation {
+                PendingMutation::Resize { len, .. } => Some(*len),
+                PendingMutation::Write { .. } => None,
+            })
+            .unwrap();
+        h.storage.crash().unwrap();
+
+        let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(len, 11);
+        let mut expected = b"abcdefghij".to_vec();
+        expected.truncate(retained_len as usize);
+        expected.resize(10, 0);
+        expected.push(b'X');
+        assert_eq!(
+            durable.read_at(0, 11).await.unwrap().coalesce().as_ref(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn test_partial_sync_write_retires_each_persisted_range() {
+        for partial_write_mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
+            let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+            let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+            blob.write_at(0, b"........", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            blob.write_at(0, b"ABCDEFGH", WriteOptions::default())
+                .await
+                .unwrap();
+            {
+                let mut config = h.config.write();
+                config.write_rate = Some(1.0);
+                config.write_retention = Some((partial_write_mode, 0.5));
+            }
+
+            assert!(blob.write_at(2, b"wxyz", WriteOptions::SYNC).await.is_err());
+            let (before, _) = h.inner.open("partition", b"test").await.unwrap();
+            let before = before.read_at(0, 8).await.unwrap().coalesce();
+            h.storage.crash().unwrap();
+            let (after, _) = h.inner.open("partition", b"test").await.unwrap();
+            let after = after.read_at(0, 8).await.unwrap().coalesce();
+            for (index, (&before, &after)) in before
+                .as_ref()
+                .iter()
+                .zip(after.as_ref().iter())
+                .enumerate()
+            {
+                let expected = if before == b'.' {
+                    b'A' + index as u8
+                } else {
+                    before
+                };
+                assert_eq!(
+                    after, expected,
+                    "mode={partial_write_mode:?}, index={index}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_sync_epoch_is_linearized_with_overlapping_write() {
+        run_overlapping_barrier(false).await;
+    }
+
+    #[tokio::test]
+    async fn test_dropped_start_sync_epoch_is_linearized_with_overlapping_write() {
+        run_overlapping_barrier(true).await;
+    }
+
     #[tokio::test]
     async fn test_faulty_storage_no_faults() {
         let h = Harness::new(Config::default());
         run_storage_tests(h.storage).await;
+    }
+
+    #[test]
+    fn test_write_retention_frequency_upper_bound() {
+        let h = Harness::new(Config::default());
+        for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
+            for frequency in [1.0, 2.0, f64::INFINITY] {
+                assert_eq!(
+                    h.storage.ctx.retained_bytes(4, (mode, frequency)),
+                    [true; 4]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_prefix_retention_stops_after_the_first_omission() {
+        for seed in 0..64 {
+            let h = Harness::with_seed(seed, Config::default());
+            let retained = h
+                .storage
+                .ctx
+                .retained_bytes(64, (PartialWriteMode::Prefix, 0.5));
+            let mut omitted = false;
+            for keep in retained {
+                if omitted {
+                    assert!(!keep);
+                } else if !keep {
+                    omitted = true;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_faulty_open_can_fail() {
+        let h = Harness::new(Config::default().open(1.0));
+        assert!(matches!(
+            h.storage.open("partition", b"blob").await,
+            Err(Error::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_write_rejects_offset_overflow_before_retention() {
+        let h = Harness::new(
+            Config::default()
+                .write(1.0)
+                .write_retention(PartialWriteMode::Subset, 0.5),
+        );
+        let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
+        assert!(matches!(
+            blob.write_at(u64::MAX, vec![1, 2], WriteOptions::default())
+                .await,
+            Err(Error::OffsetOverflow)
+        ));
+        let (_, len) = h.inner.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+    }
+
+    #[tokio::test]
+    async fn test_failed_write_can_retain_every_byte() {
+        let h = Harness::new(
+            Config::default()
+                .write(1.0)
+                .write_retention(PartialWriteMode::Prefix, 1.0),
+        );
+        let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
+
+        assert!(matches!(
+            blob.write_at(0, b"x", WriteOptions::default()).await,
+            Err(Error::Io(_))
+        ));
+        let (durable, len) = h.inner.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 1);
+        assert_eq!(durable.read_at(0, 1).await.unwrap().coalesce(), b"x");
     }
 
     #[tokio::test]
@@ -444,7 +1485,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_start_sync_always_fails() {
-        let h = Harness::new(Config::default().sync(1.0));
+        let h = Harness::new(
+            Config::default()
+                .write_retention(PartialWriteMode::Prefix, 1.0)
+                .sync(1.0),
+        );
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec(), WriteOptions::default())
@@ -453,6 +1498,7 @@ mod tests {
 
         let result = blob.start_sync().await.await;
         assert!(matches!(result, Err(Error::Io(_))));
+        assert_eq!(h.storage.pending.lock().len(), 1);
     }
 
     #[tokio::test]
@@ -510,6 +1556,16 @@ mod tests {
 
         let (_reopened, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_empty_unsynced_write_does_not_create_crash_debt() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
+            .await
+            .unwrap();
+        assert!(h.storage.pending.lock().is_empty());
     }
 
     #[tokio::test]
@@ -630,8 +1686,201 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_partial_write() {
-        let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
+    async fn test_write_retention_is_snapshotted_and_replayed_in_order() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"........", WriteOptions::SYNC)
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"AB", WriteOptions::default())
+            .await
+            .unwrap();
+        h.config.write().write_retention = None;
+        blob.write_at(2, b"CD", WriteOptions::default())
+            .await
+            .unwrap();
+        h.config.write().write_retention = Some((PartialWriteMode::Prefix, 1.0));
+        blob.write_at(1, b"XY", WriteOptions::default())
+            .await
+            .unwrap();
+        h.config.write().write_retention = None;
+
+        h.storage.crash().unwrap();
+        let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"AXY.....");
+
+        durable.write_at(0, b"Q", WriteOptions::SYNC).await.unwrap();
+        h.storage.crash().unwrap();
+        let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"QXY.....");
+    }
+
+    #[tokio::test]
+    async fn test_random_crash_write_is_deterministic_and_inclusive() {
+        let first = run_random_crash(12345, 64).await;
+        let second = run_random_crash(12345, 64).await;
+        let different = run_random_crash(54321, 64).await;
+        assert_eq!(first, second);
+        assert_ne!(first, different);
+        assert!(first.contains(&0));
+        assert!(first.contains(&1));
+
+        let mut saw_empty = false;
+        let mut saw_full = false;
+        for seed in 0..64 {
+            match run_random_crash(seed, 1).await.as_slice() {
+                [0] => saw_empty = true,
+                [1] => saw_full = true,
+                other => panic!("unexpected one-byte crash result: {other:?}"),
+            }
+        }
+        assert!(saw_empty && saw_full);
+    }
+
+    #[tokio::test]
+    async fn failed_partial_write_does_not_barrier_prior_crash_writes() {
+        for partial_write_mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
+            let mut saw_old = false;
+            let mut saw_new = false;
+            for seed in 0..64 {
+                let h = Harness::with_seed(
+                    seed,
+                    Config::default().write_retention(PartialWriteMode::Subset, 0.5),
+                );
+                let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+                blob.write_at(0, b"......", WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+                blob.write_at(0, b"AAAA", WriteOptions::default())
+                    .await
+                    .unwrap();
+                {
+                    let mut config = h.config.write();
+                    config.write_rate = Some(1.0);
+                    config.write_retention = Some((partial_write_mode, 0.5));
+                }
+
+                assert!(
+                    blob.write_at(4, b"XY", WriteOptions::default())
+                        .await
+                        .is_err()
+                );
+                h.storage.crash().unwrap();
+
+                let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
+                let durable = durable.read_at(0, 4).await.unwrap().coalesce();
+                saw_old |= durable.as_ref().contains(&b'.');
+                saw_new |= durable.as_ref().contains(&b'A');
+            }
+            assert!(saw_old && saw_new);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_partial_resize_does_not_barrier_prior_crash_writes() {
+        let mut saw_old = false;
+        let mut saw_new = false;
+        for seed in 0..64 {
+            let h = Harness::with_seed(
+                seed,
+                Config::default().write_retention(PartialWriteMode::Subset, 0.5),
+            );
+            let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+            blob.write_at(0, b"......", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            blob.write_at(0, b"AAAA", WriteOptions::default())
+                .await
+                .unwrap();
+            {
+                let mut config = h.config.write();
+                config.resize_rate = Some(1.0);
+                config.partial_resize_rate = Some(1.0);
+            }
+
+            assert!(blob.resize(8).await.is_err());
+            h.storage.crash().unwrap();
+
+            let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
+            assert_eq!(len, 7);
+            let durable = durable.read_at(0, 4).await.unwrap().coalesce();
+            saw_old |= durable.as_ref().contains(&b'.');
+            saw_new |= durable.as_ref().contains(&b'A');
+        }
+        assert!(saw_old && saw_new);
+    }
+
+    #[tokio::test]
+    async fn test_crash_journal_clears_only_after_completed_durability() {
+        let h = Harness::new(Config::default().write_retention(PartialWriteMode::Prefix, 1.0));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+
+        blob.write_at(0, b"a", WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 1);
+        h.config.write().sync_rate = Some(1.0);
+        assert!(matches!(blob.sync().await, Err(Error::Io(_))));
+        assert_eq!(h.storage.pending.lock().len(), 1);
+
+        h.config.write().sync_rate = None;
+        blob.sync().await.unwrap();
+        assert!(h.storage.pending.lock().is_empty());
+
+        let (other, _) = h.storage.open("partition", b"other").await.unwrap();
+        blob.write_at(0, b"b", WriteOptions::default())
+            .await
+            .unwrap();
+        other
+            .write_at(0, b"x", WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 2);
+        blob.sync().await.unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 1);
+        other.sync().await.unwrap();
+        assert!(h.storage.pending.lock().is_empty());
+
+        blob.write_at(0, b"b", WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 1);
+        blob.start_sync().await.await.unwrap();
+        assert!(h.storage.pending.lock().is_empty());
+
+        blob.write_at(0, b"c", WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 1);
+        blob.write_at(0, b"d", WriteOptions::SYNC).await.unwrap();
+        assert!(h.storage.pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sync_failure_journals_the_successful_inner_write() {
+        let h = Harness::new(
+            Config::default()
+                .write_retention(PartialWriteMode::Prefix, 1.0)
+                .sync(1.0),
+        );
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        assert!(matches!(
+            blob.write_at(0, b"data", WriteOptions::SYNC).await,
+            Err(Error::Io(_))
+        ));
+        assert_eq!(h.storage.pending.lock().len(), 1);
+
+        h.storage.crash().unwrap();
+        let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(durable.read_at(0, 4).await.unwrap().coalesce(), b"data");
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_write_retention_defaults_to_none() {
+        let h = Harness::new(Config::default().write(1.0));
+        assert_eq!(h.config.read().write_retention, None);
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let data = b"hello world".to_vec();
@@ -641,49 +1890,90 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Io(_))));
 
-        let (inner_blob, size) = h.inner.open("partition", b"test").await.unwrap();
-        let bytes_written = size as usize;
-        assert!(
-            bytes_written > 0 && bytes_written < data.len(),
-            "Expected partial write: {bytes_written} bytes out of {}",
-            data.len()
-        );
-
-        let read_result = inner_blob.read_at(0, bytes_written).await.unwrap();
-        assert_eq!(read_result.coalesce().as_ref(), &data[..bytes_written]);
+        let (_, size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(size, 0);
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_partial_write_disabled() {
-        let h = Harness::new(Config::default().write(1.0).partial_write(0.0));
+    async fn test_faulty_storage_partial_write_subset_can_be_non_prefix() {
+        let original = b"abcdefghijklmnop";
+        let replacement = b"ABCDEFGHIJKLMNOP";
+        let observed = run_subset_overwrite(42, original, replacement).await;
 
-        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let result = blob
-            .write_at(0, b"hello world".to_vec(), WriteOptions::default())
-            .await;
+        let retained: Vec<_> = observed
+            .iter()
+            .zip(original)
+            .zip(replacement)
+            .map(|((&actual, &old), &new)| {
+                assert!(actual == old || actual == new);
+                actual == new
+            })
+            .collect();
+        assert!(retained.iter().any(|&keep| keep));
+        assert!(retained.iter().any(|&keep| !keep));
 
-        assert!(matches!(result, Err(Error::Io(_))));
-
-        let (_, size) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(
-            size, 0,
-            "Expected no bytes written when partial_write_rate is 0"
-        );
+        let mut omitted = false;
+        let non_prefix = retained.into_iter().any(|keep| {
+            if keep {
+                omitted
+            } else {
+                omitted = true;
+                false
+            }
+        });
+        assert!(non_prefix, "expected a retained byte after an omitted byte");
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_partial_write_single_byte() {
-        let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
+    async fn test_faulty_storage_write_retention_frequency_edges() {
+        for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
+            for (frequency, expected) in [
+                (0.0, b"old".as_slice()),
+                (f64::NAN, b"old".as_slice()),
+                (1.0, b"new".as_slice()),
+            ] {
+                let failed = Harness::new(
+                    Config::default()
+                        .write(1.0)
+                        .write_retention(mode, frequency),
+                );
+                let (blob, _) = failed.storage.open("partition", b"failed").await.unwrap();
+                blob.write_at(0, b"new", WriteOptions::SYNC)
+                    .await
+                    .unwrap_err();
+                let (durable, len) = failed.inner.open("partition", b"failed").await.unwrap();
+                if frequency >= 1.0 {
+                    assert_eq!(len, 3);
+                    assert_eq!(durable.read_at(0, 3).await.unwrap().coalesce(), expected);
+                } else {
+                    assert_eq!(len, 0);
+                }
 
-        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let result = blob
-            .write_at(0, b"x".to_vec(), WriteOptions::default())
-            .await;
+                let crashed = Harness::new(Config::default().write_retention(mode, frequency));
+                let (blob, _) = crashed.storage.open("partition", b"crashed").await.unwrap();
+                blob.write_at(0, b"old", WriteOptions::SYNC).await.unwrap();
+                blob.write_at(0, b"new", WriteOptions::default())
+                    .await
+                    .unwrap();
+                crashed.storage.crash().unwrap();
+                let (durable, len) = crashed.inner.open("partition", b"crashed").await.unwrap();
+                assert_eq!(len, 3);
+                assert_eq!(durable.read_at(0, 3).await.unwrap().coalesce(), expected);
+            }
+        }
+    }
 
-        assert!(matches!(result, Err(Error::Io(_))));
+    #[tokio::test]
+    async fn test_faulty_storage_partial_write_subset_same_seed_is_deterministic() {
+        let original = vec![0x11; 64];
+        let replacement = vec![0xAA; 64];
 
-        let (_, size) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(size, 0, "No partial write possible for single byte");
+        let first = run_subset_overwrite(12345, &original, &replacement).await;
+        let second = run_subset_overwrite(12345, &original, &replacement).await;
+
+        assert_eq!(first, second);
+        assert!(first.contains(&0x11));
+        assert!(first.contains(&0xAA));
     }
 
     #[tokio::test]
@@ -697,6 +1987,7 @@ mod tests {
         let result = blob.resize(target_size).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
+        h.storage.crash().unwrap();
 
         let (_, actual_size) = h.inner.open("partition", b"test").await.unwrap();
         assert!(
@@ -723,6 +2014,7 @@ mod tests {
         let result = blob.resize(target_size).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
+        h.storage.crash().unwrap();
 
         let (_, actual_size) = h.inner.open("partition", b"test").await.unwrap();
         assert!(
@@ -782,6 +2074,7 @@ mod tests {
         let result = blob.resize(target_size).await;
 
         assert!(matches!(result, Err(Error::Io(_))));
+        h.storage.crash().unwrap();
 
         let (_, actual_size) = h.inner.open("partition", b"test").await.unwrap();
         assert!(
