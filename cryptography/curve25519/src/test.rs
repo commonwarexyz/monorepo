@@ -1,4 +1,7 @@
-//! Property tests that exercise only the crate's public API.
+//! Crate-level tests and fuzzing operations.
+
+#[cfg(test)]
+mod vectors;
 
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
@@ -19,12 +22,8 @@ const SCALAR_ORDER: [u8; 32] = [
 ];
 
 // Bias signing key material and key-exchange RNG seeds toward low-entropy patterns.
-const INTERESTING_SECRET_BYTES: [[u8; 32]; 4] = [
-    [0; 32],
-    [0xff; 32],
-    first_byte(1),
-    last_byte(0x80),
-];
+const INTERESTING_SECRET_BYTES: [[u8; 32]; 4] =
+    [[0; 32], [0xff; 32], first_byte(1), last_byte(0x80)];
 
 // Include every low-order coordinate on the curve and its twist, non-canonical aliases of 0 and
 // 1, the basepoint with both possible high bits, and the maximal encoding.
@@ -569,5 +568,157 @@ pub mod fuzz {
             .with_seed(0)
             .with_search_limit(32)
             .test(|u| u.arbitrary::<Plan>()?.run(u));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_exchange_public_key, decode_signature, decode_signing_key, decode_verifying_key,
+        vectors::{RFC7748_X25519, RFC7748_X25519_DIFFIE_HELLMAN, RFC8032_ED25519, ZIP215_POINTS},
+    };
+    use crate::{
+        key_exchange::SecretKey,
+        signing::{BatchVerifier, SigningKey},
+    };
+    use commonware_math::algebra::Random as _;
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+    use core::convert::Infallible;
+    use rand_core::{TryCryptoRng, TryRng};
+
+    const ZIP215_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
+
+    struct VectorRng {
+        bytes: [u8; 32],
+        position: usize,
+    }
+
+    impl VectorRng {
+        const fn new(bytes: [u8; 32]) -> Self {
+            Self { bytes, position: 0 }
+        }
+
+        fn take<const N: usize>(&mut self) -> [u8; N] {
+            let end = self
+                .position
+                .checked_add(N)
+                .expect("vector RNG position must not overflow");
+            let bytes = self
+                .bytes
+                .get(self.position..end)
+                .expect("vector RNG must contain enough bytes")
+                .try_into()
+                .expect("vector RNG slice must have the requested length");
+            self.position = end;
+            bytes
+        }
+    }
+
+    impl TryRng for VectorRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(u32::from_le_bytes(self.take()))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(u64::from_le_bytes(self.take()))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            let end = self
+                .position
+                .checked_add(dst.len())
+                .expect("vector RNG position must not overflow");
+            dst.copy_from_slice(
+                self.bytes
+                    .get(self.position..end)
+                    .expect("vector RNG must contain enough bytes"),
+            );
+            self.position = end;
+            Ok(())
+        }
+    }
+
+    // SAFETY: This deterministic adapter is not cryptographically secure. It implements
+    // CryptoRng only to inject RFC scalar bytes through the public random key-construction API.
+    impl TryCryptoRng for VectorRng {}
+
+    fn exchange_secret_key(bytes: [u8; 32]) -> SecretKey {
+        SecretKey::random(VectorRng::new(bytes))
+    }
+
+    #[test]
+    fn rfc8032_ed25519_vectors() {
+        for vector in RFC8032_ED25519 {
+            let signing_key: SigningKey = decode_signing_key(vector.secret_key);
+            assert_eq!(
+                signing_key.verifying_key().as_ref(),
+                vector.public_key,
+                "RFC 8032 test {} public key",
+                vector.name,
+            );
+            assert_eq!(
+                signing_key.sign_raw(vector.message).as_ref(),
+                vector.signature,
+                "RFC 8032 test {} signature",
+                vector.name,
+            );
+        }
+    }
+
+    #[test]
+    fn rfc7748_x25519_vectors() {
+        for vector in RFC7748_X25519 {
+            let shared_secret = exchange_secret_key(vector.scalar)
+                .exchange(&decode_exchange_public_key(vector.u_coordinate))
+                .expect("RFC 7748 output is contributory");
+            assert_eq!(shared_secret.as_bytes(), &vector.output);
+        }
+    }
+
+    #[test]
+    fn rfc7748_x25519_diffie_hellman_vector() {
+        let vector = &RFC7748_X25519_DIFFIE_HELLMAN;
+        let alice = exchange_secret_key(vector.alice_secret);
+        let bob = exchange_secret_key(vector.bob_secret);
+        assert_eq!(alice.public_key().as_ref(), vector.alice_public);
+        assert_eq!(bob.public_key().as_ref(), vector.bob_public);
+
+        let alice_shared = alice
+            .exchange(&decode_exchange_public_key(vector.bob_public))
+            .expect("RFC 7748 Bob public key is contributory");
+        let bob_shared = bob
+            .exchange(&decode_exchange_public_key(vector.alice_public))
+            .expect("RFC 7748 Alice public key is contributory");
+        assert_eq!(alice_shared.as_bytes(), &vector.shared_secret);
+        assert_eq!(bob_shared.as_bytes(), &vector.shared_secret);
+    }
+
+    #[test]
+    fn zip215_verification_vectors() {
+        let message = b"Zcash";
+        let mut batch = BatchVerifier::new(ZIP215_POINTS.len() * ZIP215_POINTS.len());
+
+        // These are the 196 ZIP215 test vectors: every pairing of the eight canonical
+        // low-order encodings and their six non-canonical aliases. With s = 0, each pair
+        // satisfies the cofactored verification equation for every message.
+        for public_key_bytes in ZIP215_POINTS {
+            for r_bytes in ZIP215_POINTS {
+                let verifying_key = decode_verifying_key(public_key_bytes);
+                let mut signature_bytes = [0u8; 64];
+                signature_bytes[..32].copy_from_slice(&r_bytes);
+                let signature = decode_signature(signature_bytes);
+
+                assert!(
+                    verifying_key.verify(ZIP215_NAMESPACE, message, &signature),
+                    "ZIP215 vector failed for A={public_key_bytes:?}, R={r_bytes:?}",
+                );
+                batch.add(ZIP215_NAMESPACE, message, &verifying_key, &signature);
+            }
+        }
+
+        assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 }

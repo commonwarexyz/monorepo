@@ -101,6 +101,37 @@ impl SigningKey {
             verifying_key,
         }
     }
+
+    fn sign_message(&self, msg: &[u8]) -> Signature {
+        let nonce_digest: Zeroizing<[u8; 64]> = Zeroizing::new(
+            sha2::Sha512::new()
+                .chain(self.prefix.as_slice())
+                .chain(msg)
+                .finalize_fixed()
+                .into(),
+        );
+        let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
+        let nonce_bytes = Zeroizing::new(nonce.to_bytes());
+        let r_bytes = GAffine::BASEPOINT
+            .to_extended()
+            .scalar_mul_secret(&nonce_bytes)
+            .to_bytes();
+
+        let challenge_digest: [u8; 64] = sha2::Sha512::new()
+            .chain(r_bytes)
+            .chain(self.verifying_key.bytes)
+            .chain(msg)
+            .finalize_fixed()
+            .into();
+        let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
+        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
+        let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
+
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(&r_bytes);
+        bytes[32..].copy_from_slice(&s_bytes);
+        Signature { bytes }
+    }
 }
 
 impl Random for SigningKey {
@@ -157,35 +188,13 @@ impl SigningKey {
     /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let msg = union_unique(namespace, msg);
+        self.sign_message(&msg)
+    }
 
-        let nonce_digest: Zeroizing<[u8; 64]> = Zeroizing::new(
-            sha2::Sha512::new()
-                .chain(self.prefix.as_slice())
-                .chain(&msg)
-                .finalize_fixed()
-                .into(),
-        );
-        let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
-        let nonce_bytes = Zeroizing::new(nonce.to_bytes());
-        let r_bytes = GAffine::BASEPOINT
-            .to_extended()
-            .scalar_mul_secret(&nonce_bytes)
-            .to_bytes();
-
-        let challenge_digest: [u8; 64] = sha2::Sha512::new()
-            .chain(r_bytes)
-            .chain(self.verifying_key.bytes)
-            .chain(&msg)
-            .finalize_fixed()
-            .into();
-        let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
-        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
-        let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
-
-        let mut bytes = [0u8; 64];
-        bytes[..32].copy_from_slice(&r_bytes);
-        bytes[32..].copy_from_slice(&s_bytes);
-        Signature { bytes }
+    /// Signs an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn sign_raw(&self, msg: &[u8]) -> Signature {
+        self.sign_message(msg)
     }
 }
 
