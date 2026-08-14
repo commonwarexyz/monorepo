@@ -431,11 +431,10 @@ impl Freelist {
     /// empty snapshot because a concurrent put may still be in progress.
     #[inline]
     pub fn take(&self) -> Option<PooledBuffer> {
-        let start = self.home_stripe();
-
         // A negative hint can skip locking. A positive hint requires an
         // authoritative check under the mutex because another taker may have
         // emptied the stripe.
+        let start = self.home_stripe();
         for offset in 0..self.stripes.len() {
             let stripe = &self.stripes[(start + offset) & self.stripe_mask];
             if !stripe.available.load(Ordering::Acquire) {
@@ -463,17 +462,20 @@ impl Freelist {
     /// stranded outside both the freelist and the caller.
     #[inline]
     pub fn take_batch(&self, max: usize, mut on_buffer: impl FnMut(PooledBuffer)) -> usize {
-        let max = max.min(self.slots.len());
-        if max == 0 {
-            return 0;
-        }
-        if max == 1 {
-            let Some(buffer) = self.take() else {
-                return 0;
-            };
-            on_buffer(buffer);
-            return 1;
-        }
+        // Clamp oversized requests to the freelist capacity. Empty requests
+        // return immediately, while singleton requests reuse the scalar path
+        // and avoid batch scratch allocation.
+        let max = match max.min(self.slots.len()) {
+            0 => return 0,
+            1 => {
+                let Some(buffer) = self.take() else {
+                    return 0;
+                };
+                on_buffer(buffer);
+                return 1;
+            }
+            max => max,
+        };
 
         // Keep scans that observe only negative hints allocation-free. Reserve
         // detached-slot scratch after the first positive hint but before locking.
@@ -502,6 +504,8 @@ impl Freelist {
             }
         }
 
+        // A positive hint can become stale before its stripe is locked, leaving
+        // the scan with allocated scratch but no detached slots.
         if detached.is_empty() {
             return 0;
         }
