@@ -7,8 +7,8 @@
 //! can read through to applied state.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    BatchContext, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -265,6 +265,7 @@ where
     type Error = Error<F>;
     type Config = fixed::Config<S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<F, E, FixedJournal<E, fixed::Operation<F, V>>, H>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -293,9 +294,19 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -350,6 +361,7 @@ where
     type Error = Error<F>;
     type Config = variable::Config<<variable::Operation<F, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<F, E, VariableJournal<E, variable::Operation<F, V>>, H>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -378,9 +390,19 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -555,9 +577,10 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap();
                 slot.put(database);
                 sync.await.expect("finalize flush failed");
             }
@@ -647,9 +670,10 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap();
                 slot.put(database);
                 sync.await.expect("finalize flush failed");
             }
@@ -663,9 +687,10 @@ mod tests {
             let fork = MerkleizedTrait::new_batch(&merkleized);
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap();
                 slot.put(database);
                 sync.await.expect("finalize flush failed");
             }
@@ -679,9 +704,10 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap();
                 slot.put(database);
                 sync.await.expect("finalize flush failed");
             }

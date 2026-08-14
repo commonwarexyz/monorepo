@@ -267,6 +267,7 @@ mod tests {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
         type Readers = ();
+        type Snapshots = ();
         type Config = u64;
         type SyncTargets = u64;
 
@@ -292,7 +293,11 @@ mod tests {
 
         fn readers(&self) -> Self::Readers {}
 
-        async fn finalize(&self, _batches: Self::Merkleized) -> Barrier {
+        async fn finalize(&self, _batches: Self::Merkleized) -> (Self::Snapshots, Barrier) {
+            unreachable!("WedgeSet only serves the syncer harness")
+        }
+
+        async fn snapshot(&self) -> Self::Snapshots {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 

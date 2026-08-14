@@ -18,6 +18,7 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
+        compact,
         keyless::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
@@ -216,6 +217,7 @@ where
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
+    type Snapshot = compact::Snapshot<F, Operation<F, FixedEncoding<V>>, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -242,9 +244,19 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let snapshot = Self::snapshot(&db);
+        Ok((db, snapshot, handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = Self::snapshot(&self);
+        Ok((self, snapshot))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -282,6 +294,7 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
+    type Snapshot = compact::Snapshot<F, Operation<F, VariableEncoding<V>>, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -308,9 +321,19 @@ where
         batch.root() == target.root && target.size == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let snapshot = Self::snapshot(&db);
+        Ok((db, snapshot, handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = Self::snapshot(&self);
+        Ok((self, snapshot))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -566,9 +589,10 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                    .await
-                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                        .await
+                        .unwrap();
                 slot.put(database);
                 sync.await.expect("finalize flush failed");
             }

@@ -25,7 +25,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::{core::Verification, metrics::Metrics as StatefulMetrics},
-    db::{Anchor, Barrier, DatabaseSet},
+    db::{Anchor, Barrier, DatabaseSet, SnapshotsOf, snapshot::Publisher},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -478,8 +478,11 @@ impl Cancellation for Verification {
 }
 
 /// State applied for a newly finalized block.
-pub(super) struct Applied<T> {
-    /// Deferred flush for the applied batch (see [`Barrier`]).
+pub(super) struct Applied<T, S> {
+    /// A snapshot of the database set, captured at the apply boundary.
+    pub(super) snapshots: S,
+
+    /// Proves the snapshot durable. Resolves once every database flush completes.
     pub(super) barrier: Barrier,
 
     /// Prune made due by this finalization.
@@ -685,6 +688,23 @@ where
         &self.execution.databases
     }
 
+    /// Capture a snapshot of the database set's applied state and publish it
+    /// at the processed height.
+    ///
+    /// A future factory: the future captures a clone of the set rather than
+    /// `&self`, so it stays `Send` without requiring `Application: Sync`.
+    pub(super) fn publish_snapshot<'p>(
+        &self,
+        publisher: &'p mut Publisher<SnapshotsOf<A::Databases, E>>,
+    ) -> impl Future<Output = ()> + Send + 'p {
+        let databases = self.execution.databases.clone();
+        let height = self.execution.last_processed().height;
+        async move {
+            let snapshots = databases.snapshot().await;
+            publisher.publish_now(height, snapshots);
+        }
+    }
+
     #[cfg(test)]
     fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
         self.execution.last_processed()
@@ -856,7 +876,7 @@ where
         &mut self,
         context: &E,
         block: &A::Block,
-    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
+    ) -> Option<Applied<PendingSyncTargets<A, E>, SnapshotsOf<A::Databases, E>>> {
         let finalized = Anchor::from(block);
         let (height, digest) = (finalized.height, finalized.digest);
         let last_processed = self.execution.last_processed();
@@ -930,7 +950,7 @@ where
         if let Some(owner) = reconstruction {
             owner.finish(Ok(()));
         }
-        let barrier = self.execution.databases.finalize(batch).await;
+        let (snapshots, barrier) = self.execution.databases.finalize(batch).await;
         self.notify_finalized(context, block).await;
         let prune = self
             .pruning
@@ -939,7 +959,11 @@ where
         self.execution.finish_finalization(finalized);
         timer.observe(context);
 
-        Some(Applied { barrier, prune })
+        Some(Applied {
+            snapshots,
+            barrier,
+            prune,
+        })
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -2110,7 +2134,11 @@ mod tests {
                 <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
         > {
-            let Applied { barrier, prune } = self
+            let Applied {
+                snapshots: _,
+                barrier,
+                prune,
+            } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block)
                 .await
