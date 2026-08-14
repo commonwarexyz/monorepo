@@ -104,15 +104,16 @@ use tracing::debug;
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
-mod cell;
 pub mod current;
+mod gate;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
-mod snapshot;
+pub mod snapshot;
 
-pub use cell::{Mutator, ReadHandle, ReadLease, gate};
-pub use snapshot::{Publisher, Reader as SnapshotReader};
+// Aliased because `Reader` is still taken by the `Shared`-based reader. Once
+// that is deleted, this becomes `Reader`.
+pub use gate::{Gate, Reader as GateReader};
 
 /// A database shared across tasks.
 ///
