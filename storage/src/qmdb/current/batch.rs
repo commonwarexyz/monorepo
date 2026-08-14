@@ -594,6 +594,23 @@ where
             .await?;
         compute_current_layer_pipelined(pending, db, &grafted_parent, &bitmap_parent).await
     }
+
+    /// Prefetch the committed predecessor operations of unresolved staged keys, so
+    /// [`merkleize`](Staged::merkleize) can consume them instead of reading each
+    /// predecessor from the log. Entries are keyed by immutable location and cannot go
+    /// stale; a lookup that resolves differently at merkleize time falls back to a log
+    /// read. See the any-layer `Staged::prefetch_predecessors` for the full contract.
+    pub async fn prefetch_predecessors<E, C, I>(
+        &mut self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<(), Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.inner.prefetch_predecessors(&db.any).await
+    }
 }
 
 // Unordered merkleize.

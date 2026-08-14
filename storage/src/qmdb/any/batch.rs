@@ -274,6 +274,11 @@ where
 
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
+
+    /// Committed operations prefetched by [`Staged::prefetch_predecessors`], sorted by
+    /// location with no duplicates. Merkleization consults this before reading a
+    /// predecessor operation from the log.
+    predecessors: Vec<(Location<F>, Operation<F, U>)>,
 }
 
 /// Pending mutations whose old locations were already resolved by staged reads, sorted
@@ -452,6 +457,7 @@ where
     db_state: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
+    predecessors: Vec<(Location<F>, Operation<F, U>)>,
 }
 
 /// Look up a key in the ancestor chain (immediate parent first).
@@ -1527,6 +1533,7 @@ where
             db_state,
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
             base_active_keys: self.base.active_keys(),
+            predecessors: self.predecessors,
         };
         (self.mutations, m)
     }
@@ -1889,6 +1896,55 @@ where
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
             .await
+    }
+
+    /// Prefetch the committed predecessor operations of unresolved staged keys.
+    ///
+    /// A staged key whose read resolved to nothing becomes a create when it is later
+    /// updated, and merkleizing a create reads the key's committed predecessor operations
+    /// to rewrite next-key links. Calling this after staging performs those reads here
+    /// instead of during [`merkleize`](Staged::merkleize), so a caller with work between
+    /// staging and merkleization (e.g. block execution) moves them off the merkleization
+    /// path.
+    ///
+    /// Prefetched operations are consulted by location, and a location's operation is
+    /// immutable, so entries cannot go stale: a predecessor lookup that resolves
+    /// differently at merkleize time falls back to reading from the log. Unresolved keys
+    /// that are never updated waste their prefetched reads but are otherwise harmless.
+    #[tracing::instrument(
+        name = "qmdb.any.ordered.batch.prefetch_predecessors",
+        level = "info",
+        skip_all,
+        fields(staged = self.keys.len() as u64),
+    )]
+    pub async fn prefetch_predecessors<E, C, I, const N: usize>(
+        &mut self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<(), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        let mut locations: Vec<Location<F>> = Vec::new();
+        for (key, resolution) in self.keys.iter().zip(&self.resolutions) {
+            if resolution.is_some() {
+                continue;
+            }
+            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
+                continue;
+            };
+            locations.extend(iter.copied());
+        }
+        locations.sort();
+        locations.dedup();
+        if locations.is_empty() {
+            return Ok(());
+        }
+        let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
+        let ops = db.log.read_many(&positions).await?;
+        self.batch.predecessors = locations.into_iter().zip(ops).collect();
+        Ok(())
     }
 }
 
@@ -2543,7 +2599,30 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
+        // Serve each location from the prefetched predecessors when present (see
+        // `Staged::prefetch_predecessors`) and read the rest from the log.
+        let mut slots: Vec<Option<Operation<F, update::Ordered<K, V>>>> =
+            Vec::with_capacity(prev_locations.len());
+        let mut unfetched: Vec<Location<F>> = Vec::new();
+        for &loc in &prev_locations {
+            match m
+                .predecessors
+                .binary_search_by(|(fetched_loc, _)| fetched_loc.cmp(&loc))
+            {
+                Ok(idx) => slots.push(Some(m.predecessors[idx].1.clone())),
+                Err(_) => {
+                    unfetched.push(loc);
+                    slots.push(None);
+                }
+            }
+        }
+        let mut fetched = m.read_ops(&unfetched, &[], &db.log).await?.into_iter();
+        let prev_results: Vec<Operation<F, update::Ordered<K, V>>> = slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| fetched.next().expect("one read per unfetched slot"))
+            })
+            .collect();
 
         for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
@@ -2856,6 +2935,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base: Base::Child(Arc::clone(self)),
+            predecessors: Vec::new(),
         }
     }
 
@@ -2958,6 +3038,7 @@ where
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
+            predecessors: Vec::new(),
         }
     }
 }
@@ -4358,6 +4439,82 @@ mod tests {
             assert_eq!(batch.mutations.get(&delete_key), Some(&None));
             assert!(!batch.mutations.contains_key(&update_a));
             assert!(!batch.mutations.contains_key(&update_b));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Prefetching predecessor operations must not change merkleization results: the
+    /// prefetched flow's root must be byte-identical to the unprefetched flow's. Staged
+    /// creates exercise the prefetched read path, while a staged delete and an unstaged
+    /// upsert create (whose predecessors are never prefetched) exercise the fallback read
+    /// path in the same merkleization.
+    #[test]
+    fn ordered_prefetch_predecessors_matches_unprefetched() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-prefetch-predecessors", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            // Commit seed keys so later creates and deletes have committed predecessors.
+            let seed: Vec<sha256::Digest> = (0..8).map(|i| colliding_digest(0xa0 + i, 0)).collect();
+            let mut batch = db.new_batch();
+            for (i, key) in seed.iter().enumerate() {
+                batch = batch.write(*key, Some(colliding_digest(0xc0, i as u64)));
+            }
+            let seeded = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seeded).await.unwrap();
+
+            let update_key = seed[1];
+            let delete_key = seed[5];
+            let create_a = colliding_digest(0xb0, 0);
+            let create_b = colliding_digest(0xb1, 0);
+            let create_c = colliding_digest(0xb2, 0);
+            let keys = vec![&update_key, &delete_key, &create_a, &create_b];
+            let updates = vec![
+                (0, Some(colliding_digest(0xc1, 0))),
+                (1, None),
+                (2, Some(colliding_digest(0xc1, 1))),
+                (3, Some(colliding_digest(0xc1, 2))),
+            ];
+            let upserts = vec![(create_c, Some(colliding_digest(0xc1, 3)))];
+
+            // Unprefetched baseline.
+            let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let unprefetched = staged
+                .merkleize(updates.clone(), upserts.clone(), None, &db)
+                .await
+                .unwrap();
+
+            // Prefetched flow over the same writes. The staged creates must actually
+            // populate the prefetch map, or the flow silently degenerates to the baseline.
+            let (_, mut staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            staged.prefetch_predecessors(&db).await.unwrap();
+            assert!(!staged.batch.predecessors.is_empty());
+            let prefetched = staged
+                .merkleize(updates.clone(), upserts.clone(), None, &db)
+                .await
+                .unwrap();
+
+            assert_eq!(unprefetched.root(), prefetched.root());
+            drop(unprefetched);
+
+            let (db, _) = db.apply_batch(prefetched).await.unwrap();
+            assert_eq!(db.get(&update_key).await.unwrap(), updates[0].1);
+            assert_eq!(db.get(&delete_key).await.unwrap(), None);
+            assert_eq!(db.get(&create_a).await.unwrap(), updates[2].1);
+            assert_eq!(db.get(&create_b).await.unwrap(), updates[3].1);
+            assert_eq!(db.get(&create_c).await.unwrap(), upserts[0].1);
 
             db.destroy().await.unwrap();
         });
