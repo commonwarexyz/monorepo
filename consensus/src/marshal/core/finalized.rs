@@ -148,8 +148,9 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
         .await
     }
 
-    /// Begin flushing both stores, returning a handle that completes when durable.
-    pub async fn start_sync(&self) -> Handle<()> {
+    /// Begin flushing both stores, returning per-store handles (certificates, blocks)
+    /// that complete when durable.
+    pub async fn start_sync(&self) -> (Handle<()>, Handle<()>) {
         self.mutate(|finalizations, blocks| async move {
             let ((blocks, blocks_handle), (finalizations, finalizations_handle)) = futures::join!(
                 async {
@@ -165,11 +166,7 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
                         .unwrap_or_else(|e| panic!("failed to start finalization sync: {e}"))
                 }
             );
-            let handle = Handle::from_future(async move {
-                let (a, b) = futures::join!(blocks_handle, finalizations_handle);
-                a.and(b)
-            });
-            (finalizations, blocks, handle)
+            (finalizations, blocks, (finalizations_handle, blocks_handle))
         })
         .await
     }

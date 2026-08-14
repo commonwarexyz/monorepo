@@ -1933,9 +1933,14 @@ where
             return self;
         };
 
-        let handle = self.storage.start_sync().await;
+        let (finalizations, blocks) = self.storage.start_sync().await;
         syncs.push(async move {
-            if handle.durable(round, "finalized storage").await {
+            let (finalizations, blocks) = join(
+                finalizations.durable(round, "finalizations"),
+                blocks.durable(round, "finalized blocks"),
+            )
+            .await;
+            if finalizations && blocks {
                 PooledSync::Finalized(seq)
             } else {
                 // Runtime shutdown before the sync completed: nothing may be
