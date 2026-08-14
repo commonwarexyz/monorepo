@@ -1262,8 +1262,10 @@ impl<
                     staged.nullify = nullify;
                     staged.certification = certification;
 
-                    // Start optimistic child requests before journal sync and
-                    // publication. Their responses join the next iteration's waiters.
+                    // Constructing the notarize advances the optimistic frontier,
+                    // making child requests eligible. Start them before journal
+                    // sync and publication. Their responses join the next
+                    // iteration's waiters.
                     self.reconcile_application_requests(
                         &mut resolver,
                         &mut pending_propose,
