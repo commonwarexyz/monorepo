@@ -1794,6 +1794,7 @@ dependencies = [
  "commonware-macros",
  "dashmap",
  "futures",
+ "loom",
  "proptest",
  "rayon",
 ]

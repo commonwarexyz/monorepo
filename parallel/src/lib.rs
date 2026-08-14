@@ -88,7 +88,9 @@ commonware_macros::stability_scope!(BETA {
                 time::{Duration, Instant},
             };
 
+            mod parked;
             mod policy;
+            pub use parked::Parked;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
