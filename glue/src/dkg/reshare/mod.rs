@@ -133,21 +133,20 @@
 //!
 //! # State Sync
 //!
-//! Reshare is compatible with application state sync, but timing matters. A node
-//! that joins through state sync can participate in epoch `E` only if it was
-//! already announced as a `next_player` in epoch `E - 1`. That announcement gives
-//! the node time to discover the boundary artifact, state sync, start consensus,
-//! and be online for the early private dealings of epoch `E`.
+//! Reshare is compatible with application state sync, but timing matters. A
+//! certified floor at or before an epoch's midpoint preserves the complete public
+//! dealer-log inclusion window, so the actor can participate in that epoch. A
+//! floor after the midpoint has skipped part of that history, so the actor follows
+//! the remainder of the epoch and resumes at the next boundary.
 //!
-//! If a node state syncs during the epoch in which it is already a `player`, it
-//! has missed non-replayable private dealings. The actor enters follower mode for
-//! that partial epoch and will not participate in the ceremony. If the ceremony
-//! needs that node's share, the share will be revealed as part of the public
-//! outcome.
+//! A `player` that missed private dealings may need public reveals to reconstruct
+//! its share, but a revealed share is no longer private. Announcing a node as a
+//! `next_player` one epoch early gives it time to state sync and be online for the
+//! private dealing window before its share is needed.
 //!
 //! This is why [`ParticipantsProvider`](crate::dkg::ParticipantsProvider) can be
-//! backed by chain state: the chain announces future players one epoch before
-//! their shares are needed.
+//! backed by chain state: the chain can announce future players before their
+//! shares are needed.
 //!
 //! # One-Shot DKG
 //!
