@@ -1,7 +1,7 @@
 use crate::{
     Block,
     simplex::types::Finalization,
-    types::{Epoch, Epocher, ViewDelta},
+    types::{Epoch, Epocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
     Digest, Digestible,
@@ -93,6 +93,16 @@ where
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
+
+    /// Lowest height to repair and retain, when it is below where the application resumes.
+    ///
+    /// A node started from a [`Start::Floor`] resumes at that finalization and, by default, never
+    /// fetches or serves anything below it. Setting this lets it repair history behind the
+    /// resumption point in the background: those blocks are stored and served, but never
+    /// dispatched to the application, which continues from the resumption height as usual.
+    ///
+    /// `None` keeps the two bounds equal, which is the historical behaviour.
+    pub retain_from: Option<Height>,
 
     /// Maximum number of blocks dispatched to the application that have not
     /// yet been acknowledged. Increasing this value allows the application

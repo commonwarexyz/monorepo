@@ -330,6 +330,7 @@ mod tests {
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
+            retain_from: None,
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),

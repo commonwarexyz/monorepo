@@ -4133,6 +4133,38 @@ mod tests {
         P: Provider<Scope = Epoch, Scheme = S>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
+        start_standard_actor_retaining(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            buffer,
+            start,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_standard_actor_retaining<R, Buf, P>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: P,
+        application: R,
+        buffer: Option<Buf>,
+        start: Start<S, D, B>,
+        retain_from: Option<Height>,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        Option<Buf>,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        R: Reporter<Activity = Update<B>>,
+        P: Provider<Scope = Epoch, Scheme = S>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+    {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -4140,6 +4172,7 @@ mod tests {
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
+            retain_from,
             max_pending_acks: NZUsize!(1),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
@@ -4521,6 +4554,62 @@ mod tests {
 
             assert!(mailbox.verified(floor_round, floor_block).await);
             assert_eq!(started_rx.await.unwrap(), Height::new(5));
+        });
+    }
+
+    /// A floor start with `retain_from` below it repairs history behind the resumption point,
+    /// while the application still resumes at the floor.
+    #[test_traced("WARN")]
+    fn test_standard_start_floor_retains_below_anchor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let parent = make_raw_block(Sha256::hash(&[b"below-anchor"]), Height::new(4), 400);
+            let floor_block = make_raw_block(parent.digest(), Height::new(5), 500);
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (application, _started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor_retaining(
+                context.child("validator"),
+                "start-floor-retaining",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+                Some(Height::new(1)),
+            )
+            .await;
+
+            // Deliver the anchor so the floor resolves and gap repair can begin.
+            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+
+            // Repair walks back from the anchor toward the retention bound, so the parent below
+            // the floor is requested. Without `retain_from` this fetch is denied by the floor.
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "fetch below the floor anchor",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&parent)
+                        )
+                    })
+                },
+            )
+            .await;
         });
     }
 
@@ -6825,6 +6914,7 @@ mod tests {
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
+                retain_from: None,
                 max_pending_acks: NZUsize!(1),
                 block_codec_config: (),
                 partition_prefix: partition_prefix.clone(),
@@ -7253,6 +7343,7 @@ mod tests {
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
+                retain_from: None,
                 max_pending_acks: NZUsize!(1),
                 block_codec_config: (),
                 partition_prefix: "paced-finalized-sync".to_string(),
@@ -7388,6 +7479,7 @@ mod tests {
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
+                retain_from: None,
                 max_pending_acks: NZUsize!(4),
                 block_codec_config: (),
                 partition_prefix: "stale-floor-anchor".to_string(),
@@ -7600,6 +7692,7 @@ mod tests {
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
+                retain_from: None,
                 max_pending_acks: NZUsize!(4),
                 block_codec_config: (),
                 partition_prefix: "overlapping-finalized-syncs".to_string(),

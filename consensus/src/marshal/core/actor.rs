@@ -234,10 +234,17 @@ where
             let _ = processed_height.try_set(last_processed_height.get());
         }
         let floor_state = pending_floor_anchor.map_or_else(
-            || FloorState::resolved(last_processed_height, last_processed_round),
+            || {
+                FloorState::resolved(
+                    last_processed_height,
+                    config.retain_from,
+                    last_processed_round,
+                )
+            },
             |finalization| {
                 FloorState::awaiting_anchor(
                     last_processed_height,
+                    config.retain_from,
                     last_processed_round,
                     finalization,
                 )
@@ -923,9 +930,10 @@ where
                     .await;
             }
             Message::Prune { height, .. } => {
-                // Only allow pruning at or below the current floor.
-                if height > self.floor.processed_height() {
-                    warn!(%height, floor = %self.floor.processed_height(), "prune height above floor, ignoring");
+                // Only allow pruning at or below the retention bound, which is what the archive
+                // is still expected to hold and serve.
+                if height > self.floor.retention_height() {
+                    warn!(%height, floor = %self.floor.retention_height(), "prune height above floor, ignoring");
                     return self;
                 }
 
@@ -2225,7 +2233,7 @@ where
         }
 
         let mut wrote = false;
-        let start = self.floor.processed_height().next();
+        let start = self.floor.retention_height().next();
 
         // If finalizations extend beyond the last stored block, anchor the
         // trailing block so the gap repair loop below can walk backward from it.

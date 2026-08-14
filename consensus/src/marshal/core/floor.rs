@@ -30,16 +30,26 @@ impl Floor {
 }
 
 /// Durable floor state plus any update awaiting its anchor block.
+///
+/// `height` is where the application resumes; `retention` is how far back the archive is filled
+/// and served. They are equal unless a node is asked to retain below the height it resumes from,
+/// which lets it participate immediately while repairing history behind it.
 pub(super) struct State<S: Scheme, C: Digest> {
     height: Option<Height>,
+    retain_from: Option<Height>,
     round: Round,
     pending: Option<Finalization<S, C>>,
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
-    pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
+    pub(super) const fn resolved(
+        height: Option<Height>,
+        retain_from: Option<Height>,
+        round: Round,
+    ) -> Self {
         Self {
             height,
+            retain_from,
             round,
             pending: None,
         }
@@ -47,11 +57,13 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     pub(super) const fn awaiting_anchor(
         height: Option<Height>,
+        retain_from: Option<Height>,
         round: Round,
         finalization: Finalization<S, C>,
     ) -> Self {
         Self {
             height,
+            retain_from,
             round,
             pending: Some(finalization),
         }
@@ -62,6 +74,20 @@ impl<S: Scheme, C: Digest> State<S, C> {
             height: self.height,
             round: self.round,
         }
+    }
+
+    /// The lowest height still repaired and served, tracking the processed height unless the node
+    /// was configured to retain below where it resumed.
+    fn retention(&self) -> Option<Height> {
+        let height = self.height?;
+        Some(match self.retain_from {
+            Some(retain) if retain < height => retain,
+            _ => height,
+        })
+    }
+
+    pub(super) fn retention_height(&self) -> Height {
+        self.retention().unwrap_or_else(Height::zero)
     }
 
     pub(super) const fn processed_height(&self) -> Height {
@@ -110,8 +136,12 @@ impl<S: Scheme, C: Digest> State<S, C> {
     }
 
     /// Returns true when the resolver request is above all processed floors.
+    ///
+    /// Height-keyed fetches are admitted down to the retention bound so history below the
+    /// resumption point can be repaired. Round-keyed fetches stay bound to the processed round,
+    /// which is where consensus resumed.
     fn permits(&self, fetch: &Request<C>) -> bool {
-        if let Some(height) = self.height
+        if let Some(height) = self.retention()
             && !fetch.above_height_floor(height)
         {
             return false;
@@ -284,7 +314,7 @@ mod tests {
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
-        State::resolved(Some(Height::new(5)), round(5))
+        State::resolved(Some(Height::new(5)), Some(Height::new(5)), round(5))
     }
 
     #[test]
@@ -420,7 +450,7 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
+        let floor = State::<TestScheme, TestDigest>::resolved(None, None, round(5));
         let mut resolver = TestResolver::default();
 
         assert!(matches!(
