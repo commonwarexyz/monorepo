@@ -42,6 +42,7 @@ futures.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
 rand_core.workspace = true
+rand_distr.workspace = true
 sancov.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -260,6 +261,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_cert_mock_byzantine_first_leader"
+path = "fuzz_targets/simplex_cert_mock_byzantine_first_leader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_id_state_cov"
 path = "fuzz_targets/simplex_id_state_cov.rs"
 test = false
@@ -402,6 +410,13 @@ bench = false
 [[bin]]
 name = "marshal_e2e_standard_deferred_cert_mock_disrupter"
 path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_disrupter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_block_dissemination"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_block_dissemination.rs"
 test = false
 doc = false
 bench = false

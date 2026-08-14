@@ -1,16 +1,16 @@
 #[cfg(feature = "mocks")]
 use crate::simplex_certificate_mock as cert_mock;
-use crate::{Configuration, N4F1C3, id_mock};
+use crate::{BYZANTINE_IDX, Configuration, N4F1C3, id_mock};
 use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Random, RoundRobin},
+        elector::{Config as ElectorConfig, Elector, Random, RoundRobin, Terms},
         scheme::{
             Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
             secp256r1,
         },
     },
-    types::{TermLength, View},
+    types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::{
     PublicKey, Sha256,
@@ -28,6 +28,47 @@ pub(crate) fn round_robin(term_length: TermLength) -> RoundRobin {
         RoundRobin::default()
     } else {
         RoundRobin::default().with_term(term_length, Duration::from_secs(12))
+    }
+}
+
+#[derive(Clone)]
+pub struct ByzantineFirstLeaderRoundRobin {
+    term_length: TermLength,
+}
+
+impl Default for ByzantineFirstLeaderRoundRobin {
+    fn default() -> Self {
+        Self {
+            term_length: TermLength::ONE,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ByzantineFirstLeaderElector<S: Scheme<Sha256Digest>> {
+    fallback: <RoundRobin<Sha256> as ElectorConfig<S>>::Elector,
+}
+
+impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for ByzantineFirstLeaderRoundRobin {
+    type Elector = ByzantineFirstLeaderElector<S>;
+
+    fn build(self, participants: &commonware_utils::ordered::Set<S::PublicKey>) -> Self::Elector {
+        Self::Elector {
+            fallback: round_robin(self.term_length).build(participants),
+        }
+    }
+}
+
+impl<S: Scheme<Sha256Digest>> Elector<S> for ByzantineFirstLeaderElector<S> {
+    fn terms(&self) -> Terms {
+        self.fallback.terms()
+    }
+
+    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+        if round.view().term_index(self.terms().length()) == 1 {
+            return Participant::from_usize(BYZANTINE_IDX);
+        }
+        self.fallback.elect(round, certificate)
     }
 }
 
@@ -190,6 +231,36 @@ impl Simplex for SimplexCertificateMock {
 
     fn audit_rejection_view(configuration: Configuration) -> Option<View> {
         (configuration == N4F1C3).then(|| View::new(3))
+    }
+}
+
+#[cfg(feature = "mocks")]
+pub struct SimplexCertificateMockByzantineFirstLeader;
+
+#[cfg(feature = "mocks")]
+impl Simplex for SimplexCertificateMockByzantineFirstLeader {
+    type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
+
+    type Elector = ByzantineFirstLeaderRoundRobin;
+
+    fn elector(term_length: TermLength) -> Self::Elector {
+        ByzantineFirstLeaderRoundRobin { term_length }
+    }
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = cert_mock::fixture_with::<false, true, true, _>(context, namespace, n);
+        (fixture.participants, fixture.schemes)
+    }
+
+    fn audit_rejection_view(configuration: Configuration) -> Option<View> {
+        (configuration == N4F1C3).then(|| View::new(1))
     }
 }
 
@@ -366,15 +437,16 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        CertifyChoice, CodeCoverage, FaultyMessaging, FuzzInput, N4F1C3, ReporterWiring, Standard,
-        TwinsMutator, fuzz, strategy::StrategyChoice, utils::Partition,
+        BYZANTINE_IDX, BlockFilterChoice, CertifyChoice, CodeCoverage, FaultyMessaging, FuzzInput,
+        N4F1C3, ReporterWiring, Standard, TwinsMutator, fuzz, strategy::StrategyChoice,
+        utils::Partition,
     };
     use commonware_consensus::{
         simplex::{ForwardingPolicy, mocks::application::Certifier},
-        types::TermLength,
+        types::{Epoch, Round, TermLength},
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_utils::NZU32;
+    use commonware_utils::{NZU32, TryCollect, ordered::Set};
     use proptest::prelude::*;
 
     const TEST_CONTAINERS: u64 = 1000;
@@ -421,6 +493,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn byzantine_first_leader_round_robin_pins_first_stable_term() {
+        let participants = (0..4)
+            .map(id_mock::PublicKey::from_index)
+            .try_collect::<Set<_>>()
+            .expect("public keys are unique");
+        let term_length = TermLength::new(NZU32!(2));
+        let elector: ByzantineFirstLeaderElector<id_mock::Scheme> =
+            ByzantineFirstLeaderRoundRobin { term_length }.build(&participants);
+
+        assert_eq!(
+            elector
+                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(1)), None)
+                .get() as usize,
+            BYZANTINE_IDX
+        );
+        assert_eq!(
+            elector
+                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(2)), None)
+                .get() as usize,
+            BYZANTINE_IDX
+        );
+        assert_ne!(
+            elector
+                .elect(Round::new(Epoch::new(crate::EPOCH), View::new(3)), None)
+                .get() as usize,
+            BYZANTINE_IDX
+        );
+    }
+
     fn test_input(seed: u64, containers: u64, term_length: TermLength) -> FuzzInput {
         FuzzInput {
             raw_bytes: seed.to_be_bytes().to_vec(),
@@ -434,6 +536,7 @@ mod tests {
             mailbox_size: crate::DEFAULT_MAILBOX_SIZE,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
+            block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
         }
     }

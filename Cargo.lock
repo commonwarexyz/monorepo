@@ -1497,6 +1497,7 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "rand_core 0.10.1",
+ "rand_distr",
  "sancov",
  "tracing",
  "tracing-subscriber",

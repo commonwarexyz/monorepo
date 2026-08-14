@@ -16,7 +16,8 @@ use crate::{
     utils::{Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
-use commonware_consensus::simplex::ForwardingPolicy;
+use commonware_consensus::{simplex::ForwardingPolicy, types::TermLength};
+use commonware_utils::NZU32;
 
 const MIN_REQUIRED: u64 = 1;
 pub(super) const MAX_TWINS_ROUNDS: u8 = 6;
@@ -34,10 +35,20 @@ fn sample_fault_rounds(
     Ok((fault_rounds, fault_rounds_bound))
 }
 
+/// Largest term length the block-dissemination target explores. Bounds how many
+/// consecutive views a byzantine stable leader holds; the "views 1 and 2" case
+/// is `term_length == 2`.
+const MAX_TERM_LENGTH: u32 = 4;
+
 #[derive(Debug, Clone)]
 pub struct MarshalDisrupterInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
+    /// Leadership term length. Consumed only by the block-dissemination target,
+    /// where the byzantine-first-leader elector makes index 0 a stable leader of
+    /// the whole first term (views `1..=term_length`); the other disrupter
+    /// targets keep single-view (rotating) terms.
+    pub term_length: TermLength,
     pub degraded_network: bool,
     pub partition: Partition,
     pub strategy: StrategyChoice,
@@ -53,6 +64,7 @@ impl Arbitrary<'_> for MarshalDisrupterInput {
 
         let degraded_network = partition == Partition::Connected && u.int_in_range(0..=9)? == 0;
         let required_containers = u.int_in_range(MIN_REQUIRED..=MAX_REQUIRED)?;
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
 
         let strategy = match u.int_in_range(0..=9)? {
             0 => StrategyChoice::AnyScope,
@@ -86,6 +98,7 @@ impl Arbitrary<'_> for MarshalDisrupterInput {
         Ok(Self {
             raw_bytes,
             required_containers,
+            term_length,
             degraded_network,
             partition,
             strategy,

@@ -665,7 +665,9 @@ mod tests {
     use super::*;
     #[cfg(feature = "mocks")]
     use crate::simplex::SimplexCertificateMock;
-    use crate::{FuzzInput, ReporterWiring, simplex::SimplexId, strategy::StrategyChoice};
+    use crate::{
+        BlockFilterChoice, FuzzInput, ReporterWiring, simplex::SimplexId, strategy::StrategyChoice,
+    };
     use commonware_consensus::simplex::ForwardingPolicy;
     use std::num::NonZeroUsize;
 
@@ -689,6 +691,7 @@ mod tests {
             mailbox_size: NonZeroUsize::new(1024).unwrap(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
+            block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
         }
     }

@@ -4,6 +4,7 @@ pub mod aggregation;
 pub mod aggregation_certificate_mock;
 #[cfg(feature = "mocks")]
 pub mod aggregation_decode;
+pub(crate) mod block_relay;
 pub mod bounds;
 pub mod byzzfuzz;
 pub(crate) mod chaos;
@@ -47,9 +48,9 @@ use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    CertifiableAutomaton, Monitor, Reporter, Reporters, Viewable,
+    CertifiableAutomaton, Monitor, Relay as ConsensusRelay, Reporter, Reporters, Viewable,
     simplex::{
-        Engine, Floor, ForwardingPolicy, config,
+        Engine, Floor, ForwardingPolicy, Plan, config,
         elector::Config as ElectorConfig,
         mocks::{application, relay, reporter, twins},
         types::{Activity, Certificate, Context as SimplexContext, Vote},
@@ -59,7 +60,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     PublicKey as CryptoPublicKey, Sha256, certificate::Verifier, sha256::Digest as Sha256Digest,
 };
-use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
+use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitTarget};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
@@ -75,13 +76,13 @@ use commonware_utils::{
     sync::Once,
 };
 use futures::future::join_all;
-#[cfg(feature = "mocks")]
-pub use simplex::SimplexCertificateMock;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
     SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
     SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
 };
+#[cfg(feature = "mocks")]
+pub use simplex::{SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
@@ -257,6 +258,63 @@ impl CertifyChoice {
     }
 }
 
+/// Per-iteration filter for fuzz-local mock block payload delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockFilterChoice {
+    None,
+    DropRecipient { view: View, target_idx: u8 },
+}
+
+fn configure_block_filter<P: simplex::Simplex>(
+    relay: &Arc<block_relay::Relay<PublicKeyOf<P>>>,
+    participants: &[PublicKeyOf<P>],
+    partition: &Partition,
+    choice: BlockFilterChoice,
+) {
+    let drop_target = match choice {
+        BlockFilterChoice::DropRecipient { view, target_idx } => participants
+            .get(target_idx as usize)
+            .cloned()
+            .map(|target| (view, target)),
+        BlockFilterChoice::None => None,
+    };
+    let static_partition = partition.set_partition().copied();
+    let schedule = partition.schedule().map(<[_]>::to_vec).unwrap_or_default();
+    if drop_target.is_none() && static_partition.is_none() && schedule.is_empty() {
+        return;
+    }
+
+    let participants: Arc<[PublicKeyOf<P>]> = participants.to_vec().into();
+    relay.set_filter(move |sender, _, recipient, _, _, contents| {
+        let block_view = block_relay::mock_block_view(contents);
+        if let Some((view, target)) = &drop_target
+            && block_view == Some(*view)
+            && recipient == target
+        {
+            return false;
+        }
+
+        let active_partition = static_partition
+            .or_else(|| block_view.and_then(|view| scheduled_partition(&schedule, view.get())));
+        let Some(active_partition) = active_partition else {
+            return true;
+        };
+        let Some(sender_idx) = participants
+            .iter()
+            .position(|participant| participant == sender)
+        else {
+            return true;
+        };
+        let Some(recipient_idx) = participants
+            .iter()
+            .position(|participant| participant == recipient)
+        else {
+            return true;
+        };
+        active_partition.connected(sender_idx, recipient_idx)
+    });
+}
+
 /// Per-iteration shape of the [Reporters] combinator wrapping each honest
 /// engine's reporter, driving coverage of `commonware_consensus::reporter`.
 /// Compromised twin engines keep raw reporters. The real reporter is always
@@ -352,6 +410,7 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("mailbox_size", &input.mailbox_size)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
+            .field("block_filter", &input.block_filter)
             .field("reporting", &input.reporting)
             .finish()
     }
@@ -417,13 +476,17 @@ pub struct FuzzInput {
     /// Per-iteration certify policy threaded into every honest validator
     /// the harness spawns.
     pub certify: CertifyChoice,
+    /// Per-iteration fuzz-local mock block relay filter.
+    pub block_filter: BlockFilterChoice,
     /// Per-iteration reporter wiring threaded into every honest engine
     /// the harness spawns.
     pub reporting: ReporterWiring,
 }
 
 fn should_bound_standard_liveness(input: &FuzzInput) -> bool {
-    input.partition.is_connected() && input.configuration.is_valid()
+    input.partition.is_connected()
+        && input.configuration.is_valid()
+        && matches!(input.block_filter, BlockFilterChoice::None)
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -502,6 +565,16 @@ impl Arbitrary<'_> for FuzzInput {
             CertifyChoice::Always
         };
 
+        let block_filter = if configuration == N4F1C3 && u.int_in_range(0..=9)? == 0 {
+            BlockFilterChoice::DropRecipient {
+                view: View::new(u.int_in_range(1..=fault_rounds_bound)?),
+                target_idx: u
+                    .int_in_range(configuration.faults as u8..=configuration.n as u8 - 1)?,
+            }
+        } else {
+            BlockFilterChoice::None
+        };
+
         let reporting = ReporterWiring::arbitrary(u)?;
 
         let mailbox_size = fuzz_mailbox_size(u)?;
@@ -526,6 +599,7 @@ impl Arbitrary<'_> for FuzzInput {
             mailbox_size,
             forwarding,
             certify,
+            block_filter,
             reporting,
         })
     }
@@ -635,42 +709,13 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
     (oracle, participants, schemes, registrations)
 }
 
-/// Start a Disrupter with the given strategy and network channels, using the
-/// harness-wide [`EPOCH`] for emitted messages.
-fn start_disrupter<P: simplex::Simplex>(
-    context: deterministic::Context,
-    scheme: P::Scheme,
-    strategy: &StrategyChoice,
-    required_containers: u64,
-    vote_network: (
-        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ),
-    certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ),
-    resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ),
-) {
-    start_disrupter_with_epoch::<P>(
-        context,
-        scheme,
-        strategy,
-        required_containers,
-        Epoch::new(EPOCH),
-        vote_network,
-        certificate_network,
-        resolver_network,
-    );
-}
-
-/// Like [`start_disrupter`] but stamps emitted byzantine messages with `epoch`.
+/// Start a Disrupter with an explicit consensus `epoch`.
 /// The marshal liveness target passes `Epoch::zero()` so the disrupter shares
 /// the epoch its honest engines run in (making it an in-epoch adversary rather
 /// than wrong-epoch noise).
+// Only the mocks-gated marshal end-to-end runner calls this thin wrapper; the
+// other disrupter paths use the `_and_relay`/`_relay_and_tag` variants directly.
+#[cfg(feature = "mocks")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
     context: deterministic::Context,
@@ -691,12 +736,82 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
         impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) {
+    start_disrupter_with_epoch_and_relay::<P>(
+        context,
+        scheme,
+        strategy,
+        required_containers,
+        epoch,
+        vote_network,
+        certificate_network,
+        resolver_network,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_disrupter_with_epoch_and_relay<P: simplex::Simplex>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    strategy: &StrategyChoice,
+    required_containers: u64,
+    epoch: Epoch,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    block_relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
+) {
+    start_disrupter_with_epoch_relay_and_tag::<P>(
+        context,
+        scheme,
+        strategy,
+        required_containers,
+        epoch,
+        vote_network,
+        certificate_network,
+        resolver_network,
+        block_relay,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_disrupter_with_epoch_relay_and_tag<P: simplex::Simplex>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    strategy: &StrategyChoice,
+    required_containers: u64,
+    epoch: Epoch,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    block_relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
+    block_relay_tag: Option<u64>,
+) {
     match *strategy {
         StrategyChoice::SmallScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new_with_epoch(
+            let disrupter = Disrupter::new_with_epoch_relay_and_tag(
                 context,
                 scheme,
                 SmallScope {
@@ -705,19 +820,28 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
                 },
                 required_containers,
                 epoch,
+                block_relay,
+                block_relay_tag,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter =
-                Disrupter::new_with_epoch(context, scheme, AnyScope, required_containers, epoch);
+            let disrupter = Disrupter::new_with_epoch_relay_and_tag(
+                context,
+                scheme,
+                AnyScope,
+                required_containers,
+                epoch,
+                block_relay,
+                block_relay_tag,
+            );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new_with_epoch(
+            let disrupter = Disrupter::new_with_epoch_relay_and_tag(
                 context,
                 scheme,
                 FutureScope {
@@ -726,6 +850,8 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
                 },
                 required_containers,
                 epoch,
+                block_relay,
+                block_relay_tag,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
@@ -734,7 +860,7 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
             fault_rounds_bound,
             mutation,
         } => {
-            let disrupter = Disrupter::new_with_epoch(
+            let disrupter = Disrupter::new_with_epoch_relay_and_tag(
                 context,
                 scheme,
                 HeaderScope {
@@ -744,6 +870,8 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
                 },
                 required_containers,
                 epoch,
+                block_relay,
+                block_relay_tag,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
@@ -751,7 +879,7 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new_with_epoch(
+            let disrupter = Disrupter::new_with_epoch_relay_and_tag(
                 context,
                 scheme,
                 SplitHeader {
@@ -760,28 +888,32 @@ pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
                 },
                 required_containers,
                 epoch,
+                block_relay,
+                block_relay_tag,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
     }
 }
 
-/// Spawn a Disrupter for a Byzantine node.
-fn spawn_disrupter<P: simplex::Simplex>(
+fn spawn_disrupter_with_relay<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     input: &FuzzInput,
     channels: NetworkChannels<PublicKeyOf<P>>,
+    block_relay: Option<Arc<block_relay::Relay<PublicKeyOf<P>>>>,
 ) {
     let (vote_network, certificate_network, resolver_network) = channels;
-    start_disrupter::<P>(
+    start_disrupter_with_epoch_and_relay::<P>(
         context.child("disrupter"),
         scheme,
         &input.strategy,
         input.required_containers,
+        Epoch::new(EPOCH),
         vote_network,
         certificate_network,
         resolver_network,
+        block_relay,
     );
 }
 
@@ -996,82 +1128,6 @@ where
     .reporter
 }
 
-/// Spawn an honest validator instrumented with the fuzz-only append-only
-/// reporter and automaton history, dropping the task handles. A thin wrapper
-/// over [`build_validator_with_reporter`] with the [`RecordingReporter`] family,
-/// which owns the recording instrumentation.
-#[allow(clippy::too_many_arguments)]
-fn spawn_audited_validator<
-    P,
-    EC,
-    PendingSender,
-    PendingReceiver,
-    RecoveredSender,
-    RecoveredReceiver,
-    ResolverSender,
-    ResolverReceiver,
->(
-    context: deterministic::Context,
-    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
-    participants: &[PublicKeyOf<P>],
-    scheme: P::Scheme,
-    validator: PublicKeyOf<P>,
-    elector: EC,
-    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
-    leader_timeout: Duration,
-    certification_timeout: Duration,
-    mailbox_size: NonZeroUsize,
-    forwarding: ForwardingPolicy,
-    pending: (PendingSender, PendingReceiver),
-    recovered: (RecoveredSender, RecoveredReceiver),
-    resolver: (ResolverSender, ResolverReceiver),
-    certify: CertifyChoice,
-    wiring: ReporterWiring,
-) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
-where
-    P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
-    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
-    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
-{
-    let partition = validator.to_string();
-    build_validator_with_reporter::<
-        P,
-        EC,
-        RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-    >(
-        None,
-        context,
-        oracle,
-        participants,
-        scheme,
-        validator,
-        elector,
-        relay,
-        leader_timeout,
-        certification_timeout,
-        mailbox_size,
-        forwarding,
-        partition,
-        pending,
-        recovered,
-        resolver,
-        certify,
-        wiring,
-    )
-    .reporter
-}
-
 /// Build an honest validator (application, reporter, engine) and RETAIN its task
 /// handles in a [`ManagedValidator`], instead of dropping them like
 /// [`spawn_honest_validator`]. The storage partition is `validator.to_string()`,
@@ -1137,11 +1193,99 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn start_validator_engine<
+    P,
+    EC,
+    Automaton,
+    Relay,
+    R,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: &deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    automaton: Automaton,
+    relay: Relay,
+    reporter: R,
+    partition: String,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+) -> Handle<()>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    Automaton: CertifiableAutomaton<
+            Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>,
+            Digest = Sha256Digest,
+        > + Send
+        + 'static,
+    Relay: ConsensusRelay<
+            Digest = Sha256Digest,
+            PublicKey = PublicKeyOf<P>,
+            Plan = Plan<PublicKeyOf<P>>,
+        >,
+    R: Reporter<Activity = Activity<P::Scheme, Sha256Digest>>,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let (vote_sender, vote_receiver) = pending;
+    let (certificate_sender, certificate_receiver) = recovered;
+    let (resolver_sender, resolver_receiver) = resolver;
+
+    let engine_cfg = config::Config {
+        blocker: oracle.control(validator),
+        scheme,
+        elector,
+        automaton,
+        relay,
+        reporter,
+        partition,
+        mailbox_size,
+        epoch: Epoch::new(EPOCH),
+        floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
+        leader_timeout,
+        certification_timeout,
+        timeout_retry: Duration::from_secs(10),
+        fetch_timeout: Duration::from_secs(1),
+        view_retention: Delta::new(10),
+        skip_timeout: Duration::from_secs(11),
+        replay_buffer: NZUsize!(1024 * 1024),
+        write_buffer: NZUsize!(1024 * 1024),
+        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        strategy: Sequential,
+        forwarding,
+        track_historical_votes: false,
+    };
+    let engine = Engine::new(context.child("engine"), engine_cfg);
+    engine.start(
+        (vote_sender, vote_receiver),
+        (certificate_sender, certificate_receiver),
+        (resolver_sender, resolver_receiver),
+    )
+}
+
 /// A reporter family the managed-validator builder can instantiate: how a
 /// fresh instance is constructed and which automaton the engine drives. The
 /// mock family runs the application directly; the recording family wraps it
 /// in its audit-history recorder.
-pub(crate) trait HarnessReporter<P, EC>:
+pub(crate) trait HarnessReporter<P, EC, Mailbox>:
     Reporter<Activity = Activity<P::Scheme, Sha256Digest>> + Clone
 where
     P: simplex::Simplex,
@@ -1159,14 +1303,10 @@ where
         config: reporter::Config<P::Scheme, EC>,
     ) -> Self;
 
-    fn automaton(
-        &self,
-        context: &deterministic::Context,
-        application: application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
-    ) -> Self::Automaton;
+    fn automaton(&self, context: &deterministic::Context, application: Mailbox) -> Self::Automaton;
 }
 
-impl<P, EC> HarnessReporter<P, EC>
+impl<P, EC> HarnessReporter<P, EC, application::Mailbox<Sha256Digest, PublicKeyOf<P>>>
     for reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
@@ -1191,7 +1331,32 @@ where
     }
 }
 
-impl<P, EC> HarnessReporter<P, EC>
+impl<P, EC> HarnessReporter<P, EC, block_relay::Mailbox<PublicKeyOf<P>>>
+    for reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton = block_relay::Mailbox<PublicKeyOf<P>>;
+
+    fn create(
+        context: deterministic::Context,
+        _observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self {
+        Self::new(context, config)
+    }
+
+    fn automaton(
+        &self,
+        _context: &deterministic::Context,
+        application: block_relay::Mailbox<PublicKeyOf<P>>,
+    ) -> Self::Automaton {
+        application
+    }
+}
+
+impl<P, EC> HarnessReporter<P, EC, application::Mailbox<Sha256Digest, PublicKeyOf<P>>>
     for RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
@@ -1216,6 +1381,40 @@ where
         &self,
         context: &deterministic::Context,
         application: application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+    ) -> Self::Automaton {
+        RecordingAutomaton::new(
+            context.child("automaton_recorder"),
+            application,
+            self.audit(),
+        )
+    }
+}
+
+impl<P, EC> HarnessReporter<P, EC, block_relay::Mailbox<PublicKeyOf<P>>>
+    for RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton = RecordingAutomaton<
+        deterministic::Context,
+        block_relay::Mailbox<PublicKeyOf<P>>,
+        P::Scheme,
+        Sha256Digest,
+    >;
+
+    fn create(
+        context: deterministic::Context,
+        observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self {
+        Self::new(context, observer, 0, config)
+    }
+
+    fn automaton(
+        &self,
+        context: &deterministic::Context,
+        application: block_relay::Mailbox<PublicKeyOf<P>>,
     ) -> Self::Automaton {
         RecordingAutomaton::new(
             context.child("automaton_recorder"),
@@ -1267,7 +1466,7 @@ pub(crate) fn build_validator_with_reporter<
 where
     P: simplex::Simplex,
     EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
-    R: HarnessReporter<P, EC>,
+    R: HarnessReporter<P, EC, application::Mailbox<Sha256Digest, PublicKeyOf<P>>>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -1287,10 +1486,6 @@ where
         }
     };
 
-    let (vote_sender, vote_receiver) = pending;
-    let (certificate_sender, certificate_receiver) = recovered;
-    let (resolver_sender, resolver_receiver) = resolver;
-
     let validator_idx = participants
         .iter()
         .position(|p| p == &validator)
@@ -1307,37 +1502,24 @@ where
     let app_handle = actor.start();
     let automaton = reporter.automaton(&context, application.clone());
 
-    let blocker = oracle.control(validator.clone());
     let stored_scheme = scheme.clone();
-    let engine_cfg = config::Config {
-        blocker,
+    let engine_handle = start_validator_engine::<P, EC, _, _, _, _, _, _, _, _, _>(
+        &context,
+        oracle,
         scheme,
+        validator.clone(),
         elector,
         automaton,
-        relay: application.clone(),
-        reporter: wiring.wire(reporter.clone()),
-        partition: partition.clone(),
-        mailbox_size,
-        epoch: Epoch::new(EPOCH),
-        floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
+        application.clone(),
+        wiring.wire(reporter.clone()),
+        partition.clone(),
         leader_timeout,
         certification_timeout,
-        timeout_retry: Duration::from_secs(10),
-        fetch_timeout: Duration::from_secs(1),
-        view_retention: Delta::new(10),
-        skip_timeout: Duration::from_secs(11),
-        replay_buffer: NZUsize!(1024 * 1024),
-        write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-        strategy: Sequential,
+        mailbox_size,
         forwarding,
-        track_historical_votes: false,
-    };
-    let engine = Engine::new(context.child("engine"), engine_cfg);
-    let engine_handle = engine.start(
-        (vote_sender, vote_receiver),
-        (certificate_sender, certificate_receiver),
-        (resolver_sender, resolver_receiver),
+        pending,
+        recovered,
+        resolver,
     );
 
     ManagedValidator {
@@ -1353,6 +1535,229 @@ where
     }
 }
 
+/// Spawn an honest validator backed by the fuzz-local filterable block relay.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_filtered_honest_validator<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    spawn_filtered_validator_with_reporter::<
+        P,
+        EC,
+        reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+    >(
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        elector,
+        relay,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        forwarding,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_filtered_audited_validator<
+    P,
+    EC,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    spawn_filtered_validator_with_reporter::<
+        P,
+        EC,
+        RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+    >(
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        elector,
+        relay,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        forwarding,
+        pending,
+        recovered,
+        resolver,
+        certify,
+        wiring,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_filtered_validator_with_reporter<
+    P,
+    EC,
+    R,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    participants: &[PublicKeyOf<P>],
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    elector: EC,
+    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    mailbox_size: NonZeroUsize,
+    forwarding: ForwardingPolicy,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
+    wiring: ReporterWiring,
+) -> R
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    R: HarnessReporter<P, EC, block_relay::Mailbox<PublicKeyOf<P>>>,
+    PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+{
+    let reporter_cfg = reporter::Config {
+        participants: participants.try_into().expect("public keys are unique"),
+        scheme: scheme.clone(),
+        elector: elector.clone(),
+    };
+    let reporter = R::create(context.child("reporter"), validator.clone(), reporter_cfg);
+
+    let validator_idx = participants
+        .iter()
+        .position(|p| p == &validator)
+        .expect("validator must be in participants");
+    let app_cfg = block_relay::Config::<_> {
+        relay,
+        me: validator.clone(),
+        propose_latency: (10.0, 5.0),
+        verify_latency: (10.0, 5.0),
+        certify_latency: (10.0, 5.0),
+        should_certify: certify.into_certifier(validator_idx),
+    };
+    let (actor, application) = block_relay::Application::new(context.child("application"), app_cfg);
+    let _app_handle = actor.start();
+    let automaton = reporter.automaton(&context, application.clone());
+
+    let partition = validator.to_string();
+    let _engine_handle = start_validator_engine::<P, EC, _, _, _, _, _, _, _, _, _>(
+        &context,
+        oracle,
+        scheme,
+        validator,
+        elector,
+        automaton,
+        application.clone(),
+        wiring.wire(reporter.clone()),
+        partition,
+        leader_timeout,
+        certification_timeout,
+        mailbox_size,
+        forwarding,
+        pending,
+        recovered,
+        resolver,
+    );
+
+    reporter
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     context: deterministic::Context,
@@ -1362,7 +1767,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     scheme: P::Scheme,
     validator: PublicKeyOf<P>,
     byzantine_router: crate::network::Router<PublicKeyOf<P>, deterministic::Context>,
-    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
     mailbox_size: NonZeroUsize,
@@ -1398,7 +1803,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         });
     let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
 
-    spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+    spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
         context,
         oracle,
         participants,
@@ -1883,7 +2288,15 @@ fn run_standard_once<P: simplex::Simplex>(
             .await;
         }
 
-        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
+        let relay = Arc::new(block_relay::Relay::new());
+        // A withheld block should hold certification pending only for the
+        // DropRecipient scenario (whose liveness is left unbounded); other
+        // runs certify per the Certifier as the upstream mock does.
+        relay.set_certify_requires_block(matches!(
+            input.block_filter,
+            BlockFilterChoice::DropRecipient { .. }
+        ));
+        configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
         let mut reporters = Vec::new();
         let config = input.configuration;
         let term_length = P::effective_term_length(input.term_length);
@@ -1895,7 +2308,13 @@ fn run_standard_once<P: simplex::Simplex>(
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            spawn_disrupter_with_relay::<P>(
+                ctx,
+                schemes[i].clone(),
+                &input,
+                channels,
+                Some(relay.clone()),
+            );
         }
 
         // Spawn honest validators
@@ -1949,7 +2368,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 .child("validator")
                 .with_attribute("public_key", &validator);
             let spawn = || {
-                spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
                     ctx,
                     &oracle,
                     &participants,
@@ -2122,7 +2541,15 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             .await;
         }
 
-        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
+        let relay = Arc::new(block_relay::Relay::new());
+        // A withheld block should hold certification pending only for the
+        // DropRecipient scenario (whose liveness is left unbounded); other
+        // runs certify per the Certifier as the upstream mock does.
+        relay.set_certify_requires_block(matches!(
+            input.block_filter,
+            BlockFilterChoice::DropRecipient { .. }
+        ));
+        configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
         let mut reporters = Vec::new();
         let config = input.configuration;
         let term_length = P::effective_term_length(input.term_length);
@@ -2141,7 +2568,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 // correct applications consistently reject it. Its raw reporter
                 // is intentionally excluded from the correct audit set below.
                 let (pending, recovered, resolver) = channels;
-                let _ = spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                let _ = spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
                     ctx,
                     &oracle,
                     &participants,
@@ -2160,7 +2587,13 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     ReporterWiring::Solo,
                 );
             } else {
-                spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+                spawn_disrupter_with_relay::<P>(
+                    ctx,
+                    schemes[i].clone(),
+                    &input,
+                    channels,
+                    Some(relay.clone()),
+                );
             }
         }
 
@@ -2194,7 +2627,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                         FinalizationOmissionChannel::Resolver,
                         omission.omitted_finalizations.clone(),
                     );
-                spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                spawn_filtered_audited_validator::<P, _, _, _, _, _, _, _>(
                     ctx,
                     &oracle,
                     &participants,
@@ -2213,7 +2646,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     input.reporting,
                 )
             } else {
-                spawn_audited_validator::<P, _, _, _, _, _, _, _>(
+                spawn_filtered_audited_validator::<P, _, _, _, _, _, _, _>(
                     ctx,
                     &oracle,
                     &participants,
@@ -2365,6 +2798,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
     input.degraded_network = false;
     // Three honest certifiers are exactly the finalize quorum here.
     input.certify = CertifyChoice::Always;
+    input.block_filter = BlockFilterChoice::None;
 
     let cfg = bounded_fuzz_runtime_config(&input.raw_bytes, input.required_containers);
     let executor = deterministic::Runner::new(cfg);
@@ -2378,7 +2812,15 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
 
-        let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
+        let relay = Arc::new(block_relay::Relay::new());
+        // A withheld block should hold certification pending only for the
+        // DropRecipient scenario (whose liveness is left unbounded); other
+        // runs certify per the Certifier as the upstream mock does.
+        relay.set_certify_requires_block(matches!(
+            input.block_filter,
+            BlockFilterChoice::DropRecipient { .. }
+        ));
+        configure_block_filter::<P>(&relay, &participants, &input.partition, input.block_filter);
         let mut reporters = Vec::new();
         let config = input.configuration;
         let term_length = P::effective_term_length(input.term_length);
@@ -2410,7 +2852,13 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            spawn_disrupter_with_relay::<P>(
+                ctx,
+                schemes[i].clone(),
+                &input,
+                channels,
+                Some(relay.clone()),
+            );
         }
 
         // Spawn honest validators
@@ -2453,7 +2901,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         .await;
 
         // Wait for finalization or timeout
-        if input.partition.is_connected() && config.is_valid() {
+        if should_bound_standard_liveness(&input) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
@@ -2620,6 +3068,15 @@ pub(crate) trait TwinsBackend<P: simplex::Simplex> {
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>>;
 
+    /// Called after case selection and before any twin half is spawned.
+    fn configure_topology(
+        &mut self,
+        _state: &mut Self::State,
+        _topology: &TwinsTopology<P, Self::Case>,
+        _participants: &Arc<[PublicKeyOf<P>]>,
+    ) {
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_primary(
         &mut self,
@@ -2649,6 +3106,19 @@ pub(crate) trait TwinsBackend<P: simplex::Simplex> {
     /// secondary half. `None` delegates secondary engine construction to the
     /// backend.
     fn disrupter(&self) -> Option<TwinsDisrupter>;
+
+    /// Return a filterable block relay for a Disrupter-backed secondary half.
+    fn disrupter_block_relay(
+        &self,
+        _state: &Self::State,
+    ) -> Option<Arc<block_relay::Relay<PublicKeyOf<P>>>> {
+        None
+    }
+
+    /// Sender tag for block broadcasts emitted by a Disrupter-backed twin half.
+    fn disrupter_block_relay_tag(&self) -> Option<u64> {
+        None
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn spawn_secondary(
@@ -2744,6 +3214,7 @@ pub(crate) async fn run_twins_with_backend<P, B>(
         term_length,
         data: case.data,
     };
+    backend.configure_topology(&mut setup.state, &topology, &participants);
 
     for idx in case.compromised {
         let validator = participants[idx].clone();
@@ -2820,7 +3291,7 @@ pub(crate) async fn run_twins_with_backend<P, B>(
             (resolver_sender_primary, resolver_receiver_primary),
         );
         if let Some(disrupter) = backend.disrupter() {
-            start_disrupter_with_epoch::<P>(
+            start_disrupter_with_epoch_relay_and_tag::<P>(
                 node_context.child("secondary"),
                 scheme,
                 &disrupter.strategy,
@@ -2829,6 +3300,8 @@ pub(crate) async fn run_twins_with_backend<P, B>(
                 (vote_sender_secondary, vote_receiver_secondary),
                 (certificate_sender_secondary, certificate_receiver_secondary),
                 (resolver_sender_secondary, resolver_receiver_secondary),
+                backend.disrupter_block_relay(&setup.state),
+                backend.disrupter_block_relay_tag(),
             );
         } else {
             backend.spawn_secondary(
@@ -2916,7 +3389,7 @@ struct MockTwinsBackend<P: simplex::Simplex> {
 }
 
 struct MockTwinsState<P: simplex::Simplex> {
-    relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
+    relay: Arc<block_relay::Relay<PublicKeyOf<P>>>,
     reporters: Vec<TwinsReporter<P>>,
     twin_observers: Vec<TwinsReporter<P>>,
     honest_start: usize,
@@ -2954,6 +3427,7 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
         idx: usize,
         topology: &TwinsTopology<P, ()>,
         partition: String,
+        relay_tag: u64,
         vote: (
             impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
             impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
@@ -2976,7 +3450,7 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
             elector: topology.elector.clone(),
         };
         let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-        let app_cfg = application::Config::<Sha256, _> {
+        let app_cfg = block_relay::Config::<_> {
             relay: state.relay.clone(),
             me: validator.clone(),
             propose_latency: (10.0, 5.0),
@@ -2984,8 +3458,11 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
             certify_latency: (10.0, 5.0),
             should_certify: application::Certifier::Always,
         };
-        let (actor, application) =
-            application::Application::new(context.child("application"), app_cfg);
+        let (actor, application) = block_relay::Application::new_with_relay_tag(
+            context.child("application"),
+            app_cfg,
+            relay_tag,
+        );
         actor.start();
         let engine = Engine::new(
             context.child("engine"),
@@ -3045,7 +3522,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             schemes,
             registrations,
             state: MockTwinsState {
-                relay: Arc::new(relay::Relay::new()),
+                relay: Arc::new(block_relay::Relay::new()),
                 reporters: Vec::new(),
                 twin_observers: Vec::new(),
                 honest_start: 0,
@@ -3090,6 +3567,49 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         })
     }
 
+    fn configure_topology(
+        &mut self,
+        state: &mut Self::State,
+        topology: &TwinsTopology<P, Self::Case>,
+        participants: &Arc<[PublicKeyOf<P>]>,
+    ) {
+        let scenario = topology.scenario.clone();
+        let term_length = topology.term_length;
+        let participants = participants.clone();
+        state.relay.set_filter(
+            move |sender, sender_tag, recipient, recipient_tag, _, contents| {
+                let Some(view) = block_relay::mock_block_view(contents) else {
+                    return true;
+                };
+                if !participants.iter().any(|participant| participant == sender) {
+                    return true;
+                }
+                let (primary, secondary) =
+                    scenario.partitions(view, term_length, participants.as_ref());
+                let sender_permits_recipient = match sender_tag {
+                    Some(block_relay::RELAY_TAG_TWIN_PRIMARY) => primary.contains(recipient),
+                    Some(block_relay::RELAY_TAG_TWIN_SECONDARY) => secondary.contains(recipient),
+                    _ => true,
+                };
+                if !sender_permits_recipient {
+                    return false;
+                }
+
+                match recipient_tag {
+                    block_relay::RELAY_TAG_TWIN_PRIMARY => matches!(
+                        scenario.route(view, term_length, sender, participants.as_ref()),
+                        SplitTarget::Primary | SplitTarget::Both
+                    ),
+                    block_relay::RELAY_TAG_TWIN_SECONDARY => matches!(
+                        scenario.route(view, term_length, sender, participants.as_ref()),
+                        SplitTarget::Secondary | SplitTarget::Both
+                    ),
+                    _ => true,
+                }
+            },
+        );
+    }
+
     fn spawn_primary(
         &mut self,
         context: deterministic::Context,
@@ -3123,6 +3643,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             idx,
             topology,
             format!("twin_{idx}_primary"),
+            block_relay::RELAY_TAG_TWIN_PRIMARY,
             vote,
             certificate,
             resolver,
@@ -3139,6 +3660,17 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             required_containers: self.input.required_containers,
             epoch: Epoch::new(EPOCH),
         })
+    }
+
+    fn disrupter_block_relay(
+        &self,
+        state: &Self::State,
+    ) -> Option<Arc<block_relay::Relay<PublicKeyOf<P>>>> {
+        Some(state.relay.clone())
+    }
+
+    fn disrupter_block_relay_tag(&self) -> Option<u64> {
+        Some(block_relay::RELAY_TAG_TWIN_SECONDARY)
     }
 
     fn spawn_secondary(
@@ -3178,6 +3710,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             idx,
             topology,
             format!("twin_{idx}_secondary"),
+            block_relay::RELAY_TAG_TWIN_SECONDARY,
             vote,
             certificate,
             resolver,
@@ -3240,26 +3773,28 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         };
         let spawn = || {
             if self.record_audit {
-                TwinsReporter::Recording(spawn_audited_validator::<P, _, _, _, _, _, _, _>(
-                    context,
-                    oracle,
-                    participants.as_ref(),
-                    scheme,
-                    validator,
-                    topology.elector.clone(),
-                    state.relay.clone(),
-                    Duration::from_secs(1),
-                    Duration::from_millis(1_500),
-                    self.input.mailbox_size,
-                    self.input.forwarding,
-                    pending,
-                    recovered,
-                    resolver,
-                    self.input.certify,
-                    self.input.reporting,
-                ))
+                TwinsReporter::Recording(
+                    spawn_filtered_audited_validator::<P, _, _, _, _, _, _, _>(
+                        context,
+                        oracle,
+                        participants.as_ref(),
+                        scheme,
+                        validator,
+                        topology.elector.clone(),
+                        state.relay.clone(),
+                        Duration::from_secs(1),
+                        Duration::from_millis(1_500),
+                        self.input.mailbox_size,
+                        self.input.forwarding,
+                        pending,
+                        recovered,
+                        resolver,
+                        self.input.certify,
+                        self.input.reporting,
+                    ),
+                )
             } else {
-                TwinsReporter::Summary(spawn_honest_validator::<P, _, _, _, _, _, _, _>(
+                TwinsReporter::Summary(spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
                     context,
                     oracle,
                     participants.as_ref(),
@@ -3300,7 +3835,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         state: &mut Self::State,
         prefix_end: View,
     ) {
-        if !self.input.configuration.is_valid() {
+        if !self.input.configuration.is_valid() || matches!(self.role, TwinsRole::Mutator) {
             context.sleep(MAX_SLEEP_DURATION).await;
             return;
         }
@@ -4035,6 +4570,7 @@ mod tests {
             mailbox_size: DEFAULT_MAILBOX_SIZE,
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
+            block_filter: BlockFilterChoice::None,
             reporting: ReporterWiring::Solo,
         }
     }
