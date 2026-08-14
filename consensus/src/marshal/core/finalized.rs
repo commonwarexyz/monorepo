@@ -16,7 +16,7 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Digestible;
 use commonware_runtime::{
-    Handle, Metrics, Spawner,
+    Handle, Metrics as RuntimeMetrics, Spawner,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_storage::archive::Identifier as ArchiveID;
@@ -79,7 +79,7 @@ impl<C, B> Storage<C, B> {
         out
     }
 
-    /// Hand a peer's request to the backfill task.
+    /// Enqueue a request for a finalized block at `height`, which will be sent to `response_tx`.
     /// If the submission channel is full, the request is dropped.
     pub fn serve(&self, height: Height, response_tx: oneshot::Sender<Bytes>) {
         let request = Request {
@@ -269,8 +269,8 @@ impl<C, B> Reader<C, B> {
     }
 }
 
-/// Outcome counters for submitted requests. Every submitted request lands in exactly one.
-struct Metered {
+/// Counters for submitted requests. Every submitted request lands in exactly one.
+struct Metrics {
     served: Counter,
     missing: Counter,
     failed: Counter,
@@ -287,7 +287,7 @@ pub(super) fn new<E, V, C, B>(
     capacity: NonZeroUsize,
 ) -> Storage<C, B>
 where
-    E: Spawner + Metrics,
+    E: Spawner + RuntimeMetrics,
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
@@ -304,7 +304,7 @@ where
             "Backfill requests dropped because the submission channel was full",
         ),
     };
-    let metrics = Metered {
+    let metrics = Metrics {
         served: context.counter("served", "Backfill requests answered"),
         missing: context.counter(
             "missing",
@@ -325,7 +325,7 @@ where
 async fn run<V, C, B>(
     reader: Reader<C, B>,
     mut submission_rx: mpsc::Receiver<Request>,
-    metrics: Metered,
+    metrics: Metrics,
 ) where
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
@@ -339,7 +339,7 @@ async fn run<V, C, B>(
 /// Serve one request. A miss or a read failure drops the response, which the requester sees
 /// as a retryable error.
 #[tracing::instrument(name = "marshal.finalized.serve", level = "debug", parent = &request.span, skip_all, fields(height = %request.height))]
-async fn serve<V, C, B>(reader: &Reader<C, B>, request: Request, metrics: &Metered)
+async fn serve<V, C, B>(reader: &Reader<C, B>, request: Request, metrics: &Metrics)
 where
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,

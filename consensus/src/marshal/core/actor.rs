@@ -222,7 +222,7 @@ where
         )
         .await;
 
-        // Put both stores behind the lock and start the backfill task.
+        // Put both stores behind the lock and start the backfill-serving task.
         let storage = finalized::new::<_, V, _, _>(
             context.child("storage"),
             finalizations_by_height,
@@ -1049,7 +1049,7 @@ where
                 response.send_lossy(block.encode());
             }
             Key::Finalized { height } => {
-                // Hand off to the backfill task, which replies directly.
+                // Hand off to the backfill-serving task.
                 self.storage.serve(height, response);
             }
             Key::Notarized { round } => {
