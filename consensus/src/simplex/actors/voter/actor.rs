@@ -412,8 +412,9 @@ impl<
         Some(Request(context, span, receiver))
     }
 
-    /// Starts eligible proposal and verification requests.
-    async fn dispatch_application_requests(
+    /// Reconciles pending application requests with the current view: drops
+    /// requests for exited views and dispatches eligible ones.
+    async fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut Option<Request<Context<D, S::PublicKey>, D>>,
@@ -1118,7 +1119,7 @@ impl<
             on_start => {
                 // Reconcile application requests before building this iteration's
                 // response waiters.
-                self.dispatch_application_requests(
+                self.reconcile_application_requests(
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
@@ -1263,7 +1264,7 @@ impl<
 
                     // Start optimistic child requests before journal sync and
                     // publication. Their responses join the next iteration's waiters.
-                    self.dispatch_application_requests(
+                    self.reconcile_application_requests(
                         &mut resolver,
                         &mut pending_propose,
                         &mut pending_verify,
