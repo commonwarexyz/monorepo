@@ -373,8 +373,7 @@ where
         // Begin a verification batch for every vote kind with work worth
         // verifying.
         while pool.len() < capacity
-            && let Some((batch, job)) =
-                round.begin_verify(self.context.as_mut(), &self.strategy)
+            && let Some((batch, job)) = round.begin_verify(self.context.as_mut(), &self.strategy)
         {
             let timer = self.verify_latency.timer(self.context.as_ref());
             pool.push(async move {
