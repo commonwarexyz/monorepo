@@ -539,16 +539,21 @@ impl Freelist {
                 detached
             };
 
-            for slot in detached {
-                let buffer = self.claim(slot);
-                // SAFETY: this freelist created the detached buffer with this
-                // exact layout and removed its slot under lock.
-                unsafe { buffer.deallocate(self.layout) };
-                drained += 1;
-            }
+            drained += self.deallocate_detached(detached);
         }
 
         drained
+    }
+
+    /// Deallocates buffers whose slots are no longer owned by a stripe.
+    fn deallocate_detached(&self, detached: Vec<u32>) -> usize {
+        let count = detached.len();
+        for slot in detached {
+            // SAFETY: detachment gives this method unique ownership of the buffer,
+            // which this freelist allocated with `self.layout`.
+            unsafe { self.claim(slot).deallocate(self.layout) };
+        }
+        count
     }
 
     /// Returns the stable owner pointer for one slot id.
@@ -599,10 +604,9 @@ impl Freelist {
 
 impl Drop for Freelist {
     fn drop(&mut self) {
-        // Checked-out and TLS-cached slots keep the size class alive until they
-        // return. Final destruction therefore owns every live allocation, while
-        // `drain` must preserve reserved stripe storage for returns that can race
-        // pool teardown. Exclusive access permits reclaiming each stripe in place.
+        // Every checked-out or TLS-cached slot keeps the size class alive until it
+        // returns. Final destruction therefore owns every live allocation and
+        // needs no replacement capacity for a later return.
         for index in 0..self.stripes.len() {
             #[cfg(feature = "loom")]
             let detached = std::mem::take(
@@ -614,11 +618,7 @@ impl Drop for Freelist {
             #[cfg(not(feature = "loom"))]
             let detached = std::mem::take(self.stripes[index].free.get_mut());
 
-            for slot in detached {
-                // SAFETY: `slot` uniquely identifies a live allocation owned by
-                // this freelist, and `self.layout` is the layout used to allocate it.
-                unsafe { self.claim(slot).deallocate(self.layout) };
-            }
+            self.deallocate_detached(detached);
         }
     }
 }
