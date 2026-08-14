@@ -724,11 +724,21 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
     /// Reintegrates the result of a completed verification batch into the
     /// [Certification] of its kind (see [Certification::finish_verify]).
+    /// Proposal-bearing votes are filtered against the current proposal,
+    /// which may have changed while the batch was in flight.
     pub fn finish_verify(&mut self, votes: VerifiedVotes<S, D>) {
         match votes {
-            VerifiedVotes::Notarizes(notarizes) => self.notarize.finish_verify(notarizes),
+            VerifiedVotes::Notarizes(mut notarizes) => {
+                let proposal = self.proposal();
+                notarizes.retain(|notarize| Some(&notarize.proposal) == proposal);
+                self.notarize.finish_verify(notarizes);
+            }
             VerifiedVotes::Nullifies(nullifies) => self.nullify.finish_verify(nullifies),
-            VerifiedVotes::Finalizes(finalizes) => self.finalize.finish_verify(finalizes),
+            VerifiedVotes::Finalizes(mut finalizes) => {
+                let proposal = self.proposal();
+                finalizes.retain(|finalize| Some(&finalize.proposal) == proposal);
+                self.finalize.finish_verify(finalizes);
+            }
         }
     }
 }
@@ -1239,6 +1249,58 @@ mod tests {
         buffer_votes_while_batch_in_flight(bls12381_multisig::fixture::<MinPk, _>).await;
         buffer_votes_while_batch_in_flight(ed25519::fixture).await;
         buffer_votes_while_batch_in_flight(secp256r1::fixture).await;
+    }
+
+    #[test_async]
+    async fn test_proposal_displacement_filters_in_flight_batches() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier =
+            Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone(), quorum);
+        let proposal_a = Proposal::new(round, View::zero(), sample_digest(1));
+        let proposal_b = Proposal::new(round, View::zero(), sample_digest(2));
+
+        verifier.set_leader(Participant::new(0), None);
+        for scheme in schemes.iter().take(quorum as usize) {
+            verifier.add(
+                Vote::Notarize(Notarize::sign(scheme, proposal_a.clone()).unwrap()),
+                false,
+            );
+            verifier.add(
+                Vote::Finalize(Finalize::sign(scheme, proposal_a.clone()).unwrap()),
+                false,
+            );
+        }
+
+        let (_, notarizes) = verifier
+            .begin_verify_notarizes(&mut rng, &Sequential)
+            .expect("notarize batch must begin");
+        let (_, finalizes) = verifier
+            .begin_verify_finalizes(&mut rng, &Sequential)
+            .expect("finalize batch must begin");
+        assert!(
+            verifier
+                .set_proposal(ProposalState::Certificate(proposal_b))
+                .changed
+        );
+
+        let (notarizes, invalid) = notarizes.await;
+        assert!(invalid.is_empty());
+        verifier.finish_verify(notarizes);
+        let (finalizes, invalid) = finalizes.await;
+        assert!(invalid.is_empty());
+        verifier.finish_verify(finalizes);
+
+        assert!(verifier.notarize.verified().is_empty());
+        assert!(verifier.finalize.verified().is_empty());
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_none()
+        );
     }
 
     fn add_nullify<S, F>(mut fixture: F)

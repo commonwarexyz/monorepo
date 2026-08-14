@@ -544,27 +544,32 @@ mod tests {
             let mut proposals = Vec::new();
             for view in [1u64, 2] {
                 let round_id = Round::new(epoch, View::new(view));
-                work.insert(
-                    View::new(view),
-                    super::Round::new(
-                        round_id,
-                        Arc::new(schemes[0].clone()),
-                        NoopBlocker,
-                        NoopReporter(PhantomData),
-                        false,
-                    ),
-                );
-                proposals.push(Proposal::new(
+                let proposal = Proposal::new(
                     round_id,
                     View::new(view - 1),
                     Sha256::hash(&[(view as u8).to_be_bytes().as_slice()]),
-                ));
+                );
+                let mut round = super::Round::new(
+                    round_id,
+                    Arc::new(schemes[0].clone()),
+                    NoopBlocker,
+                    NoopReporter(PhantomData),
+                    false,
+                );
+                round.set_leader(Participant::new(0));
+                round.accept_vote(
+                    Vote::Notarize(Notarize::sign(&schemes[0], proposal.clone()).unwrap()),
+                    false,
+                );
+                work.insert(View::new(view), round);
+                proposals.push(proposal);
             }
 
             // Reintegrate the higher view's batch first.
             for (view, proposal) in [(2u64, &proposals[1]), (1u64, &proposals[0])] {
                 let votes = schemes
                     .iter()
+                    .skip(1)
                     .take(quorum)
                     .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
