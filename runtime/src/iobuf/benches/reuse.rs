@@ -1,9 +1,9 @@
-//! End-to-end buffer reuse after partial lazy growth.
+//! End-to-end buffer reuse.
 //!
-//! Each worker creates and returns a sparse batch before timing starts, then
-//! repeatedly allocates and returns that batch with thread-local caching
-//! disabled. This isolates whether lazy owner placement improves later global
-//! freelist access.
+//! The batch rows create and return sparse buffers before timing, then reuse
+//! them with thread-local caching disabled. The TLS rows use a working set one
+//! larger than the local cache, forcing one batched global refill and spill per
+//! iteration while retaining the surrounding local-cache work.
 
 use super::utils::start_pool;
 use commonware_runtime::{BufferPool, BufferPoolConfig, IoBufMut};
@@ -23,6 +23,7 @@ const CAPACITY: u32 = 4096;
 const PARALLELISM: usize = 8;
 const THREADS: usize = 8;
 const BATCHES: &[usize] = &[1, 8];
+const TLS_CACHE_CAPACITIES: &[usize] = &[16, 256];
 
 struct State {
     pool: BufferPool,
@@ -77,6 +78,18 @@ pub fn bench(c: &mut Criterion) {
             b.iter_custom(|iters| measure(iters, build_pool(), batch));
         });
     }
+
+    for &cache in TLS_CACHE_CAPACITIES {
+        // Exceeding the cache by one forces one refill and one spill each step.
+        let working_set = cache + 1;
+        let name = format!(
+            "{}/size={SIZE} capacity={CAPACITY} threads={THREADS} parallelism={PARALLELISM} mode=tls cache={cache} working_set={working_set}",
+            module_path!(),
+        );
+        c.bench_function(&name, |b| {
+            b.iter_custom(|iters| measure(iters, build_tls_pool(cache), working_set));
+        });
+    }
 }
 
 fn measure(iters: u64, pool: BufferPool, batch: usize) -> Duration {
@@ -126,6 +139,17 @@ fn build_pool() -> BufferPool {
         .with_size_class_range(NZUsize!(SIZE), NZUsize!(SIZE), NZU32!(CAPACITY))
         .with_parallelism(NZUsize!(PARALLELISM))
         .with_thread_cache_disabled();
+
+    start_pool(cfg)
+}
+
+fn build_tls_pool(cache: usize) -> BufferPool {
+    let cfg = BufferPoolConfig::for_network()
+        .with_pool_min_size(0)
+        .with_size_class_range(NZUsize!(SIZE), NZUsize!(SIZE), NZU32!(CAPACITY))
+        .with_parallelism(NZUsize!(PARALLELISM))
+        .with_prefill(true)
+        .with_max_thread_cache_capacity(NZUsize!(cache));
 
     start_pool(cfg)
 }
