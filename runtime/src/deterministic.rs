@@ -42,7 +42,7 @@
 //! });
 //! ```
 
-pub use crate::storage::faulty::Config as FaultConfig;
+pub use crate::storage::faulty::{Config as FaultConfig, PartialWriteMode};
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use crate::{
@@ -54,8 +54,10 @@ use crate::{
     },
     prefixed_name,
     storage::{
-        audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
-        memory::Storage as MemStorage, metered::Storage as MeteredStorage,
+        audited::Storage as AuditedStorage,
+        faulty::Storage as FaultyStorage,
+        memory::{Snapshot as MemStorageSnapshot, Storage as MemStorage},
+        metered::Storage as MeteredStorage,
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -499,7 +501,8 @@ pub struct Checkpoint {
     auditor: Arc<Auditor>,
     rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
-    storage: Arc<Storage>,
+    storage: MemStorageSnapshot,
+    storage_fault_cfg: FaultConfig,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
     network_buffer_pool_cfg: BufferPoolConfig,
@@ -707,6 +710,15 @@ impl Runner {
         // root future is still Pending and holds captured variables with Context references.
         drop(root);
 
+        // No task can issue or make a write durable after this crash boundary.
+        storage
+            .inner()
+            .inner()
+            .crash()
+            .expect("retaining successful unsynced writes at crash should succeed");
+        let storage_fault_cfg = storage.inner().inner().config().read().clone();
+        let storage = storage.inner().inner().inner().take_snapshot();
+
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
         assert!(
@@ -731,6 +743,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            storage_fault_cfg,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
             network_buffer_pool_cfg,
@@ -907,6 +920,22 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
+fn build_storage(
+    inner: MemStorage,
+    rng: Arc<Mutex<BoxDynRng>>,
+    faults: FaultConfig,
+    auditor: Arc<Auditor>,
+    registry: &mut impl Register,
+) -> Storage {
+    MeteredStorage::new(
+        AuditedStorage::new(
+            FaultyStorage::new(inner, rng, Arc::new(RwLock::new(faults))),
+            auditor,
+        ),
+        registry,
+    )
+}
+
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
@@ -949,17 +978,11 @@ impl Context {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
-        let storage = MeteredStorage::new(
-            AuditedStorage::new(
-                FaultyStorage::new(
-                    MemStorage::new(storage_buffer_pool.clone()),
-                    rng.clone(),
-                    storage_fault_config,
-                ),
-                auditor.clone(),
-            ),
+        let storage = build_storage(
+            MemStorage::new(storage_buffer_pool.clone()),
+            rng.clone(),
+            cfg.storage_fault_cfg,
+            auditor.clone(),
             &mut runtime_registry,
         );
 
@@ -1002,10 +1025,11 @@ impl Context {
         )
     }
 
-    /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
-    /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
-    /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
-    /// its shutdown signaler.
+    /// Recover the inner state (deadline, metrics, auditor, rng, storage, etc.) from the current
+    /// runtime and use it to initialize a new instance of the runtime. Storage recovery includes
+    /// durable state and any unsynchronized mutations retained by the configured crash policy. A
+    /// recovered runtime does not inherit pending tasks, network connections, or its shutdown
+    /// signaler.
     ///
     /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
     /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
@@ -1032,6 +1056,13 @@ impl Context {
         let storage_buffer_pool = BufferPool::new(
             checkpoint.storage_buffer_pool_cfg.clone(),
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
+        );
+        let storage = build_storage(
+            MemStorage::from_snapshot(checkpoint.storage, storage_buffer_pool.clone()),
+            checkpoint.rng.clone(),
+            checkpoint.storage_fault_cfg,
+            checkpoint.auditor.clone(),
+            &mut runtime_registry,
         );
 
         // Initialize panicker
@@ -1060,7 +1091,7 @@ impl Context {
                 attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
-                storage: checkpoint.storage,
+                storage: Arc::new(storage),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1884,6 +1915,88 @@ mod tests {
     }
 
     #[test]
+    fn test_recover_snapshots_fault_configuration() {
+        let (stale_config, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let config = context.storage_fault_config();
+                *config.write() = FaultConfig::default().open(1.0);
+                config
+            });
+        *stale_config.write() = FaultConfig::default();
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            assert!(context.open("fault_config", b"blob").await.is_err());
+        });
+    }
+
+    #[test]
+    fn test_recover_retained_successful_resize() {
+        let cfg = deterministic::Config::default()
+            .with_storage_fault_config(FaultConfig::default().resize(0.0, 1.0));
+        let (_, checkpoint) =
+            deterministic::Runner::new(cfg).start_and_recover(|context| async move {
+                let (blob, _) = context.open("crash_resize", b"blob").await.unwrap();
+                blob.write_at(0, b"abcdefgh", WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+                blob.resize(3).await.unwrap();
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (blob, len) = context.open("crash_resize", b"blob").await.unwrap();
+            assert_eq!(len, 3);
+            assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"abc");
+        });
+    }
+
+    #[test]
+    fn test_recover_random_crash_writes_is_seeded_and_epoch_scoped() {
+        const STABLE_LEN: usize = 32;
+        const PENDING_LEN: usize = 256;
+
+        fn run(seed: u64) -> (Vec<u8>, Digest) {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_fault_config(
+                    FaultConfig::default().write(0.0, (PartialWriteMode::Subset, 0.5)),
+                );
+            let (_, checkpoint) =
+                deterministic::Runner::new(cfg).start_and_recover(|context| async move {
+                    let (blob, _) = context.open("crash_epoch", b"blob").await.unwrap();
+                    blob.write_at(0, vec![0xA5; STABLE_LEN], WriteOptions::default())
+                        .await
+                        .unwrap();
+                    blob.sync().await.unwrap();
+                    blob.write_at(
+                        STABLE_LEN as u64,
+                        vec![0x5A; PENDING_LEN],
+                        WriteOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let (blob, len) = context.open("crash_epoch", b"blob").await.unwrap();
+                let mut bytes = vec![0; STABLE_LEN + PENDING_LEN];
+                let len = usize::try_from(len).unwrap();
+                let durable = blob.read_at(0, len).await.unwrap().coalesce();
+                bytes[..durable.len()].copy_from_slice(durable.as_ref());
+                (bytes, context.storage_audit())
+            })
+        }
+
+        let first = run(12345);
+        let second = run(12345);
+        let different = run(54321);
+        assert_eq!(first, second);
+        assert_ne!(first.0, different.0);
+        assert!(first.0[..STABLE_LEN].iter().all(|&byte| byte == 0xA5));
+        assert!(first.0[STABLE_LEN..].contains(&0));
+        assert!(first.0[STABLE_LEN..].contains(&0x5A));
+    }
+
+    #[test]
     fn test_recover_dns_mappings_persist() {
         // Initialize the first runtime
         let executor = deterministic::Runner::default();
@@ -2338,7 +2451,7 @@ mod tests {
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
                     open_rate: Some(0.5),
-                    write_rate: Some(0.3),
+                    write_rate: Some((0.3, (PartialWriteMode::Prefix, 0.0))),
                     sync_rate: Some(0.2),
                     ..Default::default()
                 });

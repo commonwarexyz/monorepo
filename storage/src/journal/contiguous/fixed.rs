@@ -2104,7 +2104,7 @@ mod tests {
             // handle unobserved.
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(1.0),
+                write_rate: Some((1.0, (deterministic::PartialWriteMode::Prefix, 0.0))),
                 ..Default::default()
             };
             let (mut journal, handle) = journal.start_sync().await.unwrap();

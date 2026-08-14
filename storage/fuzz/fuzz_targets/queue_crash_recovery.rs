@@ -485,7 +485,10 @@ fn fuzz(input: FuzzInput) {
             // Enable fault injection
             let fault_config = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(write_failure_rate),
+                write_rate: Some((
+                    write_failure_rate,
+                    (deterministic::PartialWriteMode::Prefix, 0.0),
+                )),
                 ..Default::default()
             };
             let faults = ctx.storage_fault_config();

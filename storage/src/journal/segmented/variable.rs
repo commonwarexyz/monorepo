@@ -1385,7 +1385,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
+                resize_rate: Some((1.0, 0.0)),
                 ..Default::default()
             };
 
@@ -1447,7 +1447,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
+                resize_rate: Some((1.0, 0.0)),
                 ..Default::default()
             };
 

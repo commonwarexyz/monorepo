@@ -252,7 +252,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let storage_fault_cfg = ctx.storage_fault_config();
             *storage_fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(write_failure_rate),
+                write_rate: Some((
+                    write_failure_rate,
+                    (deterministic::PartialWriteMode::Prefix, 0.0),
+                )),
                 ..Default::default()
             };
 
