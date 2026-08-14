@@ -1133,7 +1133,6 @@ pub(super) mod tests {
     #[global_allocator]
     static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
-    #[inline]
     fn record_allocation() {
         ALLOCATION_CALLS.with(|calls| {
             if let Some(count) = calls.get() {
