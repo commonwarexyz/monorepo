@@ -2733,13 +2733,7 @@ pub(super) mod tests {
     /// Verifies a forced paired group reaches both base chunks.
     #[test]
     fn test_freelist_forced_pair_group_reaches_both_chunks() {
-        let set = Freelist::new_inner(
-            NZU32!(65),
-            NZUsize!(1),
-            TEST_LAYOUT,
-            false,
-            Some(1),
-        );
+        let set = Freelist::new_inner(NZU32!(65), NZUsize!(1), TEST_LAYOUT, false, Some(1));
         assert_eq!(set.stripes[0].group_count, 1);
         assert_eq!(set.stripes[0].single_groups, 0);
         let mut entries = reserve_by_slot(&set, 65);
