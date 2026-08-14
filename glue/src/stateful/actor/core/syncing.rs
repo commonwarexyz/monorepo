@@ -8,7 +8,7 @@ use crate::stateful::{
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, AttachableResolverSet},
+    db::{Anchor, SnapshotsOf, snapshot::Publisher},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -48,13 +48,12 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, S, V, R>
+pub(super) struct Syncing<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -86,9 +85,8 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// The state sync resolvers used for state sync fetching and post-bootstrap
-    /// serving.
-    pub(super) resolvers: R,
+    /// Publishes the latest durable capture of snapshots.
+    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
@@ -103,13 +101,12 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, S, V, R> Syncing<E, A, S, V, R>
+impl<E, A, S, V> Syncing<E, A, S, V>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
@@ -326,6 +323,12 @@ where
             self.pruning,
         );
 
+        // Serving must not wait for the next finalization, so the synced state
+        // alone publishes as the first capture.
+        processor
+            .publish_snapshot(&mut self.snapshot_publisher)
+            .await;
+
         let mut pending_prune = None;
 
         for handoff in handoffs {
@@ -338,7 +341,11 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let Applied { barrier, prune } = processor
+                    let Applied {
+                        snapshots,
+                        barrier,
+                        prune,
+                    } = processor
                         .finalize(self.context.as_present(), block.as_ref())
                         .await
                         .expect("sync handoff block cannot be a duplicate");
@@ -349,6 +356,8 @@ where
                     if !barrier.durable().await {
                         return;
                     }
+                    self.snapshot_publisher
+                        .publish_now(block.height(), snapshots);
                     acknowledgement.acknowledge();
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
@@ -365,16 +374,14 @@ where
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;
+            // The published snapshot was captured before this prune. Republish so
+            // serving stops pinning the pruned state. Every handoff barrier was
+            // awaited above, so the capture is already durable.
+            processor
+                .publish_snapshot(&mut self.snapshot_publisher)
+                .await;
         }
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs.
-        self.resolvers
-            .attach_databases(processor.databases().clone())
-            .await;
-
-        // `subscribe_databases` promises a database set that is already attached to the
-        // serving actor, so keep subscribers waiting until the resolver handoff is complete.
         for subscriber in self.database_subscribers.drain(..) {
             subscriber.send_lossy(processor.databases().clone());
         }
@@ -385,6 +392,7 @@ where
             provider: self.provider,
             marshal: self.marshal,
             processor,
+            snapshot_publisher: self.snapshot_publisher,
             deferred_verifications: self.deferred_verifications,
             skip_finalized_until: Some(completed_height),
         }
@@ -405,7 +413,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, AttachableResolver, Shared},
+        db::{Anchor, Shared, snapshot::Publisher},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -439,18 +447,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct NoopResolver;
-
-    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<DB>) {}
-    }
-
     struct TestHarness<E>
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver>,
+        syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -565,7 +566,7 @@ mod tests {
                     deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
                     artifact: None,
-                    resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&syncing_context).0,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
@@ -622,7 +623,7 @@ mod tests {
                         databases: test_databases(),
                         anchor,
                     }),
-                    resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&syncing_context).0,
                     sync_completed,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,

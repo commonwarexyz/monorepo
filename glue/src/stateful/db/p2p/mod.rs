@@ -9,7 +9,7 @@
 //!   engine so that duplicate requests share a single network round-trip.
 //! - [`Actor`]: service loop that bridges the [`Mailbox`] with the P2P
 //!   engine, dispatches fetches, fans out deliveries to waiting callers,
-//!   and serves produce requests from the local database.
+//!   and serves produce requests from the latest published snapshot.
 
 mod actor;
 pub use actor::{Actor, Config};
