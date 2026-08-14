@@ -40,6 +40,13 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! The finalized stores sit behind a fair read/write lock shared with a backfill serving task, so a
+//! peer's request for a finalized block is answered off the actor loop: the actor forwards the
+//! request's response channel and keeps processing consensus. The serving task answers one
+//! request at a time through the read side of the lock, so a store write waits behind at most
+//! one in-flight serve. A request the task cannot take or answer is dropped, which the peer
+//! sees as a retryable resolver error.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
