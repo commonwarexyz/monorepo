@@ -8,9 +8,6 @@ const CHECKSUMMED_TYPE: &str = "Checksummed";
 
 /// Computes a fixed-size checksum over a slice of bytes.
 ///
-/// [`Checksummed`] is generic over this trait rather than over a hasher from a dedicated hashing
-/// crate because those crates depend on this one.
-///
 /// # Example
 ///
 /// ```
@@ -27,6 +24,8 @@ const CHECKSUMMED_TYPE: &str = "Checksummed";
 ///     }
 /// }
 /// ```
+// Defined here instead of reusing a hasher trait from a dedicated hashing crate: those crates
+// depend on this one.
 pub trait Checksummer: Send + Sync + 'static {
     /// The checksum written after the encoded value.
     type Digest: Read<Cfg = ()> + Write + FixedSize + PartialEq;
