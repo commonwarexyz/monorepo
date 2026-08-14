@@ -22,9 +22,11 @@ commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
+ed25519-consensus = { workspace = true, optional = true }
 rand_core.workspace = true
 sha2 = { workspace = true, features = [ "zeroize" ] }
 subtle.workspace = true
+x25519-dalek = { workspace = true, optional = true }
 zeroize = { workspace = true, features = [ "zeroize_derive" ] }
 
 [dev-dependencies]
@@ -53,7 +55,14 @@ arbitrary = [
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
-fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
+fuzz = [
+	"arbitrary",
+	"arbitrary/derive",
+	"dep:arbitrary",
+	"dep:ed25519-consensus",
+	"dep:x25519-dalek",
+	"std",
+]
 std = [
 	"bytes/std",
 	"commonware-codec/std",

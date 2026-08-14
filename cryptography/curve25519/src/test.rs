@@ -1,17 +1,62 @@
 //! Property tests that exercise only the crate's public API.
 
-use crate::signing::{BatchVerifier, Signature, SigningKey, VerifyingKey};
+use crate::{
+    key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
+    signing::{BatchVerifier, Signature, SigningKey, VerifyingKey},
+};
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::DecodeExt as _;
+use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
-use commonware_utils::TestRng;
+use commonware_utils::{FuzzRng, TestRng, union_unique};
+use ed25519_consensus::SigningKey as ConsensusSigningKey;
 use rand_core::Rng as _;
 
 const SCALAR_ORDER: [u8; 32] = [
     0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
 ];
+
+// Bias signing key material and key-exchange RNG seeds toward low-entropy patterns.
+const INTERESTING_SECRET_BYTES: [[u8; 32]; 4] = [
+    [0; 32],
+    [0xff; 32],
+    first_byte(1),
+    last_byte(0x80),
+];
+
+// Include every low-order coordinate on the curve and its twist, non-canonical aliases of 0 and
+// 1, the basepoint with both possible high bits, and the maximal encoding.
+const INTERESTING_X25519_PUBLIC_KEYS: [[u8; 32]; 10] = [
+    [0; 32],
+    first_byte(1),
+    hex!("0xe0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
+    hex!("0x5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
+    hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex!("0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    first_byte(9),
+    with_high_bit(first_byte(9)),
+    [0xff; 32],
+];
+
+const fn first_byte(byte: u8) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    bytes[0] = byte;
+    bytes
+}
+
+const fn last_byte(byte: u8) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    bytes[31] = byte;
+    bytes
+}
+
+const fn with_high_bit(mut bytes: [u8; 32]) -> [u8; 32] {
+    bytes[31] |= 0x80;
+    bytes
+}
 
 const fn identity_encoding(sign: bool) -> [u8; 32] {
     let mut bytes = [0; 32];
@@ -61,6 +106,14 @@ fn signing_key(seed: u64) -> SigningKey {
 
 fn decode_verifying_key(bytes: [u8; 32]) -> VerifyingKey {
     VerifyingKey::decode(bytes.as_slice()).expect("a fixed-size key encoding must decode")
+}
+
+fn decode_signing_key(bytes: [u8; 32]) -> SigningKey {
+    SigningKey::decode(bytes.as_slice()).expect("a fixed-size key encoding must decode")
+}
+
+fn decode_exchange_public_key(bytes: [u8; 32]) -> ExchangePublicKey {
+    ExchangePublicKey::decode(bytes.as_slice()).expect("a fixed-size key encoding must decode")
 }
 
 fn decode_signature(bytes: [u8; 64]) -> Signature {
@@ -141,6 +194,34 @@ fn mutate_bytes(bytes: &mut Vec<u8>, u: &mut Unstructured<'_>) -> arbitrary::Res
 }
 
 #[derive(Clone, Copy, Debug)]
+struct SecretBytes([u8; 32]);
+
+impl Arbitrary<'_> for SecretBytes {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes = if u.ratio(3, 4)? {
+            *u.choose(&INTERESTING_SECRET_BYTES)?
+        } else {
+            u.arbitrary()?
+        };
+        Ok(Self(bytes))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct X25519PublicKey([u8; 32]);
+
+impl Arbitrary<'_> for X25519PublicKey {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes = if u.ratio(3, 4)? {
+            *u.choose(&INTERESTING_X25519_PUBLIC_KEYS)?
+        } else {
+            u.arbitrary()?
+        };
+        Ok(Self(bytes))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct EncodedPoint([u8; 32]);
 
 impl Arbitrary<'_> for EncodedPoint {
@@ -207,6 +288,67 @@ impl Arbitrary<'_> for Payload {
             namespace: arbitrary_bytes(u)?,
             message: arbitrary_bytes(u)?,
         })
+    }
+}
+
+#[derive(Debug, Arbitrary)]
+struct Signing {
+    seed: SecretBytes,
+    payload: Payload,
+}
+
+impl Signing {
+    fn run(self) {
+        let SecretBytes(seed) = self.seed;
+        let signing_key = decode_signing_key(seed);
+        let consensus_key = ConsensusSigningKey::from(seed);
+        assert_eq!(
+            signing_key.verifying_key().as_ref(),
+            consensus_key.verification_key().to_bytes(),
+            "signing: {self:#?}",
+        );
+
+        let signature = signing_key.sign(&self.payload.namespace, &self.payload.message);
+        let consensus_signature = consensus_key.sign(&union_unique(
+            &self.payload.namespace,
+            &self.payload.message,
+        ));
+        assert_eq!(
+            signature.as_ref(),
+            consensus_signature.to_bytes(),
+            "signing: {self:#?}",
+        );
+    }
+}
+
+#[derive(Debug, Arbitrary)]
+struct KeyExchange {
+    secret: SecretBytes,
+    public_key: X25519PublicKey,
+}
+
+impl KeyExchange {
+    fn run(self) {
+        let SecretBytes(secret_bytes) = self.secret;
+        let X25519PublicKey(public_key_bytes) = self.public_key;
+        let mut rng = FuzzRng::new(secret_bytes.to_vec());
+        let secret_key = SecretKey::random(&mut rng);
+        let mut dalek_rng = FuzzRng::new(secret_bytes.to_vec());
+        let dalek_secret = x25519_dalek::EphemeralSecret::random_from_rng(&mut dalek_rng);
+
+        assert_eq!(
+            secret_key.public_key().as_ref(),
+            x25519_dalek::PublicKey::from(&dalek_secret).as_bytes(),
+            "key exchange: {self:#?}",
+        );
+
+        let shared = secret_key.exchange(&decode_exchange_public_key(public_key_bytes));
+        let dalek_shared = dalek_secret
+            .diffie_hellman(&x25519_dalek::PublicKey::from(public_key_bytes))
+            .to_bytes();
+        let shared = shared.as_ref().map(|shared| *shared.as_bytes());
+        let dalek_shared = (dalek_shared != [0; 32]).then_some(dalek_shared);
+        assert_eq!(shared, dalek_shared, "key exchange: {self:#?}");
     }
 }
 
@@ -394,7 +536,7 @@ impl Batch {
 
 /// Fuzzing operations for public API invariants.
 pub mod fuzz {
-    use super::Batch;
+    use super::{Batch, KeyExchange, Signing};
     use arbitrary::{Arbitrary, Unstructured};
 
     /// A public API fuzzing operation.
@@ -402,6 +544,10 @@ pub mod fuzz {
     pub enum Plan {
         /// Check that batch verification agrees with verifying every item individually.
         BatchMatchesIndividual,
+        /// Check that signing agrees with `ed25519-consensus`.
+        SigningMatchesConsensus,
+        /// Check that key exchange agrees with `x25519-dalek`.
+        KeyExchangeMatchesDalek,
     }
 
     impl Plan {
@@ -409,6 +555,8 @@ pub mod fuzz {
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::BatchMatchesIndividual => u.arbitrary::<Batch>()?.run(),
+                Self::SigningMatchesConsensus => u.arbitrary::<Signing>()?.run(),
+                Self::KeyExchangeMatchesDalek => u.arbitrary::<KeyExchange>()?.run(),
             }
             Ok(())
         }
