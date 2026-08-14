@@ -162,12 +162,9 @@ impl Stripe {
     /// `free` must be the guard obtained from [`Self::lock`] for this stripe.
     #[inline(always)]
     fn pop(&self, free: &mut MutexGuard<'_, Vec<u32>>) -> Option<u32> {
-        let Some(slot) = free.pop() else {
-            // A taker can load `true` before another taker removes the final
-            // slot. Reconfirm the now-authoritative empty state for later scans.
-            self.available.store(false, Ordering::Release);
-            return None;
-        };
+        // A taker can load `true` before another taker removes the final slot,
+        // so the locked vector may already be empty.
+        let slot = free.pop()?;
 
         if free.is_empty() {
             // Publish the last removal before releasing the stripe lock.
@@ -463,12 +460,17 @@ impl Freelist {
             return 1;
         }
 
-        let mut detached = Vec::with_capacity(max);
+        let mut detached = Vec::new();
         let start = self.home_stripe();
         for offset in 0..self.stripes.len() {
             let stripe = &self.stripes[(start + offset) & self.stripe_mask];
             if !stripe.available.load(Ordering::Acquire) {
                 continue;
+            }
+            if detached.capacity() == 0 {
+                // Reserve only after a potentially productive hint, while
+                // keeping allocator work outside the critical section.
+                detached = Vec::with_capacity(max);
             }
             let mut free = stripe.lock();
             while detached.len() < max {
@@ -623,7 +625,10 @@ fn current_thread_id() -> usize {
 #[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
+    use crate::{BufferPool, BufferPoolConfig, IoBufMut, iobuf::PoolError};
     use std::{
+        alloc::{GlobalAlloc, System},
+        cell::Cell,
         collections::HashSet,
         sync::{
             Arc, Barrier,
@@ -1119,16 +1124,94 @@ pub(super) mod tests {
         assert!(set.stripes[0].available.load(Ordering::Acquire));
     }
 
-    /// Verifies that the vector corrects a stale positive availability hint.
-    #[test]
-    fn test_stale_positive_hint_is_reconfirmed() {
-        let set = lazy(1, 1);
+    struct TrackingAllocator;
 
-        // This reproduces the state seen by a taker that loaded `true` before
-        // another taker removed the final slot and acquired the mutex later.
-        set.stripes[0].available.store(true, Ordering::Release);
-        assert!(set.take().is_none());
-        assert!(!set.stripes[0].available.load(Ordering::Acquire));
+    std::thread_local! {
+        static ALLOCATION_CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+    #[inline]
+    fn record_allocation() {
+        ALLOCATION_CALLS.with(|calls| {
+            if let Some(count) = calls.get() {
+                calls.set(Some(count + 1));
+            }
+        });
+    }
+
+    // SAFETY: Every operation delegates to the system allocator with unchanged
+    // arguments. Recording an allocation only updates a thread-local cell.
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: The pointer was allocated through this wrapper, which
+            // delegates every allocation to System with the same layout.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The pointer and layout came from System through this wrapper,
+            // and the caller supplies the new size required by GlobalAlloc.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    fn allocation_calls_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_CALLS.with(|calls| assert!(calls.replace(Some(0)).is_none()));
+        let result = f();
+        let calls = ALLOCATION_CALLS.with(|calls| calls.replace(None).expect("tracking enabled"));
+        (result, calls)
+    }
+
+    /// Verifies an exhausted TLS batch probe does not allocate result scratch.
+    #[test]
+    fn test_exhausted_batched_tls_miss_is_allocation_free() {
+        const BUFFER_SIZE: usize = 64;
+        const CAPACITY: usize = 4;
+
+        let size = NonZeroUsize::new(BUFFER_SIZE).expect("positive buffer size");
+        let config = BufferPoolConfig::for_network()
+            .with_size_class_range(
+                size,
+                size,
+                NonZeroU32::new(CAPACITY as u32).expect("positive capacity"),
+            )
+            .with_max_thread_cache_capacity(
+                NonZeroUsize::new(CAPACITY).expect("positive cache capacity"),
+            );
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = BufferPool::new(config, &mut registry);
+
+        let _held: [IoBufMut; CAPACITY] = std::array::from_fn(|_| {
+            pool.try_alloc(BUFFER_SIZE)
+                .expect("lazy allocation within capacity")
+        });
+        assert!(matches!(
+            pool.try_alloc(BUFFER_SIZE),
+            Err(PoolError::Exhausted)
+        ));
+
+        let (result, allocation_calls) = allocation_calls_during(|| pool.try_alloc(BUFFER_SIZE));
+        assert!(matches!(result, Err(PoolError::Exhausted)));
+        assert_eq!(
+            allocation_calls, 0,
+            "an exhausted TLS batch probe must not allocate scratch"
+        );
     }
 }
 
