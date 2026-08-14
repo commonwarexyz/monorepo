@@ -15,13 +15,33 @@ use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
 };
 use rand_core::CryptoRng;
+
+#[cfg(test)]
+std::thread_local! {
+    static FINAL_EXPONENTIATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_final_exponentiations() {
+    FINAL_EXPONENTIATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn final_exponentiations() -> usize {
+    FINAL_EXPONENTIATIONS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn record_final_exponentiation() {
+    FINAL_EXPONENTIATIONS.set(FINAL_EXPONENTIATIONS.get() + 1);
+}
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
@@ -69,6 +89,16 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         strategy: &impl Strategy,
     ) -> Result<(), Error>;
 
+    /// Verifies `signature` against pairings of corresponding public keys and message hashes.
+    ///
+    /// Implementations must reject empty inputs and inputs with different lengths.
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error>;
+
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
 }
@@ -96,7 +126,13 @@ impl Variant for MinPk {
         if signature == &Self::Signature::zero() {
             return Err(Error::InvalidSignature);
         }
-        if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
+        if !G2::multi_pairing_check(
+            &[*hm],
+            &[*public],
+            signature,
+            &-G1::generator(),
+            &Sequential,
+        ) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -152,7 +188,22 @@ impl Variant for MinPk {
             || G2::msm(signatures, &scalars, par),
             || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
         );
-        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator()) {
+        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator(), par) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if publics.is_empty()
+            || publics.len() != hms.len()
+            || !G2::multi_pairing_check(hms, publics, signature, &-G1::generator(), strategy)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -165,6 +216,8 @@ impl Variant for MinPk {
 
         let mut result = blst_fp12::default();
         let ptr = &raw mut result;
+        #[cfg(test)]
+        record_final_exponentiation();
         // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
         unsafe {
             blst_miller_loop(ptr, &p2_affine, &p1_affine);
@@ -204,7 +257,13 @@ impl Variant for MinSig {
         if signature == &Self::Signature::zero() {
             return Err(Error::InvalidSignature);
         }
-        if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
+        if !G1::multi_pairing_check(
+            &[*hm],
+            &[*public],
+            signature,
+            &-G2::generator(),
+            &Sequential,
+        ) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -260,7 +319,22 @@ impl Variant for MinSig {
             || G1::msm(signatures, &scalars, par),
             || par.map_collect_vec(hms.iter().zip(scalars.iter()), |(&hm, s)| hm * s),
         );
-        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator()) {
+        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator(), par) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if publics.is_empty()
+            || publics.len() != hms.len()
+            || !G1::multi_pairing_check(hms, publics, signature, &-G2::generator(), strategy)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -273,6 +347,8 @@ impl Variant for MinSig {
 
         let mut result = blst_fp12::default();
         let ptr = &raw mut result;
+        #[cfg(test)]
+        record_final_exponentiation();
         // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
         unsafe {
             blst_miller_loop(ptr, &p2_affine, &p1_affine);
