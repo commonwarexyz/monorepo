@@ -47,7 +47,7 @@ const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
 /// CRC32C hasher.
 ///
 /// Uses the iSCSI polynomial (0x1EDC6F41) as specified in RFC 3720.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Crc32 {
     inner: crc_fast::Digest,
 }
@@ -67,6 +67,19 @@ impl Crc32 {
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
         crc_fast::checksum(ALGORITHM, data) as u32
+    }
+
+    /// Resume a CRC32C stream from a previously finalized checksum.
+    ///
+    /// This is useful when a durable checkpoint stores only the four-byte checksum of an
+    /// append-only prefix. Updating the returned hasher with a suffix produces the same checksum as
+    /// hashing the prefix and suffix together.
+    pub fn resume(checksum: u32) -> Self {
+        // CRC32C finalization XORs the running state with all ones. Undo that transform before
+        // asking crc-fast to continue from the recovered state.
+        Self {
+            inner: crc_fast::Digest::new_with_init_state(ALGORITHM, u64::from(checksum ^ u32::MAX)),
+        }
     }
 }
 
@@ -392,6 +405,24 @@ mod tests {
         // Test multi-part one-shot
         let hash = Crc32::hash(&[b"hello", b" world"]);
         assert_eq!(hash.as_u32(), expected);
+    }
+
+    #[test]
+    fn resumed_hasher_resets_after_finalize() {
+        let prefix = b"durable prefix";
+        let suffix = b"new suffix";
+        let mut hasher = Crc32::resume(Crc32::checksum(prefix));
+        hasher.update(suffix);
+
+        let (mut hasher, digest) = hasher.finalize();
+        assert_eq!(
+            digest.as_u32(),
+            Crc32::hash(&[prefix.as_slice(), suffix.as_slice()]).as_u32()
+        );
+
+        hasher.update(suffix);
+        let (_, digest) = hasher.finalize();
+        assert_eq!(digest.as_u32(), Crc32::checksum(suffix));
     }
 
     #[test]
