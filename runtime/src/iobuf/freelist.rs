@@ -1,27 +1,75 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! A [Freelist] owns one stable [PooledOwner] record for every possible buffer
-//! in a size class. Globally free buffers are represented by owner indices in
-//! cache-isolated, mutex-protected vectors.
+//! # Role
 //!
-//! Each thread has one stable home stripe. Returns lock stripes from that home
-//! and spill past stripes at their exact preallocated limit. Those limits sum
-//! to the freelist capacity, so valid returns do not allocate while holding a
-//! lock. Takes skip stripes known to be empty, then lock and scan from the same
-//! home. The first insertion and last removal update one exact nonempty hint
-//! while holding the stripe lock, so empty probes avoid mutex traffic.
-//! Stripe locks are blocking. An operation can wait for a lock holder even
-//! when another stripe could otherwise satisfy it.
+//! Each size class has a fixed number of slots. A slot combines one stable
+//! [`PooledOwner`] record with one data allocation after that slot is created.
+//! The [`Freelist`] owns the slot table, the allocation layout, and every
+//! buffer currently available for global reuse.
 //!
-//! The freelist does not track global membership separately. Its caller must
-//! return only uniquely owned buffers created by this freelist, return each
-//! buffer exactly once, and provide distinct entries in every batch.
+//! A buffer moves through these ownership states:
 //!
-//! A [PooledBuffer] does not carry its allocation layout. Every created or
-//! claimed buffer must eventually return to this freelist before the freelist
-//! is dropped. An outstanding buffer that never returns leaks. Buffer-pool
-//! leases keep the owning size class and this freelist alive until valid
-//! returns complete.
+//! ```text
+//!                        create or take
+//!  +----------------+ --------------------> +-----------------------+
+//!  | global stripe  |                       | checked out or in TLS |
+//!  | Vec<slot id>   | <-------------------- | cache                 |
+//!  +----------------+          put          +-----------------------+
+//! ```
+//!
+//! The global representation is deliberately small. Stripes store only `u32`
+//! slot ids. The corresponding owner records never move:
+//!
+//! ```text
+//!  Freelist
+//!  +-- slots:   [ PooledOwner ][ PooledOwner ][ PooledOwner ] ...
+//!  +-- stripes: [ available | Mutex<Vec<u32>> | hard limit ] ...
+//!
+//!                      slot 5
+//!  stripe vector  --------------------->  slots[5]
+//! ```
+//!
+//! # Striping
+//!
+//! Every thread receives a stable process-local id. The low bits select that
+//! thread's home stripe. A put starts at the home stripe and continues in
+//! wrapped order only when a stripe has reached its hard limit. A take follows
+//! the same wrapped order and may claim any available slot. Slot ids can
+//! therefore migrate between stripes as buffers are returned by different
+//! threads.
+//!
+//! Stripe limits are fixed at construction and sum to the freelist capacity.
+//! Each vector requests its limit as initial capacity, and operations enforce
+//! that limit even if the allocator reserves more. A valid put therefore does
+//! not grow a vector while holding its lock. If racing operations move the
+//! remaining room during a complete scan, the put yields and retries.
+//!
+//! # Availability hints and locking
+//!
+//! Each stripe has an [`AtomicBool`] that avoids locking a stripe known to be
+//! empty. The vector remains authoritative. The first put
+//! into an empty vector publishes `true`, and the take that removes the final
+//! slot publishes `false`. Both transitions happen while the stripe is locked.
+//! A concurrent operation may observe a transition in progress, but once an
+//! operation completes the hint reflects its result.
+//!
+//! Stripe locks are blocking. A take that observes a positive hint waits for
+//! that stripe even if a later stripe could satisfy it. A failed scan is one
+//! bounded concurrent miss, not a linearizable snapshot of global emptiness.
+//! A retry may succeed after an overlapping return completes.
+//!
+//! # Caller contract
+//!
+//! This is not a general-purpose container. It relies on the buffer pool to
+//! maintain exclusive ownership. Callers must return only buffers created by
+//! this freelist, return each buffer exactly once, and provide distinct buffers
+//! in each batch. Violating that contract can duplicate a slot or exceed a
+//! stripe's aggregate capacity.
+//!
+//! [`PooledBuffer`] does not carry its allocation layout. Every created or
+//! claimed buffer must eventually return before this freelist is dropped. An
+//! outstanding buffer that never returns leaks. Buffer-pool leases keep the
+//! owning size class and this freelist alive until valid returns complete.
 
 use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
@@ -33,91 +81,157 @@ use std::{
     sync::atomic::Ordering,
 };
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "loom")] {
-        use loom::{
-            cell::UnsafeCell,
-            sync::{
-                Mutex,
-                MutexGuard,
-                atomic::{AtomicBool, AtomicUsize},
-            },
-            thread,
-        };
-    } else {
-        use commonware_utils::sync::{Mutex, MutexGuard};
-        use std::{
-            cell::UnsafeCell,
-            sync::atomic::{AtomicBool, AtomicUsize},
-            thread,
-        };
-    }
-}
-
-/// Maximum number of cache-isolated lock stripes in one freelist.
-const MAX_STRIPES: usize = 4_096;
-/// Minimum stripe target when capacity permits.
-const MIN_STRIPES: usize = 8;
-
-#[cfg(not(feature = "loom"))]
-#[inline(always)]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock()
-}
-
-#[cfg(feature = "loom")]
-#[inline(always)]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().expect("freelist mutex must not be poisoned")
-}
-
-#[inline(always)]
-#[allow(clippy::missing_const_for_fn)]
-fn owner_ptr(owner: &UnsafeCell<PooledOwner>) -> ptr::NonNull<PooledOwner> {
+/// Synchronization types used by production and Loom builds.
+mod sync {
     cfg_if::cfg_if! {
-        if #[cfg(not(feature = "loom"))] {
-            ptr::NonNull::new(owner.get()).expect("owner pointers are non-null")
+        if #[cfg(feature = "loom")] {
+            pub(super) use loom::{
+                cell::UnsafeCell,
+                sync::{
+                    Mutex,
+                    MutexGuard,
+                    atomic::{AtomicBool, AtomicUsize},
+                },
+                thread,
+            };
         } else {
-            owner.with(|owner| {
-                ptr::NonNull::new(owner.cast_mut()).expect("owner pointers are non-null")
-            })
+            pub(super) use commonware_utils::sync::{Mutex, MutexGuard};
+            pub(super) use std::{
+                cell::UnsafeCell,
+                sync::atomic::{AtomicBool, AtomicUsize},
+                thread,
+            };
         }
     }
 }
 
-/// One hard-bounded free vector and its lock.
+use sync::{AtomicBool, AtomicUsize, Mutex, MutexGuard, UnsafeCell, thread};
+
+/// Preferred minimum stripe count when the capacity can support it.
+///
+/// The floor prevents a low or underestimated parallelism setting from
+/// collapsing ordinary pools onto one hot lock. Capacity still bounds the
+/// count, so small size classes never allocate empty stripes.
+const MIN_STRIPES: usize = 8;
+
+/// Maximum number of cache-isolated stripes in one freelist.
+///
+/// The cap bounds both cache-padded metadata and the cost of an empty scan when
+/// configured parallelism is extremely large.
+const MAX_STRIPES: usize = 4_096;
+
+/// One cache-isolated, hard-bounded collection of globally free slots.
 struct Stripe {
-    /// Exact nonempty hint, changed only while holding `free`.
+    /// Completion-accurate nonempty hint used to skip empty stripe locks.
+    ///
+    /// The value changes only while `free` is locked. `false` lets a taker skip
+    /// the mutex. `true` means the taker must lock and inspect `free`, which is
+    /// authoritative if another taker emptied the stripe in the meantime.
     available: AtomicBool,
+    /// Slot ids currently owned by the global freelist in this stripe.
     free: Mutex<Vec<u32>>,
+    /// Maximum number of slot ids that `free` may contain.
+    ///
+    /// The vector is created with this requested capacity during construction.
     limit: usize,
 }
 
-/// Bounded striped freelist of tracked buffers for one size class.
+impl Stripe {
+    /// Creates a stripe from its preallocated initial free-slot vector.
+    fn new(free: Vec<u32>, limit: usize) -> Self {
+        debug_assert!(free.len() <= limit);
+        debug_assert!(free.capacity() >= limit);
+        Self {
+            available: AtomicBool::new(!free.is_empty()),
+            free: Mutex::new(free),
+            limit,
+        }
+    }
+
+    /// Locks the authoritative free-slot vector.
+    ///
+    /// Production mutexes do not expose poisoning. Loom uses the standard
+    /// poisoning API, and a poisoned model indicates a prior test panic rather
+    /// than a recoverable freelist state.
+    #[inline(always)]
+    fn lock(&self) -> MutexGuard<'_, Vec<u32>> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                self.free.lock().expect("freelist mutex must not be poisoned")
+            } else {
+                self.free.lock()
+            }
+        }
+    }
+
+    /// Removes one slot while maintaining the availability hint.
+    ///
+    /// `free` must be the guard obtained from [`Self::lock`] for this stripe.
+    #[inline(always)]
+    fn pop(&self, free: &mut MutexGuard<'_, Vec<u32>>) -> Option<u32> {
+        let Some(slot) = free.pop() else {
+            // A taker can load `true` before another taker removes the final
+            // slot. Reconfirm the now-authoritative empty state for later scans.
+            self.available.store(false, Ordering::Release);
+            return None;
+        };
+
+        if free.is_empty() {
+            // Publish the last removal before releasing the stripe lock.
+            self.available.store(false, Ordering::Release);
+        }
+        Some(slot)
+    }
+}
+
+/// Fixed-capacity striped freelist for one buffer-pool size class.
+///
+/// The freelist owns every stable pooled-owner slot and the exact layout used
+/// for its data allocation. Globally available slots are stored as compact ids
+/// in hard-bounded stripes. Checked-out buffers and thread-local caches may
+/// temporarily own slots, but their leases keep this freelist alive until they
+/// return.
 pub struct Freelist {
+    /// Exact layout shared by every data allocation in this size class.
     layout: Layout,
+    /// Number of permanent creation permits consumed so far.
+    ///
+    /// The cache padding isolates concurrent lazy creation from stripe state.
     created: CachePadded<AtomicUsize>,
-    owners: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    /// Stable owner record for every possible slot in this size class.
+    ///
+    /// Boxing prevents the records from moving after pointers escape.
+    slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    /// Cache-isolated free-slot vectors selected by thread home.
     stripes: Box<[CachePadded<Stripe>]>,
+    /// `stripes.len() - 1`, used for power-of-two wrapped indexing.
     stripe_mask: usize,
 }
 
-// SAFETY: owner storage is stable for the lifetime of the freelist. The buffer
-// pool contract places each created owner either outside the global freelist or
+// SAFETY: slot storage is stable for the lifetime of the freelist. The buffer
+// pool contract places each created slot either outside the global freelist or
 // in exactly one mutex-protected stripe.
 unsafe impl Send for Freelist {}
 // SAFETY: same ownership and locking discipline as the Send implementation.
 unsafe impl Sync for Freelist {}
 
 impl Freelist {
-    /// Creates a new fixed-capacity freelist.
+    /// Creates a fixed-capacity freelist for one allocation layout.
     ///
-    /// Parallelism selects a power-of-two stripe target with a floor of up to
-    /// [MIN_STRIPES] and a cap of [MAX_STRIPES]. Each stripe preallocates its
-    /// exact share of the total capacity.
+    /// `parallelism` selects a power-of-two stripe target. When capacity allows,
+    /// the target is at least [`MIN_STRIPES`] and never exceeds
+    /// [`MAX_STRIPES`]. The count also never exceeds the greatest power of two
+    /// no larger than `capacity`, which ensures every stripe has a nonzero hard
+    /// limit.
     ///
-    /// If prefill is true, all buffers are created and parked before this
-    /// method returns.
+    /// Each stripe preallocates its exact share of total capacity. If `prefill`
+    /// is `true`, every slot's data allocation is created and parked before
+    /// this method returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `layout` is zero-sized. Allocation failure invokes the
+    /// process allocation error handler.
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -129,29 +243,28 @@ impl Freelist {
         let stripe_count = Self::stripe_count(capacity, parallelism.get());
         let stripe_mask = stripe_count - 1;
 
-        let owners = (0..capacity)
-            .map(|owner_index| {
+        let slots = (0..capacity)
+            .map(|slot| {
                 CachePadded::new(UnsafeCell::new(PooledOwner::new(
-                    u32::try_from(owner_index).expect("owner index must fit in u32"),
+                    u32::try_from(slot).expect("slot must fit in u32"),
                     layout.size(),
                 )))
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
+        // Build the free vectors before their mutexes exist. This keeps prefill
+        // allocation and initialization outside every stripe lock.
         let mut free = (0..stripe_count)
-            .map(|stripe| {
-                Vec::with_capacity(Self::stripe_capacity(capacity, stripe_count, stripe))
-            })
+            .map(|stripe| Vec::with_capacity(Self::stripe_capacity(capacity, stripe_count, stripe)))
             .collect::<Vec<_>>();
 
         if prefill {
-            for owner_index in 0..capacity {
-                // SAFETY: construction exclusively initializes this stable owner.
-                let buffer = unsafe {
-                    PooledBuffer::new(owner_ptr(&owners[owner_index]), layout, false)
-                };
-                free[owner_index & stripe_mask].push(buffer.into_owner_index());
+            for slot in 0..capacity {
+                // SAFETY: construction exclusively initializes this stable slot.
+                let buffer =
+                    unsafe { PooledBuffer::new(Self::cell_ptr(&slots[slot]), layout, false) };
+                free[slot & stripe_mask].push(buffer.into_slot());
             }
         }
 
@@ -159,11 +272,8 @@ impl Freelist {
             .into_iter()
             .enumerate()
             .map(|(stripe, free)| {
-                CachePadded::new(Stripe {
-                    available: AtomicBool::new(!free.is_empty()),
-                    free: Mutex::new(free),
-                    limit: Self::stripe_capacity(capacity, stripe_count, stripe),
-                })
+                let limit = Self::stripe_capacity(capacity, stripe_count, stripe);
+                CachePadded::new(Stripe::new(free, limit))
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -171,12 +281,17 @@ impl Freelist {
         Self {
             layout,
             created: CachePadded::new(AtomicUsize::new(if prefill { capacity } else { 0 })),
-            owners,
+            slots,
             stripes,
             stripe_mask,
         }
     }
 
+    /// Selects a power-of-two stripe count from capacity and parallelism.
+    ///
+    /// The minimum protects low parallelism estimates from a single hot lock.
+    /// The maximum bounds metadata and empty scans. The capacity ceiling keeps
+    /// every stripe useful and makes wrapped indexing a mask operation.
     #[inline]
     fn stripe_count(capacity: usize, parallelism: usize) -> usize {
         let capacity_ceiling = 1usize << capacity.ilog2();
@@ -188,52 +303,58 @@ impl Freelist {
             .min(capacity_ceiling)
     }
 
+    /// Returns the exact hard limit for one stripe.
+    ///
+    /// Slots are distributed by `slot & (stripes - 1)` during prefill. This
+    /// formula gives the matching quotient plus remainder distribution, whose
+    /// limits sum exactly to `capacity`.
     #[inline(always)]
     const fn stripe_capacity(capacity: usize, stripes: usize, stripe: usize) -> usize {
         ((capacity - 1 - stripe) / stripes) + 1
     }
 
-    /// Creates a new tracked buffer and assigns its permanent owner index.
+    /// Creates a new tracked buffer and assigns its permanent slot id.
     ///
-    /// Returns None after all creation permits have been claimed. Draining
-    /// does not reopen permits.
+    /// Returns `None` after all creation permits have been consumed. Draining
+    /// does not reopen permits because each slot is initialized at most once.
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
-        let capacity = self.owners.len();
+        let capacity = self.slots.len();
         #[allow(deprecated)]
-        let owner_index = self
+        let slot = self
             .created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
                 (created < capacity).then_some(created + 1)
             })
             .ok()?;
 
-        // SAFETY: creation admission assigns this owner exactly once. Its
+        // SAFETY: creation admission assigns this slot exactly once. Its
         // address remains stable for the freelist lifetime.
-        Some(unsafe { PooledBuffer::new(self.owner(owner_index as u32), self.layout, zeroed) })
+        Some(unsafe { PooledBuffer::new(self.slot(slot as u32), self.layout, zeroed) })
     }
 
-    /// Returns one tracked buffer, starting from this thread's home stripe.
-    #[inline]
+    /// Returns one uniquely owned buffer to global availability.
+    ///
+    /// The scan starts at the current thread's home stripe. Full stripes are
+    /// skipped in wrapped order. Under the caller contract, aggregate room
+    /// exists for every returned buffer, although racing operations can move
+    /// that room during a scan.
     pub fn put(&self, buffer: PooledBuffer) {
-        self.put_from(buffer, self.home_stripe());
-    }
-
-    /// Returns one buffer starting from an already-resolved home stripe.
-    fn put_from(&self, buffer: PooledBuffer, start: usize) {
-        let mut owner_index = Some(buffer.into_owner_index());
+        let start = self.home_stripe();
+        let slot = buffer.into_slot();
         loop {
             for offset in 0..self.stripes.len() {
                 let stripe = &self.stripes[(start + offset) & self.stripe_mask];
-                let mut free = lock(&stripe.free);
+                let mut free = stripe.lock();
                 if free.len() == stripe.limit {
                     continue;
                 }
 
                 let was_empty = free.is_empty();
                 debug_assert!(free.len() < free.capacity());
-                free.push(owner_index.take().expect("owner index is published once"));
+                free.push(slot);
                 if was_empty {
+                    // Publish the first insertion before releasing the lock.
                     stripe.available.store(true, Ordering::Release);
                 }
                 return;
@@ -245,134 +366,125 @@ impl Freelist {
         }
     }
 
-    /// Returns several tracked buffers, starting from this thread's home.
+    /// Returns several uniquely owned buffers to global availability.
     ///
-    /// The complete batch is collected before any buffer is published.
-    /// Publication fills one hard-bounded stripe at a time.
+    /// The iterator is consumed into compact slot ids before any slot is
+    /// published. Publication starts at the current thread's home and fills one
+    /// hard-bounded stripe at a time. No two stripe locks are held together.
     ///
-    /// The iterator should not panic. Buffers yielded before a panic may leak.
-    #[inline]
-    pub fn put_batch(&self, entries: impl IntoIterator<Item = PooledBuffer>) {
-        self.put_batch_from(entries, self.home_stripe());
-    }
-
-    /// Returns several buffers using an already-resolved home stripe.
-    fn put_batch_from(
-        &self,
-        entries: impl IntoIterator<Item = PooledBuffer>,
-        start: usize,
-    ) {
-        let mut entries = entries.into_iter();
-        let Some(first) = entries.next() else {
+    /// The iterator must contain distinct buffers created by this freelist. It
+    /// should not panic because buffers yielded before a panic may leak.
+    pub fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
+        let mut buffers = buffers.into_iter();
+        let Some(first) = buffers.next() else {
             return;
         };
-        let Some(second) = entries.next() else {
-            self.put_from(first, start);
+        let Some(second) = buffers.next() else {
+            self.put(first);
             return;
         };
 
-        let reserve = entries
+        let reserve = buffers
             .size_hint()
             .0
             .saturating_add(2)
-            .min(self.owners.len());
-        let mut owner_indices = Vec::with_capacity(reserve);
-        owner_indices.push(first.into_owner_index());
-        owner_indices.push(second.into_owner_index());
-        owner_indices.extend(entries.map(PooledBuffer::into_owner_index));
+            .min(self.slots.len());
+        let mut slots = Vec::with_capacity(reserve);
+        slots.push(first.into_slot());
+        slots.push(second.into_slot());
+        slots.extend(buffers.map(PooledBuffer::into_slot));
 
-        while !owner_indices.is_empty() {
-            let before = owner_indices.len();
+        let start = self.home_stripe();
+        while !slots.is_empty() {
+            let before = slots.len();
             for offset in 0..self.stripes.len() {
                 let stripe = &self.stripes[(start + offset) & self.stripe_mask];
-                let mut free = lock(&stripe.free);
-                let count = (stripe.limit - free.len()).min(owner_indices.len());
+                let mut free = stripe.lock();
+                let count = (stripe.limit - free.len()).min(slots.len());
                 let was_empty = free.is_empty();
                 for _ in 0..count {
                     debug_assert!(free.len() < free.capacity());
-                    free.push(owner_indices.pop().expect("count is bounded by length"));
+                    free.push(slots.pop().expect("count is bounded by length"));
                 }
                 if was_empty && count != 0 {
+                    // One publication covers every slot inserted under this lock.
                     stripe.available.store(true, Ordering::Release);
                 }
-                if owner_indices.is_empty() {
+                if slots.is_empty() {
                     return;
                 }
             }
 
-            if owner_indices.len() == before {
+            if slots.len() == before {
+                // Racing takes and puts can move aggregate room for a full pass.
                 thread::yield_now();
             }
         }
     }
 
-    /// Takes any one globally available buffer.
+    /// Takes any one globally available buffer, if observed.
     ///
-    /// The scan reports empty only after every stripe is either known empty or
-    /// observed empty under its mutex.
+    /// The scan starts at the current thread's home. Stripes with a negative
+    /// availability hint are skipped without locking. A positive stripe is
+    /// locked and checked authoritatively.
+    ///
+    /// `None` means this bounded scan found no slot. It is not a linearizable
+    /// empty snapshot because a concurrent put may still be in progress.
     #[inline]
     pub fn take(&self) -> Option<PooledBuffer> {
-        self.take_from(self.home_stripe())
-    }
-
-    /// Takes one buffer using an already-resolved home stripe.
-    #[inline(always)]
-    fn take_from(&self, start: usize) -> Option<PooledBuffer> {
+        let start = self.home_stripe();
         for offset in 0..self.stripes.len() {
             let stripe = &self.stripes[(start + offset) & self.stripe_mask];
             if !stripe.available.load(Ordering::Acquire) {
                 continue;
             }
-            let mut free = lock(&stripe.free);
-            if let Some(owner_index) = Self::pop_locked(stripe, &mut free) {
+            let mut free = stripe.lock();
+            if let Some(slot) = stripe.pop(&mut free) {
+                // Reconstructing the buffer touches only stable slot state, so
+                // keep it outside the critical section.
                 drop(free);
-                return Some(self.claim(owner_index));
+                return Some(self.claim(slot));
             }
         }
         None
     }
 
-    /// Takes up to max globally available buffers.
+    /// Takes up to `max` globally available buffers.
     ///
-    /// Claimed buffers are detached while their stripe is locked. All callback
-    /// invocations happen after every lock has been released. The callback must
-    /// not panic because remaining detached buffers would be stranded.
+    /// Slot ids are detached while each stripe is locked. All buffers are
+    /// reconstructed and passed to `on_buffer` only after every lock has been
+    /// released. A short result means the bounded scan found fewer than `max`
+    /// slots, not that no overlapping put can make more available.
+    ///
+    /// `on_buffer` must not panic because any remaining detached slots would be
+    /// stranded outside both the freelist and the caller.
     #[inline]
-    pub fn take_batch(&self, max: usize, mut on_entry: impl FnMut(PooledBuffer)) -> usize {
-        self.take_batch_from(max, self.home_stripe(), &mut on_entry)
-    }
-
-    /// Takes a batch using an already-resolved home stripe.
-    fn take_batch_from(
-        &self,
-        max: usize,
-        start: usize,
-        mut on_entry: impl FnMut(PooledBuffer),
-    ) -> usize {
-        let max = max.min(self.owners.len());
+    pub fn take_batch(&self, max: usize, mut on_buffer: impl FnMut(PooledBuffer)) -> usize {
+        let max = max.min(self.slots.len());
         if max == 0 {
             return 0;
         }
         if max == 1 {
-            let Some(buffer) = self.take_from(start) else {
+            let Some(buffer) = self.take() else {
                 return 0;
             };
-            on_entry(buffer);
+            on_buffer(buffer);
             return 1;
         }
 
         let mut detached = Vec::with_capacity(max);
+        let start = self.home_stripe();
         for offset in 0..self.stripes.len() {
             let stripe = &self.stripes[(start + offset) & self.stripe_mask];
             if !stripe.available.load(Ordering::Acquire) {
                 continue;
             }
-            let mut free = lock(&stripe.free);
+            let mut free = stripe.lock();
             while detached.len() < max {
-                let Some(owner_index) = Self::pop_locked(stripe, &mut free) else {
+                let Some(slot) = stripe.pop(&mut free) else {
                     break;
                 };
-                detached.push(owner_index);
+                detached.push(slot);
             }
             if detached.len() == max {
                 break;
@@ -383,31 +495,33 @@ impl Freelist {
             return 0;
         }
         let count = detached.len();
-        for owner_index in detached {
-            on_entry(self.claim(owner_index));
+        for slot in detached {
+            on_buffer(self.claim(slot));
         }
         count
     }
 
-    /// Deallocates every buffer currently parked in the global freelist.
+    /// Deallocates every buffer currently parked in this freelist.
     ///
-    /// Creation permits remain consumed. Each stripe receives an empty vector
-    /// with the same reserved capacity before detached buffers are deallocated.
+    /// Each stripe receives an empty vector with the same reserved capacity
+    /// while locked. Detached buffers are deallocated after unlocking. Creation
+    /// permits remain consumed, so a later return can reuse the reserved room
+    /// but draining never permits a second allocation for an existing slot.
     pub fn drain(&self) -> usize {
         let mut drained = 0;
 
         for stripe in &self.stripes {
             let detached = {
-                let mut free = lock(&stripe.free);
+                let mut free = stripe.lock();
                 let detached = std::mem::replace(&mut *free, Vec::with_capacity(stripe.limit));
                 stripe.available.store(false, Ordering::Release);
                 detached
             };
 
-            for owner_index in detached {
-                let buffer = self.claim(owner_index);
+            for slot in detached {
+                let buffer = self.claim(slot);
                 // SAFETY: this freelist created the detached buffer with this
-                // exact layout and removed its owner index under lock.
+                // exact layout and removed its slot under lock.
                 unsafe { buffer.deallocate(self.layout) };
                 drained += 1;
             }
@@ -416,55 +530,60 @@ impl Freelist {
         drained
     }
 
+    /// Returns the stable owner pointer for one slot id.
     #[inline(always)]
-    fn owner(&self, owner_index: u32) -> ptr::NonNull<PooledOwner> {
+    fn slot(&self, slot: u32) -> ptr::NonNull<PooledOwner> {
         let owner = self
-            .owners
-            .get(owner_index as usize)
-            .expect("owner index must belong to this freelist");
-        owner_ptr(owner)
+            .slots
+            .get(slot as usize)
+            .expect("slot must belong to this freelist");
+        Self::cell_ptr(owner)
     }
 
-    /// Returns one stable home stripe for the current thread.
+    /// Obtains the stable pointer stored by one platform-specific cell.
+    #[inline(always)]
+    #[allow(clippy::missing_const_for_fn)]
+    fn cell_ptr(owner: &UnsafeCell<PooledOwner>) -> ptr::NonNull<PooledOwner> {
+        cfg_if::cfg_if! {
+            if #[cfg(not(feature = "loom"))] {
+                ptr::NonNull::new(owner.get()).expect("slot pointers are non-null")
+            } else {
+                owner.with(|owner| {
+                    ptr::NonNull::new(owner.cast_mut()).expect("slot pointers are non-null")
+                })
+            }
+        }
+    }
+
+    /// Returns the current thread's stable home stripe in this freelist.
     #[inline(always)]
     fn home_stripe(&self) -> usize {
         if self.stripe_mask == 0 {
             return 0;
         }
-        take_thread_id() & self.stripe_mask
+        current_thread_id() & self.stripe_mask
     }
 
-    /// Removes one owner index and maintains the stripe's availability hint.
+    /// Reconstructs unique ownership after removing a slot from a stripe.
     #[inline(always)]
-    fn pop_locked(stripe: &Stripe, free: &mut MutexGuard<'_, Vec<u32>>) -> Option<u32> {
-        let Some(owner_index) = free.pop() else {
-            stripe.available.store(false, Ordering::Release);
-            return None;
-        };
-        if free.is_empty() {
-            stripe.available.store(false, Ordering::Release);
-        }
-        Some(owner_index)
-    }
-
-    /// Reconstructs unique ownership after removing an index from a stripe.
-    #[inline(always)]
-    fn claim(&self, owner_index: u32) -> PooledBuffer {
-        // SAFETY: the buffer-pool contract makes a globally stored owner index
-        // unique, and the caller removed this index from its stripe.
-        let buffer = unsafe { PooledBuffer::from_owner(self.owner(owner_index)) };
+    fn claim(&self, slot: u32) -> PooledBuffer {
+        // SAFETY: the buffer-pool contract makes a globally stored slot unique,
+        // and the caller removed this slot from its stripe.
+        let buffer = unsafe { PooledBuffer::from_owner(self.slot(slot)) };
         #[cfg(feature = "loom")]
-        buffer.assert_unique_sentinel();
+        buffer.assert_parked_sentinel();
         buffer
     }
 }
 
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
-        static NEXT_TAKE_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+        /// Next process-local id assigned to a thread that touches a freelist.
+        static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
     } else {
         loom::lazy_static! {
-            static ref NEXT_TAKE_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+            /// Next model-local id assigned to a thread that touches a freelist.
+            static ref NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
         }
     }
 }
@@ -472,24 +591,28 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
         thread_local! {
-            static TAKE_THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
+            /// Stable id used to select this thread's home in every freelist.
+            static THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
         }
     } else {
         loom::thread_local! {
-            static TAKE_THREAD_ID: Cell<Option<usize>> = Cell::new(None);
+            /// Stable id used to select this modeled thread's freelist home.
+            static THREAD_ID: Cell<Option<usize>> = Cell::new(None);
         }
     }
 }
 
 /// Returns one stable process-local id for the current thread.
 #[inline(always)]
-fn take_thread_id() -> usize {
-    TAKE_THREAD_ID.with(|thread_id| {
+fn current_thread_id() -> usize {
+    THREAD_ID.with(|thread_id| {
         if let Some(id) = thread_id.get() {
             return id;
         }
 
-        let id = NEXT_TAKE_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        // The id is used only for load distribution, so wraparound and ordering
+        // relative to freelist contents have no correctness significance.
+        let id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
         thread_id.set(Some(id));
         id
     })
@@ -497,10 +620,13 @@ fn take_thread_id() -> usize {
 
 impl Drop for Freelist {
     fn drop(&mut self) {
+        // Outstanding slots keep the size class alive, so only globally parked
+        // buffers can remain when the final freelist reference is dropped.
         self.drain();
     }
 }
 
+/// Native unit tests and helpers shared with buffer-pool tests.
 #[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
@@ -514,27 +640,32 @@ pub(super) mod tests {
         time::Duration,
     };
 
+    /// Allocation layout shared by native freelist tests.
     const TEST_LAYOUT: Layout = match Layout::from_size_align(64, 64) {
         Ok(layout) => layout,
         Err(_) => panic!("valid test layout"),
     };
 
+    /// Returns the number of permanent creation permits consumed.
     pub fn created(freelist: &Freelist) -> usize {
         freelist.created.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of slots currently parked across all stripes.
     pub fn len(freelist: &Freelist) -> usize {
         freelist
             .stripes
             .iter()
-            .map(|stripe| lock(&stripe.free).len())
+            .map(|stripe| stripe.lock().len())
             .sum()
     }
 
+    /// Returns the number of stripes selected during construction.
     pub fn num_stripes(freelist: &Freelist) -> usize {
         freelist.stripes.len()
     }
 
+    /// Creates an empty freelist whose slots are allocated lazily.
     fn lazy(capacity: u32, parallelism: usize) -> Freelist {
         Freelist::new(
             NonZeroU32::new(capacity).expect("positive capacity"),
@@ -544,6 +675,7 @@ pub(super) mod tests {
         )
     }
 
+    /// Creates a freelist with every slot allocated and globally available.
     fn prefilled(capacity: u32, parallelism: usize) -> Freelist {
         Freelist::new(
             NonZeroU32::new(capacity).expect("positive capacity"),
@@ -553,6 +685,7 @@ pub(super) mod tests {
         )
     }
 
+    /// Takes every slot visible through repeated bounded batch scans.
     fn take_all(freelist: &Freelist) -> Vec<PooledBuffer> {
         let mut buffers = Vec::new();
         loop {
@@ -563,6 +696,16 @@ pub(super) mod tests {
         }
     }
 
+    /// Parks one test buffer in a chosen stripe without exercising routing.
+    fn park_in_stripe(freelist: &Freelist, stripe: usize, buffer: PooledBuffer) {
+        let stripe = &freelist.stripes[stripe];
+        let mut free = stripe.lock();
+        assert!(free.len() < stripe.limit);
+        free.push(buffer.into_slot());
+        stripe.available.store(true, Ordering::Release);
+    }
+
+    /// Verifies lazy creation, prefill, fixed permits, and explicit draining.
     #[test]
     fn test_creation_prefill_and_drain() {
         let set = lazy(3, 2);
@@ -570,13 +713,10 @@ pub(super) mod tests {
             .map(|_| set.try_create(false).expect("creation permit"))
             .collect::<Vec<_>>();
         assert_eq!(
-            buffers
-                .iter()
-                .map(PooledBuffer::owner_index)
-                .collect::<Vec<_>>(),
+            buffers.iter().map(PooledBuffer::slot).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        assert!(format!("{:?}", buffers[0]).contains("owner_index"));
+        assert!(format!("{:?}", buffers[0]).contains("slot"));
         assert!(set.try_create(false).is_none());
         assert_eq!(created(&set), 3);
 
@@ -592,6 +732,7 @@ pub(super) mod tests {
         assert!(set.try_create(false).is_none());
     }
 
+    /// Verifies that zeroed lazy creation initializes every data byte.
     #[test]
     fn test_zeroed_creation() {
         let set = lazy(1, 1);
@@ -602,6 +743,7 @@ pub(super) mod tests {
         set.put(buffer);
     }
 
+    /// Verifies stripe-count bounds, exact limits, and preallocated capacity.
     #[test]
     fn test_stripe_geometry_is_bounded_and_preallocated() {
         assert_eq!(Freelist::stripe_count(1, usize::MAX), 1);
@@ -613,18 +755,19 @@ pub(super) mod tests {
         let set = prefilled(19, 8);
         assert_eq!(num_stripes(&set), 8);
         for (index, stripe) in set.stripes.iter().enumerate() {
-            let free = lock(&stripe.free);
+            let free = stripe.lock();
             let expected = Freelist::stripe_capacity(19, 8, index);
             assert_eq!(stripe.limit, expected);
             assert_eq!(free.len(), expected);
             assert!(free.capacity() >= expected);
             assert!(
                 free.iter()
-                    .all(|owner_index| *owner_index as usize & set.stripe_mask == index)
+                    .all(|slot| *slot as usize & set.stripe_mask == index)
             );
         }
     }
 
+    /// Verifies that a batch spills past its home stripe's hard limit.
     #[test]
     fn test_returner_home_batch_spills_past_hard_limit() {
         let set = lazy(19, 8);
@@ -635,98 +778,91 @@ pub(super) mod tests {
             .collect::<Vec<_>>();
 
         set.put_batch(buffers);
-        assert_eq!(lock(&set.stripes[home].free).len(), set.stripes[home].limit);
+        assert_eq!(set.stripes[home].lock().len(), set.stripes[home].limit);
         assert_eq!(len(&set), count);
         assert_eq!(set.drain(), count);
     }
 
+    /// Verifies that `put` waits for its locked full home before scanning on.
     #[test]
     fn test_put_waits_for_locked_full_home() {
         let set = Arc::new(lazy(2, 2));
         let first = set.try_create(false).expect("first creation permit");
         let second = set.try_create(false).expect("second creation permit");
-        set.put_from(first, 0);
-
-        let guard = lock(&set.stripes[0].free);
+        let (home_tx, home_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = {
             let set = Arc::clone(&set);
             std::thread::spawn(move || {
-                set.put_from(second, 0);
+                home_tx.send(set.home_stripe()).expect("send worker home");
+                go_rx.recv().expect("start return");
+                set.put(second);
                 done_tx.send(()).expect("signal completion");
             })
         };
 
+        let home = home_rx.recv().expect("receive worker home");
+        park_in_stripe(&set, home, first);
+        let guard = set.stripes[home].lock();
+        go_tx.send(()).expect("start worker");
         assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
         drop(guard);
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("return must finish after home unlocks");
         worker.join().expect("worker must not panic");
-        assert_eq!(lock(&set.stripes[1].free).len(), 1);
+        assert_eq!(len(&set), 2);
     }
 
+    /// Verifies that `put_batch` waits for its full locked home, then spills.
     #[test]
     fn test_put_batch_waits_for_locked_full_home() {
-        let set = Arc::new(lazy(4, 2));
+        let set = Arc::new(lazy(4, 4));
         let mut buffers = (0..4).map(|_| set.try_create(false).expect("creation permit"));
         let first = buffers.next().expect("first buffer");
         let second = buffers.next().expect("second buffer");
         let third = buffers.next().expect("third buffer");
         let fourth = buffers.next().expect("fourth buffer");
-        set.put_from(first, 0);
-
-        let guard = lock(&set.stripes[0].free);
+        let (home_tx, home_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = {
             let set = Arc::clone(&set);
             std::thread::spawn(move || {
-                set.put_batch_from([second, third, fourth], 0);
+                home_tx.send(set.home_stripe()).expect("send worker home");
+                go_rx.recv().expect("start batch return");
+                set.put_batch([second, third, fourth]);
                 done_tx.send(()).expect("signal completion");
             })
         };
 
+        let home = home_rx.recv().expect("receive worker home");
+        park_in_stripe(&set, home, first);
+        let guard = set.stripes[home].lock();
+        go_tx.send(()).expect("start worker");
         assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
         drop(guard);
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("batch return must finish after home unlocks");
         worker.join().expect("worker must not panic");
-        assert_eq!(
-            set.stripes[1..]
-                .iter()
-                .map(|stripe| lock(&stripe.free).len())
-                .sum::<usize>(),
-            3
-        );
+        assert_eq!(set.stripes[home].lock().len(), 1);
+        assert_eq!(len(&set), 4);
     }
 
+    /// Verifies that one thread keeps a stable, in-range home stripe.
     #[test]
-    fn test_returner_homes_redistribute_fixed_owner_skew() {
+    fn test_thread_home_is_stable_and_bounded() {
         let set = lazy(64, 8);
-        let mut outside = (0..57)
-            .map(|_| set.try_create(false).expect("creation permit"))
-            .collect::<Vec<_>>();
-        let mut skewed = Vec::new();
-        for owner_index in (0..57).step_by(8) {
-            let index = outside
-                .iter()
-                .position(|buffer| buffer.owner_index() == owner_index)
-                .expect("created skewed owner");
-            skewed.push(outside.swap_remove(index));
+        let home = set.home_stripe();
+        assert!(home < set.stripes.len());
+        for _ in 0..32 {
+            assert_eq!(set.home_stripe(), home);
         }
-
-        for (home, buffer) in skewed.into_iter().enumerate() {
-            set.put_from(buffer, home);
-        }
-
-        for stripe in &set.stripes {
-            assert_eq!(lock(&stripe.free).len(), 1);
-        }
-        set.put_batch(outside);
-        assert_eq!(set.drain(), 57);
     }
 
+    /// Verifies multi-stripe batch scans and callbacks after all unlocks.
     #[test]
     fn test_take_batch_scans_stripes_and_calls_back_after_unlock() {
         let set = prefilled(8, 4);
@@ -736,10 +872,26 @@ pub(super) mod tests {
         assert_eq!(set.take_batch(0, |_| unreachable!()), 0);
     }
 
+    /// Verifies empty and singleton put and take batch paths.
+    #[test]
+    fn test_empty_and_singleton_batches() {
+        let set = lazy(1, 1);
+        set.put_batch(std::iter::empty());
+        assert_eq!(set.take_batch(1, |_| unreachable!()), 0);
+
+        let buffer = set.try_create(false).expect("creation permit");
+        set.put_batch([buffer]);
+
+        let mut taken = None;
+        assert_eq!(set.take_batch(1, |buffer| taken = Some(buffer)), 1);
+        set.put(taken.expect("singleton callback receives the buffer"));
+    }
+
+    /// Verifies that a positive stripe remains authoritative while locked.
     #[test]
     fn test_take_waits_for_locked_stripe() {
         let set = Arc::new(prefilled(1, 1));
-        let guard = lock(&set.stripes[0].free);
+        let guard = set.stripes[0].lock();
         let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = {
@@ -761,23 +913,25 @@ pub(super) mod tests {
         set.put(buffer);
     }
 
+    /// Verifies that `take` waits for its positive home before later stripes.
     #[test]
     fn test_take_waits_for_home_before_later_stripe() {
         let set = Arc::new(prefilled(2, 2));
-        let first_guard = lock(&set.stripes[0].free);
-        let (started_tx, started_rx) = mpsc::channel();
+        let (home_tx, home_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = {
             let set = Arc::clone(&set);
             std::thread::spawn(move || {
-                started_tx.send(()).expect("signal start");
-                done_tx
-                    .send(set.take_from(0))
-                    .expect("send take result");
+                home_tx.send(set.home_stripe()).expect("send worker home");
+                go_rx.recv().expect("start take");
+                done_tx.send(set.take()).expect("send take result");
             })
         };
 
-        started_rx.recv().expect("worker started");
+        let home = home_rx.recv().expect("receive worker home");
+        let first_guard = set.stripes[home].lock();
+        go_tx.send(()).expect("start worker");
         assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
         drop(first_guard);
         let result = done_rx.recv_timeout(Duration::from_secs(1));
@@ -786,29 +940,31 @@ pub(super) mod tests {
         let buffer = result
             .expect("take must finish after the home stripe unlocks")
             .expect("home stripe must remain productive");
-        assert_eq!(buffer.owner_index(), 0);
+        assert_eq!(buffer.slot(), home as u32);
         set.put(buffer);
     }
 
+    /// Verifies that `take_batch` waits for its home before scanning onward.
     #[test]
     fn test_take_batch_waits_for_home_before_later_stripe() {
         let set = Arc::new(prefilled(2, 2));
-        let first_guard = lock(&set.stripes[0].free);
-        let (started_tx, started_rx) = mpsc::channel();
+        let (home_tx, home_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = {
             let set = Arc::clone(&set);
             std::thread::spawn(move || {
-                started_tx.send(()).expect("signal start");
+                home_tx.send(set.home_stripe()).expect("send worker home");
+                go_rx.recv().expect("start batch take");
                 let mut buffers = Vec::new();
-                let count = set.take_batch_from(2, 0, |buffer| buffers.push(buffer));
-                done_tx
-                    .send((count, buffers))
-                    .expect("send batch result");
+                let count = set.take_batch(2, |buffer| buffers.push(buffer));
+                done_tx.send((count, buffers)).expect("send batch result");
             })
         };
 
-        started_rx.recv().expect("worker started");
+        let home = home_rx.recv().expect("receive worker home");
+        let first_guard = set.stripes[home].lock();
+        go_tx.send(()).expect("start worker");
         assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
         drop(first_guard);
         let result = done_rx.recv_timeout(Duration::from_secs(1));
@@ -816,12 +972,13 @@ pub(super) mod tests {
 
         let (count, mut buffers) = result.expect("batch take must finish after home unlocks");
         assert_eq!(count, 2);
-        buffers.sort_by_key(PooledBuffer::owner_index);
-        assert_eq!(buffers[0].owner_index(), 0);
-        assert_eq!(buffers[1].owner_index(), 1);
+        buffers.sort_by_key(PooledBuffer::slot);
+        assert_eq!(buffers[0].slot(), 0);
+        assert_eq!(buffers[1].slot(), 1);
         set.put_batch(buffers);
     }
 
+    /// Verifies unique ownership across contended scalar take and put cycles.
     #[test]
     fn test_concurrent_take_and_put_preserve_unique_ownership() {
         const CAPACITY: usize = 64;
@@ -850,9 +1007,9 @@ pub(super) mod tests {
                         }
                         std::thread::yield_now();
                     };
-                    let owner_index = buffer.owner_index() as usize;
-                    assert!(!outside[owner_index].swap(true, StdOrdering::Relaxed));
-                    assert!(outside[owner_index].swap(false, StdOrdering::Relaxed));
+                    let slot = buffer.slot() as usize;
+                    assert!(!outside[slot].swap(true, StdOrdering::Relaxed));
+                    assert!(outside[slot].swap(false, StdOrdering::Relaxed));
                     set.put(buffer);
                 }
             }));
@@ -865,6 +1022,7 @@ pub(super) mod tests {
         assert_eq!(set.drain(), CAPACITY);
     }
 
+    /// Verifies concurrent batch publication respects every hard stripe limit.
     #[test]
     fn test_concurrent_batches_respect_hard_stripe_limits() {
         const CAPACITY: usize = 64;
@@ -895,39 +1053,41 @@ pub(super) mod tests {
         }
         assert_eq!(len(&set), CAPACITY);
         for stripe in &set.stripes {
-            let free = lock(&stripe.free);
+            let free = stripe.lock();
             assert_eq!(free.len(), stripe.limit);
             assert!(free.len() <= free.capacity());
         }
         assert_eq!(set.drain(), CAPACITY);
     }
 
+    /// Verifies concurrent lazy creation assigns each slot exactly once.
     #[test]
-    fn test_concurrent_creation_assigns_unique_owners() {
+    fn test_concurrent_creation_assigns_unique_slots() {
         const CAPACITY: usize = 64;
         let set = Arc::new(lazy(CAPACITY as u32, 8));
         let mut workers = Vec::new();
         for _ in 0..8 {
             let set = Arc::clone(&set);
             workers.push(std::thread::spawn(move || {
-                let mut owner_indices = Vec::new();
+                let mut slots = Vec::new();
                 while let Some(buffer) = set.try_create(false) {
-                    owner_indices.push(buffer.owner_index());
+                    slots.push(buffer.slot());
                     set.put(buffer);
                 }
-                owner_indices
+                slots
             }));
         }
 
-        let owner_indices = workers
+        let slots = workers
             .into_iter()
             .flat_map(|worker| worker.join().expect("worker must not panic"))
             .collect::<HashSet<_>>();
-        assert_eq!(owner_indices.len(), CAPACITY);
+        assert_eq!(slots.len(), CAPACITY);
         assert_eq!(created(&set), CAPACITY);
         assert_eq!(len(&set), CAPACITY);
     }
 
+    /// Verifies drain preserves reserved room for an outstanding late return.
     #[test]
     fn test_drain_leaves_room_for_late_return() {
         let set = prefilled(4, 2);
@@ -937,15 +1097,16 @@ pub(super) mod tests {
         assert_eq!(set.drain(), 1);
     }
 
+    /// Verifies repeated maximum batches return every slot exactly once.
     #[test]
-    fn test_take_all_covers_every_owner_once() {
+    fn test_take_all_covers_every_slot_once() {
         let set = prefilled(19, 8);
         let buffers = take_all(&set);
         assert_eq!(buffers.len(), 19);
         assert_eq!(
             buffers
                 .iter()
-                .map(PooledBuffer::owner_index)
+                .map(PooledBuffer::slot)
                 .collect::<HashSet<_>>()
                 .len(),
             19
@@ -953,6 +1114,7 @@ pub(super) mod tests {
         set.put_batch(buffers);
     }
 
+    /// Verifies the final removal clears and the next put restores the hint.
     #[test]
     fn test_last_take_clears_nonempty_hint() {
         let set = prefilled(1, 1);
@@ -963,23 +1125,39 @@ pub(super) mod tests {
         set.put(buffer);
         assert!(set.stripes[0].available.load(Ordering::Acquire));
     }
+
+    /// Verifies that the vector corrects a stale positive availability hint.
+    #[test]
+    fn test_stale_positive_hint_is_reconfirmed() {
+        let set = lazy(1, 1);
+
+        // This reproduces the state seen by a taker that loaded `true` before
+        // another taker removed the final slot and acquired the mutex later.
+        set.stripes[0].available.store(true, Ordering::Release);
+        assert!(set.take().is_none());
+        assert!(!set.stripes[0].available.load(Ordering::Acquire));
+    }
 }
 
+/// Exhaustive concurrency models for freelist ownership transfers.
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
     use commonware_utils::{NZU32, NZUsize};
     use loom::{sync::Arc, thread};
 
+    /// Small allocation layout used to keep model state compact.
     const TEST_LAYOUT: Layout = match Layout::from_size_align(8, 8) {
         Ok(layout) => layout,
         Err(_) => panic!("valid test layout"),
     };
 
+    /// Creates a fully available freelist for one Loom model.
     fn prefilled(capacity: u32) -> Freelist {
         Freelist::new(NZU32!(capacity), NZUsize!(1), TEST_LAYOUT, true)
     }
 
+    /// Verifies that a completed return is discoverable by a later take.
     #[test]
     fn completed_put_is_discoverable() {
         loom::model(|| {
@@ -1005,8 +1183,9 @@ mod loom_tests {
         });
     }
 
+    /// Verifies that two concurrent takers cannot claim one slot twice.
     #[test]
-    fn two_takers_cannot_claim_one_owner() {
+    fn two_takers_cannot_claim_one_slot() {
         loom::model(|| {
             let set = Arc::new(prefilled(1));
             let first = {
@@ -1025,8 +1204,9 @@ mod loom_tests {
         });
     }
 
+    /// Verifies that concurrent returns preserve both distinct slots.
     #[test]
-    fn concurrent_puts_preserve_both_owners() {
+    fn concurrent_puts_preserve_both_slots() {
         loom::model(|| {
             let set = Arc::new(Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false));
             let first = set.try_create(false).expect("first permit");
@@ -1043,18 +1223,19 @@ mod loom_tests {
             first_put.join().expect("first put must not panic");
             second_put.join().expect("second put must not panic");
 
-            let first = set.take().expect("first owner");
-            let second = set.take().expect("second owner");
-            assert_ne!(first.owner_index(), second.owner_index());
+            let first = set.take().expect("first slot");
+            let second = set.take().expect("second slot");
+            assert_ne!(first.slot(), second.slot());
             set.put_batch([first, second]);
         });
     }
 
+    /// Verifies that a positive locked stripe is waited on, not skipped.
     #[test]
     fn locked_stripe_is_not_reported_empty() {
         loom::model(|| {
             let set = Arc::new(prefilled(1));
-            let guard = lock(&set.stripes[0].free);
+            let guard = set.stripes[0].lock();
             let taker = {
                 let set = Arc::clone(&set);
                 thread::spawn(move || set.take())
@@ -1070,36 +1251,30 @@ mod loom_tests {
         });
     }
 
+    /// Verifies that a return waits for the only stripe's lock.
     #[test]
-    fn return_waits_for_locked_full_home() {
+    fn return_waits_for_locked_stripe() {
         loom::model(|| {
-            let set = Arc::new(Freelist::new(
-                NZU32!(2),
-                NZUsize!(2),
-                TEST_LAYOUT,
-                false,
-            ));
-            let first = set.try_create(false).expect("first creation permit");
-            let second = set.try_create(false).expect("second creation permit");
-            set.put_from(first, 0);
+            let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
+            let buffer = set.try_create(false).expect("creation permit");
 
-            let guard = lock(&set.stripes[0].free);
+            let guard = set.stripes[0].lock();
             let returner = {
                 let set = Arc::clone(&set);
-                thread::spawn(move || set.put_from(second, 0))
+                thread::spawn(move || set.put(buffer))
             };
             thread::yield_now();
             drop(guard);
             returner.join().expect("returner must not panic");
 
-            let first = set.take().expect("first returned buffer");
-            let second = set.take().expect("second returned buffer");
-            set.put_batch([first, second]);
+            let buffer = set.take().expect("returned buffer");
+            set.put(buffer);
         });
     }
 
+    /// Verifies that concurrent take and drain partition all parked slots.
     #[test]
-    fn take_and_drain_partition_owners() {
+    fn take_and_drain_partition_slots() {
         loom::model(|| {
             let set = Arc::new(prefilled(2));
             let taker = {

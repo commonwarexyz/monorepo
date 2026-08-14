@@ -16,7 +16,7 @@
 //! steady-state shape of multi-threaded freelist reuse.
 //!
 //! The benchmarked values are [`PooledBuffer`] handles backed by initialized
-//! benchmark owners, keeping the baseline container shape close to the real
+//! benchmark slots, keeping the baseline container shape close to the real
 //! freelist.
 
 use super::utils::{Pattern, Threading, measure};
@@ -46,14 +46,14 @@ const BENCH_LAYOUT: Layout =
         Err(_) => panic!("valid bench layout"),
     };
 
-/// Benchmark owner storage backing a set of [`PooledBuffer`] handles.
-type BenchOwners = Box<[CachePadded<UnsafeCell<PooledOwner>>]>;
+/// Benchmark slot storage backing a set of [`PooledBuffer`] handles.
+type BenchSlots = Box<[CachePadded<UnsafeCell<PooledOwner>>]>;
 
-fn new_buffers(capacity: usize) -> (BenchOwners, Vec<PooledBuffer>) {
-    let owners = (0..capacity)
-        .map(|owner_index| {
+fn new_buffers(capacity: usize) -> (BenchSlots, Vec<PooledBuffer>) {
+    let slots = (0..capacity)
+        .map(|slot| {
             CachePadded::new(UnsafeCell::new(PooledOwner::new(
-                owner_index as u32,
+                slot as u32,
                 BENCH_BUFFER_CAPACITY,
             )))
         })
@@ -61,16 +61,16 @@ fn new_buffers(capacity: usize) -> (BenchOwners, Vec<PooledBuffer>) {
         .into_boxed_slice();
 
     let buffers = (0..capacity)
-        .map(|owner_index| {
-            let owner_ptr = owners[owner_index].get();
-            let owner_ptr = NonNull::new(owner_ptr).expect("owner pointers are non-null");
-            // SAFETY: each benchmark owner is initialized once before the
+        .map(|slot| {
+            let slot_ptr = slots[slot].get();
+            let slot_ptr = NonNull::new(slot_ptr).expect("slot pointers are non-null");
+            // SAFETY: each benchmark slot is initialized once before the
             // buffer is published to a baseline container.
-            unsafe { PooledBuffer::new(owner_ptr, BENCH_LAYOUT, false) }
+            unsafe { PooledBuffer::new(slot_ptr, BENCH_LAYOUT, false) }
         })
         .collect();
 
-    (owners, buffers)
+    (slots, buffers)
 }
 
 trait FreelistImplementation: Send + Sync {
@@ -209,7 +209,7 @@ fn bench_name<S: FreelistImplementation>(
 }
 
 struct MutexVec {
-    _owners: BenchOwners,
+    _slots: BenchSlots,
     buffers: Mutex<Vec<PooledBuffer>>,
 }
 
@@ -225,9 +225,9 @@ impl FreelistImplementation for MutexVec {
     }
 
     fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
-        let (owners, buffers) = new_buffers(capacity);
+        let (slots, buffers) = new_buffers(capacity);
         Self {
-            _owners: owners,
+            _slots: slots,
             buffers: Mutex::new(buffers),
         }
     }
@@ -257,7 +257,7 @@ impl Drop for MutexVec {
 }
 
 struct ArrayQueueFreelist {
-    _owners: BenchOwners,
+    _slots: BenchSlots,
     queue: ArrayQueue<PooledBuffer>,
 }
 
@@ -273,13 +273,13 @@ impl FreelistImplementation for ArrayQueueFreelist {
     }
 
     fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
-        let (owners, buffers) = new_buffers(capacity);
+        let (slots, buffers) = new_buffers(capacity);
         let queue = ArrayQueue::new(capacity);
         for buffer in buffers {
             queue.push(buffer).expect("array queue prefill must fit");
         }
         Self {
-            _owners: owners,
+            _slots: slots,
             queue,
         }
     }
@@ -359,7 +359,7 @@ impl FreelistImplementation for Freelist {
             return;
         }
         // SAFETY: every held buffer was taken from this freelist by a distinct
-        // take, so owners are unique and each is returned exactly once. The
+        // take, so slots are unique and each is returned exactly once. The
         // drain iterator cannot panic.
         unsafe { self.put_batch(buffers.drain(..)) };
     }

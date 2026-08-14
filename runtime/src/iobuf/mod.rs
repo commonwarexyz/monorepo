@@ -5,7 +5,7 @@
 //! reference: runtime-owned heap buffers keep a header inside their own
 //! allocation (in front of the data for low-alignment mutable buffers, at the
 //! tail for high-alignment ones and adopted vecs), pooled buffers keep their
-//! owner record in a side table owned by the size class,
+//! owner record in a per-slot side table owned by the size class,
 //! caller-supplied `Vec<u8>` values converted to immutable buffers are adopted
 //! into the native heap form when their spare capacity allows (mutable
 //! conversions copy to preserve the caller's capacity), and caller-supplied
@@ -208,8 +208,8 @@ pub mod bench {
         ///
         /// # Safety
         ///
-        /// `buffer` must have been taken from this freelist and must not already
-        /// be available here.
+        /// `buffer` must have been taken from this freelist, and its slot must
+        /// not already be available here.
         #[inline]
         pub unsafe fn put(&self, buffer: PooledBuffer) {
             self.0.put(buffer);
@@ -222,8 +222,8 @@ pub mod bench {
         ///
         /// # Safety
         ///
-        /// Every buffer must have been taken from this freelist. Their owner
-        /// indices must be distinct and unavailable in the freelist.
+        /// Every buffer must have been taken from this freelist. Their slots
+        /// must be unique within the batch and unavailable in the freelist.
         #[inline]
         pub unsafe fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
             self.0.put_batch(buffers);
@@ -917,7 +917,7 @@ impl IoBufMut {
     ///
     /// # Safety
     ///
-    /// `buffer` must have an initialized live lease in its pooled owner.
+    /// `buffer` must have an initialized live lease in its pooled slot.
     #[inline]
     pub(crate) unsafe fn from_pooled_parts(buffer: PooledBuffer) -> Self {
         let cap = buffer.capacity();
