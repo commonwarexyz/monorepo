@@ -6801,6 +6801,29 @@ mod tests {
     }
 
     #[test]
+    fn pipelined_handoff_withholds_notarize_after_equivocation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+            prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            assert!(state.try_propose().is_some());
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(ours));
+
+            // The outgoing leader equivocates on the tip between building and
+            // voting: the vote must be withheld.
+            assert!(!state.set_proposal(View::new(5), fetch_proposal(5, 4, 99)));
+            assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    #[test]
     fn pipelined_handoff_keeps_peer_verification_explicit() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
