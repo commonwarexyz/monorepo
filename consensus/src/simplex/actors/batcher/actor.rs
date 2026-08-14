@@ -439,8 +439,9 @@ where
                     }
                 }
 
-                // The round may have been pruned while the batch was in
-                // flight; its votes are no longer needed.
+                // The round may have been pruned while the batch was in flight.
+                // The monotonic retention floor also gates vote admission, so a
+                // pruned view cannot be recreated and its votes are no longer needed.
                 let round = work.get_mut(&view)?;
                 let _guard = round.span().entered();
                 trace!(%view, batch, "batch verified votes");
