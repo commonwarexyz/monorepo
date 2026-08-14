@@ -35,11 +35,10 @@ pub(super) const SLOTS: usize = 4;
 /// Rounds of slot rescanning (with a spin hint between rounds) a worker performs after
 /// running out of work, before it registers idle and parks.
 ///
-/// This window is what absorbs intra-commit burst trains (e.g. merkleize submits ~15
-/// back-to-back per-level jobs per commit); parking between levels would pay an unpark
-/// per worker per level. Set by measurement via the burst-train gate bench; it does not
-/// reintroduce the idle tax because it only holds a worker awake immediately after work
-/// existed, and is bounded in microseconds.
+/// This window absorbs trains of back-to-back submissions: parking between two jobs in a
+/// train would pay an unpark per worker per job. Set by measurement via the burst-train
+/// gate bench; it does not reintroduce the idle tax because it only holds a worker awake
+/// immediately after work existed, and is bounded in microseconds.
 #[cfg(not(feature = "loom"))]
 pub(super) const SEARCH_ROUNDS: usize = 64;
 #[cfg(feature = "loom")]

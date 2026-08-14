@@ -44,7 +44,7 @@ pub(super) const MIN_CHUNK: usize = 32;
 pub(super) const MIN_CHUNK: usize = 1;
 
 /// Payload of a caught chunk panic.
-type Payload = Box<dyn core::any::Any + Send + 'static>;
+pub(super) type Payload = Box<dyn core::any::Any + Send + 'static>;
 
 /// Control surface a body may use to stop further claims (fallible operations record their
 /// error and close; infallible bodies ignore it).
@@ -55,9 +55,7 @@ pub(super) struct Ctl<'a> {
 impl Ctl<'_> {
     /// Closes the job: no further ranges will be claimed. In-flight chunks finish normally.
     pub(super) fn close(&self) {
-        self.job.closed.store(true, Ordering::SeqCst);
-        // Executing-vs-close handshake (see drive).
-        fence(Ordering::SeqCst);
+        self.job.close();
     }
 }
 
@@ -82,8 +80,9 @@ pub(super) struct Job {
     call: unsafe fn(*const (), Range<usize>, &Ctl<'_>),
     /// Total number of items.
     len: usize,
-    /// Executor count hint for chunk sizing (workers + caller).
-    executors: usize,
+    /// Maximum concurrent executors for this job (the strategy's parallelism): the
+    /// participant cap, and the divisor for guided chunk sizing.
+    max_executors: usize,
     /// Claim cursor: the next unclaimed index. Monotonic; claims are `[start, start + c)`.
     next: AtomicUsize,
     /// Executors currently inside [`drive`] for this job. Capped at `executors` so a single
@@ -108,14 +107,18 @@ pub(super) struct Job {
 unsafe impl Sync for Job {}
 
 impl Job {
-    fn new<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(body: &F, len: usize, executors: usize) -> Self {
+    fn new<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(
+        body: &F,
+        len: usize,
+        max_executors: usize,
+    ) -> Self {
         Self {
             // The one lifetime erasure: sound per the module safety model, because `run`
             // keeps `body`'s frame alive until no executor can reach this pointer.
             data: body as *const F as *const (),
             call: call_shim::<F>,
             len,
-            executors: executors.max(1),
+            max_executors: max_executors.max(1),
             next: AtomicUsize::new(0),
             participants: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
@@ -125,6 +128,13 @@ impl Job {
             latch: Mutex::new(false),
             latch_cv: Condvar::new(),
         }
+    }
+
+    /// Closes the job: no further ranges will be claimed. In-flight chunks finish normally.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        // Executing-vs-close handshake (see drive).
+        fence(Ordering::SeqCst);
     }
 
     /// Records a panic payload (first wins) and closes the job. A losing payload is dropped
@@ -140,9 +150,7 @@ impl Job {
                 Some(payload)
             }
         };
-        self.closed.store(true, Ordering::SeqCst);
-        // Executing-vs-close handshake (see drive).
-        fence(Ordering::SeqCst);
+        self.close();
         if let Some(payload) = losing {
             if let Err(second) = panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
                 // A payload whose Drop panics with ANOTHER Drop-panicking payload: leak it
@@ -200,7 +208,7 @@ impl Job {
     /// tiny jobs from being shredded into per-item claims, where the SeqCst claim/handshake
     /// traffic would dwarf the work itself.
     fn chunk(&self, remaining: usize) -> usize {
-        (remaining / (2 * self.executors)).max(MIN_CHUNK)
+        (remaining / (2 * self.max_executors)).max(MIN_CHUNK)
     }
 }
 
@@ -222,7 +230,7 @@ fn finish_executing(job: &Job) {
 pub(super) fn drive(job: &Job) -> bool {
     // Participant cap: a single job never runs on more executors than the pool's
     // parallelism; excess workers leave immediately and can park.
-    if job.participants.fetch_add(1, Ordering::SeqCst) >= job.executors {
+    if job.participants.fetch_add(1, Ordering::SeqCst) >= job.max_executors {
         job.participants.fetch_sub(1, Ordering::SeqCst);
         return false;
     }
@@ -308,6 +316,32 @@ impl Slot {
         self.state.load(Ordering::SeqCst) == PUBLISHED
     }
 
+    /// Pins the slot and, if it holds a published job, calls `f` on it; `None` when the
+    /// slot is not published. `f` must not unwind: an unwind would leak the pin and hang
+    /// `unpublish` forever.
+    fn with_pinned<R>(&self, f: impl FnOnce(&Job) -> R) -> Option<R> {
+        // Pin FIRST, then validate: the unpublisher stores DRAINING before waiting on
+        // `pins`, so a pin taken after the store observes non-PUBLISHED and unpins without
+        // touching the pointer, and a pin taken before the store is waited out.
+        self.pins.fetch_add(1, Ordering::SeqCst);
+        // Pin-vs-unpublish handshake: order our pin before the state check against the
+        // unpublisher's DRAINING-store-then-pins-check.
+        fence(Ordering::SeqCst);
+        let out = if self.state.load(Ordering::SeqCst) == PUBLISHED {
+            let ptr = self.job.load(Ordering::SeqCst);
+            debug_assert!(!ptr.is_null(), "PUBLISHED slot with null job");
+            // SAFETY: PUBLISHED observed while pinned. Unpublishing stores DRAINING and
+            // then waits for `pins == 0` before the job frame may die, and re-installation
+            // requires the slot to first reach EMPTY (after that wait), so our pin keeps
+            // this exact referent alive until we unpin.
+            Some(f(unsafe { &*ptr }))
+        } else {
+            None
+        };
+        self.pins.fetch_sub(1, Ordering::SeqCst);
+        out
+    }
+
     /// Whether this slot holds work a new executor could actually claim (racy by design).
     ///
     /// Distinguishes "published" from "claimable": a job whose ranges are all claimed (or
@@ -315,49 +349,22 @@ impl Slot {
     /// worker, and treating it as work would keep every worker hot-spinning for the
     /// duration of a straggler chunk.
     pub(super) fn looks_claimable(&self) -> bool {
+        // Unpinned pre-check: this probe runs in every idle-scan round.
         if self.state.load(Ordering::SeqCst) != PUBLISHED {
             return false;
         }
-        self.pins.fetch_add(1, Ordering::SeqCst);
-        // Pin-vs-unpublish handshake: order our pin before the state check against the
-        // unpublisher's DRAINING-store-then-pins-check.
-        fence(Ordering::SeqCst);
-        let claimable = if self.state.load(Ordering::SeqCst) == PUBLISHED {
-            let ptr = self.job.load(Ordering::SeqCst);
-            debug_assert!(!ptr.is_null(), "PUBLISHED slot with null job");
-            // SAFETY: PUBLISHED observed while pinned; see `try_drive`.
-            let job = unsafe { &*ptr };
+        self.with_pinned(|job| {
             !job.closed.load(Ordering::SeqCst)
                 && job.next.load(Ordering::SeqCst) < job.len
-                && job.participants.load(Ordering::SeqCst) < job.executors
-        } else {
-            false
-        };
-        self.pins.fetch_sub(1, Ordering::SeqCst);
-        claimable
+                && job.participants.load(Ordering::SeqCst) < job.max_executors
+        })
+        .unwrap_or(false)
     }
 
     /// Pins the slot and, if it holds a published job, drives it. Returns whether any chunk
     /// was executed. Safe to call from any worker at any time.
     pub(super) fn try_drive(&self) -> bool {
-        // Pin FIRST, then validate: the unpublisher stores DRAINING before waiting on
-        // `pins`, so a pin taken after the store observes non-PUBLISHED and unpins without
-        // touching the pointer, and a pin taken before the store is waited out.
-        self.pins.fetch_add(1, Ordering::SeqCst);
-        // Pin-vs-unpublish handshake (see looks_claimable).
-        fence(Ordering::SeqCst);
-        let executed = if self.state.load(Ordering::SeqCst) == PUBLISHED {
-            let ptr = self.job.load(Ordering::SeqCst);
-            // SAFETY: `state == PUBLISHED` observed while pinned. Unpublishing stores
-            // DRAINING and then waits for `pins == 0` before the job frame may die, and
-            // re-installation requires the slot to first reach EMPTY (after that wait), so
-            // our pin keeps this exact referent alive until we unpin.
-            drive(unsafe { &*ptr })
-        } else {
-            false
-        };
-        self.pins.fetch_sub(1, Ordering::SeqCst);
-        executed
+        self.with_pinned(drive).unwrap_or(false)
     }
 
     /// Attempts to publish `job` into this slot. Returns false if the slot is not empty.
@@ -423,8 +430,8 @@ pub(super) fn run<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(
     }
 
     // The participant cap is the STRATEGY's parallelism (the caller plus helpers), which
-    // may differ from the pool's worker count (`with_parallelism`); a single job never
-    // runs on more executors than the strategy plans for.
+    // may differ from the pool's worker count; a single job never runs on more executors
+    // than the strategy plans for.
     let cap = parallelism.max(1);
     let job = Job::new(body, len, cap);
     // Publish before waking so woken workers find the job. Overflow (no empty slot) means

@@ -7,19 +7,23 @@
 //! would take the Serial arm and the models would explore nothing), while the explored
 //! thread count stays small.
 //!
-//! Race coverage (numbering per the plan):
-//! - Races 1/2 (submit-vs-park, spurious wakes) and the sync-caller half of race 5 are
+//! Coverage by protocol:
+//! - Submit-vs-park (the register-then-recheck handshake) and spurious wakes:
 //!   interleavings of [`loom_map_completes`] and [`loom_concurrent_submitters`].
-//! - Races 3/7 (wake claiming, registration withdrawal) require a nonzero wake budget and
-//!   are exercised by [`loom_wake_dispatch`] (two workers, so `wake` runs its CAS loop).
-//! - Race 4 (shutdown vs parked worker): [`loom_shutdown_with_parked_worker`].
-//! - Race 6 (caller-only completion): explored within [`loom_map_completes`] whenever the
+//! - Wake claiming and registration withdrawal (need a nonzero wake budget):
+//!   [`loom_wake_dispatch`], whose two workers make `wake` run its CAS loop and let two
+//!   executors share one job (last-finisher arbitration, concurrent completion counting).
+//! - Shutdown vs a parked worker: [`loom_shutdown_with_parked_worker`].
+//! - Caller-only completion: explored within [`loom_map_completes`] whenever the
 //!   scheduler never runs the worker.
-//! - Race 8 (overflow never blocks) is deterministic logic, covered by
+//! - Slot-table overflow never blocks: deterministic logic, covered by
 //!   `tests::test_nested_submission_and_overflow_inline`.
-//! - Race 9 (pin acquisition vs unpublish): [`loom_slot_reuse_does_not_touch_dead_frame`].
-//! - Close-vs-claim backout (the executing-before-claim protocol):
+//! - Pin acquisition vs unpublish (the frame-liveness guarantee):
+//!   [`loom_slot_reuse_does_not_touch_dead_frame`].
+//! - Close-vs-claim backout (the executing-before-claim handshake):
 //!   [`loom_error_close_backout`].
+//! - Spawn completion for awaited and detached futures:
+//!   [`loom_spawn_completes_and_detached_runs`].
 
 use super::*;
 use loom::sync::atomic::{AtomicBool as LoomBool, Ordering as LoomOrdering};
@@ -121,9 +125,13 @@ fn loom_wake_dispatch() {
 #[test]
 fn loom_spawn_completes_and_detached_runs() {
     model(|| {
-        // Async-awaiter waiter type (race 5) + detached completion: one awaited spawn and
-        // one dropped-future spawn must both execute, on every interleaving, and shutdown
-        // must drain whatever the worker has not yet taken.
+        // One awaited spawn and one dropped-future (detached) spawn must both execute on
+        // every interleaving. The detached job holds an owner clone, so the pool cannot
+        // shut down before it runs; its flag is checked from inside the job of a SECOND
+        // pool via a channel-free handshake: we simply require that by the time the
+        // detached job's own owner clone is dropped, the store happened (asserted by the
+        // model completing with all threads terminated and the load below observing it
+        // only after join in Owner::drop on the main thread).
         let strategy = Parked::new(NonZeroUsize::new(2).unwrap());
         let ran = loom::sync::Arc::new(LoomBool::new(false));
         {
@@ -132,7 +140,10 @@ fn loom_spawn_completes_and_detached_runs() {
         }
         let out = futures::executor::block_on(strategy.spawn(|_| 5u8));
         assert_eq!(out, 5);
-        drop(strategy); // shutdown drains the detached job if no worker took it
+        // Owner::drop joins the workers (main is not a pool member), and workers cannot
+        // exit while the detached job's owner clone keeps the pool alive, so the store is
+        // ordered before this load.
+        drop(strategy);
         assert!(ran.load(LoomOrdering::SeqCst));
     });
 }

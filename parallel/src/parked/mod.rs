@@ -6,8 +6,8 @@
 //! core ([`scoped`]) in which the submitting caller participates. `spawn` hands one-shots to
 //! an unbounded queue eagerly (a dropped future still runs its job) with a member-poller
 //! help path (a pool worker polling a spawn future of its own pool runs pending work
-//! instead of parking the only capable worker). `join` and `sort_by` are TEMPORARY serial
-//! implementations until increment C.
+//! instead of parking the only capable worker). `join` and `sort_by` currently execute
+//! serially on the caller.
 //!
 //! Pools with more than one worker always hand `spawn` jobs off to a worker; single-worker
 //! pools execute them inline at submission (matching `Rayon` at one thread), so jobs that
@@ -41,7 +41,7 @@ use sync::{Arc, Mutex, WorkerHandle, spawn_worker};
 /// Sends the pool into shutdown when the last `Parked` handle drops.
 struct Owner {
     shared: Arc<Shared>,
-    workers: Mutex<Vec<WorkerHandle>>,
+    workers: Vec<WorkerHandle>,
 }
 
 impl Drop for Owner {
@@ -53,8 +53,7 @@ impl Drop for Owner {
         if pool::is_member(&self.shared) {
             return;
         }
-        let handles: Vec<WorkerHandle> = self.workers.lock().unwrap().drain(..).collect();
-        for handle in handles {
+        for handle in self.workers.drain(..) {
             let _ = handle.join();
         }
     }
@@ -63,14 +62,25 @@ impl Drop for Owner {
 /// A parallel execution strategy backed by parked worker threads.
 ///
 /// See the module docs. `Parked::new(n)` spawns `n` background workers; a collection
-/// operation wakes at most `n - 1` of them so that, with the participating caller, a single
-/// job's executor count equals the configured parallelism.
+/// operation wakes only as many as it has claimable chunks (at most `n - 1`), so that with
+/// the participating caller a single job never exceeds the configured parallelism.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_parallel::{Parked, Strategy};
+/// use std::num::NonZeroUsize;
+///
+/// let strategy = Parked::new(NonZeroUsize::new(2).unwrap());
+/// let doubled = strategy.map_collect_vec(0..8u64, |i| i * 2);
+/// assert_eq!(doubled, (0..8u64).map(|i| i * 2).collect::<Vec<_>>());
+/// ```
 #[derive(Clone)]
 pub struct Parked {
     shared: Arc<Shared>,
-    _owner: Arc<Owner>,
+    owner: Arc<Owner>,
     // The parallelism assumed for policy decisions and manual partitioning.
-    parallelism: usize,
+    parallelism: NonZeroUsize,
     // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs
     // the parallel body whenever the parallelism exceeds one.
     policy: Option<policy::Policy>,
@@ -87,6 +97,10 @@ impl fmt::Debug for Parked {
 
 impl Parked {
     /// Creates a `Parked` strategy with `workers` background worker threads.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a worker thread cannot be spawned.
     pub fn new(workers: NonZeroUsize) -> Self {
         let shared = Arc::new(Shared::new(workers.get()));
         let handles: Vec<WorkerHandle> = (0..workers.get())
@@ -97,11 +111,11 @@ impl Parked {
             .collect();
         Self {
             shared: Arc::clone(&shared),
-            _owner: Arc::new(Owner {
+            owner: Arc::new(Owner {
                 shared,
-                workers: Mutex::new(handles),
+                workers: handles,
             }),
-            parallelism: workers.get(),
+            parallelism: workers,
             policy: Some(policy::Policy::default()),
         }
     }
@@ -111,7 +125,7 @@ impl Parked {
     /// This does not resize the pool. By default a strategy plans with its worker count;
     /// override it when the strategy should expose a different parallelism.
     pub fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
-        self.parallelism = parallelism.get();
+        self.parallelism = parallelism;
         self
     }
 
@@ -138,7 +152,7 @@ impl Parked {
         run: impl FnOnce(policy::Execution) -> Result<R, E>,
     ) -> Result<R, E> {
         let Some(policy) = &self.policy else {
-            let execution = if self.parallelism <= 1 {
+            let execution = if self.parallelism.get() <= 1 {
                 policy::Execution::Serial
             } else {
                 policy::Execution::Parallel
@@ -147,7 +161,7 @@ impl Parked {
         };
 
         let work = len.saturating_mul(multiplier);
-        policy.try_run(Location::caller(), len, work, self.parallelism, run)
+        policy.try_run(Location::caller(), len, work, self.parallelism.get(), run)
     }
 }
 
@@ -180,6 +194,48 @@ impl<T> Ptr<T> {
 unsafe impl<T: Send> Send for Ptr<T> {}
 // SAFETY: see above; concurrent executors access disjoint indexes only.
 unsafe impl<T: Send> Sync for Ptr<T> {}
+
+/// Unwraps a `Result` whose error type is uninhabited.
+fn infallible<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(e) => match e {},
+    }
+}
+
+/// Records `e` as the operation's error if none is recorded yet; later errors are dropped.
+fn record_first<E>(slot: &Mutex<Option<E>>, e: E) {
+    let mut slot = slot.lock().unwrap();
+    if slot.is_none() {
+        *slot = Some(e);
+    }
+}
+
+/// Resolves a failed scoped run after cleanup ran under `catch_unwind`: the first chunk
+/// panic wins, then a cleanup panic, then the recorded error. Superseded payloads and
+/// errors are leaked rather than dropped mid-unwind (a panicking `Drop` would abort).
+fn resolve_failure<E>(
+    chunk_panic: Option<scoped::Payload>,
+    cleanup: Result<(), scoped::Payload>,
+    error: Option<E>,
+) -> E {
+    if let Some(payload) = chunk_panic {
+        if let Err(second) = cleanup {
+            core::mem::forget(second);
+        }
+        if let Some(e) = error {
+            core::mem::forget(e);
+        }
+        panic::resume_unwind(payload);
+    }
+    if let Err(payload) = cleanup {
+        if let Some(e) = error {
+            core::mem::forget(e);
+        }
+        panic::resume_unwind(payload);
+    }
+    error.expect("failure without panic must carry an error")
+}
 
 /// The scoped map core shared by every `map*_collect_vec` variant.
 ///
@@ -256,12 +312,7 @@ where
         match result {
             Ok(None) => done.lock().unwrap().push(range),
             Ok(Some(e)) => {
-                {
-                    let mut slot = error.lock().unwrap();
-                    if slot.is_none() {
-                        *slot = Some(e);
-                    }
-                }
+                record_first(&error, e);
                 ctl.close();
                 clean_chunk(&range);
             }
@@ -293,23 +344,7 @@ where
                 unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
             }
         }));
-        if let Some(payload) = outcome.panic {
-            // The chunk payload wins; leak secondary payloads rather than panic-in-unwind.
-            if let Err(second) = cleanup {
-                core::mem::forget(second);
-            }
-            if let Some(e) = error {
-                core::mem::forget(e);
-            }
-            panic::resume_unwind(payload);
-        }
-        if let Err(payload) = cleanup {
-            if let Some(e) = error {
-                core::mem::forget(e);
-            }
-            panic::resume_unwind(payload);
-        }
-        return Err(error.expect("failure without panic must carry an error"));
+        return Err(resolve_failure(outcome.panic, cleanup, error));
     }
 
     // SAFETY: every index in `0..n` was written exactly once by a completed chunk.
@@ -370,12 +405,7 @@ where
         match result {
             Ok(Ok(acc)) => partials.lock().unwrap().push((range.start, acc)),
             Ok(Err(e)) => {
-                {
-                    let mut slot = error.lock().unwrap();
-                    if slot.is_none() {
-                        *slot = Some(e);
-                    }
-                }
+                record_first(&error, e);
                 ctl.close();
                 clean_rest();
             }
@@ -400,24 +430,7 @@ where
                 unsafe { ptr::drop_in_place(in_ptr.get().add(j)) };
             }
         }));
-        if let Some(payload) = outcome.panic {
-            // The chunk payload wins; a cleanup panic during unwind would abort, so leak
-            // its payload instead.
-            if let Err(second) = cleanup {
-                core::mem::forget(second);
-            }
-            if let Some(e) = error {
-                core::mem::forget(e);
-            }
-            panic::resume_unwind(payload);
-        }
-        if let Err(payload) = cleanup {
-            if let Some(e) = error {
-                core::mem::forget(e);
-            }
-            panic::resume_unwind(payload);
-        }
-        return Err(error.expect("failure without panic must carry an error"));
+        return Err(resolve_failure(outcome.panic, cleanup, error));
     }
     let mut partials = partials.into_inner().unwrap();
     // Chunk starts are unique; stable sort restores input-segment order cheaply since
@@ -431,11 +444,11 @@ impl Strategy for Parked {
         Manual::new(
             Self {
                 shared: Arc::clone(&self.shared),
-                _owner: Arc::clone(&self._owner),
+                owner: Arc::clone(&self.owner),
                 parallelism: self.parallelism,
                 policy: None,
             },
-            NonZeroUsize::new(self.parallelism).expect("parallelism is nonzero"),
+            self.parallelism,
         )
     }
 
@@ -446,8 +459,8 @@ impl Strategy for Parked {
     {
         // Mirror Rayon: a single-worker pool executes inline (offloading to the only
         // worker could deadlock a job that waits on work only the submitter can create).
-        // A pool already shutting down also executes inline: post-close submissions are
-        // the submitter's own work by contract.
+        // The shutdown arm is a backstop: callers hold an owner clone, so a live handle
+        // implies a live pool, and the arm is unreachable through public use.
         if self.shared.workers() <= 1 || self.shared.is_shutdown() {
             return Either::Left(future::ready(f(self.clone())));
         }
@@ -541,16 +554,15 @@ impl Strategy for Parked {
             policy::Execution::Parallel => {
                 let partials = scoped_fold(
                     &self.shared,
-                    self.parallelism,
+                    self.parallelism.get(),
                     items,
                     &init,
                     &identity,
                     |acc, state, item| Ok::<_, Infallible>(fold_op(acc, state, item)),
                 );
-                match partials {
-                    Ok(partials) => partials.into_iter().fold(identity(), &reduce_op),
-                    Err(e) => match e {},
-                }
+                infallible(partials)
+                    .into_iter()
+                    .fold(identity(), &reduce_op)
             }
         })
     }
@@ -577,7 +589,7 @@ impl Strategy for Parked {
             policy::Execution::Parallel => {
                 let partials = scoped_fold(
                     &self.shared,
-                    self.parallelism,
+                    self.parallelism.get(),
                     items,
                     || (),
                     &identity,
@@ -601,15 +613,12 @@ impl Strategy for Parked {
             policy::Execution::Parallel => {
                 let out = scoped_map(
                     &self.shared,
-                    self.parallelism,
+                    self.parallelism.get(),
                     items,
                     || (),
                     |_state: &mut (), item| Ok::<_, Infallible>(map_op(item)),
                 );
-                match out {
-                    Ok(out) => out,
-                    Err(e) => match e {},
-                }
+                infallible(out)
             }
         })
     }
@@ -627,7 +636,7 @@ impl Strategy for Parked {
             policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
             policy::Execution::Parallel => scoped_map(
                 &self.shared,
-                self.parallelism,
+                self.parallelism.get(),
                 items,
                 || (),
                 |_state: &mut (), item| map_op(item),
@@ -644,23 +653,7 @@ impl Strategy for Parked {
         F: Fn(&mut T, I::Item) -> R + Send + Sync,
         R: Send,
     {
-        let items: Vec<I::Item> = iter.into_iter().collect();
-        self.execute(items.len(), 1, |execution| match execution {
-            policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-            policy::Execution::Parallel => {
-                let out = scoped_map(
-                    &self.shared,
-                    self.parallelism,
-                    items,
-                    &init,
-                    |state, item| Ok::<_, Infallible>(map_op(state, item)),
-                );
-                match out {
-                    Ok(out) => out,
-                    Err(e) => match e {},
-                }
-            }
-        })
+        self.map_init_collect_vec_with_multiplier(iter, 1, init, map_op)
     }
 
     #[track_caller]
@@ -684,15 +677,12 @@ impl Strategy for Parked {
             policy::Execution::Parallel => {
                 let out = scoped_map(
                     &self.shared,
-                    self.parallelism,
+                    self.parallelism.get(),
                     items,
                     &init,
                     |state, item| Ok::<_, Infallible>(map_op(state, item)),
                 );
-                match out {
-                    Ok(out) => out,
-                    Err(e) => match e {},
-                }
+                infallible(out)
             }
         })
     }
@@ -704,8 +694,8 @@ impl Strategy for Parked {
         RA: Send,
         RB: Send,
     {
-        // TEMPORARY (increment A): serial. The handoff-slot join lands in increment C.
-        // No policy involvement so temporary timings cannot pollute adaptive estimates.
+        // Serial for now; kept off the adaptive policy so serial timings cannot pollute
+        // its estimates when a parallel implementation lands.
         (a(), b())
     }
 
@@ -715,9 +705,8 @@ impl Strategy for Parked {
         T: Send,
         C: Fn(&T, &T) -> CmpOrdering + Send + Sync,
     {
-        // TEMPORARY (increment A): serial stable sort. The join-based parallel sort lands
-        // in increment C. No policy involvement so temporary timings cannot pollute
-        // adaptive estimates.
+        // Serial stable sort for now; kept off the adaptive policy so serial timings
+        // cannot pollute its estimates when a parallel implementation lands.
         items.sort_by(compare);
     }
 }

@@ -6,8 +6,10 @@
 //!
 //! - `gate_saturated_parity`: `map_init_collect_vec` throughput at saturation vs `Rayon`.
 //! - `gate_fairness_long_short`: short-job latency while a long job monopolizes a slot.
-//! - `gate_burst_train`: back-to-back small jobs at merkleize per-level sizes; this is the
-//!   bench that sets `SEARCH_ROUNDS` (the Searching-window tunable) by measurement.
+//! - `gate_burst_train`: back-to-back small jobs in halving sizes; this is the bench that
+//!   sets `SEARCH_ROUNDS` (the Searching-window tunable) and `MIN_CHUNK` by measurement.
+//! - `gate_spawn_roundtrip`: hand-off + wake + completion latency of one spawned job with
+//!   interleaved caller work.
 
 use super::*;
 use crate::Rayon;

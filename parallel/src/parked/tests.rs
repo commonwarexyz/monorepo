@@ -139,8 +139,8 @@ fn test_try_fold_ok_and_err() {
 
 #[test]
 fn test_fold_init_order_matches_sequential_non_commutative() {
-    // reduce_op is associative but NOT commutative (Vec concatenation): the trait contract
-    // (codified by the crate's proptest suite against Rayon) requires input-segment order.
+    // reduce_op is associative but NOT commutative (Vec concatenation): partials must be
+    // reduced in input-segment order, matching Sequential and Rayon.
     let strategy = parked(4);
     let expected = Sequential.fold_init(
         0..N as u64,
@@ -176,29 +176,17 @@ fn test_fold_init_order_matches_sequential_non_commutative() {
 #[test]
 fn test_map_partition_collect_vec() {
     let strategy = parked(4);
-    let (evens, odds) = strategy
-        .manual()
-        .map_partition_collect_vec(0..N as u64, |i| {
-            if i % 2 == 0 {
-                (i, Some(i * 10))
-            } else {
-                (i, None)
-            }
-        });
-    let mut evens = evens;
-    let mut odds = odds;
-    evens.sort_unstable();
-    odds.sort_unstable();
+    let op = |i: u64| {
+        if i % 2 == 0 {
+            (i, Some(i * 10))
+        } else {
+            (i, None)
+        }
+    };
+    let expected = Sequential.map_partition_collect_vec(0..N as u64, op);
     assert_eq!(
-        evens,
-        (0..N as u64)
-            .filter(|i| i % 2 == 0)
-            .map(|i| i * 10)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        odds,
-        (0..N as u64).filter(|i| i % 2 == 1).collect::<Vec<_>>()
+        strategy.manual().map_partition_collect_vec(0..N as u64, op),
+        expected
     );
 }
 
@@ -259,6 +247,38 @@ fn test_single_worker_pool() {
         strategy.map_collect_vec(0..N as u64, |i| i * 2),
         strategy.manual().map_collect_vec(0..N as u64, |i| i * 2),
     );
+}
+
+#[test]
+fn test_with_parallelism_one_takes_serial_arm() {
+    // Workers exist but planning parallelism is 1: manual (policy=None) must choose Serial.
+    let strategy = parked(4).with_parallelism(NonZeroUsize::new(1).unwrap());
+    assert_eq!(
+        strategy.manual().run(N, || "serial", || "parallel"),
+        "serial"
+    );
+    let out = strategy.manual().map_collect_vec(0..N as u64, |i| i + 1);
+    assert_eq!(out, (1..=N as u64).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_with_parallelism_above_workers() {
+    // Participant cap (8) exceeds workers + caller (3): budget clamps to pool.workers().
+    let strategy = parked(2).with_parallelism(NonZeroUsize::new(8).unwrap());
+    let expected = Sequential.map_collect_vec(0..N as u64, |i| i ^ 5);
+    assert_eq!(
+        strategy.manual().map_collect_vec(0..N as u64, |i| i ^ 5),
+        expected
+    );
+}
+
+#[test]
+fn test_single_worker_spawn_executes_inline() {
+    use futures::FutureExt;
+    // A 1-worker pool executes spawn at submission; the future is already resolved.
+    let strategy = parked(1);
+    assert_eq!(strategy.spawn(|_| 7u8).now_or_never(), Some(7));
+    assert_eq!(strategy.manual().spawn(|_| 8u8).now_or_never(), Some(8));
 }
 
 #[test]
@@ -572,8 +592,29 @@ fn test_manual_spawn_hands_off_blocking_jobs() {
 }
 
 #[test]
-fn test_smoke_map() {
-    let strategy = parked(2);
-    let out = strategy.manual().map_collect_vec(0..64u64, |i| i * 2);
-    assert_eq!(out, (0..64u64).map(|i| i * 2).collect::<Vec<_>>());
+fn test_boundary_lengths_match_sequential() {
+    // len 0 exercises scoped::run's early return after scoped_map's set_len(0);
+    // len == MIN_CHUNK yields a zero wake budget (caller-only); MIN_CHUNK + 1 wakes one.
+    let strategy = parked(4);
+    for n in [
+        0usize,
+        1,
+        scoped::MIN_CHUNK - 1,
+        scoped::MIN_CHUNK,
+        scoped::MIN_CHUNK + 1,
+        3 * scoped::MIN_CHUNK + 1,
+    ] {
+        let expected = Sequential.map_collect_vec(0..n as u64, |i| i * 3 + 1);
+        assert_eq!(
+            strategy
+                .manual()
+                .map_collect_vec(0..n as u64, |i| i * 3 + 1),
+            expected,
+            "n={n}"
+        );
+        let sum: u64 = strategy
+            .manual()
+            .fold(0..n as u64, || 0u64, |a, i| a + i, |a, b| a + b);
+        assert_eq!(sum, (0..n as u64).sum::<u64>(), "n={n}");
+    }
 }
