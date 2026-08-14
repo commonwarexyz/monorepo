@@ -17,8 +17,8 @@
 //!
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
-//! Electors that can name a leader before the certificate unlocking its round exists may
-//! implement [`Elector::elect_ahead`] to support pipelined handoffs.
+//! An elector can support pipelined handoffs when it can select a leader before the round's
+//! unlocking certificate exists. See [`Elector::elect_ahead`].
 //!
 //! # Usage
 //!
@@ -242,8 +242,8 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// unlock the round. Certificate-derived electors such as
     /// [`RandomElector`] cannot elect ahead.
     ///
-    /// The voter may call this several times per view, so implementations
-    /// should answer from precomputed state.
+    /// The voter may call this method several times per view. Electors should
+    /// return a precomputed result.
     ///
     /// This is local policy: participants with different settings interoperate.
     /// The default opts out.
@@ -320,12 +320,13 @@ impl<H: Hasher> RoundRobin<H> {
 
     /// Enables pipelined handoffs (see [Pipelined Handoff]). When this
     /// participant leads the term starting at view `v`, it proposes during
-    /// view `v - 1` on that view's proposal, before the proposal notarizes.
+    /// view `v - 1` and uses the `v - 1` proposal as its parent. It does not
+    /// wait for the parent to notarize.
     /// Rotating terms (the default) benefit most: every view is a handoff.
     ///
-    /// This trusts the leader of `v - 1`: if the parent proposal never
-    /// notarizes, the pipelined proposal fails with it. Like the stall
-    /// timeout and lookahead, this is local policy.
+    /// The incoming leader trusts the leader of `v - 1` not to equivocate.
+    /// If the parent never notarizes, validators cannot use the pipelined
+    /// proposal. This setting is local policy.
     ///
     /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
     pub const fn with_pipelined_handoff(mut self) -> Self {
