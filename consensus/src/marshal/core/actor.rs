@@ -952,7 +952,6 @@ where
     {
         let mut handled = false;
         let mut produces = Vec::new();
-        let mut serves = Vec::new();
         let mut delivers = Vec::new();
 
         // Drain up to max_repair resolver messages. Block deliveries are handled
@@ -968,13 +967,9 @@ where
             handled = true;
 
             match msg {
-                handler::Message::Produce { key, response } => match key {
-                    // Finalized keys read only the finalized stores, so the serving task
-                    // answers them off this loop. Held until the batch tail, like the inline
-                    // produces, so a height this batch stored is written before the read.
-                    Key::Finalized { height } => serves.push((height, response)),
-                    key => produces.push((key, response)),
-                },
+                handler::Message::Produce { key, response } => {
+                    produces.push((key, response));
+                }
                 handler::Message::Deliver {
                     delivery,
                     value,
@@ -1025,15 +1020,7 @@ where
         let round = self.floor.round();
         self = self.start_finalized_sync(round, syncs).await;
 
-        // Hand the finalized requests off now that this batch's writes have completed, so
-        // every height this batch stored is servable.
-        for (height, response) in serves {
-            if !response.is_closed() {
-                self.storage.serve(height, response);
-            }
-        }
-
-        // Handle the remaining produce requests in parallel.
+        // Handle produce requests in parallel.
         join_all(
             produces
                 .into_iter()
@@ -1061,10 +1048,10 @@ where
                 };
                 response.send_lossy(block.encode());
             }
-            Key::Finalized { .. } => {
-                // Routed to the serving task before the batch reaches this point (see
-                // `handle_resolver_message`).
-                unreachable!("finalized produces are served by the serving task")
+            Key::Finalized { height } => {
+                // Runs at the batch tail, after the batch's writes, so a height this
+                // batch stored is servable. The serving task replies directly.
+                self.storage.serve(height, response);
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
