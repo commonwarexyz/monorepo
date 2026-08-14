@@ -222,7 +222,8 @@ where
         )
         .await;
 
-        // Put both stores behind the lock and start the backfill-serving task.
+        // Put both stores behind the lock and start the backfill-serving task. A resolver
+        // batch forwards at most `max_repair` requests, so one batch always fits the channel.
         let storage = finalized::new::<_, V, _, _>(
             context.child("storage"),
             finalizations_by_height,
