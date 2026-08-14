@@ -730,8 +730,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if !self.admits_outbound(view) {
             return None;
         }
-        // Check the cheap round-local eligibility before the ancestry gate
-        // below, which re-resolves parent payloads on every event otherwise.
+        // Check cheap round-local eligibility first because the ancestry gate
+        // re-resolves parent payloads on every event.
         if !self.views.get(&view)?.can_construct_notarize() {
             return None;
         }
@@ -1402,8 +1402,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// nullification has abandoned `parent`'s term.
     ///
     /// Only the incoming leader issues work on cross-term optimistic
-    /// ancestry. Checking the signer here makes that structural rather than
-    /// a property of the callers.
+    /// ancestry. This signer check prevents callers from issuing that work for
+    /// another leader.
     fn handoff_parent(&self, parent: View) -> bool {
         self.handoff_leader(parent.next())
             .is_some_and(|leader| self.is_me(leader))
@@ -1475,9 +1475,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// proposals. Called when we sign a notarize vote or receive the leader's
     /// proposal for a view.
     ///
-    /// At a term end, a pipelined handoff instead stamps the incoming term's
-    /// leader ahead of the certificate that unlocks the term, so that leader
-    /// can propose across the boundary.
+    /// At a term end, a pipelined handoff sets the incoming leader before the
+    /// certificate exists. This lets the leader propose across the boundary.
     fn prepare_optimistic_successor(&mut self, view: View) {
         let next = view.next();
         if self.in_issuance_window(next) {
@@ -1635,15 +1634,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// its immediate parent has certified, but certification waits for explicit
     /// certified or finalized parent ancestry.
     ///
-    /// Exempting term-start views is sound because this precheck exists only
-    /// to close the intra-term optimistic gap, which term starts cannot be in:
-    /// peers verify them through explicit ancestry only (they are never inside
-    /// the issuance window, see
-    /// [`Lookahead::issuance_floor`](crate::simplex::Lookahead)). A local
-    /// pipelined-handoff proposal is built without explicit ancestry, but
-    /// certification only runs once the view is directly notarized. Honest
-    /// voters other than the proposer only vote for a term start after
-    /// verifying it through explicit ancestry.
+    /// Term-start views bypass this precheck because they are outside the
+    /// issuance window (see
+    /// [`Lookahead::issuance_floor`](crate::simplex::Lookahead)). Peers verify
+    /// term starts only through explicit ancestry. A local pipelined-handoff
+    /// proposal can be built without explicit ancestry, but certification
+    /// starts only after the view is directly notarized. Every other honest
+    /// voter requires explicit ancestry before voting for the term start.
     fn certification_parent_ready(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
         let (view, parent) = (proposal.view(), proposal.parent);
         Self::ensure_parent_precedes(view, parent)?;
