@@ -44,10 +44,8 @@
 //! 16000-byte request above is served by the 32768-byte class. Requests larger
 //! than the largest enabled class return [`PoolError::Oversized`] from
 //! [`BufferPool::try_alloc`], or fall back to an untracked aligned heap
-//! allocation from [`BufferPool::alloc`]. A request that misses its required
-//! class returns [`PoolError::Exhausted`] without trying larger classes. The
-//! freelist scan is a bounded concurrent observation, not a linearizable empty
-//! snapshot, so a retry can succeed after a concurrent return.
+//! allocation from [`BufferPool::alloc`]. A request routed to an exhausted
+//! class returns [`PoolError::Exhausted`] without trying larger classes.
 //!
 //! # Cache Structure
 //!
@@ -97,11 +95,8 @@ pub enum PoolError {
     /// The requested capacity exceeds the maximum buffer size.
     #[error("requested capacity exceeds maximum buffer size")]
     Oversized,
-    /// A bounded allocation attempt missed the required size class.
-    ///
-    /// This is not a linearizable empty snapshot. A retry can succeed after a
-    /// concurrent return.
-    #[error("pool allocation missed required size class")]
+    /// The pool is exhausted for the required size class.
+    #[error("pool exhausted for required size class")]
     Exhausted,
 }
 
@@ -177,11 +172,9 @@ pub struct BufferPoolConfig {
     alignment: NonZeroUsize,
     /// Expected number of threads concurrently accessing the pool.
     ///
-    /// This selects the shared global freelist stripe target, which is rounded
-    /// to a power of two, floored at up to eight stripes, and capped at the
-    /// class capacity and 4,096. It is also used to derive thread-cache capacity
-    /// when the thread-cache policy is automatic, using approximately half of
-    /// each class limit divided across expected threads.
+    /// This sizes the shared global freelist stripes. It is also used to derive
+    /// thread-cache capacity when the thread-cache policy is automatic, using
+    /// approximately half of each class limit divided across expected threads.
     parallelism: NonZeroUsize,
     /// Policy for sizing the per-thread local cache in each size class.
     ///
@@ -380,12 +373,11 @@ impl BufferPoolConfig {
 
     /// Returns a copy of this config with a new expected parallelism.
     ///
-    /// The global freelist rounds this target up to a power of two, uses at
-    /// least eight stripes when capacity permits, and caps it at both the class
-    /// capacity and 4,096 stripes. This value also controls thread-cache
-    /// capacity when the thread-cache policy is automatic. The automatic policy
-    /// reserves about half of each class for the global freelist and divides
-    /// the remaining capacity across expected threads.
+    /// The global freelist derives its stripe count from this target and the
+    /// class capacity. This value also controls thread-cache capacity when the
+    /// thread-cache policy is automatic. The automatic policy reserves about
+    /// half of each class for the global freelist and divides the remaining
+    /// capacity across expected threads.
     pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.parallelism = parallelism;
         self
@@ -667,7 +659,7 @@ struct SizeClassLabel {
 struct PoolMetrics {
     /// Number of tracked buffers created for the size class.
     created: GaugeFamily<SizeClassLabel>,
-    /// Total number of bounded allocation attempts that missed their class.
+    /// Total number of failed allocations (pool exhausted).
     exhausted_total: CounterFamily<SizeClassLabel>,
     /// Total number of oversized allocation requests.
     oversized_total: Counter,
@@ -685,7 +677,7 @@ impl PoolMetrics {
             // prometheus encoder appends it to counter names.
             exhausted_total: registry.register(
                 "buffer_pool_exhausted",
-                "Total number of bounded allocation attempts that missed the required size class",
+                "Total number of failed allocations due to pool exhaustion",
                 raw::Family::default(),
             ),
             oversized_total: registry.register(
@@ -1524,7 +1516,7 @@ impl BufferPoolThreadCache {
     /// global freelist.
     ///
     /// Cache routing reads `class_id` and `thread_cache_capacity` from the
-    /// live slot lease, on the slot line the release path already loaded,
+    /// live slot lease (on the slot line the release path has already loaded)
     /// instead of dereferencing the class object, keeping the dependent-load
     /// chain on the return fast path one level shorter.
     #[inline(always)]
@@ -1907,9 +1899,9 @@ impl BufferPool {
     /// Attempts to allocate a buffer without falling back on pool miss.
     ///
     /// Unlike [`Self::alloc`], this method does not fall back to untracked
-    /// allocation on a bounded pool miss or oversized request. Requests
-    /// smaller than [`BufferPoolConfig::pool_min_size`] intentionally bypass
-    /// pooling and return an untracked aligned allocation instead.
+    /// allocation on exhaustion or oversized requests. Requests smaller than
+    /// [`BufferPoolConfig::pool_min_size`] intentionally bypass pooling and
+    /// return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
     ///
@@ -1924,8 +1916,7 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: this bounded attempt missed the required
-    ///   size class. A retry can succeed after a concurrent return
+    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     #[inline(always)]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         if capacity == 0 {
@@ -1964,12 +1955,12 @@ impl BufferPool {
     /// Zero-capacity requests return a detached empty buffer without touching
     /// the pool.
     ///
-    /// If the pool can provide a buffer on this attempt, this returns a pooled
-    /// buffer that will be returned to the pool when dropped. Requests smaller
-    /// than [`BufferPoolConfig::pool_min_size`] bypass pooling and return an
-    /// untracked aligned allocation. Oversized requests and bounded pool misses
-    /// also fall back to an untracked aligned heap allocation that is
-    /// deallocated when dropped.
+    /// If the pool can provide a buffer (capacity within limits and pool not
+    /// exhausted), this returns a pooled buffer that will be returned to the
+    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
+    /// bypass pooling and return an untracked aligned allocation. Oversized or
+    /// exhausted requests also fall back to an untracked aligned heap allocation
+    /// that is deallocated when dropped.
     ///
     /// Use [`Self::try_alloc`] if eligible requests must fail instead of falling
     /// back to direct allocation.
@@ -2005,9 +1996,9 @@ impl BufferPool {
     /// pool miss.
     ///
     /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
-    /// untracked allocation on a bounded pool miss or oversized request.
-    /// Requests smaller than [`BufferPoolConfig::pool_min_size`] intentionally
-    /// bypass pooling and return an untracked aligned allocation instead.
+    /// untracked allocation on exhaustion or oversized requests. Requests
+    /// smaller than [`BufferPoolConfig::pool_min_size`] intentionally bypass
+    /// pooling and return an untracked aligned allocation instead.
     ///
     /// The returned buffer has `len() == len` and `capacity() >= len`.
     /// Zero-length requests return a detached empty buffer without touching
@@ -2021,8 +2012,7 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: this bounded attempt missed the required
-    ///   size class. A retry can succeed after a concurrent return
+    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
         if len == 0 {
             return Ok(IoBufMut::default());
@@ -2065,12 +2055,12 @@ impl BufferPool {
     /// Zero-length requests return a detached empty buffer without touching
     /// the pool.
     ///
-    /// If the pool can provide a buffer on this attempt, this returns a pooled
-    /// buffer that will be returned to the pool when dropped. Requests smaller
-    /// than [`BufferPoolConfig::pool_min_size`] bypass pooling and return an
-    /// untracked aligned allocation. Oversized requests and bounded pool misses
-    /// also fall back to an untracked aligned heap allocation that is
-    /// deallocated when dropped.
+    /// If the pool can provide a buffer (len within limits and pool not
+    /// exhausted), this returns a pooled buffer that will be returned to the
+    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
+    /// bypass pooling and return an untracked aligned allocation. Oversized or
+    /// exhausted requests also fall back to an untracked aligned heap allocation
+    /// that is deallocated when dropped.
     ///
     /// Use this for read APIs that require an initialized `&mut [u8]`. This
     /// avoids `unsafe set_len` at callsites.
@@ -2084,7 +2074,7 @@ impl BufferPool {
     /// may be uninitialized.
     pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
         self.try_alloc_zeroed(len).unwrap_or_else(|_| {
-            // Pool miss or oversized request: allocate untracked zeroed memory.
+            // Pool exhausted or oversized: allocate untracked zeroed memory.
             let size = len.max(1);
             let mut buf = IoBufMut::zeroed_with_alignment(size, self.inner.config.alignment);
             buf.truncate(len);
@@ -3254,7 +3244,7 @@ mod tests {
         );
         assert_eq!(
             PoolError::Exhausted.to_string(),
-            "pool allocation missed required size class"
+            "pool exhausted for required size class"
         );
     }
 
@@ -3463,8 +3453,8 @@ mod tests {
         class.global.put(buffer1);
 
         // The freelist does not preserve insertion order, so normalize by slot
-        // before asserting identity. Each slot must be returned once with its
-        // original buffer.
+        // before asserting identity. The important property is that each slot is
+        // returned exactly once with its original parked buffer.
         let mut popped = [
             class.global.take().expect("first pop"),
             class.global.take().expect("second pop"),

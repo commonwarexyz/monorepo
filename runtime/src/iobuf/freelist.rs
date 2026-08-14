@@ -1,7 +1,5 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! # Role
-//!
 //! Each size class has a fixed number of slots. A slot combines one stable
 //! [`PooledOwner`] record with one data allocation after that slot is created.
 //! The [`Freelist`] owns the slot table, the allocation layout, and every
@@ -81,31 +79,26 @@ use std::{
     sync::atomic::Ordering,
 };
 
-/// Synchronization types used by production and Loom builds.
-mod sync {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "loom")] {
-            pub(super) use loom::{
-                cell::UnsafeCell,
-                sync::{
-                    Mutex,
-                    MutexGuard,
-                    atomic::{AtomicBool, AtomicUsize},
-                },
-                thread,
-            };
-        } else {
-            pub(super) use commonware_utils::sync::{Mutex, MutexGuard};
-            pub(super) use std::{
-                cell::UnsafeCell,
-                sync::atomic::{AtomicBool, AtomicUsize},
-                thread,
-            };
-        }
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::{
+            cell::UnsafeCell,
+            sync::{
+                Mutex,
+                MutexGuard,
+                atomic::{AtomicBool, AtomicUsize},
+            },
+            thread,
+        };
+    } else {
+        use commonware_utils::sync::{Mutex, MutexGuard};
+        use std::{
+            cell::UnsafeCell,
+            sync::atomic::{AtomicBool, AtomicUsize},
+            thread,
+        };
     }
 }
-
-use sync::{AtomicBool, AtomicUsize, Mutex, MutexGuard, UnsafeCell, thread};
 
 /// Preferred minimum stripe count when the capacity can support it.
 ///

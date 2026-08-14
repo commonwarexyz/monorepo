@@ -35,14 +35,11 @@ impl State {
     fn new(pool: BufferPool, grown: &Barrier, batch: usize) -> Self {
         let mut buffers = Vec::with_capacity(batch);
         for _ in 0..batch {
-            buffers.push(
-                pool.try_alloc(SIZE)
-                    .expect("lazy-growth pool exhausted during setup"),
-            );
+            buffers.push(pool.try_alloc(SIZE).expect("pool exhausted during setup"));
         }
 
-        // Keep every new buffer checked out until all workers have created
-        // their batch, so setup cannot reuse an owner created by another worker.
+        // Keep every setup buffer checked out until all workers have built
+        // their batch, so setup cannot reuse a buffer held by another worker.
         grown.wait();
         buffers.clear();
 
@@ -59,7 +56,7 @@ impl State {
             self.buffers.push(
                 self.pool
                     .try_alloc(SIZE)
-                    .expect("lazy-growth pool exhausted during reuse"),
+                    .expect("pool exhausted during reuse"),
             );
         }
         black_box(self.buffers.as_slice());
@@ -75,7 +72,7 @@ pub fn bench(c: &mut Criterion) {
         );
 
         c.bench_function(&name, |b| {
-            b.iter_custom(|iters| measure(iters, build_pool(), batch));
+            b.iter_custom(|iters| measure(iters, build_pool(false, 0), batch));
         });
     }
 
@@ -87,7 +84,7 @@ pub fn bench(c: &mut Criterion) {
             module_path!(),
         );
         c.bench_function(&name, |b| {
-            b.iter_custom(|iters| measure(iters, build_tls_pool(cache), working_set));
+            b.iter_custom(|iters| measure(iters, build_pool(true, cache), working_set));
         });
     }
 }
@@ -133,23 +130,18 @@ fn measure(iters: u64, pool: BufferPool, batch: usize) -> Duration {
     })
 }
 
-fn build_pool() -> BufferPool {
+fn build_pool(tls_cache_enabled: bool, cache: usize) -> BufferPool {
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(0)
         .with_size_class_range(NZUsize!(SIZE), NZUsize!(SIZE), NZU32!(CAPACITY))
-        .with_parallelism(NZUsize!(PARALLELISM))
-        .with_thread_cache_disabled();
+        .with_parallelism(NZUsize!(PARALLELISM));
 
-    start_pool(cfg)
-}
-
-fn build_tls_pool(cache: usize) -> BufferPool {
-    let cfg = BufferPoolConfig::for_network()
-        .with_pool_min_size(0)
-        .with_size_class_range(NZUsize!(SIZE), NZUsize!(SIZE), NZU32!(CAPACITY))
-        .with_parallelism(NZUsize!(PARALLELISM))
-        .with_prefill(true)
-        .with_max_thread_cache_capacity(NZUsize!(cache));
+    let cfg = if tls_cache_enabled {
+        cfg.with_prefill(true)
+            .with_max_thread_cache_capacity(NZUsize!(cache))
+    } else {
+        cfg.with_thread_cache_disabled()
+    };
 
     start_pool(cfg)
 }
