@@ -11,16 +11,15 @@
 //! fatal. Dropping the gate closes it, so readers cannot silently go on
 //! serving a database that can never advance.
 //!
-//! A reader that finds the gate closed or poisoned logs an error and waits
-//! forever rather than see missing or frozen state. Readers learn about
-//! shutdown from their own tasks, not from the gate; parking only bridges
-//! the teardown race.
+//! A [`Reader`] read of a dropped or poisoned gate returns [`Closed`], which
+//! only happens while the gate's owner is going down. Callers must treat it
+//! as an instruction to stop, never as a data-level failure. The gate itself
+//! reads infallibly, because a live gate proves a live database.
 //!
 //! The lock is not reentrant. Never hold a read guard while acquiring another
 //! on the same gate, or a mutation queued between the two will deadlock both.
 
 use commonware_utils::sync::{AsyncRwLockReadGuard, TracedAsyncRwLock};
-use futures::future;
 use std::{
     future::Future,
     sync::{
@@ -28,7 +27,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tracing::error;
+use thiserror::Error;
+
+/// The gate was dropped, or poisoned by an interrupted mutation. The
+/// database is gone and the caller must stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("database gate dropped or poisoned")]
+pub struct Closed;
 
 enum State<T> {
     Live(T),
@@ -56,21 +61,6 @@ impl<T> Clone for Reader<T> {
     }
 }
 
-/// Acquire a read guard, waiting forever if the [`Gate`] is gone.
-async fn read<T>(inner: &Inner<T>) -> AsyncRwLockReadGuard<'_, T> {
-    if !inner.closed.load(Ordering::Acquire) {
-        let guard = inner.state.read().await;
-        if let Ok(guard) = AsyncRwLockReadGuard::try_map(guard, |state| match state {
-            State::Live(db) => Some(db),
-            State::Poisoned => None,
-        }) {
-            return guard;
-        }
-    }
-    error!("database gate dropped or poisoned, parking this read forever");
-    future::pending().await
-}
-
 impl<T> Gate<T> {
     /// Wrap `db` in a new gate.
     pub fn new(db: T) -> Self {
@@ -82,7 +72,11 @@ impl<T> Gate<T> {
 
     /// Acquire a read guard.
     pub async fn read(&self) -> AsyncRwLockReadGuard<'_, T> {
-        read(&self.0).await
+        AsyncRwLockReadGuard::map(self.0.state.read().await, |state| match state {
+            State::Live(db) => db,
+            // Poisoning destroys the gate, so a live gate cannot observe it.
+            State::Poisoned => unreachable!("a gate only exists while its state is live"),
+        })
     }
 
     /// Create a [`Reader`] of the gated database.
@@ -115,9 +109,17 @@ impl<T> Drop for Gate<T> {
 }
 
 impl<T> Reader<T> {
-    /// Acquire a read guard.
-    pub async fn read(&self) -> AsyncRwLockReadGuard<'_, T> {
-        read(&self.0).await
+    /// Acquire a read guard, or report the gate dropped or poisoned.
+    pub async fn read(&self) -> Result<AsyncRwLockReadGuard<'_, T>, Closed> {
+        if self.0.closed.load(Ordering::Acquire) {
+            return Err(Closed);
+        }
+        let guard = self.0.state.read().await;
+        AsyncRwLockReadGuard::try_map(guard, |state| match state {
+            State::Live(db) => Some(db),
+            State::Poisoned => None,
+        })
+        .map_err(|_| Closed)
     }
 }
 
@@ -141,7 +143,7 @@ mod tests {
             let (gate, seen) = gate.mutate(|db| async move { (db + 1, db) }).await;
             assert_eq!(seen, 1, "the second mutation starts from the first");
             assert_eq!(*gate.read().await, 2);
-            assert_eq!(*reader.read().await, 2);
+            assert_eq!(*reader.read().await.expect("gate is live"), 2);
         });
     }
 
@@ -156,7 +158,7 @@ mod tests {
                 let reader = gate.reader();
                 readers.push(context.child(worker).spawn(move |ctx| async move {
                     loop {
-                        if *reader.read().await == 1 {
+                        if *reader.read().await.expect("gate is live") == 1 {
                             return;
                         }
                         ctx.sleep(Duration::from_millis(1)).await;
@@ -208,31 +210,29 @@ mod tests {
 
             release_tx.send(()).expect("mutation is waiting");
             writer.await.expect("mutation completes");
-            assert_eq!(*read.await, 1, "the read sees the mutated state");
-        });
-    }
-
-    /// Dropping the gate closes it. A later read waits forever instead of
-    /// serving a database that can never advance.
-    #[test]
-    fn dropped_gate_parks_readers() {
-        deterministic::Runner::default().start(|_context| async move {
-            let gate = Gate::new(0u64);
-            let reader = gate.reader();
-            drop(gate);
-
-            let read = reader.read();
-            futures::pin_mut!(read);
-            assert!(
-                read.as_mut().now_or_never().is_none(),
-                "a read after the gate drops must wait, not serve frozen state",
+            assert_eq!(
+                *read.await.expect("gate is live"),
+                1,
+                "the read sees the mutated state",
             );
         });
     }
 
+    /// Dropping the gate closes it. A later read reports [`Closed`] instead
+    /// of serving a database that can never advance.
+    #[test]
+    fn dropped_gate_closes_reads() {
+        deterministic::Runner::default().start(|_context| async move {
+            let gate = Gate::new(0u64);
+            let reader = gate.reader();
+            drop(gate);
+            assert_eq!(reader.read().await.err(), Some(Closed));
+        });
+    }
+
     /// Dropping a mutation partway through poisons the gate and destroys it,
-    /// so no second mutation can exist. A later read waits forever instead
-    /// of seeing missing state.
+    /// so no second mutation can exist. A later read reports [`Closed`]
+    /// instead of seeing missing state.
     #[test]
     fn interrupted_mutation_poisons() {
         deterministic::Runner::default().start(|_context| async move {
@@ -252,12 +252,7 @@ mod tests {
             started.await.expect("mutation must reach its closure");
             drop(mutation);
 
-            let read = reader.read();
-            futures::pin_mut!(read);
-            assert!(
-                read.as_mut().now_or_never().is_none(),
-                "a read after poisoning must wait, not see a gap",
-            );
+            assert_eq!(reader.read().await.err(), Some(Closed));
         });
     }
 }

@@ -113,7 +113,7 @@ pub mod snapshot;
 
 // Aliased because `Reader` is still taken by the `Shared`-based reader. Once
 // that is deleted, this becomes `Reader`.
-pub use gate::{Gate, Reader as GateReader};
+pub use gate::{Closed, Gate, Reader as GateReader};
 
 /// A database shared across tasks.
 ///
