@@ -1,19 +1,10 @@
-//! Finalized storage, shared behind one lock.
+//! Finalized block and certificate storage, shared behind one lock.
 //!
-//! Marshal's loop answers a peer's request for a finalized block by reading two archives from
-//! disk. Doing that inline stalls consensus behind a peer that is walking old heights. This module
-//! keeps both archives behind a single fair read/write lock: marshal reads and mutates them
-//! through [Stores], while a serving task answers peer backfill requests through the read side.
+//! Answering a peer's backfill request means two storage reads. Doing that on the actor's loop
+//! stalls consensus behind a peer that is querying old data. Instead, marshal mutates and reads
+//! the storage through [Storage], while a backfill task answers peer requests through the reader.
 //!
-//! Fairness bounds the interference in both directions: a mutation queued behind an in-flight
-//! serve waits for at most that one serve, and later serves queue behind the mutation. A serve
-//! reads both archives under one guard, so it is atomic with respect to mutations. Backfill
-//! serving is bounded and rejects on overflow: a dropped request closes the peer's channel,
-//! which the resolver retries.
-//!
-//! Every guard is scoped to a single call inside this module, so no guard is ever held across
-//! an unrelated await. Marshal's writes complete before it forwards a serve, so a height
-//! finalized in a batch is servable by that batch's requests.
+//! The submission channel is bounded. A request that overflows is dropped. Peers can retry.
 
 use super::Variant;
 use crate::{
@@ -39,29 +30,27 @@ use tracing::{Span, debug, warn};
 /// A mutation panicked mid-write, destroying the stores.
 const POISONED: &str = "finalized stores poisoned";
 
-/// A peer's request for a finalized block, answered without marshal's involvement.
-///
-/// Carries the forwarding span, so a trace follows the request across the task boundary.
-struct Serve {
+/// A peer's request for a finalized block.
+struct Request {
+    /// Span of the forwarding call.
     span: Span,
+    /// Height of the requested block.
     height: Height,
-    respond: oneshot::Sender<Bytes>,
+    /// Where the encoded response is sent.
+    response_tx: oneshot::Sender<Bytes>,
 }
 
-/// The certificate and block stores, behind one lock.
-///
-/// Marshal holds the only [Stores], so it is the only mutator. The serving task shares the read
-/// side through a [Reader].
-pub(super) struct Stores<C, B> {
+/// The certificate and block stores behind one lock.
+pub(super) struct Storage<C, B> {
+    // The underlying block and certificate stores.
     inner: Arc<TracedAsyncRwLock<Option<(C, B)>>>,
-    serving: mpsc::Sender<Serve>,
-    /// Backfill requests handed to the serving task.
-    forwarded: Counter,
-    /// Backfill requests refused because the queue was full (the peer retries).
-    refused: Counter,
+    /// Requests to the backfill task.
+    submission_tx: mpsc::Sender<Request>,
+    /// Requests dropped because the submission channel was full.
+    dropped: Counter,
 }
 
-impl<C, B> Stores<C, B> {
+impl<C, B> Storage<C, B> {
     /// Read guard over the certificate store.
     async fn finalizations(&self) -> AsyncRwLockReadGuard<'_, C> {
         AsyncRwLockReadGuard::map(self.inner.read().await, |slot| {
@@ -76,11 +65,9 @@ impl<C, B> Stores<C, B> {
         })
     }
 
-    /// Run one consuming mutation over both stores under the write side of the lock.
+    /// Run a consuming mutation over both stores.
     ///
-    /// A failed mutation destroys the store it consumed, so `f` panics on error and every
-    /// later access panics on the emptied slot. That matches marshal's behaviour when it held
-    /// the stores directly.
+    /// Mutation failures are fatal.
     async fn mutate<T, Fut>(&self, f: impl FnOnce(C, B) -> Fut) -> T
     where
         Fut: Future<Output = (C, B, T)>,
@@ -92,27 +79,22 @@ impl<C, B> Stores<C, B> {
         out
     }
 
-    /// Hand a peer's backfill request to the serving task, refusing it when the queue is full.
-    ///
-    /// Never awaits. Call this after the batch's writes have completed, so a height finalized
-    /// in that batch is stored before the request is serviced.
-    pub fn serve(&self, height: Height, respond: oneshot::Sender<Bytes>) {
-        match self.serving.try_send(Serve {
+    /// Hand a peer's request to the backfill task.
+    /// If the submission channel is full, the request is dropped.
+    pub fn serve(&self, height: Height, response_tx: oneshot::Sender<Bytes>) {
+        let request = Request {
             span: Span::current(),
             height,
-            respond,
-        }) {
-            Ok(()) => self.forwarded.inc(),
-            Err(_) => self.refused.inc(),
+            response_tx,
         };
+        if self.submission_tx.try_send(request).is_err() {
+            self.dropped.inc();
+        }
     }
 }
 
-impl<C: Certificates, B: Blocks> Stores<C, B> {
+impl<C: Certificates, B: Blocks> Storage<C, B> {
     /// Store a finalized block and, when consensus supplied one, its certificate.
-    ///
-    /// The write is buffered, not durable; the return is backpressure so consensus cannot
-    /// outrun the disk.
     pub async fn put(
         &self,
         height: Height,
@@ -144,7 +126,7 @@ impl<C: Certificates, B: Blocks> Stores<C, B> {
         .await
     }
 
-    /// Flush both stores, blocking until durable.
+    /// Durably persist both stores, blocking until durable.
     pub async fn sync(&self) {
         self.mutate(|finalizations, blocks| async move {
             let (blocks, finalizations) = futures::join!(
@@ -235,7 +217,7 @@ impl<C: Certificates, B: Blocks> Stores<C, B> {
             .unwrap_or_else(|e| panic!("failed to get finalization: {e}"))
     }
 
-    /// The finalized block with `digest`, whatever its height.
+    /// The finalized block with `digest`.
     pub async fn get_block_by_digest(
         &self,
         digest: <B::Block as Digestible>::Digest,
@@ -277,17 +259,17 @@ impl<C: Certificates, B: Blocks> Stores<C, B> {
     }
 }
 
-/// Read side of the lock, held by the serving task.
+/// Reader over the stores, held by the backfill task.
 struct Reader<C, B>(Arc<TracedAsyncRwLock<Option<(C, B)>>>);
 
 impl<C, B> Reader<C, B> {
-    /// Read guard over both stores.
+    /// Read guard over the stores.
     async fn read(&self) -> AsyncRwLockReadGuard<'_, (C, B)> {
         AsyncRwLockReadGuard::map(self.0.read().await, |slot| slot.as_ref().expect(POISONED))
     }
 }
 
-/// Outcome counters for backfill requests. Every forwarded request lands in exactly one.
+/// Outcome counters for submitted requests. Every submitted request lands in exactly one.
 struct Metered {
     served: Counter,
     missing: Counter,
@@ -295,33 +277,31 @@ struct Metered {
     abandoned: Counter,
 }
 
-/// Wrap the stores and spawn the backfill serving task. `capacity` bounds the serving queue.
+/// Wrap the stores and spawn the backfill task. `capacity` bounds the submission channel.
 ///
-/// The serving task exits when the returned [Stores] drops; a panic in it is re-raised by the
-/// runtime, so its handle need not be held.
+/// The task exits when the returned [Storage] drops.
 pub(super) fn new<E, V, C, B>(
     context: E,
     finalizations: C,
     blocks: B,
     capacity: NonZeroUsize,
-) -> Stores<C, B>
+) -> Storage<C, B>
 where
     E: Spawner + Metrics,
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
 {
-    let (serving_tx, serving_rx) = mpsc::channel(capacity.get());
-    let stores = Stores {
+    let (submission_tx, submission_rx) = mpsc::channel(capacity.get());
+    let storage = Storage {
         inner: Arc::new(TracedAsyncRwLock::new(
             "marshal.finalized",
             Some((finalizations, blocks)),
         )),
-        serving: serving_tx,
-        forwarded: context.counter("forwarded", "Backfill requests handed to the serving task"),
-        refused: context.counter(
-            "refused",
-            "Backfill requests refused because the queue was full",
+        submission_tx,
+        dropped: context.counter(
+            "dropped",
+            "Backfill requests dropped because the submission channel was full",
         ),
     };
     let metrics = Metered {
@@ -330,49 +310,54 @@ where
             "missing",
             "Backfill requests for a height either store lacks",
         ),
-        failed: context.counter("failed", "Backfill requests dropped by a failed store read"),
+        failed: context.counter("failed", "Backfill requests whose store read failed"),
         abandoned: context.counter(
             "abandoned",
             "Backfill requests whose requester left before the response",
         ),
     };
-    let reader = Reader(stores.inner.clone());
-    context.spawn(move |_| run::<V, _, _>(reader, serving_rx, metrics));
-    stores
+    let reader = Reader(storage.inner.clone());
+    context.spawn(move |_| run::<V, _, _>(reader, submission_rx, metrics));
+    storage
 }
 
-/// Answer peer requests until marshal drops its [Stores].
-async fn run<V, C, B>(reader: Reader<C, B>, mut requests: mpsc::Receiver<Serve>, metrics: Metered)
-where
+/// Serve backfill requests until every sender of `submission_rx` is dropped.
+async fn run<V, C, B>(
+    reader: Reader<C, B>,
+    mut submission_rx: mpsc::Receiver<Request>,
+    metrics: Metered,
+) where
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
 {
-    while let Some(request) = requests.recv().await {
+    while let Some(request) = submission_rx.recv().await {
         serve::<V, _, _>(&reader, request, &metrics).await;
     }
 }
 
-/// Answer one peer request. A miss or a read failure drops the response, which the requester sees
+/// Serve one request. A miss or a read failure drops the response, which the requester sees
 /// as a retryable error.
 #[tracing::instrument(name = "marshal.finalized.serve", level = "debug", parent = &request.span, skip_all, fields(height = %request.height))]
-async fn serve<V, C, B>(reader: &Reader<C, B>, request: Serve, metrics: &Metered)
+async fn serve<V, C, B>(reader: &Reader<C, B>, request: Request, metrics: &Metered)
 where
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
 {
-    let Serve {
-        height, respond, ..
+    let Request {
+        height,
+        response_tx,
+        ..
     } = request;
 
-    // The requester may have moved on while this queued.
-    if respond.is_closed() {
+    // The requester may have moved on while this request waited.
+    if response_tx.is_closed() {
         metrics.abandoned.inc();
         return;
     }
 
-    // One guard across both reads, so no mutation lands between them.
+    // One guard across both reads so no mutation lands between them.
     let (finalization, block) = {
         let guard = reader.read().await;
         let (finalizations, blocks) = &*guard;
@@ -409,7 +394,7 @@ where
         }
     };
 
-    if respond.send_lossy((finalization, V::into_inner(block)).encode()) {
+    if response_tx.send_lossy((finalization, V::into_inner(block)).encode()) {
         metrics.served.inc();
     } else {
         metrics.abandoned.inc();
@@ -422,60 +407,56 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, deterministic, telemetry::metrics::has_metric_value};
 
-    /// Stores whose serving queue holds `capacity`, with the receiver so the test controls
-    /// when (or whether) the serving side drains. The archives are never touched, so their
-    /// type does not matter and the slot stays empty.
-    fn stores(
+    /// Storage with a submission channel of `capacity`. The archives are never touched,
+    /// so the slot stays empty and the receiver is handed back to the test.
+    fn storage(
         context: &deterministic::Context,
         capacity: usize,
-    ) -> (Stores<(), ()>, mpsc::Receiver<Serve>) {
-        let (serving, receiver) = mpsc::channel(capacity);
-        let stores = Stores {
+    ) -> (Storage<(), ()>, mpsc::Receiver<Request>) {
+        let (submission_tx, submission_rx) = mpsc::channel(capacity);
+        let storage = Storage {
             inner: Arc::new(TracedAsyncRwLock::new("test", None)),
-            serving,
-            forwarded: context.counter("forwarded", "forwarded"),
-            refused: context.counter("refused", "refused"),
+            submission_tx,
+            dropped: context.counter("dropped", "dropped"),
         };
-        (stores, receiver)
+        (storage, submission_rx)
     }
 
     #[test_traced("ERROR")]
-    fn test_saturated_serving_queue_sheds() {
+    fn test_drops_when_channel_full() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (stores, _receiver) = stores(&context, 1);
+            let (storage, _submission_rx) = storage(&context, 1);
 
-            // The first request fits the queue; the second has nowhere to go, and the peer
-            // sees a closed response rather than a hang.
+            // The channel holds one: the first request is accepted, the second is
+            // dropped and the peer sees a closed channel rather than a hang.
             let (accepted, accepted_rx) = oneshot::channel();
-            stores.serve(Height::new(1), accepted);
-            let (refused, refused_rx) = oneshot::channel();
-            stores.serve(Height::new(2), refused);
-            assert!(refused_rx.await.is_err());
+            storage.serve(Height::new(1), accepted);
+            let (dropped, dropped_rx) = oneshot::channel();
+            storage.serve(Height::new(2), dropped);
+            assert!(dropped_rx.await.is_err());
             drop(accepted_rx);
 
             let encoded = context.encode();
-            assert!(has_metric_value(&encoded, "forwarded_total", 1));
-            assert!(has_metric_value(&encoded, "refused_total", 1));
+            assert!(has_metric_value(&encoded, "dropped_total", 1));
         });
     }
 
     #[test_traced("ERROR")]
-    fn test_serving_drops_when_the_task_is_gone() {
+    fn test_drops_when_task_gone() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (stores, receiver) = stores(&context, 1);
+            let (storage, submission_rx) = storage(&context, 1);
 
-            // Losing the receiver stands in for the serving task exiting. Every later request
-            // is refused, which must be counted rather than passing silently.
-            drop(receiver);
-            let (response, response_rx) = oneshot::channel();
-            stores.serve(Height::new(1), response);
+            // Dropping the receiver stands in for the backfill task exiting:
+            // requests are dropped and counted, not lost silently.
+            drop(submission_rx);
+            let (response_tx, response_rx) = oneshot::channel();
+            storage.serve(Height::new(1), response_tx);
             assert!(response_rx.await.is_err());
 
             let encoded = context.encode();
-            assert!(has_metric_value(&encoded, "forwarded_total", 0));
-            assert!(has_metric_value(&encoded, "refused_total", 1));
+            assert!(has_metric_value(&encoded, "dropped_total", 1));
         });
     }
 }

@@ -144,8 +144,8 @@ where
     // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
-    // Finalized certificates and blocks, shared with the backfill serving task
-    storage: finalized::Stores<C, B>,
+    // Finalized certificates and blocks, shared with the backfill task
+    storage: finalized::Storage<C, B>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -222,7 +222,7 @@ where
         )
         .await;
 
-        // Put both stores behind the lock and start the backfill serving task.
+        // Put both stores behind the lock and start the backfill task.
         let storage = finalized::new::<_, V, _, _>(
             context.child("storage"),
             finalizations_by_height,
@@ -929,7 +929,7 @@ where
                     return self;
                 }
 
-                self = self.prune_finalized_archives(height).await;
+                self.storage.prune(height).await;
             }
         }
         self
@@ -1049,8 +1049,7 @@ where
                 response.send_lossy(block.encode());
             }
             Key::Finalized { height } => {
-                // Runs at the batch tail, after the batch's writes, so a height this
-                // batch stored is servable. The serving task replies directly.
+                // Hand off to the backfill task, which replies directly.
                 self.storage.serve(height, response);
             }
             Key::Notarized { round } => {
@@ -1377,7 +1376,7 @@ where
         });
 
         // The floor is durable, so cache/finalized data below it can be pruned.
-        self = self.prune_after_floor(height).await;
+        self = self.prune(height).await;
 
         // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
         // stops obsolete network work, but later local ingress can still satisfy these waiters,
@@ -1933,7 +1932,6 @@ where
             return self;
         };
 
-        // One handle covers both stores, which are started together.
         let handle = self.storage.start_sync().await;
         syncs.push(async move {
             if handle.durable(round, "finalized storage").await {
@@ -1947,9 +1945,9 @@ where
         self
     }
 
-    // -------------------- Finalized Storage --------------------
+    // -------------------- Storage --------------------
 
-    /// Get a finalized block by height from finalized storage.
+    /// Get a finalized block by height.
     async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {
         self.storage
             .get_block(height)
@@ -1957,7 +1955,7 @@ where
             .map(|stored| stored.into())
     }
 
-    /// Get a finalization by height from finalized storage.
+    /// Get a finalization by height.
     async fn get_finalization_by_height(
         &self,
         height: Height,
@@ -2394,14 +2392,8 @@ where
         self
     }
 
-    /// Prunes finalized blocks and certificates below the given height.
-    async fn prune_finalized_archives(self: Box<Self>, height: Height) -> Box<Self> {
-        self.storage.prune(height).await;
-        self
-    }
-
-    /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
-    async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
+    /// Prunes finalized storage and height-indexed certified cache data below `height`.
+    async fn prune(mut self: Box<Self>, height: Height) -> Box<Self> {
         (self.cache, ()) = join(
             self.cache.prune_by_height(height),
             self.storage.prune(height),

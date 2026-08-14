@@ -7039,16 +7039,15 @@ mod tests {
         });
     }
 
-    /// A finalized-store wrapper that delays durability by `pace` of
-    /// deterministic time to model a slow sync: `sync` blocks the caller for
-    /// the pace, while `start_sync` returns immediately with a handle that
-    /// completes after the pace (like an archive with a non-blocking sync
-    /// path, e.g. [`prunable::Archive`]).
+    /// A finalized-store wrapper that delays operations by deterministic time
+    /// to model a slow store: `sync` blocks the caller for `sync_pace`,
+    /// `start_sync` returns immediately with a handle that completes after it
+    /// (like an archive with a non-blocking sync path, e.g.
+    /// [`prunable::Archive`]), and every `get` sleeps `read_pace`.
     struct PacedStore<T> {
         inner: T,
         context: deterministic::Context,
-        pace: Duration,
-        /// Sleep applied to every `get`, so a test can model a slow serving read.
+        sync_pace: Duration,
         read_pace: Duration,
     }
 
@@ -7062,7 +7061,7 @@ mod tests {
         }
 
         async fn sync(mut self) -> Result<Self, Self::Error> {
-            self.context.sleep(self.pace).await;
+            self.context.sleep(self.sync_pace).await;
             self.inner = self.inner.sync().await?;
             Ok(self)
         }
@@ -7072,7 +7071,7 @@ mod tests {
         ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
             let handle;
             (self.inner, handle) = self.inner.start_sync().await?;
-            let sleep = self.context.sleep(self.pace);
+            let sleep = self.context.sleep(self.sync_pace);
             Ok((
                 self,
                 commonware_runtime::Handle::from_future(async move {
@@ -7127,7 +7126,7 @@ mod tests {
         }
 
         async fn sync(mut self) -> Result<Self, Self::Error> {
-            self.context.sleep(self.pace).await;
+            self.context.sleep(self.sync_pace).await;
             self.inner = self.inner.sync().await?;
             Ok(self)
         }
@@ -7137,7 +7136,7 @@ mod tests {
         ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
             let handle;
             (self.inner, handle) = self.inner.start_sync().await?;
-            let sleep = self.context.sleep(self.pace);
+            let sleep = self.context.sleep(self.sync_pace);
             Ok((
                 self,
                 commonware_runtime::Handle::from_future(async move {
@@ -7180,7 +7179,7 @@ mod tests {
     async fn paced_finalized_stores(
         context: &deterministic::Context,
         partition_prefix: &str,
-        pace: Duration,
+        sync_pace: Duration,
         read_pace: Duration,
     ) -> (
         PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
@@ -7225,13 +7224,13 @@ mod tests {
             PacedStore {
                 inner: finalizations_by_height,
                 context: context.child("finalizations_pacer"),
-                pace,
+                sync_pace,
                 read_pace,
             },
             PacedStore {
                 inner: finalized_blocks,
                 context: context.child("blocks_pacer"),
-                pace,
+                sync_pace,
                 read_pace,
             },
         )
@@ -7363,7 +7362,7 @@ mod tests {
         });
     }
 
-    /// A slow finalized-serving read must not stall the actor loop: the serving
+    /// A slow backfill read must not stall the actor loop: the backfill
     /// task performs it while marshal keeps answering unrelated mailbox messages.
     #[test_traced("WARN")]
     fn test_standard_paced_serve_does_not_block_mailbox() {
@@ -7425,7 +7424,7 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
 
             // Let the write settle: dispatch and the ack tail perform paced reads of their
-            // own, so wait them out and the serving read is the only slow work in flight
+            // own, so wait them out and the backfill read is the only slow work in flight
             // when the measurement starts.
             wait_until(
                 &context,
@@ -7436,7 +7435,7 @@ mod tests {
             .await;
             context.sleep(READ_PACE * 4).await;
 
-            // Ask for it: the serving task's two reads run joined, costing READ_PACE.
+            // Ask for it: the backfill task's two reads run joined, costing READ_PACE.
             // Meanwhile marshal must keep answering from its (unpaced) cache.
             let (response, response_rx) = oneshot::channel();
             resolver.enqueue(handler::Message::Produce {
@@ -7458,7 +7457,7 @@ mod tests {
             );
             assert!(
                 elapsed < READ_PACE,
-                "get_verified queued behind the serving read: took {elapsed:?}"
+                "get_verified queued behind the backfill read: took {elapsed:?}"
             );
 
             // The serve itself completes with the identical wire encoding.
@@ -7469,16 +7468,16 @@ mod tests {
         });
     }
 
-    /// A flood of finalized-serving requests must not stall writes: every request
+    /// A flood of backfill requests must not stall writes: every request
     /// resolves, and a height finalized mid-flood is dispatched long before the
-    /// flood alone would finish. Shedding itself is covered at the module boundary
+    /// flood alone would finish. Drops on a full submission channel are covered at the module boundary
     /// (see `core::finalized::tests`): the actor performs paced reads of its own
-    /// between forwards, so end-to-end the queue drains before it fills.
+    /// between forwards, so end-to-end the channel drains before it fills.
     #[test_traced("WARN")]
-    fn test_standard_finalized_serve_flood_preserves_write_liveness() {
+    fn test_standard_backfill_flood_preserves_write_liveness() {
         const READ_PACE: Duration = Duration::from_millis(100);
-        // The serving queue holds `max_repair` requests.
-        const QUEUE: usize = 2;
+        // The submission channel holds `max_repair` requests.
+        const CAPACITY: usize = 2;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -7489,10 +7488,10 @@ mod tests {
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
-                max_repair: NZUsize!(QUEUE),
+                max_repair: NZUsize!(CAPACITY),
                 max_pending_acks: NZUsize!(1),
                 block_codec_config: (),
-                partition_prefix: "saturated-serving".to_string(),
+                partition_prefix: "saturated-backfill".to_string(),
                 prunable_items_per_section: NZU64!(10),
                 replay_buffer: NZUsize!(1024),
                 key_write_buffer: NZUsize!(1024),
@@ -7501,7 +7500,7 @@ mod tests {
                 strategy: Sequential,
             };
             let (finalizations_by_height, finalized_blocks) =
-                paced_finalized_stores(&context, "saturated-serving", Duration::ZERO, READ_PACE)
+                paced_finalized_stores(&context, "saturated-backfill", Duration::ZERO, READ_PACE)
                     .await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -7522,7 +7521,7 @@ mod tests {
             )
             .await;
 
-            // Finalize height 1, then flood the serving queue asking for it.
+            // Finalize height 1, then flood the submission channel asking for it.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
@@ -7536,7 +7535,7 @@ mod tests {
 
             // Settle before flooding: dispatch and the ack tail perform paced reads of their
             // own, and a busy loop would space the resolver batches far enough apart to drain
-            // the queue without ever filling it.
+            // the channel without ever filling it.
             wait_until(
                 &context,
                 Duration::from_secs(5),
