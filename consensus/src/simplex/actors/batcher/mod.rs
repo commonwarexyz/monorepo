@@ -91,7 +91,7 @@ mod tests {
         },
         tokio,
     };
-    use commonware_utils::{NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng};
+    use commonware_utils::{NZUsize, TestRng, futures::Pool, ordered::Set, sync::Mutex, test_rng};
     use std::{
         collections::BTreeMap, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration,
     };
@@ -598,6 +598,83 @@ mod tests {
                 };
                 assert_eq!(&notarization.proposal, proposal);
             }
+        });
+    }
+
+    /// Crypto dispatch never submits more jobs than the strategy can execute
+    /// concurrently. A view skipped at capacity remains ready for a later pass.
+    #[test_traced]
+    fn test_dispatch_view_respects_strategy_parallelism() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"batcher_test", 5);
+            let epoch = Epoch::new(0);
+            let cfg = test_config(
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (mut actor, _mailbox) = Actor::new(context.child("actor"), cfg);
+            let mut rounds = BTreeMap::new();
+
+            for view in [View::new(1), View::new(2)] {
+                let round_id = Round::new(epoch, view);
+                let proposal = Proposal::new(
+                    round_id,
+                    view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(&[&view.get().to_be_bytes()]),
+                );
+                let mut round = super::Round::new(
+                    round_id,
+                    Arc::new(schemes[0].clone()),
+                    NoopBlocker,
+                    NoopReporter(PhantomData),
+                    false,
+                );
+                round.set_leader(Participant::new(0));
+                for (participant, scheme) in participants.iter().zip(&schemes) {
+                    let vote = Notarize::sign(scheme, proposal.clone()).unwrap();
+                    assert!(round.add_network(participant.clone(), Vote::Notarize(vote)));
+                }
+                rounds.insert(view, round);
+            }
+
+            let mut pool = Pool::default();
+            actor.dispatch_view(
+                &mut pool,
+                View::new(1),
+                rounds.get_mut(&View::new(1)).unwrap(),
+            );
+            assert_eq!(pool.len(), 1);
+
+            actor.dispatch_view(
+                &mut pool,
+                View::new(2),
+                rounds.get_mut(&View::new(2)).unwrap(),
+            );
+            assert_eq!(pool.len(), 1);
+
+            let Done::Verified { view, .. } = pool.next_completed().await else {
+                panic!("expected a verification completion");
+            };
+            assert_eq!(view, View::new(1));
+
+            actor.dispatch_view(
+                &mut pool,
+                View::new(2),
+                rounds.get_mut(&View::new(2)).unwrap(),
+            );
+            let Done::Verified { view, .. } = pool.next_completed().await else {
+                panic!("expected a verification completion");
+            };
+            assert_eq!(view, View::new(2));
         });
     }
 

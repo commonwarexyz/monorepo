@@ -29,7 +29,7 @@ use commonware_runtime::{
 use commonware_utils::{N3f1, futures::Pool, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -45,6 +45,20 @@ struct Current {
     view: View,
     leader: Option<Participant>,
     leader_nullify_hinted: bool,
+}
+
+/// Moves each dirty view into one dispatch pass, prioritizing the current view.
+fn prepare_dispatch(
+    dirty_views: &mut BTreeSet<View>,
+    current: View,
+    dispatch_views: &mut Vec<View>,
+) {
+    dispatch_views.clear();
+    if dirty_views.remove(&current) {
+        dispatch_views.push(current);
+    }
+    dispatch_views.extend(dirty_views.iter().copied());
+    dirty_views.clear();
 }
 
 /// A completed crypto job from the actor's dispatch pool.
@@ -345,15 +359,23 @@ where
     /// Results arrive through the pool's completion branch, which reintegrates
     /// them and marks the view dirty so this dispatch runs again (e.g. to
     /// recover a certificate from a quorum a batch just completed).
-    fn dispatch_view(
+    ///
+    /// Returns true when the strategy's execution capacity is full. The caller
+    /// must retain the view for a later pass because more work may be ready.
+    pub(super) fn dispatch_view(
         &mut self,
         pool: &mut Pool<Done<S, D>>,
         view: View,
         round: &mut Round<S, B, D, Re>,
-    ) {
+    ) -> bool {
+        let capacity = self.strategy.manual().parallelism();
+
         // Begin a verification batch for every vote kind with work worth
         // verifying.
-        while let Some((batch, job)) = round.begin_verify(self.context.as_mut(), &self.strategy) {
+        while pool.len() < capacity
+            && let Some((batch, job)) =
+                round.begin_verify(self.context.as_mut(), &self.strategy)
+        {
             let timer = self.verify_latency.timer(self.context.as_ref());
             pool.push(async move {
                 let (votes, invalid) = job.await;
@@ -368,7 +390,9 @@ where
         }
 
         // Begin recovery of every certificate with a verified quorum.
-        while let Some(job) = round.begin_construct_certificate(&self.strategy) {
+        while pool.len() < capacity
+            && let Some(job) = round.begin_construct_certificate(&self.strategy)
+        {
             let timer = self.recover_latency.timer(self.context.as_ref());
             pool.push(async move {
                 Done::Recovered {
@@ -378,6 +402,8 @@ where
                 }
             });
         }
+
+        pool.len() == capacity
     }
 
     /// Reintegrates a completed crypto job from the dispatch pool.
@@ -482,9 +508,10 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
-        // Views whose rounds may have become actionable. Capacity is reused
-        // across select-loop iterations.
-        let mut dirty_views: Vec<View> = Vec::new();
+        // Views whose rounds may have become actionable. Views that cannot be
+        // dispatched at capacity remain queued for a later completion.
+        let mut dirty_views: BTreeSet<View> = BTreeSet::new();
+        let mut dispatch_views: Vec<View> = Vec::new();
         // In-flight crypto (verification batches and certificate recoveries).
         // Dispatching instead of awaiting keeps the event loop free to ingest
         // votes while the strategy's workers verify, so multiple batches (and
@@ -492,9 +519,6 @@ where
         let mut crypto_pool: Pool<Done<S, D>> = Pool::default();
         select_loop! {
             self.context,
-            on_start => {
-                dirty_views.clear();
-            },
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
@@ -539,7 +563,7 @@ where
                         // span so all of its work shares one trace
                         let round = self.round_for_view(&current, &mut work, current.view);
                         round.set_span(span);
-                        dirty_views.push(current.view);
+                        dirty_views.insert(current.view);
 
                         // Revisit rounds in the admission window now that the
                         // current view advanced: rounds already visited are
@@ -548,7 +572,7 @@ where
                         if current.view < limit {
                             for (&view, round) in work.range_mut(current.view.next()..=limit) {
                                 self.stamp_leader(&current, view, round);
-                                dirty_views.push(view);
+                                dirty_views.insert(view);
                             }
                         }
 
@@ -611,7 +635,7 @@ where
                         let _guard = process.entered();
                         round.accept_vote(message, true);
                         self.added.inc();
-                        dirty_views.push(view);
+                        dirty_views.insert(view);
                     }
                 }
             },
@@ -619,7 +643,7 @@ where
             // certificate recoveries)
             done = crypto_pool.next_completed() => {
                 if let Some(view) = self.handle_done(&mut voter, &mut work, done) {
-                    dirty_views.push(view);
+                    dirty_views.insert(view);
                 }
             },
             // Handle certificates from the network
@@ -683,7 +707,7 @@ where
                 // certificate may have unlocked already-buffered votes.
                 let round = self.round_for_view(&current, &mut work, view);
                 if round.record_certificate(&message) {
-                    dirty_views.push(view);
+                    dirty_views.insert(view);
                 }
                 voter.recovered(message);
             },
@@ -743,7 +767,7 @@ where
                             .entered();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
-                    dirty_views.push(view);
+                    dirty_views.insert(view);
                 }
             },
             on_end => {
@@ -753,7 +777,10 @@ where
 
                 let me = self.scheme.me();
 
-                for view in dirty_views.drain(..) {
+                // Process each currently dirty view once. Saturated views are
+                // reinserted for a later pass.
+                prepare_dispatch(&mut dirty_views, current.view, &mut dispatch_views);
+                for view in dispatch_views.drain(..) {
                     // Skip verification and construction for views at or below
                     // finalized. We still admit votes there (see
                     // [Viewport::retains]) to notify the reporter of all votes
@@ -784,7 +811,9 @@ where
                     }
 
                     let span = round.span();
-                    span.in_scope(|| self.dispatch_view(&mut crypto_pool, view, round));
+                    if span.in_scope(|| self.dispatch_view(&mut crypto_pool, view, round)) {
+                        dirty_views.insert(view);
+                    }
                 }
 
                 // Drop any rounds that are no longer retained
@@ -797,5 +826,22 @@ where
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BTreeSet, View, prepare_dispatch};
+
+    #[test]
+    fn dispatch_pass_prioritizes_current_without_reprocessing() {
+        let current = View::new(3);
+        let mut dirty = BTreeSet::from([View::new(1), current, View::new(4)]);
+        let mut dispatch = vec![View::new(9)];
+
+        prepare_dispatch(&mut dirty, current, &mut dispatch);
+
+        assert_eq!(dispatch, [current, View::new(1), View::new(4)]);
+        assert!(dirty.is_empty());
     }
 }
