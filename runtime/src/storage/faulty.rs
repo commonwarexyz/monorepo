@@ -571,6 +571,39 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 }
 
+impl<S: crate::atomic::Backend> crate::atomic::Backend for Storage<S> {
+    type Worker = Storage<S::Worker>;
+
+    fn atomic_worker(&self) -> Self::Worker {
+        Storage {
+            inner: self.inner.atomic_worker(),
+            ctx: self.ctx.clone(),
+            pending: self.pending.clone(),
+            generations: self.generations.clone(),
+        }
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        self.inner.atomic_resources()
+    }
+
+    fn new_atomic_identifier(&self) -> [u8; 16] {
+        self.inner.new_atomic_identifier()
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, Error> {
+        if self.ctx.should_fail(Op::Open) {
+            return Err(injected_io_error().into());
+        }
+        let opened = self.inner.open_atomic_existing(partition, name).await?;
+        Ok(opened.map(|(blob, len)| (self.wrap_blob(partition, name, blob, len), len)))
+    }
+}
+
 /// A blob wrapper that injects deterministic faults based on configuration.
 #[derive(Clone)]
 pub struct Blob<B: crate::Blob> {

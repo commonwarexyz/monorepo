@@ -1117,6 +1117,14 @@ impl Context {
         self.executor().auditor.clone()
     }
 
+    fn fill_random(&self, dest: &mut [u8]) {
+        let executor = self.executor();
+        executor.auditor.event(b"rand", |hasher| {
+            hasher.update(b"fill_bytes");
+        });
+        executor.rng.lock().fill_bytes(dest);
+    }
+
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
@@ -1593,11 +1601,7 @@ impl TryRng for Context {
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
-        let executor = self.executor();
-        executor.auditor.event(b"rand", |hasher| {
-            hasher.update(b"fill_bytes");
-        });
-        executor.rng.lock().fill_bytes(dest);
+        self.fill_random(dest);
         Ok(())
     }
 }
@@ -1625,6 +1629,32 @@ impl crate::Storage for Context {
     }
 }
 
+impl crate::atomic::Backend for Context {
+    type Worker = Self;
+
+    fn atomic_worker(&self) -> Self {
+        <Self as crate::Supervisor>::child(self, "atomic_storage")
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        self.storage.atomic_resources()
+    }
+
+    fn new_atomic_identifier(&self) -> [u8; 16] {
+        let mut identifier = [0; 16];
+        self.fill_random(&mut identifier);
+        identifier
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, Error> {
+        self.storage.open_atomic_existing(partition, name).await
+    }
+}
+
 impl crate::BufferPooler for Context {
     fn network_buffer_pool(&self) -> &crate::BufferPool {
         &self.network_buffer_pool
@@ -1641,8 +1671,9 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, WriteOptions, deterministic, reschedule,
+        AtomicBlob as _, AtomicStorage as _, BatchOperation, Blob, Metrics as _, Resolver,
+        Runner as _, Spawner as _, Storage, Strategizer, Supervisor as _, WriteOptions,
+        deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
@@ -1698,6 +1729,23 @@ mod tests {
         let state_b = run_with_metric("ab", "c");
 
         assert_ne!(state_a, state_b);
+    }
+
+    #[test]
+    fn test_try_fill_bytes_is_deterministic_and_audited() {
+        fn run(seed: u64) -> ([u8; 32], String) {
+            deterministic::Runner::seeded(seed).start(|mut context| async move {
+                let before = context.auditor().state();
+                let mut bytes = [0; 32];
+                context.try_fill_bytes(&mut bytes).unwrap();
+                let after = context.auditor().state();
+                assert_ne!(after, before);
+                (bytes, after)
+            })
+        }
+
+        assert_eq!(run(7), run(7));
+        assert_ne!(run(7), run(8));
     }
 
     #[test]
@@ -1910,6 +1958,46 @@ mod tests {
         // Check that unsynced storage does not persist after recovery
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_escaped_atomic_blob_cannot_publish_crash_lost_bytes() {
+        let (stale, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let (blob, _) = context.open_atomic("stale", b"blob").await.unwrap();
+                blob.append(b"lost").await.unwrap();
+                blob
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            assert!(stale.sync().await.is_err());
+            drop(stale);
+
+            let (_, len) = context.open_atomic("stale", b"blob").await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_rejects_escaped_atomic_batch_participant() {
+        let (stale, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let (blob, _) = context.open_atomic("stale_batch", b"blob").await.unwrap();
+                blob.append(b"lost").await.unwrap();
+                blob
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            assert!(
+                context
+                    .apply(vec![BatchOperation::Publish(stale)])
+                    .await
+                    .is_err()
+            );
+
+            let (_, len) = context.open_atomic("stale_batch", b"blob").await.unwrap();
             assert_eq!(len, 0);
         });
     }
