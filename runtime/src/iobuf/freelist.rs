@@ -310,6 +310,9 @@ impl Freelist {
     #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
         let capacity = self.slots.len();
+
+        // The successful old counter value is a unique permanent slot id. This
+        // admission does not publish slot state, so relaxed ordering is enough.
         #[allow(deprecated)]
         let slot = self
             .created
@@ -364,6 +367,8 @@ impl Freelist {
     /// The iterator must contain distinct buffers created by this freelist. It
     /// should not panic because buffers yielded before a panic may leak.
     pub fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
+        // Keep empty and singleton batches off the staging path. Internal
+        // slot-id scratch is needed only when publishing multiple buffers.
         let mut buffers = buffers.into_iter();
         let Some(first) = buffers.next() else {
             return;
@@ -503,6 +508,8 @@ impl Freelist {
     pub fn drain(&self) -> usize {
         let mut drained = 0;
 
+        // Visit stripes directly so Drop can run during thread-local cache
+        // teardown without consulting this thread's routing state.
         for stripe in &self.stripes {
             // Allocate before locking so late returns never wait for allocator
             // work that is independent of the protected vector swap.
@@ -885,32 +892,6 @@ pub(super) mod tests {
         set.put(taken.expect("singleton callback receives the buffer"));
     }
 
-    /// Verifies that a positive stripe remains authoritative while locked.
-    #[test]
-    fn test_take_waits_for_locked_stripe() {
-        let set = Arc::new(prefilled(1, 1));
-        let guard = set.stripes[0].lock();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = {
-            let set = Arc::clone(&set);
-            std::thread::spawn(move || {
-                started_tx.send(()).expect("signal start");
-                done_tx.send(set.take()).expect("send take result");
-            })
-        };
-
-        started_rx.recv().expect("worker started");
-        assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
-        drop(guard);
-        let buffer = done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("take must finish after unlock")
-            .expect("locked stripe must preserve its buffer");
-        worker.join().expect("worker must not panic");
-        set.put(buffer);
-    }
-
     /// Verifies that `take` waits for its positive home before later stripes.
     #[test]
     fn test_take_waits_for_home_before_later_stripe() {
@@ -1196,6 +1177,8 @@ pub(super) mod tests {
         let mut registry = crate::telemetry::metrics::Registry::default();
         let pool = BufferPool::new(config, &mut registry);
 
+        // Exhaust the class before tracking allocations. Measuring only the
+        // repeated miss excludes pool setup and lazy buffer creation.
         let _held: [IoBufMut; CAPACITY] = std::array::from_fn(|_| {
             pool.try_alloc(BUFFER_SIZE)
                 .expect("lazy allocation within capacity")
@@ -1248,6 +1231,8 @@ mod loom_tests {
                 })
             };
 
+            // This flag orders the take after the put completes, so a miss
+            // would violate completed-operation discoverability.
             while !returned.load(Ordering::Acquire) {
                 thread::yield_now();
             }

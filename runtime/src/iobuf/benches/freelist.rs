@@ -213,7 +213,7 @@ struct MutexVec {
     buffers: Mutex<Vec<PooledBuffer>>,
 }
 
-// SAFETY: benchmark buffers are mutated only while their corresponding
+// SAFETY: benchmark slot buffers are mutated only while their corresponding
 // buffer is exclusively owned by one worker or protected by the container.
 unsafe impl Send for MutexVec {}
 // SAFETY: shared access to buffers is synchronized by the mutex.
@@ -261,7 +261,7 @@ struct ArrayQueueFreelist {
     queue: ArrayQueue<PooledBuffer>,
 }
 
-// SAFETY: benchmark buffers are mutated only while their corresponding
+// SAFETY: benchmark slot buffers are mutated only while their corresponding
 // buffer is exclusively owned by one worker or protected by the queue.
 unsafe impl Send for ArrayQueueFreelist {}
 // SAFETY: shared access to buffers is synchronized by `ArrayQueue`.

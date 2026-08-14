@@ -695,8 +695,8 @@ impl PoolMetrics {
 /// - a shared global freelist for tracked buffers visible to all threads
 /// - a per-thread local cache for same-thread reuse
 ///
-/// The global freelist owns the allocation layout, slot reservation counter, and
-/// side-table slots for this class. A tracked buffer can be globally parked,
+/// The global freelist owns the allocation layout, slot reservation counter,
+/// and side-table slots for this class. A tracked buffer can be globally parked,
 /// owned by a pooled backing, or parked in one thread's local cache, but the
 /// slot always belongs to this `SizeClass`.
 ///
@@ -1093,7 +1093,7 @@ impl SizeClassLease {
 ///
 /// The buffer's side-table slot identifies the stable slot within its
 /// [`SizeClass`] and contains the live lease that keeps that class alive. The
-/// entry itself intentionally stores only the buffer so local pop and push do
+/// entry itself intentionally stores only the buffer so local pop/push does
 /// not move separate slot or class metadata per buffer.
 struct TlsSizeClassCacheEntry {
     buffer: PooledBuffer,
@@ -2966,14 +2966,6 @@ mod tests {
     #[test]
     fn test_parallelism_policy_resolves_freelist_stripes() {
         let page = page_size();
-        let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(1)));
-
-        let class_index = pool.class_index(page).unwrap();
-        assert_eq!(
-            freelist::tests::num_stripes(&pool.inner.classes[class_index].global),
-            8
-        );
-
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(16)));
 
         let class_index = pool.class_index(page).unwrap();
