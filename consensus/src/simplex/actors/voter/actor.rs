@@ -412,8 +412,8 @@ impl<
         Some(Request(context, span, receiver))
     }
 
-    /// Reconciles pending application requests with the current view: drops
-    /// requests for exited views and dispatches eligible ones.
+    /// Drops pending application requests for exited views and dispatches
+    /// eligible new ones.
     async fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
