@@ -1,3 +1,7 @@
+["commonware_runtime::atomic::tests::conformance::AtomicFormat"]
+n_cases = 1
+hash = "df79b238d8a5fafab8ce4820f9c51c716afe04760ddb82aaded8a639bc185389"
+
 ["commonware_runtime::iobuf::tests::conformance::CodecConformance<IoBuf>"]
 hash = "b9218555b17220499ccf2b9dc98ce40132e4cd674ea4add3faa90e24731e907c"
 n_cases = 65536
