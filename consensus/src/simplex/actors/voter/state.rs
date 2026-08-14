@@ -711,24 +711,31 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.handoff_ancestry_payload(parent).is_some()
     }
 
+    /// Returns true when `view`'s parent evidence permits our notarize vote.
+    ///
+    /// Views inside the issuance window use the optimistic rule
+    /// ([`Self::optimistic_parent_ready`]). Views outside it carry certified
+    /// ancestry already. The exception is a pipelined-handoff proposal, which
+    /// waits for evidence of its cross-term parent
+    /// ([`Self::handoff_parent_ready`]).
+    fn notarize_parent_ready(&self, view: View) -> bool {
+        if self.in_issuance_window(view) {
+            return self.optimistic_parent_ready(view);
+        }
+        self.handoff_parent_ready(view)
+    }
+
     /// Construct a notarize vote for this view when we're ready to sign.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
         if !self.admits_outbound(view) {
             return None;
         }
-        // Check the cheap round-local eligibility before the ancestry gates
-        // below, which re-resolve parent payloads on every event otherwise.
+        // Check the cheap round-local eligibility before the ancestry gate
+        // below, which re-resolves parent payloads on every event otherwise.
         if !self.views.get(&view)?.can_construct_notarize() {
             return None;
         }
-        // Optimistic views wait for local evidence of their parent; anything
-        // outside the issuance window carries certified ancestry already.
-        if self.in_issuance_window(view) && !self.optimistic_parent_ready(view) {
-            return None;
-        }
-        // The exception is a pipelined-handoff proposal, which waits for
-        // evidence of its cross-term parent.
-        if !self.handoff_parent_ready(view) {
+        if !self.notarize_parent_ready(view) {
             return None;
         }
         if !self.verification_matches(view) {
@@ -1324,10 +1331,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     //
     // The `*_parent_ready` predicates answer whether a view's immediate parent
     // is settled enough to act on. Certification and finalization require
-    // `explicit_parent_ready`. Notarize issuance uses `optimistic_parent_ready`
-    // and, for term starts, `handoff_parent_ready`; both delegate to their
-    // ancestry resolver so issuance and proposal construction share one
-    // ancestry rule.
+    // `explicit_parent_ready`. Notarize issuance uses `notarize_parent_ready`,
+    // which selects `optimistic_parent_ready` inside the issuance window and
+    // `handoff_parent_ready` outside it; both delegate to their ancestry
+    // resolver so issuance and proposal construction share one ancestry rule.
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
     /// proposal, the strongest form of ancestry.
