@@ -1,7 +1,7 @@
 use super::Header;
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher};
 use commonware_formatting::hex;
-use commonware_utils::sync::{Mutex, RwLock};
+use commonware_utils::sync::{AsyncMutex, AsyncRwLock, Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 /// Resolves a blob's header from its full contents (see [super::header::resolve]).
@@ -53,6 +53,7 @@ impl Generations {
 pub struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
+    atomic_resources: crate::atomic::AtomicResources,
     pool: BufferPool,
 }
 
@@ -65,6 +66,12 @@ impl Storage {
         Self {
             partitions: Arc::new(Mutex::new(partitions)),
             generations: Arc::new(Mutex::new(Generations::default())),
+            atomic_resources: crate::atomic::AtomicResources {
+                driver: crate::atomic::Driver::inline(),
+                exclusion: Arc::new(AsyncRwLock::new(())),
+                namespace: Arc::new(AsyncMutex::new(())),
+                payload_budget: Arc::new(crate::atomic::PayloadBudget::default()),
+            },
             pool,
         }
     }
@@ -449,11 +456,60 @@ impl crate::Blob for Blob {
     }
 }
 
+impl crate::atomic::Backend for Storage {
+    type Worker = Self;
+
+    fn atomic_worker(&self) -> Self {
+        self.clone()
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        self.atomic_resources.clone()
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, crate::Error> {
+        super::validate_partition_name(partition)?;
+        let key = (partition.to_string(), name.to_vec());
+        let mut generations = self.generations.lock();
+        let mut partitions = self.partitions.lock();
+        let Some(blobs) = partitions.get_mut(partition) else {
+            return Ok(None);
+        };
+        let Some(content) = blobs.get(name) else {
+            return Ok(None);
+        };
+        let versions = crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION;
+        let Some((logical_size, _, data_offset)) =
+            resolve_header(content, &versions, partition, name)?
+        else {
+            return Ok(None);
+        };
+        super::header::require_atomic_layout(data_offset, partition, name)?;
+        let generation = generations.get_or_insert(&key);
+        Ok(Some((
+            Blob::new(
+                self.partitions.clone(),
+                self.generations.clone(),
+                key,
+                content.clone(),
+                self.pool.clone(),
+                data_offset,
+                generation,
+            ),
+            logical_size,
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _,
+        AtomicStorage as _, Blob, BufferPoolConfig, Storage as _,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -467,6 +523,99 @@ mod tests {
     async fn test_memory_storage() {
         let storage = Storage::new(test_pool());
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_atomic_backing_matches_the_ordinary_default_container() {
+        let storage = Storage::new(test_pool());
+        let (ordinary, _) = storage.open("headers", b"ordinary").await.unwrap();
+        let (atomic, _) = storage.open_atomic("headers", b"atomic").await.unwrap();
+        drop(ordinary);
+        drop(atomic);
+
+        let partitions = storage.partitions.lock();
+        let partition = partitions.get("headers").unwrap();
+        let ordinary = partition.get(b"ordinary".as_slice()).unwrap();
+        let atomic = partition.get(b"atomic".as_slice()).unwrap();
+        let (header, version) =
+            Header::create(&(crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION));
+        assert_eq!(version, crate::DEFAULT_BLOB_VERSION);
+        let header_len = header.len();
+        assert_eq!(&atomic[..header_len], &ordinary[..header_len]);
+        assert_eq!(&atomic[..header_len], header.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_atomic_exact_open_preserves_incomplete_container_and_generation() {
+        let storage = Storage::new(test_pool());
+        let partition = "atomic_container_recovery";
+        let name = b"blob".to_vec();
+        let key = (partition.to_string(), name.clone());
+        let interrupted =
+            Header::create(&(crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION)).0
+                [..Header::PRELUDE_SIZE]
+                .to_vec();
+        storage
+            .partitions
+            .lock()
+            .entry(partition.to_string())
+            .or_default()
+            .insert(name.clone(), interrupted.clone());
+        let generation = storage.generations.lock().get_or_insert(&key);
+
+        assert!(
+            crate::atomic::Backend::open_atomic_existing(&storage, partition, &name)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(storage.partitions.lock()[partition][&name], interrupted);
+        assert_eq!(
+            storage.generations.lock().current.get(&key),
+            Some(&generation)
+        );
+
+        let (_, len) = storage.open_atomic(partition, &name).await.unwrap();
+        assert_eq!(len, 0);
+        assert_ne!(
+            storage.generations.lock().current.get(&key),
+            Some(&generation)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_atomic_rejects_v0_ordinary_lookalikes_without_mutation() {
+        let storage = Storage::new(test_pool());
+        let original = crate::storage::header::tests::v0_atomic_lookalike_bytes();
+
+        for (partition, name) in [("v0_atomic_open", b"open"), ("v0_atomic_scan", b"scan")] {
+            storage
+                .partitions
+                .lock()
+                .entry(partition.to_string())
+                .or_default()
+                .insert(name.to_vec(), original.clone());
+        }
+
+        let rejected_open = storage.open_atomic("v0_atomic_open", b"open").await;
+        let rejected_scan = storage.scan_atomic("v0_atomic_scan").await;
+        let partitions = storage.partitions.lock();
+        assert!(
+            partitions["v0_atomic_open"][b"open".as_slice()].as_slice() == original.as_slice(),
+            "atomic open mutated a legacy ordinary blob"
+        );
+        assert!(
+            partitions["v0_atomic_scan"][b"scan".as_slice()].as_slice() == original.as_slice(),
+            "atomic scan mutated a legacy ordinary blob"
+        );
+        assert!(matches!(
+            rejected_open,
+            Err(crate::Error::BlobCorrupt(_, _, reason)) if reason == "expected V1 header layout"
+        ));
+        assert!(matches!(
+            rejected_scan,
+            Err(crate::Error::BlobCorrupt(_, _, reason)) if reason == "expected V1 header layout"
+        ));
     }
 
     #[tokio::test]
