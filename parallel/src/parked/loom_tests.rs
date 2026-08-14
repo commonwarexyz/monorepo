@@ -119,6 +119,25 @@ fn loom_wake_dispatch() {
 }
 
 #[test]
+fn loom_spawn_completes_and_detached_runs() {
+    model(|| {
+        // Async-awaiter waiter type (race 5) + detached completion: one awaited spawn and
+        // one dropped-future spawn must both execute, on every interleaving, and shutdown
+        // must drain whatever the worker has not yet taken.
+        let strategy = Parked::new(NonZeroUsize::new(2).unwrap());
+        let ran = loom::sync::Arc::new(LoomBool::new(false));
+        {
+            let ran = loom::sync::Arc::clone(&ran);
+            drop(strategy.spawn(move |_| ran.store(true, LoomOrdering::SeqCst)));
+        }
+        let out = futures::executor::block_on(strategy.spawn(|_| 5u8));
+        assert_eq!(out, 5);
+        drop(strategy); // shutdown drains the detached job if no worker took it
+        assert!(ran.load(LoomOrdering::SeqCst));
+    });
+}
+
+#[test]
 fn loom_error_close_backout() {
     model(|| {
         // One item errors while the other may be claimed by the worker: the close must

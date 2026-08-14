@@ -3,13 +3,15 @@
 //! `Parked` replaces rayon's spin-then-yield idle behavior with immediate parking plus
 //! wake-limited dispatch: idle workers cost zero, and a submission wakes only as many
 //! workers as the job can use. Collection operations execute through a scoped chunk-claiming
-//! core ([`scoped`]) in which the submitting caller participates; `spawn`, `join`, and
-//! `sort_by` are TEMPORARY serial implementations in this increment (see the plan; real
-//! implementations land in increments B and C).
+//! core ([`scoped`]) in which the submitting caller participates. `spawn` hands one-shots to
+//! an unbounded queue eagerly (a dropped future still runs its job) with a member-poller
+//! help path (a pool worker polling a spawn future of its own pool runs pending work
+//! instead of parking the only capable worker). `join` and `sort_by` are TEMPORARY serial
+//! implementations until increment C.
 //!
-//! Not publicly constructible yet: the `Manual` hand-off contract for `spawn` does not hold
-//! until increment B, so jobs that block on external synchronization (e.g. a channel) would
-//! deadlock their submitter. Tests that need such jobs must keep using `Rayon`.
+//! Pools with more than one worker always hand `spawn` jobs off to a worker; single-worker
+//! pools execute them inline at submission (matching `Rayon` at one thread), so jobs that
+//! block on external synchronization require a multi-worker pool.
 
 mod pool;
 mod scoped;
@@ -27,7 +29,10 @@ use core::{
     cell::Cell, cmp::Ordering as CmpOrdering, convert::Infallible, fmt, num::NonZeroUsize,
     ops::Range, ptr,
 };
-use futures::future::{self, Either};
+use futures::{
+    channel::oneshot,
+    future::{self, Either},
+};
 use pool::Shared;
 use scoped::Ctl;
 use std::panic::{self, Location};
@@ -36,18 +41,20 @@ use sync::{Arc, Mutex, WorkerHandle, spawn_worker};
 /// Sends the pool into shutdown when the last `Parked` handle drops.
 struct Owner {
     shared: Arc<Shared>,
-    /// Worker handles, joined on shutdown under loom (a detached loom thread can outlive
-    /// the model iteration's execution arena). Production detaches for now; joining --
-    /// including the last-owner-drop-on-a-worker case -- is increment B lifecycle work.
-    #[cfg(feature = "loom")]
     workers: Mutex<Vec<WorkerHandle>>,
 }
 
 impl Drop for Owner {
     fn drop(&mut self) {
         self.shared.shutdown();
-        #[cfg(feature = "loom")]
-        for handle in self.workers.lock().unwrap().drain(..) {
+        // A spawned job can hold the last Parked clone, making this drop run ON a pool
+        // worker: joining would self-deadlock, so detach in that case (the flag is set;
+        // siblings exit after draining). Otherwise join so no thread outlives the pool.
+        if pool::is_member(&self.shared) {
+            return;
+        }
+        let handles: Vec<WorkerHandle> = self.workers.lock().unwrap().drain(..).collect();
+        for handle in handles {
             let _ = handle.join();
         }
     }
@@ -59,7 +66,7 @@ impl Drop for Owner {
 /// operation wakes at most `n - 1` of them so that, with the participating caller, a single
 /// job's executor count equals the configured parallelism.
 #[derive(Clone)]
-pub(crate) struct Parked {
+pub struct Parked {
     shared: Arc<Shared>,
     _owner: Arc<Owner>,
     // The parallelism assumed for policy decisions and manual partitioning.
@@ -80,22 +87,18 @@ impl fmt::Debug for Parked {
 
 impl Parked {
     /// Creates a `Parked` strategy with `workers` background worker threads.
-    pub(crate) fn new(workers: NonZeroUsize) -> Self {
+    pub fn new(workers: NonZeroUsize) -> Self {
         let shared = Arc::new(Shared::new(workers.get()));
-        #[cfg_attr(not(feature = "loom"), allow(clippy::let_underscore_untyped))]
         let handles: Vec<WorkerHandle> = (0..workers.get())
             .map(|id| {
                 let s = Arc::clone(&shared);
                 spawn_worker(id, move || pool::worker_loop(s, id))
             })
             .collect();
-        #[cfg(not(feature = "loom"))]
-        drop(handles); // production detaches workers (see Owner)
         Self {
             shared: Arc::clone(&shared),
             _owner: Arc::new(Owner {
                 shared,
-                #[cfg(feature = "loom")]
                 workers: Mutex::new(handles),
             }),
             parallelism: workers.get(),
@@ -103,11 +106,11 @@ impl Parked {
         }
     }
 
-    /// Overrides the parallelism assumed for planning decisions (mirrors
-    /// `Rayon::with_parallelism`). Used by loom models to engage the parallel arms with a
-    /// single worker, keeping the explored thread count small.
-    #[cfg(test)]
-    pub(crate) fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+    /// Overrides the parallelism assumed for planning decisions.
+    ///
+    /// This does not resize the pool. By default a strategy plans with its worker count;
+    /// override it when the strategy should expose a different parallelism.
+    pub fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.parallelism = parallelism.get();
         self
     }
@@ -441,11 +444,48 @@ impl Strategy for Parked {
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
-        // TEMPORARY (increment A): executes inline at submission. The real hand-off (with
-        // the member-poller help path and Manual's unconditional hand-off contract) lands
-        // in increment B. Jobs that block on external synchronization would deadlock the
-        // submitter here; such tests must use Rayon until B.
-        Either::<_, future::Ready<T>>::Left(future::ready(f(self.clone())))
+        // Mirror Rayon: a single-worker pool executes inline (offloading to the only
+        // worker could deadlock a job that waits on work only the submitter can create).
+        // A pool already shutting down also executes inline: post-close submissions are
+        // the submitter's own work by contract.
+        if self.shared.workers() <= 1 || self.shared.is_shutdown() {
+            return Either::Left(future::ready(f(self.clone())));
+        }
+
+        let (tx, mut rx) = oneshot::channel();
+        let s = self.clone();
+        let shared = Arc::clone(&self.shared);
+        // Eager submission: the job is queued before the future is returned, so a caller
+        // that drops the future (detached spawn) still gets its job executed.
+        self.shared.enqueue(Box::new(move || {
+            // Catch the panic so a panicking job propagates to the awaiting task rather
+            // than killing a pool worker.
+            let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
+            let _ = tx.send(result);
+        }));
+        Either::Right(async move {
+            // When the polling thread is itself a member of THIS pool, waiting on the
+            // channel could park the only worker able to run the job. Run pending pool
+            // work inline until the job completes or an external poller takes over.
+            // `is_member` checks pool identity, so a worker of another pool falls through
+            // to the channel immediately.
+            loop {
+                if let Ok(Some(result)) = rx.try_recv() {
+                    return match result {
+                        Ok(value) => value,
+                        Err(payload) => panic::resume_unwind(payload),
+                    };
+                }
+                if !pool::is_member(&shared) || !shared.help_once() {
+                    break;
+                }
+            }
+            match rx.await {
+                Ok(Ok(value)) => value,
+                Ok(Err(payload)) => panic::resume_unwind(payload),
+                Err(_) => panic!("strategy job dropped before completion"),
+            }
+        })
     }
 
     #[track_caller]

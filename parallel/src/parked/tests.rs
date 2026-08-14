@@ -63,10 +63,10 @@ fn test_try_map_collect_vec_ok_and_err() {
         (0..N as u64).map(|i| i + 7).collect::<Vec<_>>()
     );
 
-    let err: Result<Vec<u64>, u64> = strategy
-        .manual()
-        .try_map_collect_vec(0..N as u64, |i| if i == 300 { Err(i) } else { Ok(i) });
-    assert_eq!(err.unwrap_err(), 300);
+    let err: Result<Vec<u64>, u64> = strategy.manual().try_map_collect_vec(0..N as u64, |i| {
+        if i == N as u64 / 2 { Err(i) } else { Ok(i) }
+    });
+    assert_eq!(err.unwrap_err(), N as u64 / 2);
 }
 
 #[test]
@@ -125,7 +125,13 @@ fn test_try_fold_ok_and_err() {
     let err: Result<u64, &'static str> = strategy.manual().try_fold(
         0..N as u64,
         || 0u64,
-        |acc, i| if i == 100 { Err("boom") } else { Ok(acc + i) },
+        |acc, i| {
+            if i == N as u64 / 3 {
+                Err("boom")
+            } else {
+                Ok(acc + i)
+            }
+        },
         |a, b| a + b,
     );
     assert_eq!(err.unwrap_err(), "boom");
@@ -439,6 +445,129 @@ fn test_matches_rayon_semantics_on_error_priority() {
     ] {
         let e = strategy_result.unwrap_err();
         assert_eq!(e % 97, 0);
+    }
+}
+
+#[test]
+fn test_spawn_result_and_panic() {
+    let strategy = parked(2);
+    assert_eq!(futures::executor::block_on(strategy.spawn(|_| 7u8)), 7);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        futures::executor::block_on(strategy.spawn(|_| -> u8 { panic!("spawn boom") }))
+    }));
+    assert_eq!(
+        *result.unwrap_err().downcast_ref::<&str>().unwrap(),
+        "spawn boom"
+    );
+}
+
+#[test]
+fn test_detached_spawn_still_runs() {
+    // Eager submission: dropping the returned future must not cancel the job.
+    let strategy = parked(2);
+    let (tx, rx) = std::sync::mpsc::channel();
+    drop(strategy.spawn(move |_| {
+        tx.send(42u8).unwrap();
+    }));
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+        42
+    );
+}
+
+#[test]
+fn test_member_poller_executes_pending_spawn() {
+    // Port of the Rayon member-poller contract: occupy every worker except the one running
+    // the outer job, so the inner spawn can only complete if the outer job's block_on
+    // (polling from a pool worker) helps by running queued work itself.
+    let strategy = parked(2);
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    let gate_rx = StdArc::new(std::sync::Mutex::new(gate_rx));
+
+    // Occupy one worker with a job that blocks until the end of the test.
+    let blocker = {
+        let gate_rx = StdArc::clone(&gate_rx);
+        strategy.manual().spawn(move |_| {
+            let _ = gate_rx.lock().unwrap().recv();
+        })
+    };
+
+    // The outer job runs on the remaining worker and block_on-polls an inner spawn: with
+    // no free worker, only the member help path can execute it.
+    let outer = strategy
+        .manual()
+        .spawn(move |s| futures::executor::block_on(s.spawn(|_| 99u8)));
+    assert_eq!(futures::executor::block_on(outer), 99);
+
+    gate_tx.send(()).unwrap();
+    futures::executor::block_on(blocker);
+}
+
+#[test]
+fn test_last_owner_dropped_inside_spawned_job() {
+    // The spawned job holds the final Parked clone: its drop runs Owner::drop ON a pool
+    // worker, which must detach (not self-join) and must not hang the pool.
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let strategy = parked(2);
+        let fut = strategy.spawn(move |s| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(s); // possibly the last owner by now
+            tx.send(1u8).unwrap();
+        });
+        drop(fut);
+        drop(strategy); // job's clone may become the last owner
+    }
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_dropping_handles_never_cancels_queued_spawns() {
+    // Every queued job holds an owner clone, so the pool cannot shut down while work is
+    // pending: dropping every external handle must still let all 64 jobs run.
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let strategy = parked(2);
+        for i in 0..64u8 {
+            let tx = tx.clone();
+            drop(strategy.spawn(move |_| {
+                tx.send(i).unwrap();
+            }));
+        }
+    }
+    drop(tx);
+    let mut seen = 0;
+    while rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok() {
+        seen += 1;
+    }
+    assert_eq!(seen, 64);
+}
+
+#[test]
+fn test_manual_spawn_hands_off_blocking_jobs() {
+    // The block_strategy pattern: jobs that block on a channel must not execute inline on
+    // the submitter (that would deadlock before the release below).
+    let strategy = parked(2);
+    let manual = strategy.manual();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = StdArc::new(std::sync::Mutex::new(release_rx));
+    let futs: Vec<_> = (0..2)
+        .map(|_| {
+            let rx = StdArc::clone(&release_rx);
+            manual.spawn(move |_| {
+                let _ = rx.lock().unwrap().recv();
+            })
+        })
+        .collect();
+    // If either job had run inline, we would never reach here.
+    release_tx.send(()).unwrap();
+    release_tx.send(()).unwrap();
+    for fut in futs {
+        futures::executor::block_on(fut);
     }
 }
 

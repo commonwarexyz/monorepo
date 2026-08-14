@@ -8,8 +8,25 @@
 
 use super::{
     scoped::{Job, Slot},
-    sync::{Arc, AtomicBool, AtomicU8, AtomicUsize, Ordering, Parker, fence, spin},
+    sync::{Arc, AtomicBool, AtomicU8, AtomicUsize, Mutex, Ordering, Parker, fence, spin},
 };
+use std::collections::VecDeque;
+
+/// A queued one-shot job (a `spawn` closure, boxed: spawn bodies are `'static`).
+pub(super) type OneShot = Box<dyn FnOnce() + Send + 'static>;
+
+std::thread_local! {
+    /// `(pool identity, worker id)` when the current thread is a pool worker. Pool identity
+    /// is the address of its `Shared`, so a worker of pool A polling a future of pool B is
+    /// never misclassified as a member of B.
+    static WORKER_OF: core::cell::Cell<Option<(usize, usize)>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Whether the current thread is a worker of `shared`'s pool.
+pub(super) fn is_member(shared: &Shared) -> bool {
+    WORKER_OF.with(|w| w.get().is_some_and(|(pool, _)| pool == shared.identity()))
+}
 
 /// Number of concurrently published jobs. A performance knob, never a correctness bound:
 /// when every slot is occupied, a submitter executes its job inline on its own thread.
@@ -44,6 +61,13 @@ struct IdleEntry {
 /// State shared by all workers and every `Parked` handle.
 pub(super) struct Shared {
     slots: Box<[Slot]>,
+    /// Queued `spawn` one-shots. Unbounded, so `Manual::spawn`'s hand-off contract never
+    /// needs an inline fallback; drained (not dropped) on shutdown. A mutexed deque is
+    /// deliberate: spawn frequency is per-pipeline-stage, not per-item.
+    oneshots: Mutex<VecDeque<OneShot>>,
+    /// Lock-free mirror of the queue length, so idle-scan probes (search window, park
+    /// recheck) never touch the queue mutex.
+    oneshot_len: AtomicUsize,
     idle: Box<[IdleEntry]>,
     /// Approximate count of REGISTERED entries, maintained by registrants and claimants.
     /// Used only to short-circuit wake scans; correctness never depends on it.
@@ -56,6 +80,8 @@ impl Shared {
     pub(super) fn new(workers: usize) -> Self {
         Self {
             slots: (0..SLOTS).map(|_| Slot::new()).collect(),
+            oneshots: Mutex::new(VecDeque::new()),
+            oneshot_len: AtomicUsize::new(0),
             idle: (0..workers)
                 .map(|_| IdleEntry {
                     state: AtomicU8::new(ACTIVE),
@@ -71,6 +97,59 @@ impl Shared {
     /// Number of background workers.
     pub(super) fn workers(&self) -> usize {
         self.workers
+    }
+
+    /// This pool's identity for thread-local membership checks.
+    pub(super) fn identity(&self) -> usize {
+        core::ptr::from_ref(self) as usize
+    }
+
+    /// Whether the pool has begun shutting down.
+    pub(super) fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// Enqueues a one-shot and wakes one worker to run it.
+    ///
+    /// The publish-vs-register handshake is carried by the queue mutex on the publish side
+    /// paired with the worker's register-then-recheck fence (the recheck locks the same
+    /// mutex via `has_oneshots`).
+    pub(super) fn enqueue(&self, job: OneShot) {
+        self.oneshots.lock().unwrap().push_back(job);
+        self.oneshot_len.fetch_add(1, Ordering::SeqCst);
+        // Publish-vs-register handshake: order the length publication before the idle
+        // scan in wake(), pairing with the worker's register-then-recheck fence.
+        fence(Ordering::SeqCst);
+        self.wake(1);
+    }
+
+    /// Pops one queued one-shot, if any.
+    pub(super) fn pop_oneshot(&self) -> Option<OneShot> {
+        let job = self.oneshots.lock().unwrap().pop_front();
+        if job.is_some() {
+            self.oneshot_len.fetch_sub(1, Ordering::SeqCst);
+        }
+        job
+    }
+
+    fn has_oneshots(&self) -> bool {
+        self.oneshot_len.load(Ordering::SeqCst) != 0
+    }
+
+    /// Runs one unit of pending pool work on the current thread, if any exists: a queued
+    /// one-shot first (latency), otherwise chunks of a published job. Used by workers and
+    /// by member-polling `spawn` futures.
+    pub(super) fn help_once(&self) -> bool {
+        if let Some(job) = self.pop_oneshot() {
+            job();
+            return true;
+        }
+        for slot in self.slots.iter() {
+            if slot.looks_published() && slot.try_drive() {
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn slot(&self, idx: usize) -> &Slot {
@@ -125,10 +204,26 @@ impl Shared {
 
 /// The body of one background worker thread.
 pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
+    WORKER_OF.with(|w| w.set(Some((shared.identity(), id))));
     let mut rotation = id;
     'outer: loop {
         if shared.shutdown.load(Ordering::SeqCst) {
+            // Defensive drain. In practice the queue is empty here by construction: every
+            // queued one-shot holds a `Parked` (owner) clone, so the owner count cannot
+            // reach zero -- and shutdown cannot fire -- while work is pending. The pool
+            // therefore outlives all submitted work. The drain stays as a backstop against
+            // future changes to that ownership structure.
+            while let Some(job) = shared.pop_oneshot() {
+                job();
+            }
             return;
+        }
+
+        // One-shots first: they are latency-sensitive hand-offs (and Manual::spawn's
+        // contract), while scoped jobs always have their caller participating.
+        if let Some(job) = shared.pop_oneshot() {
+            job();
+            continue;
         }
 
         // Work phase: drive every published slot, starting at a rotating origin so one
@@ -150,7 +245,7 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
             if shared.shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            if shared.any_claimable() {
+            if shared.any_claimable() || shared.has_oneshots() {
                 continue 'outer;
             }
             spin();
@@ -169,7 +264,8 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
         // pairing with the publisher's publish-then-scan fence. A submitter that missed our
         // registration published before our recheck; a publication we miss here claimed us.
         fence(Ordering::SeqCst);
-        if shared.shutdown.load(Ordering::SeqCst) || shared.any_claimable() {
+        if shared.shutdown.load(Ordering::SeqCst) || shared.any_claimable() || shared.has_oneshots()
+        {
             // Withdraw the registration. A failed CAS means a submitter already claimed
             // (and decremented for) us; the deposited token makes our next park return
             // immediately, which the loop tolerates as a spurious wake.

@@ -146,6 +146,52 @@ fn gate_fairness_long_short() {
 
 #[test]
 #[ignore = "gate bench: run manually with --ignored --nocapture in release"]
+fn gate_spawn_roundtrip() {
+    // The merkleize offload shape: spawn one CPU job per commit and await it after doing
+    // interleaved caller work. Measures hand-off + wake + completion latency beyond the
+    // job's own wall.
+    const JOB_ROUNDS: u32 = 40_000; // ~40us of work
+    const CALLER_ROUNDS: u32 = 20_000; // caller overlaps ~20us before awaiting
+    const ITERS: usize = 2_001;
+
+    fn scenario<S: Strategy>(strategy: &S) -> Duration {
+        // Warmup.
+        for _ in 0..100 {
+            let fut = strategy.manual().spawn(|_| work(1, JOB_ROUNDS));
+            black_box(work(2, CALLER_ROUNDS));
+            black_box(futures::executor::block_on(fut));
+        }
+        let samples: Vec<Duration> = (0..ITERS)
+            .map(|_| {
+                let (elapsed, out) = time(|| {
+                    let fut = strategy.manual().spawn(|_| work(1, JOB_ROUNDS));
+                    let caller = work(2, CALLER_ROUNDS);
+                    (futures::executor::block_on(fut), caller)
+                });
+                black_box(out);
+                elapsed
+            })
+            .collect();
+        median(samples)
+    }
+
+    let parked = Parked::new(NonZeroUsize::new(WORKERS).unwrap());
+    println!(
+        "gate_spawn_roundtrip/parked: median {:?}",
+        scenario(&parked)
+    );
+    drop(parked);
+    let rayon = Rayon::new(NonZeroUsize::new(WORKERS).unwrap()).unwrap();
+    println!("gate_spawn_roundtrip/rayon: median {:?}", scenario(&rayon));
+    println!(
+        "gate_spawn_roundtrip/inline-floor: job {:?} + caller {:?} serial",
+        time(|| black_box(work(1, JOB_ROUNDS))).0,
+        time(|| black_box(work(2, CALLER_ROUNDS))).0,
+    );
+}
+
+#[test]
+#[ignore = "gate bench: run manually with --ignored --nocapture in release"]
 fn gate_burst_train() {
     // Merkleize submits ~15 back-to-back per-level jobs per commit, halving in size.
     const LEVELS: [usize; 12] = [4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2];
