@@ -47,6 +47,7 @@ module twins {
   val block_commits_to_parent = i::block_commits_to_parent
   val agreement = i::agreement
   val no_vote_equivocation_inv = i::no_vote_equivocation_inv
+  val contradiction_nullify_is_justified = i::contradiction_nullify_is_justified
   val no_nullification_and_finalization_in_the_same_view = i::no_nullification_and_finalization_in_the_same_view
   val validity = i::validity
   val finalization_agreement = i::finalization_agreement
@@ -57,5 +58,8 @@ module twins {
   val certificates_are_backed = i::certificates_are_backed
   val committed_blocks_are_finalized = i::committed_blocks_are_finalized
   val committed_chain_is_connected = i::committed_chain_is_connected
+  val last_finalized_is_committed = i::last_finalized_is_committed
+  val finalized_blocks_are_committed_or_pending = i::finalized_blocks_are_committed_or_pending
+  val pending_finalization_agreement = i::pending_finalization_agreement
   val no_nullification_and_finalization_globally = i::no_nullification_and_finalization_globally
 }

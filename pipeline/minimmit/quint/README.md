@@ -33,17 +33,21 @@ The specification validates the following safety properties:
 | 2 | `block_commits_to_parent` | A block is a hash-protected container that commits to its parent, so the same block cannot be built on two different parents |
 | 3 | `agreement` | No two honest replicas disagree on committed proposal-chain prefixes |
 | 4 | `no_vote_equivocation_inv` | An honest replica does not send an invalid sequence of votes in one view |
-| 5 | `no_nullification_and_finalization_in_the_same_view` | One honest replica does not observe both nullification and finalization evidence for the same view |
-| 6 | `validity` | At most one proposal can be finalized in a view |
-| 7 | `finalization_agreement` | No two honest replicas finalize different proposals in the same view |
-| 8 | `valid_last_finalized` | The last finalized view must not exceed the last seen notarization view |
-| 9 | `certificates_are_valid_inv` | Stored certificates are well-formed and meet their thresholds |
-| 10 | `certificates_are_backed` | Certificate signatures from non-faulty keys are backed by matching votes |
-| 11 | `notarized_consistency` | Local notarization state matches notarize votes sent by the same honest key |
-| 12 | `safe_finalization` | A finalized view has neither nullification nor conflicting notarization evidence |
-| 13 | `committed_blocks_are_finalized` | Every committed proposal is notarized, and the tip of the committed chain is finalized (its ancestors are finalized transitively, minimmit.md 8.4) |
-| 14 | `committed_chain_is_connected` | Every committed proposal links to the preceding committed proposal |
-| 15 | `no_nullification_and_finalization_globally` | No view has both nullification and finalization evidence across honest stores |
+| 5 | `contradiction_nullify_is_justified` | An honest replica that nullified after notarizing (minimmit.md 8.6) holds an M-quorum of conflicting votes justifying it |
+| 6 | `no_nullification_and_finalization_in_the_same_view` | One honest replica does not observe both nullification and finalization evidence for the same view |
+| 7 | `validity` | At most one proposal can be finalized in a view |
+| 8 | `finalization_agreement` | No two honest replicas finalize different proposals in the same view |
+| 9 | `valid_last_finalized` | The last finalized view must not exceed the last seen notarization view |
+| 10 | `certificates_are_valid_inv` | Stored certificates are well-formed and meet their thresholds |
+| 11 | `certificates_are_backed` | Certificate signatures from non-faulty keys are backed by matching votes |
+| 12 | `notarized_consistency` | Local notarization state matches notarize votes sent by the same honest key |
+| 13 | `safe_finalization` | A finalized view has neither nullification nor conflicting notarization evidence |
+| 14 | `committed_blocks_are_finalized` | Every committed proposal is notarized, and the tip of the committed chain is finalized (its ancestors are finalized transitively, minimmit.md 8.4) |
+| 15 | `committed_chain_is_connected` | Every committed proposal links to the preceding committed proposal |
+| 16 | `last_finalized_is_committed` | `last_finalized` equals the view of the committed chain's tip (genesis while nothing is committed) |
+| 17 | `finalized_blocks_are_committed_or_pending` | Every stored finalization is on the committed chain or pending backfill of its ancestry |
+| 18 | `pending_finalization_agreement` | A pending finalized block does not conflict with a block another honest replica committed at the same view |
+| 19 | `no_nullification_and_finalization_globally` | No view has both nullification and finalization evidence across honest stores |
 
 ## Running the Specification
 

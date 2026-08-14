@@ -312,6 +312,60 @@ module tests {
             .expect(all_invariants)
     }
 
+    // Regression test: contradiction causality must be enforced by the invariant layer, not
+    // only by the transition guard.
+    //
+    // minimmit.md 8.6 permits notarize-then-nullify only after observing >= M distinct
+    // conflicting replicas. `on_nullify_by_contradiction` checks this via `is_contradicted`,
+    // but a guard is invisible to the invariants: `no_vote_equivocation_inv` accepts every
+    // [notarize, nullify] sequence, and no property names the evidence. The unjustified state,
+    // a nullify-after-notarize with NO conflicting evidence in the local store, is not
+    // reachable via `step` precisely because of the guard, so no test can produce it through
+    // the real action either; we force it with `force_unjustified_nullify`, which replays the
+    // transition's effect while bypassing the guard, purely to show
+    // `contradiction_nullify_is_justified` detects it (the same pattern as
+    // `equivocatedAncestorTest`).
+    run unjustifiedContradictionNullifyTest = {
+        initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n4", 5 -> "n0"))
+            // n0 proposes, which counts as its notarize(val_b0, 0): ghost_sent_votes[0] = [Some]
+            .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
+            .then(all { assert(contradiction_nullify_is_justified), unchanged_all })
+            // the forged 8.6: n0 nullifies view 0 with an empty vote store, zero conflicting
+            // signatures, where the rule demands M = 3
+            .then(force_unjustified_nullify("n0"))
+            .then(all {
+                // the sent sequence [notarize, nullify] is exactly the shape 8.6 legitimately
+                // produces, so the equivocation invariant sees nothing wrong ...
+                assert(no_vote_equivocation_inv),
+                // ... but the causality invariant does: no evidence backs the nullify
+                assert(not(contradiction_nullify_is_justified)),
+                unchanged_all,
+            })
+            .expect(not(contradiction_nullify_is_justified))
+            .expect(not(all_invariants))
+    }
+
+    // Replays the state change of `on_nullify_by_contradiction` WITHOUT its
+    // `is_contradicted` guard. Test-only: `step` cannot produce this transition.
+    action force_unjustified_nullify(id: ReplicaId): bool = all {
+        val self = replica_state.get(id)
+        all {
+            sent_vote' = sent_vote.union(Set(nullify(self.view, sig_of(id)))),
+            replica_state' = replica_state.set(id, {
+                ...self,
+                nullified: true,
+                ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(None))
+            }),
+            sent_proposal' = sent_proposal,
+            sent_certificate' = sent_certificate,
+            store_vote' = store_vote,
+            store_certificate' = store_certificate,
+            ghost_proposal' = ghost_proposal,
+            ghost_committed_blocks' = ghost_committed_blocks,
+            leader' = leader,
+        }
+    }
+
     // Agreement holds even when replicas finalize at different views.
     //
     // n0 finalizes view 0 and commits val_b0. n3 finalizes view 1 while holding
@@ -517,9 +571,10 @@ module tests {
     // The committed chain is rebuilt from stored certificates and derives its order from parent
     // links, not from `last_finalized`, so a top-view finalization cannot commit out of order --
     // val_b1 (view 8) still cannot precede or follow val_b0 (view 0) unless the (0, 8) gap is
-    // nullified. `enter_new_view` now also advances `last_finalized` for a certificate on the top
-    // view even though it cannot enter `view + 1` (view 9 is outside VIEWS), keeping that
-    // watermark accurate for `on_proposal`'s `proposal.view_parent >= self.last_finalized` guard.
+    // nullified. A finalization whose ancestry is locally incomplete is pending
+    // (`pending_finalizations`) and does not advance `last_finalized`: the watermark tracks the
+    // committed chain's tip, so it moves only when the ancestry is complete; here, when the
+    // *earlier* view 0 is finalized while view 8 stays pending.
     run outOfOrderCommitTest = {
         pure val proposal_from_n0 = {
             block: "val_b0",
@@ -616,27 +671,118 @@ module tests {
             .then(on_proposal("n2", proposal_at_top_view))
             .then(on_proposal("n3", proposal_at_top_view))
 
-            // n4 sees all L = 5 votes and finalizes view 8. It cannot enter view 9 (outside
-            // VIEWS), but `last_finalized` still advances to 8.
+            // n4 sees all L = 5 votes and stores a finalization for view 8. Its ancestry is
+            // locally incomplete (the (0, 8) gap is not nullified in n4's store), so the
+            // finalization is pending and `last_finalized` does not move.
             .then(replica_receives_notarize_votes("n4", proposal_at_top_view, Set("n0", "n1", "n5", "n2", "n3")))
             .then(all {
-                // val_b1's parent is view 0, which n4 has not committed, and the (0, 8) gap is not
-                // nullified in n4's store, so the walk from genesis cannot reach it: n4 commits
-                // nothing yet even though last_finalized == 8.
+                // val_b1's parent is view 0, which n4 has not committed, and the (0, 8) gap is
+                // not nullified in n4's store, so the walk from genesis cannot reach it: n4
+                // commits nothing, the finalization is parked in `pending_finalizations`, and
+                // the committed watermark stays at genesis.
                 assert(ghost_committed_blocks.get("n4") == List()),
-                assert(replica_state.get("n4").last_finalized == 8),
+                assert(pending_finalizations(store_certificate.get("n4")) == Set(proposal_at_top_view)),
+                assert(replica_state.get("n4").last_finalized == GENESIS_VIEW),
                 unchanged_all,
             })
 
             // n4 now finalizes the *earlier* view 0. The chain is rebuilt from scratch,
             // so val_b0 lands first; val_b1 still cannot follow it, because n4 is missing
-            // nullifications for views 1-6 and the gap (0, 8) is not covered.
+            // nullifications for views 1-6 and the gap (0, 8) is not covered; it stays
+            // pending, and `last_finalized` advances only to the committed tip, view 0.
             .then(replica_receives_notarize_votes("n4", proposal_from_n0, Set("n0", "n1", "n2", "n3", "n4")))
             // n0 picks up that finalization certificate and commits val_b0 too.
             .then(on_certificate("n0", finalization_0))
             .then(all {
                 assert(ghost_committed_blocks.get("n4") == List(proposal_from_n0)),
+                assert(replica_state.get("n4").last_finalized == 0),
+                assert(pending_finalizations(store_certificate.get("n4")) == Set(proposal_at_top_view)),
                 assert(ghost_committed_blocks.get("n0") == List(proposal_from_n0)),
+                assert(replica_state.get("n0").last_finalized == 0),
+                unchanged_all,
+            })
+            .expect(all_invariants)
+    }
+
+    // Regression test for the pending-finalization semantics: a finalization whose ancestry
+    // is locally incomplete must not vanish from the committed-state model.
+    //
+    // Two views, no forged messages: every step is a real protocol action and every vote a
+    // replica receives was actually broadcast, so the whole trace is in-domain for `step`. A
+    // replica (n4) that saw nothing of view 0 assembles a genuine L-quorum finalization for
+    // the view-1 block from votes alone: `on_vote_notarize` checks only vote shape, no
+    // ancestry, exactly like the real protocol, where a certificate is just an aggregation of
+    // signatures. The L certificate for P1 does not certify P1's parent: the parent link
+    // inside the proposal is a claim, and the proof of that claim (notarization(val_b0, 0))
+    // is a separate certificate n4 does not hold. So n4 must NOT commit and, since
+    // `last_finalized` is the committed watermark, must not advance it either. The
+    // finalization is parked in `pending_finalizations`, waiting for backfill.
+    //
+    // Before this semantics landed, the trace ended with `last_finalized == 1`, an empty
+    // committed chain, and `all_invariants` still true: the finalization was invisible to the
+    // committed-state model, `agreement`'s prefix check was vacuous over the empty chain, and
+    // no invariant related the stored L certificate to the chain. Now the state is honestly
+    // described (pending, watermark unmoved) and pinned by `last_finalized_is_committed`,
+    // `finalized_blocks_are_committed_or_pending`, and `pending_finalization_agreement`.
+    run finalizationPendingUntilBackfillTest = {
+        pure val proposal_0 = {
+            block: "val_b0", view: 0,
+            view_parent: GENESIS_VIEW, block_parent: GENESIS_BLOCK, sig: sig_of("n0")
+        }
+        pure val proposal_1 = {
+            block: "val_b1", view: 1,
+            view_parent: 0, block_parent: "val_b0", sig: sig_of("n1")
+        }
+        // assembled and broadcast by n0 from the M-subquorum {n0, n1, n2}
+        pure val notarization_0 = notarization(proposal_0, Set("n0", "n1", "n2"), sig_of("n0"))
+
+        initWithLeader(Map(0 -> "n0", 1 -> "n1", 2 -> "n5", 3 -> "n5", 4 -> "n5",
+                           5 -> "n5", 6 -> "n5", 7 -> "n5", 8 -> "n5"))
+            // === view 0: P0 proposed and notarized by n0..n3; n4 sees none of it ===
+            .then(proposer_step("n0", "val_b0", GENESIS_BLOCK, GENESIS_VIEW))
+            .then(on_proposal("n1", proposal_0))
+            .then(on_proposal("n2", proposal_0))
+            .then(on_proposal("n3", proposal_0))
+            // n0 and n1 assemble notarization(P0, 0) from {n0, n1, n2} and enter view 1
+            .then(replica_receives_notarize_votes("n0", proposal_0, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_votes("n1", proposal_0, Set("n0", "n1", "n2")))
+            // n2 and n3 pick up the broadcast certificate and enter view 1 too
+            .then(on_certificate("n2", notarization_0))
+            .then(on_certificate("n3", notarization_0))
+
+            // === view 1: P1 built on P0; the L-quorum forms ===
+            .then(proposer_step("n1", "val_b1", "val_b0", 0))
+            .then(on_proposal("n0", proposal_1))
+            .then(on_proposal("n2", proposal_1))
+            .then(on_proposal("n3", proposal_1))
+            // the byzantine replica contributes the fifth notarize vote
+            .then(inject_vote(notarize(proposal_1, sig_of("n5"))))
+
+            // n4, still in view 0 with an empty store, receives the L = 5 quorum for P1
+            .then(replica_receives_notarize_votes("n4", proposal_1, Set("n0", "n1", "n2", "n3", "n5")))
+            .then(all {
+                // the finalization is genuine and stored ...
+                assert(is_proposal_finalized(Some(proposal_1), store_certificate.get("n4"))),
+                // ... but pending: P1's parent notarization is missing locally, so nothing
+                // is committed and the committed watermark has not moved
+                assert(pending_finalizations(store_certificate.get("n4")) == Set(proposal_1)),
+                assert(ghost_committed_blocks.get("n4") == List()),
+                assert(replica_state.get("n4").last_finalized == GENESIS_VIEW),
+                // the state is fully accounted for: nothing disappeared, nothing objects
+                assert(all_invariants),
+                unchanged_all,
+            })
+
+            // === backfill: the missing parent notarization arrives ===
+            .then(on_certificate("n4", notarization_0))
+            .then(all {
+                // the ancestry is now complete: the chain and the watermark advance
+                // together, and the pending set drains; the finalization was never lost,
+                // only waiting
+                assert(ghost_committed_blocks.get("n4") == List(proposal_0, proposal_1)),
+                assert(replica_state.get("n4").last_finalized == 1),
+                assert(pending_finalizations(store_certificate.get("n4")) == Set()),
+                assert(all_invariants),
                 unchanged_all,
             })
             .expect(all_invariants)

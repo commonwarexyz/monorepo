@@ -306,6 +306,20 @@ module replica {
             })
     }
 
+    // The finalizations waiting for backfill: blocks with a stored L-quorum finalization that
+    // are not yet committable because part of their ancestry (an ancestor's notarization or
+    // a gap's nullification) is missing locally. minimmit.md 8.4 finalizes a block and all
+    // of its ancestors, which is only possible once the ancestry is present; until the missing
+    // certificates arrive, the finalization is pending: retained in the store, excluded from
+    // the committed chain, and not reflected in `last_finalized`. The `>= L` threshold is
+    // explicit so the helper is self-contained.
+    def pending_finalizations(certificates: Set[Certificate]): Set[Proposal] = {
+        certificates
+            .filter(c => cert_kind(c) == FinalizationKind and cert_signatures(c).size() >= L)
+            .fold(Set(), (s, c) => match cert_proposal(c) { | Some(p) => s.union(Set(p)) | None => s })
+            .filter(p => ancestry_if_complete(p, certificates) == None)
+    }
+
     // Create a nullify certificate from a set of votes.
     def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
@@ -368,15 +382,21 @@ module replica {
     }
 
     // Enter a new view, unless it is older than the current view.
-    pure def enter_new_view(self: ReplicaState, cert: Certificate): ReplicaState = {
+    //
+    // `committed_tip` is the view of the committed chain's tip after this certificate is
+    // stored (GENESIS_VIEW while nothing is committed). `last_finalized` is the committed
+    // watermark: it advances to the tip, not to the view of any finalization observed.
+    // A finalization whose ancestry is not yet locally complete is pending
+    // (`pending_finalizations`) and does not move the watermark; when backfill later
+    // delivers the missing ancestor certificates, possibly via a plain notarization or
+    // nullification, the rebuilt chain absorbs it and the watermark catches up then.
+    // `ghost_last_seen_notarization`, in contrast, records observation: it advances for any
+    // notarization/finalization regardless of ancestry, even at the top of VIEWS where
+    // `view + 1` is not enterable.
+    pure def enter_new_view(self: ReplicaState, cert: Certificate, committed_tip: ViewNumber): ReplicaState = {
         val view = cert_view(cert)
         val kind = cert_kind(cert)
         val new_view = view + 1
-        // The replica can only enter `view + 1` if that view exists and is ahead of it. The
-        // watermarks, however, record that a finalization/notarization for `view` was observed;
-        // they advance regardless of whether `view + 1` is enterable -- in particular a
-        // finalization at the top of VIEWS still advances `last_finalized`, which also feeds
-        // `on_proposal`'s `proposal.view_parent >= self.last_finalized` guard.
         val can_advance = VIEWS.contains(new_view) and self.view < new_view
         {
             ...self,
@@ -385,7 +405,7 @@ module replica {
             timer_cancelled: if (can_advance) false else self.timer_cancelled,
             view: if (can_advance) new_view else self.view,
             last_finalized:
-                if (self.last_finalized < view and kind == FinalizationKind) view else self.last_finalized,
+                if (self.last_finalized < committed_tip) committed_tip else self.last_finalized,
             ghost_last_seen_notarization:
                 if (self.ghost_last_seen_notarization < view and kind != NullificationKind) view else self.ghost_last_seen_notarization
         }
@@ -601,7 +621,7 @@ module replica {
     }
 
     // -------------------------------------------------
-    // ── Handle a subset of received votes
+    // Handle a subset of received votes
     // -------------------------------------------------
 
     // 8.6 Nullify by Contradiction
@@ -763,6 +783,19 @@ module replica {
             store_certificate.get(id).union(Set(cert))
         else
             store_certificate.get(id)
+        // The committed chain is derived from the stored certificates rather than
+        // accumulated, so it cannot drift from them: it never depends on the order
+        // certificates arrive in, and never records a block whose ancestry is missing.
+        // A finalization whose ancestry is incomplete stays out of the chain, and out of
+        // `committed_tip`, until backfill completes it (see `pending_finalizations`).
+        val next_chain = if (is_new_cert)
+            rebuild_committed_chain(next_certs)
+        else
+            ghost_committed_blocks.get(id)
+        val committed_tip = if (next_chain.length() > 0)
+            next_chain[next_chain.length() - 1].view
+        else
+            GENESIS_VIEW
         all {
             cert_signatures(cert).size() >= M,
 
@@ -774,11 +807,8 @@ module replica {
                 sent_certificate' = sent_certificate,
             },
 
-            // The committed chain is derived from the stored certificates rather than
-            // accumulated, so it cannot drift from them: it never depends on the order
-            // certificates arrive in, and never records a block whose ancestry is missing.
             ghost_committed_blocks' = if (is_new_cert)
-                ghost_committed_blocks.set(id, rebuild_committed_chain(next_certs))
+                ghost_committed_blocks.set(id, next_chain)
             else
                 ghost_committed_blocks,
 
@@ -786,7 +816,7 @@ module replica {
             // view; it does not cast a notarize vote (minimmit.md 8.4). A notarize vote is emitted
             // solely on the proposal path (minimmit.md 8.2, see `on_proposal`).
             sent_vote' = sent_vote,
-            replica_state' = replica_state.set(id, enter_new_view(self, cert)),
+            replica_state' = replica_state.set(id, enter_new_view(self, cert, committed_tip)),
         }
     }
 
@@ -943,6 +973,42 @@ module replica {
         val self = replica_state.get(id)
         VIEWS.forall(v => votes_seq_correct(self.ghost_sent_votes.get(v)))
 
+    })
+
+    // Contradiction causality (minimmit.md 8.6): a correct replica may follow its
+    // notarize(c, v) with a nullify(v) only after observing >= M distinct replicas that each
+    // voted nullify(v) or notarize(c', v) with c' != c. The transition
+    // `on_nullify_by_contradiction` checks this, but a transition guard alone is invisible to
+    // the invariant layer: `no_vote_equivocation_inv` accepts every [notarize, nullify]
+    // sequence, and no other property names the evidence, so a weakened guard would surface
+    // only indirectly (steps later, on schedules where an L-quorum of notarizes and an
+    // M-quorum of nullifies meet in one view), not at the causality break itself.
+    // This invariant restates the guard as a state property: whenever the sent-vote sequence
+    // for a view is [notarize, nullify], the replica's own vote store still carries an
+    // M-quorum of conflicting signatures justifying the nullify. The evidence is counted
+    // directly rather than through `is_proposal_in_view_cannot_be_notarized`, so a weakened
+    // helper cannot weaken transition and invariant in lockstep. Sound without a ghost
+    // snapshot because `store_vote` only grows (minimmit.md 7 `prune` is not modeled); if
+    // pruning is ever added, the justification must be snapshotted at the moment 8.6 fires.
+    val contradiction_nullify_is_justified = CORRECT.forall(id => {
+        val self = replica_state.get(id)
+        val store = store_vote.get(id)
+        VIEWS.forall(v => {
+            val sent = self.ghost_sent_votes.get(v)
+            (sent.length() == 2 and sent[0] != None and sent[1] == None) implies
+                sent[0].option_has(p => {
+                    val conflicting_notarizes = store.filter(vt => and {
+                        vote_kind(vt) == NotarizeKind,
+                        vote_view(vt) == v,
+                        vote_proposal(vt) != Some(p),
+                    }).map(vt => vote_sig(vt))
+                    val nullifies = store.filter(vt => and {
+                        vote_kind(vt) == NullifyKind,
+                        vote_view(vt) == v,
+                    }).map(vt => vote_sig(vt))
+                    conflicting_notarizes.union(nullifies).size() >= M
+                })
+        })
     })
 
     // No honest replica ever holds evidence for BOTH a finalization and a nullification of the
@@ -1197,6 +1263,50 @@ module replica {
         })
     })
 
+    // `last_finalized` is the committed watermark: it equals the view of the committed
+    // chain's tip, or GENESIS_VIEW while nothing is committed. A finalization whose ancestry
+    // is still incomplete is pending (`pending_finalizations`) and does not move the
+    // watermark, so "highest finalization observed" and "committed" cannot be conflated: a
+    // replica whose chain is empty has finalized nothing yet.
+    val last_finalized_is_committed = CORRECT.forall(id => {
+        val chain = ghost_committed_blocks.get(id)
+        val lf = replica_state.get(id).last_finalized
+        if (chain.length() > 0) lf == chain[chain.length() - 1].view else lf == GENESIS_VIEW
+    })
+
+    // Every finalization a replica holds is accounted for: its block is either on the
+    // committed chain (its ancestry is locally complete, minimmit.md 8.4) or explicitly
+    // pending backfill (`pending_finalizations`). A stored L-quorum finalization can
+    // therefore never silently vanish from the committed-state model. Because
+    // `ghost_committed_blocks` is updated state while both sides here are re-derived from
+    // the stored certificates, this also catches a rebuild that drifts from the store or
+    // drops a finalized block whose ancestry is complete. The signature threshold is
+    // explicit so the invariant is self-contained when run in a job of its own.
+    val finalized_blocks_are_committed_or_pending = CORRECT.forall(id => {
+        val certs = store_certificate.get(id)
+        val chain = ghost_committed_blocks.get(id)
+        certs
+            .filter(c => cert_kind(c) == FinalizationKind and cert_signatures(c).size() >= L)
+            .forall(c => cert_proposal(c).option_has(p => or {
+                chain.indices().exists(i => chain[i] == p),
+                pending_finalizations(certs).contains(p),
+            }))
+    })
+
+    // Companion of `agreement` for finalizations that are still pending backfill: a pending
+    // finalized block is already binding, so it must not conflict with a block another
+    // correct replica has committed at the same view. Without this, a replica whose chain is
+    // empty satisfies the prefix check in `agreement` vacuously no matter what it has
+    // finalized. Pending-vs-pending conflicts need no extra clause here: two stored L-quorum
+    // certificates for different proposals in one view already violate
+    // `finalization_agreement`; committed ancestors carry only M-quorum notarizations, which
+    // is why the pending-vs-committed case is not covered there and is stated separately.
+    val pending_finalization_agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
+        val chain = ghost_committed_blocks.get(p1)
+        pending_finalizations(store_certificate.get(p2)).forall(q =>
+            chain.indices().forall(i => chain[i].view == q.view implies chain[i] == q))
+    })
+
     // No view carries evidence for both a nullification and a finalization, not even in two
     // different replicas' stores. This is what makes the committed sequence the same at
     // every correct replica, and so it is what `agreement` rests on: if one replica commits
@@ -1231,6 +1341,7 @@ module replica {
         block_commits_to_parent,
         agreement,
         no_vote_equivocation_inv,
+        contradiction_nullify_is_justified,
         no_nullification_and_finalization_in_the_same_view,
         validity,
         finalization_agreement,
@@ -1241,6 +1352,9 @@ module replica {
         safe_finalization,
         committed_blocks_are_finalized,
         committed_chain_is_connected,
+        last_finalized_is_committed,
+        finalized_blocks_are_committed_or_pending,
+        pending_finalization_agreement,
         no_nullification_and_finalization_globally,
     }
 
@@ -1270,8 +1384,11 @@ module replica {
         ghost_committed_blocks.get(id).length() >= 1
     }))
 
+    // Check this invariant to see an example of an observed finalization certificate,
+    // committed or still pending. (`last_finalized` now tracks the committed tip, so a
+    // watermark-based witness would duplicate `block_example`.)
     val finalized_example = not(CORRECT.exists(id => {
-        replica_state.get(id).last_finalized >= 0
+        store_certificate.get(id).exists(c => cert_kind(c) == FinalizationKind)
     }))
 
     val notarized_example = not(CORRECT.exists(id => {
