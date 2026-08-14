@@ -144,6 +144,11 @@ fn usage() {
     );
 }
 
+// Concurrency benches use mimalloc: glibc's per-thread arena assignment is a
+// per-process lottery that makes concurrent-path results sticky-bimodal.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries; drop it so
     // trailing optional args parse.
