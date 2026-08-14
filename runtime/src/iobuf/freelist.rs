@@ -50,7 +50,7 @@
 //!
 //! ```text
 //! +------------------------+                           +-------------------+
-//! | checked out or cached  | <--- take: Acquire RMW -- | globally parked  |
+//! | checked out or cached  | <--- take: Acquire RMW -- | globally parked   |
 //! | free bit = 0           | --- put: Release RMW ---> | free bit = 1      |
 //! +------------------------+                           +-------------------+
 //!                                                            |
@@ -103,13 +103,13 @@
 //! +-- layout and fixed capacity
 //! +-- created                    cache-padded global admission counter
 //! +-- stripes[S]
-//! |   +-- Stripe 0
+//! |   +-- stripe 0
 //! |   |   +-- summary            [ cleaning code: 6 | availability: 58 ]
 //! |   |   +-- free words          packed, cache-aligned blocks of AtomicU64
 //! |   |   +-- slots              stable stripe-local PooledOwner records
 //! |   |   +-- valid extent        slot, word, and summary-group bounds
 //! |   +-- ...
-//! |   +-- Stripe S-1
+//! |   +-- stripe S-1
 //! +-- creation_cursors[S]        separate cache-padded cursor array
 //! ```
 //!
@@ -262,7 +262,7 @@
 //! ```text
 //! 63                 58 57                                      0
 //! +--------------------+-----------------------------------------+
-//! | cleaning code (6)  | availability bits A_57 ... A_1 A_0 (58)|
+//! | cleaning code (6)  | availability bits A_57 ... A_1 A_0 (58) |
 //! +--------------------+-----------------------------------------+
 //!
 //! code = 0      no group is being cleaned
@@ -331,10 +331,10 @@
 //!
 //! ```text
 //! probe phase
-//! 38                         12 11             6 5              0
-//! +----------------------------+----------------+----------------+
-//! | raw word phase (27 bits)   | bit phase (6)  | group phase (6)|
-//! +----------------------------+----------------+----------------+
+//! 38                         12 11             6 5               0
+//! +----------------------------+----------------+-----------------+
+//! | raw word phase (27 bits)   | bit phase (6)  | group phase (6) |
+//! +----------------------------+----------------+-----------------+
 //! ```
 //!
 //! A take visits stripes in wrapped order from its home and stops on success.
@@ -741,7 +741,11 @@ impl Geometry {
     }
 }
 
-/// One cache-isolated contention and navigation domain.
+/// Cache-isolated ownership and navigation domain for interleaved slots.
+///
+/// A stripe owns the authoritative free words and stable owner records for its
+/// local slots. Its summary and extent fields bound traversal without changing
+/// the global slot mapping.
 struct Stripe {
     /// Advisory 58+6 availability and cleaning state.
     summary: AtomicU64,
@@ -998,11 +1002,6 @@ const fn mix_probe_id(id: u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
-/// Asserts that an array of `len` values has a representable allocation layout.
-fn assert_allocation<T>(len: usize) {
-    Layout::array::<T>(len).expect("freelist allocation must be representable");
-}
-
 /// Derives the summary group count and unpaired prefix for a word extent.
 ///
 /// Each leading group owns one `base_chunk_words` chunk. Excess tail chunks
@@ -1037,25 +1036,6 @@ const fn group_base_range(single_groups: usize, group: usize) -> (usize, usize) 
         (group, 1)
     } else {
         (single_groups + (group - single_groups) * 2, 2)
-    }
-}
-
-/// Internal construction policy for automatic and verification geometries.
-#[derive(Clone, Copy)]
-struct ConstructionOptions {
-    /// Enables summary navigation below the automatic block cutoff.
-    force_summaries: bool,
-    /// Maximum availability groups exposed by each summary.
-    max_groups: usize,
-}
-
-impl Default for ConstructionOptions {
-    /// Selects automatic traversal policy and the full 58-group geometry.
-    fn default() -> Self {
-        Self {
-            force_summaries: false,
-            max_groups: AVAILABILITY_BITS,
-        }
     }
 }
 
@@ -1122,31 +1102,6 @@ unsafe impl Send for Freelist {}
 // access. Stripe-local owner pointees remain stable until the freelist drops.
 unsafe impl Sync for Freelist {}
 
-/// Construction helpers used by targeted protocol tests.
-#[cfg(test)]
-pub(super) mod test_helpers {
-    use super::*;
-
-    /// Builds a freelist that exercises summary navigation at any capacity.
-    pub(in crate::iobuf) fn forced_summary(
-        capacity: NonZeroU32,
-        parallelism: NonZeroUsize,
-        layout: Layout,
-        prefill: bool,
-    ) -> Freelist {
-        Freelist::new_inner(
-            capacity,
-            parallelism,
-            layout,
-            prefill,
-            ConstructionOptions {
-                force_summaries: true,
-                max_groups: AVAILABILITY_BITS,
-            },
-        )
-    }
-}
-
 impl Freelist {
     /// Creates a new fixed-capacity freelist.
     ///
@@ -1162,33 +1117,28 @@ impl Freelist {
         layout: Layout,
         prefill: bool,
     ) -> Self {
-        Self::new_inner(
-            capacity,
-            parallelism,
-            layout,
-            prefill,
-            ConstructionOptions::default(),
-        )
+        Self::new_inner(capacity, parallelism, layout, prefill, None)
     }
 
-    /// Builds the complete freelist storage from validated policy options.
+    /// Builds storage using automatic policy or a forced summary group limit.
+    ///
+    /// `forced_summary_groups` is `None` in production. Tests use `Some` to
+    /// exercise summary navigation and tail pairing at tractable capacities.
     fn new_inner(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
         layout: Layout,
         prefill: bool,
-        options: ConstructionOptions,
+        forced_summary_groups: Option<usize>,
     ) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
         let capacity = capacity.get() as usize;
         let geometry = Geometry::new(capacity, parallelism.get());
         // The physical block budget is target-adaptive because block width is
         // derived from the target's production atomic representation.
-        let summaries_enabled = options.force_summaries
+        let summaries_enabled = forced_summary_groups.is_some()
             || geometry.total_free_word_blocks > MAX_DIRECT_FREE_WORD_BLOCKS;
-
-        assert_allocation::<CachePadded<Stripe>>(geometry.stripe_count);
-        assert_allocation::<CachePadded<CreationCursor>>(geometry.stripe_count);
+        let max_groups = forced_summary_groups.unwrap_or(AVAILABILITY_BITS);
 
         let mut stripes = Vec::with_capacity(geometry.stripe_count);
         let mut creation_cursors = Vec::with_capacity(geometry.stripe_count);
@@ -1200,10 +1150,7 @@ impl Freelist {
             let logical_words = stripe_capacity.div_ceil(SLOT_WORD_BITS);
             let free_word_blocks = logical_words.div_ceil(FREE_WORDS_PER_BLOCK);
             let (group_count, single_groups) =
-                group_geometry(logical_words, geometry.base_chunk_words, options.max_groups);
-
-            assert_allocation::<FreeWordBlock>(free_word_blocks);
-            assert_allocation::<CachePadded<UnsafeCell<PooledOwner>>>(stripe_capacity);
+                group_geometry(logical_words, geometry.base_chunk_words, max_groups);
 
             let free_word_blocks = (0..free_word_blocks)
                 .map(|block| {
@@ -2260,6 +2207,28 @@ impl Probe {
     }
 }
 
+/// Construction helpers used by targeted protocol tests.
+#[cfg(test)]
+pub(super) mod test_helpers {
+    use super::*;
+
+    /// Builds a freelist that exercises summary navigation at any capacity.
+    pub fn forced_summary(
+        capacity: NonZeroU32,
+        parallelism: NonZeroUsize,
+        layout: Layout,
+        prefill: bool,
+    ) -> Freelist {
+        Freelist::new_inner(
+            capacity,
+            parallelism,
+            layout,
+            prefill,
+            Some(AVAILABILITY_BITS),
+        )
+    }
+}
+
 /// Native unit tests and read-only test inspection helpers.
 #[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
@@ -2532,10 +2501,7 @@ pub(super) mod tests {
                 NZUsize!(1),
                 TEST_LAYOUT,
                 false,
-                ConstructionOptions {
-                    force_summaries: true,
-                    max_groups,
-                },
+                Some(max_groups),
             );
             let probe = Probe::from_id(
                 ProbeId {
@@ -2772,10 +2738,7 @@ pub(super) mod tests {
             NZUsize!(1),
             TEST_LAYOUT,
             false,
-            ConstructionOptions {
-                force_summaries: true,
-                max_groups: 1,
-            },
+            Some(1),
         );
         assert_eq!(set.stripes[0].group_count, 1);
         assert_eq!(set.stripes[0].single_groups, 0);
@@ -4178,10 +4141,7 @@ mod loom_tests {
                 NZUsize!(1),
                 layout,
                 true,
-                ConstructionOptions {
-                    force_summaries: true,
-                    max_groups: 2,
-                },
+                Some(2),
             ));
             let stripe = &set.stripes[0];
             assert_eq!(stripe.group_count, 2);
@@ -4263,10 +4223,7 @@ mod loom_tests {
                 NZUsize!(1),
                 layout,
                 true,
-                ConstructionOptions {
-                    force_summaries: true,
-                    max_groups: 2,
-                },
+                Some(2),
             ));
             let stripe = &set.stripes[0];
             assert_eq!(stripe.group_count, 2);
@@ -4352,10 +4309,7 @@ mod loom_tests {
                 NZUsize!(1),
                 layout,
                 true,
-                ConstructionOptions {
-                    force_summaries: true,
-                    max_groups: 1,
-                },
+                Some(1),
             ));
             assert_eq!(set.stripes[0].group_count, 1);
             assert_eq!(set.stripes[0].single_groups, 0);

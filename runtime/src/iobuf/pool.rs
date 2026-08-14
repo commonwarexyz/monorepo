@@ -38,8 +38,10 @@
 //! 16000-byte request above is served by the 32768-byte class. Requests larger
 //! than the largest enabled class return [`PoolError::Oversized`] from
 //! [`BufferPool::try_alloc`], or fall back to an untracked aligned heap
-//! allocation from [`BufferPool::alloc`]. A request routed to an exhausted
-//! class returns [`PoolError::Exhausted`] without trying larger classes.
+//! allocation from [`BufferPool::alloc`]. A request routed to a class that
+//! cannot supply a buffer in one bounded attempt returns
+//! [`PoolError::Exhausted`] without trying larger classes. A retry can succeed
+//! after a concurrent return.
 //!
 //! # Cache Structure
 //!
@@ -89,8 +91,10 @@ pub enum PoolError {
     /// The requested capacity exceeds the maximum buffer size.
     #[error("requested capacity exceeds maximum buffer size")]
     Oversized,
-    /// The pool is exhausted for the required size class.
-    #[error("pool exhausted for required size class")]
+    /// One bounded attempt found no buffer in the required size class.
+    ///
+    /// A concurrent return may become visible to a later allocation attempt.
+    #[error("no buffer found in bounded attempt for required size class")]
     Exhausted,
 }
 
@@ -658,7 +662,7 @@ struct SizeClassLabel {
 struct PoolMetrics {
     /// Number of tracked buffers created for the size class.
     created: GaugeFamily<SizeClassLabel>,
-    /// Total number of failed allocations (pool exhausted).
+    /// Total number of bounded allocation attempts that found no buffer.
     exhausted_total: CounterFamily<SizeClassLabel>,
     /// Total number of oversized allocation requests.
     oversized_total: Counter,
@@ -676,7 +680,7 @@ impl PoolMetrics {
             // prometheus encoder appends it to counter names.
             exhausted_total: registry.register(
                 "buffer_pool_exhausted",
-                "Total number of failed allocations due to pool exhaustion",
+                "Total number of bounded allocation attempts that found no buffer",
                 raw::Family::default(),
             ),
             oversized_total: registry.register(
@@ -1900,7 +1904,7 @@ impl BufferPool {
     /// Attempts to allocate a buffer without falling back on pool miss.
     ///
     /// Unlike [`Self::alloc`], this method does not fall back to untracked
-    /// allocation on exhaustion or oversized requests. Requests smaller than
+    /// allocation on a pool miss or oversized requests. Requests smaller than
     /// [`BufferPoolConfig::pool_min_size`] intentionally bypass pooling and
     /// return an untracked aligned allocation instead.
     ///
@@ -1917,7 +1921,8 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
+    /// - [`PoolError::Exhausted`]: one bounded attempt found no buffer in the
+    ///   required size class. A concurrent return can make a retry succeed
     #[inline(always)]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         if capacity == 0 {
@@ -1956,12 +1961,12 @@ impl BufferPool {
     /// Zero-capacity requests return a detached empty buffer without touching
     /// the pool.
     ///
-    /// If the pool can provide a buffer (capacity within limits and pool not
-    /// exhausted), this returns a pooled buffer that will be returned to the
-    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
-    /// bypass pooling and return an untracked aligned allocation. Oversized or
-    /// exhausted requests also fall back to an untracked aligned heap allocation
-    /// that is deallocated when dropped.
+    /// If the pool finds a buffer in its bounded attempt, this returns a pooled
+    /// buffer that will be returned to the pool when dropped. Requests smaller
+    /// than [`BufferPoolConfig::pool_min_size`] bypass pooling and return an
+    /// untracked aligned allocation. Oversized requests or pool misses fall
+    /// back to an untracked aligned heap allocation that is deallocated when
+    /// dropped.
     ///
     /// Use [`Self::try_alloc`] if eligible requests must fail instead of falling
     /// back to direct allocation.
@@ -1997,7 +2002,7 @@ impl BufferPool {
     /// pool miss.
     ///
     /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
-    /// untracked allocation on exhaustion or oversized requests. Requests
+    /// untracked allocation on a pool miss or oversized requests. Requests
     /// smaller than [`BufferPoolConfig::pool_min_size`] intentionally bypass
     /// pooling and return an untracked aligned allocation instead.
     ///
@@ -2013,7 +2018,8 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
+    /// - [`PoolError::Exhausted`]: one bounded attempt found no buffer in the
+    ///   required size class. A concurrent return can make a retry succeed
     pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
         if len == 0 {
             return Ok(IoBufMut::default());
@@ -2056,12 +2062,12 @@ impl BufferPool {
     /// Zero-length requests return a detached empty buffer without touching
     /// the pool.
     ///
-    /// If the pool can provide a buffer (len within limits and pool not
-    /// exhausted), this returns a pooled buffer that will be returned to the
-    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
-    /// bypass pooling and return an untracked aligned allocation. Oversized or
-    /// exhausted requests also fall back to an untracked aligned heap allocation
-    /// that is deallocated when dropped.
+    /// If the pool finds a buffer in its bounded attempt, this returns a pooled
+    /// buffer that will be returned to the pool when dropped. Requests smaller
+    /// than [`BufferPoolConfig::pool_min_size`] bypass pooling and return an
+    /// untracked aligned allocation. Oversized requests or pool misses fall
+    /// back to an untracked aligned heap allocation that is deallocated when
+    /// dropped.
     ///
     /// Use this for read APIs that require an initialized `&mut [u8]`. This
     /// avoids `unsafe set_len` at callsites.
@@ -2075,7 +2081,7 @@ impl BufferPool {
     /// may be uninitialized.
     pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
         self.try_alloc_zeroed(len).unwrap_or_else(|_| {
-            // Pool exhausted or oversized: allocate untracked zeroed memory.
+            // Pool miss or oversized request: allocate untracked zeroed memory.
             let size = len.max(1);
             let mut buf = IoBufMut::zeroed_with_alignment(size, self.inner.config.alignment);
             buf.truncate(len);
@@ -3237,7 +3243,7 @@ mod tests {
         );
         assert_eq!(
             PoolError::Exhausted.to_string(),
-            "pool exhausted for required size class"
+            "no buffer found in bounded attempt for required size class"
         );
     }
 
