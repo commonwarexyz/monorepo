@@ -36,6 +36,15 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
+#[cfg(unix)]
+async fn remove_migration_stage(path: &Path) -> Result<bool, Error> {
+    match fs::remove_file(path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::Io(error.into())),
+    }
+}
+
 /// Configuration for a [`Storage`].
 ///
 /// `storage_directory` must be owned by exactly one independently constructed [`Storage`] lineage
@@ -247,12 +256,22 @@ impl crate::Storage for Storage {
             .await
             .map_err(|_| Error::PartitionMissing(partition.into()))?;
         let mut blobs = Vec::new();
+        #[cfg(unix)]
+        let mut removed_stage = false;
         while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
             let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
             if !file_type.is_file() {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
             let file_name = entry.file_name();
+            #[cfg(unix)]
+            if super::migration::is_stage_file_name(&file_name) {
+                // An interrupted migration can leave one full-size non-authoritative stage.
+                // Scanning is a namespace recovery point, so reclaim it instead of leaking the
+                // abandoned copy or exposing its reserved name.
+                removed_stage |= remove_migration_stage(&entry.path()).await?;
+                continue;
+            }
             if let Some(name) = file_name.to_str() {
                 // Reject anything that isn't canonical lowercase hex (no `0x`
                 // prefix, no whitespace) since `from_hex` is lenient and
@@ -264,6 +283,10 @@ impl crate::Storage for Storage {
 
                 blobs.push(decoded);
             }
+        }
+        #[cfg(unix)]
+        if removed_stage {
+            sync_dir(&path).await?;
         }
         Ok(blobs)
     }
@@ -278,6 +301,44 @@ impl crate::atomic::Backend for Storage {
 
     fn atomic_resources(&self) -> crate::atomic::AtomicResources {
         self.atomic_resources.clone()
+    }
+
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        #[cfg(not(unix))]
+        {
+            let _ = (blob, incarnation);
+            return Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "atomic migration requires Unix inode identity",
+            )
+            .into());
+        }
+
+        #[cfg(unix)]
+        {
+            let partition = blob.partition().to_string();
+            let name = blob.name().to_vec();
+            let source = blob.file();
+            let root = self.cfg.storage_directory.clone();
+            let migration_partition = partition.clone();
+            let migration_name = name.clone();
+            let migration = tokio::task::spawn_blocking(move || {
+                super::migration::migrate_live(
+                    &root,
+                    &migration_partition,
+                    &migration_name,
+                    &source,
+                    incarnation,
+                )
+            });
+            migration
+                .await
+                .expect("an admitted atomic migration task is not externally abortable")
+        }
     }
 
     async fn open_atomic_existing(
@@ -328,12 +389,14 @@ impl crate::atomic::Backend for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        AtomicStorage as _, Blob, BufferPoolConfig, Storage as _, WriteOptions,
+        AtomicBlob as _, AtomicStorage as _, Blob, BufferPoolConfig, Storage as _, WriteOptions,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
     use rand::RngExt as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
     use std::{
         env,
         sync::atomic::{AtomicU64, Ordering},
@@ -367,6 +430,26 @@ mod tests {
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_migration_stage_cleanup_is_classified() {
+        let root = atomic_test_directory("storage_tokio_atomic_stage_cleanup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing");
+        assert!(!remove_migration_stage(&missing).await.unwrap());
+
+        let file = root.join("file");
+        std::fs::write(&file, b"stage").unwrap();
+        assert!(remove_migration_stage(&file).await.unwrap());
+        assert!(!file.exists());
+
+        let directory = root.join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(remove_migration_stage(&directory).await.is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -432,7 +515,10 @@ mod tests {
     async fn test_atomic_rejects_v0_ordinary_lookalikes_without_mutation() {
         let storage_directory = atomic_test_directory("storage_tokio_atomic_v0_lookalike");
         let _ = std::fs::remove_dir_all(&storage_directory);
-        let original = crate::storage::header::tests::v0_atomic_lookalike_bytes();
+        let mut payload = crate::atomic::migration_prefix([0x11; 16], 0, 0).to_vec();
+        payload.extend_from_slice(b"ordinary tail");
+        let original =
+            crate::storage::header::tests::v0_blob_bytes(crate::DEFAULT_BLOB_VERSION, &payload);
         for (partition, name) in [("v0_atomic_open", b"open"), ("v0_atomic_scan", b"scan")] {
             let partition_path = storage_directory.join(partition);
             std::fs::create_dir_all(&partition_path).unwrap();
@@ -465,6 +551,190 @@ mod tests {
         ));
 
         drop(storage);
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_atomic_backend_normalizes_container_and_retries_without_replacing_again() {
+        const VERSION: u16 = 7;
+        let storage_directory = atomic_test_directory("storage_tokio_atomic_migration");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let payload = (0u8..=255).cycle().take(160_003).collect::<Vec<_>>();
+        let (blob, _, version) = storage
+            .open_versioned("partition", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(version, VERSION);
+        blob.write_at(0, payload.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+        let old = blob.clone();
+        let live_path = storage_directory.join("partition").join(hex(b"blob"));
+        let ordinary_inode = std::fs::metadata(&live_path).unwrap().ino();
+        let incarnation = [0x3C; 16];
+        let prefix = crate::atomic::migration_prefix(
+            incarnation,
+            payload.len() as u64,
+            commonware_cryptography::Crc32::checksum(&payload),
+        );
+
+        {
+            let _namespace = storage
+                .atomic_resources
+                .namespace
+                .clone()
+                .lock_owned()
+                .await;
+            crate::atomic::Backend::migrate_atomic_backing(&storage, blob, incarnation)
+                .await
+                .unwrap();
+        }
+
+        let migrated = std::fs::read(&live_path).unwrap();
+        let (logical_len, migrated_version, data_offset) = Header::parse(
+            &migrated[..Layout::V1.data_offset() as usize],
+            migrated.len() as u64,
+            &(crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION),
+        )
+        .unwrap();
+        assert_eq!(migrated_version, crate::DEFAULT_BLOB_VERSION);
+        assert_eq!(data_offset, Layout::V1.data_offset());
+        assert_eq!(logical_len as usize, prefix.len() + payload.len());
+        assert_eq!(
+            &migrated[data_offset as usize..data_offset as usize + prefix.len()],
+            &prefix
+        );
+        assert_eq!(&migrated[data_offset as usize + prefix.len()..], &payload);
+        assert_ne!(ordinary_inode, std::fs::metadata(&live_path).unwrap().ino());
+        let old_read = old.read_at(0, payload.len()).await.unwrap().coalesce();
+        assert_eq!(old_read.as_ref(), payload.as_slice());
+
+        let (retry, retry_len, retry_version) = storage
+            .open_versioned(
+                "partition",
+                b"blob",
+                crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_len as usize, prefix.len() + payload.len());
+        assert_eq!(retry_version, crate::DEFAULT_BLOB_VERSION);
+        let migrated_inode = std::fs::metadata(&live_path).unwrap().ino();
+        {
+            let _namespace = storage
+                .atomic_resources
+                .namespace
+                .clone()
+                .lock_owned()
+                .await;
+            crate::atomic::Backend::migrate_atomic_backing(&storage, retry, [0xA5; 16])
+                .await
+                .unwrap();
+        }
+        assert_eq!(migrated_inode, std::fs::metadata(&live_path).unwrap().ino());
+        assert_eq!(std::fs::read(&live_path).unwrap(), migrated);
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_atomic_storage_migration_preserves_public_value() {
+        const VERSION: u16 = 7;
+        let storage_directory = atomic_test_directory("storage_tokio_public_atomic_migration");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let payload = (0u8..=255).cycle().take(160_003).collect::<Vec<_>>();
+        let (ordinary, _, version) = storage
+            .open_versioned("partition", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(version, VERSION);
+        ordinary
+            .write_at(0, payload.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+        let prior = ordinary.clone();
+
+        storage.migrate_atomic(ordinary).await.unwrap();
+        let (atomic, len) = storage.open_atomic("partition", b"blob").await.unwrap();
+        assert_eq!(len, payload.len() as u64);
+        assert_eq!(atomic.tag().await.unwrap(), [0; crate::ATOMIC_BLOB_TAG_LEN]);
+        let migrated = atomic.read_at(0, payload.len()).await.unwrap().coalesce();
+        assert_eq!(migrated.as_ref(), payload.as_slice());
+        let snapshot = atomic.integrity_snapshot().await.unwrap();
+        assert_eq!(snapshot.scheme, crate::IntegrityScheme::Unbound);
+        let (unit, tail) = snapshot.tail.unwrap();
+        assert_eq!(
+            unit,
+            crate::IntegrityUnit {
+                offset: 0,
+                len: payload.len() as u64,
+            }
+        );
+        assert_eq!(tail.coalesce().as_ref(), payload.as_slice());
+        let old = prior.read_at(0, payload.len()).await.unwrap().coalesce();
+        assert_eq!(old.as_ref(), payload.as_slice());
+
+        let token = atomic.integrity_snapshot().await.unwrap().token;
+        let append = atomic
+            .append_integrity(token, b"!", crate::IntegrityBoundary::Complete, None)
+            .await
+            .unwrap();
+        assert_eq!(append.offset, payload.len() as u64);
+        atomic.sync().await.unwrap();
+        drop(atomic);
+
+        let (atomic, len) = storage.open_atomic("partition", b"blob").await.unwrap();
+        assert_eq!(len, payload.len() as u64 + 1 + 4);
+        let mut completed = payload.clone();
+        completed.push(b'!');
+        assert_eq!(
+            atomic
+                .read_integrity(crate::IntegrityUnit {
+                    offset: 0,
+                    len: completed.len() as u64,
+                })
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            completed.as_slice()
+        );
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_scan_discards_atomic_migration_stage() {
+        let storage_directory = atomic_test_directory("storage_tokio_atomic_migration_scan");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.sync().await.unwrap();
+        let partition_path = storage_directory.join("partition");
+        let stage =
+            crate::storage::migration::stage_path(&partition_path.join(hex(b"blob"))).unwrap();
+        std::fs::write(&stage, b"abandoned migration stage").unwrap();
+
+        assert_eq!(
+            storage.scan("partition").await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+        assert!(!stage.exists());
+
         let _ = std::fs::remove_dir_all(storage_directory);
     }
 

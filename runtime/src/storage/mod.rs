@@ -62,6 +62,9 @@ stability_scope!(BETA {
     mod header;
     pub(crate) use header::{Header, Layout};
 
+    #[cfg(unix)]
+    mod migration;
+
     /// Validate that a partition name contains only allowed characters.
     ///
     /// Partition names must only contain alphanumeric characters, dashes ('-'),
@@ -167,6 +170,14 @@ pub(crate) mod tests {
             let mut identifier = [self.tag; 16];
             identifier[8..].copy_from_slice(&ordinal.to_be_bytes());
             identifier
+        }
+
+        async fn migrate_atomic_backing(
+            &self,
+            blob: Self::Blob,
+            incarnation: [u8; 16],
+        ) -> Result<(), Error> {
+            crate::atomic::Backend::migrate_atomic_backing(&self.inner, blob, incarnation).await
         }
 
         async fn open_atomic_existing(

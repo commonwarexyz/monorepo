@@ -90,6 +90,21 @@ impl<S: crate::atomic::Backend> crate::atomic::Backend for Storage<S> {
         self.inner.new_atomic_identifier()
     }
 
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        self.auditor.event(b"migrate_atomic", |hasher| {
+            hasher.update(blob.partition.as_bytes());
+            hasher.update(&blob.name);
+            hasher.update(incarnation);
+        });
+        self.inner
+            .migrate_atomic_backing(blob.inner, incarnation)
+            .await
+    }
+
     async fn open_atomic_existing(
         &self,
         partition: &str,
@@ -264,6 +279,34 @@ mod tests {
         storage1.open("a", b"bc").await.unwrap();
         storage2.open("ab", b"c").await.unwrap();
 
+        assert_ne!(auditor1.state(), auditor2.state());
+    }
+
+    #[tokio::test]
+    async fn test_audited_migration_binds_the_incarnation() {
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+
+        let (blob1, _) = storage1.open("partition", b"blob").await.unwrap();
+        let (blob2, _) = storage2.open("partition", b"blob").await.unwrap();
+        blob1
+            .write_at(0, b"payload", WriteOptions::default())
+            .await
+            .unwrap();
+        blob2
+            .write_at(0, b"payload", WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(auditor1.state(), auditor2.state());
+
+        crate::atomic::Backend::migrate_atomic_backing(&storage1, blob1, [1; 16])
+            .await
+            .unwrap();
+        crate::atomic::Backend::migrate_atomic_backing(&storage2, blob2, [2; 16])
+            .await
+            .unwrap();
         assert_ne!(auditor1.state(), auditor2.state());
     }
 

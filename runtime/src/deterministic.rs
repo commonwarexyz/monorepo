@@ -1646,6 +1646,14 @@ impl crate::atomic::Backend for Context {
         identifier
     }
 
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        self.storage.migrate_atomic_backing(blob, incarnation).await
+    }
+
     async fn open_atomic_existing(
         &self,
         partition: &str,
@@ -2034,6 +2042,30 @@ mod tests {
             let (blob, len) = context.open("crash_resize", b"blob").await.unwrap();
             assert_eq!(len, 3);
             assert_eq!(blob.read_at(0, 3).await.unwrap().coalesce(), b"abc");
+        });
+    }
+
+    #[test]
+    fn test_atomic_migration_traverses_the_runtime_storage_stack() {
+        Runner::seeded(0xA701_C001).start(|context| async move {
+            let (ordinary, _) = context.open("migration", b"blob").await.unwrap();
+            ordinary
+                .write_at(0, b"payload", WriteOptions::default())
+                .await
+                .unwrap();
+
+            context.migrate_atomic(ordinary).await.unwrap();
+
+            let (atomic, len) = context.open_atomic("migration", b"blob").await.unwrap();
+            assert_eq!(len, b"payload".len() as u64);
+            assert_eq!(
+                atomic
+                    .read_at(0, b"payload".len())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"payload"
+            );
         });
     }
 

@@ -244,6 +244,7 @@ impl crate::Storage for Storage {
             std::fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
         let mut blobs = Vec::new();
+        let mut removed_stage = false;
         for entry in entries {
             let entry = entry.map_err(|_| Error::ReadFailed)?;
             let file_type = entry.file_type().map_err(|_| Error::ReadFailed)?;
@@ -253,6 +254,17 @@ impl crate::Storage for Storage {
             }
 
             let file_name = entry.file_name();
+            if super::migration::is_stage_file_name(&file_name) {
+                // An interrupted migration can leave one full-size non-authoritative stage.
+                // Scanning is a namespace recovery point, so reclaim it instead of leaking the
+                // abandoned copy or exposing its reserved name.
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed_stage = true,
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(Error::Io(error.into())),
+                }
+                continue;
+            }
             if let Some(name) = file_name.to_str() {
                 // Reject anything that isn't canonical lowercase hex (no `0x`
                 // prefix, no whitespace) since `from_hex` is lenient and
@@ -265,6 +277,10 @@ impl crate::Storage for Storage {
                 blobs.push(decoded);
             }
         }
+        if removed_stage {
+            sync_dir(&path)?;
+        }
+
         Ok(blobs)
     }
 }
@@ -278,6 +294,25 @@ impl crate::atomic::Backend for Storage {
 
     fn atomic_resources(&self) -> crate::atomic::AtomicResources {
         self.atomic_resources.clone()
+    }
+
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        let partition = blob.partition.clone();
+        let name = blob.name.clone();
+        let source = blob.file.clone();
+        let root = self.storage_directory.clone();
+        let migration = tokio::task::spawn_blocking(move || {
+            super::migration::migrate_live(&root, &partition, &name, &source, incarnation)
+        });
+        match migration.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(Error::Closed),
+        }
     }
 
     async fn open_atomic_existing(
@@ -638,7 +673,10 @@ mod tests {
     #[tokio::test]
     async fn test_atomic_rejects_v0_ordinary_lookalikes_without_mutation() {
         let storage_directory = create_test_directory();
-        let original = crate::storage::header::tests::v0_atomic_lookalike_bytes();
+        let mut payload = crate::atomic::migration_prefix([0x11; 16], 0, 0).to_vec();
+        payload.extend_from_slice(b"ordinary tail");
+        let original =
+            crate::storage::header::tests::v0_blob_bytes(crate::DEFAULT_BLOB_VERSION, &payload);
         for (partition, name) in [("v0_atomic_open", b"open"), ("v0_atomic_scan", b"scan")] {
             let partition_path = storage_directory.join(partition);
             std::fs::create_dir_all(&partition_path).unwrap();

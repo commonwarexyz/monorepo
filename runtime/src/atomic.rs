@@ -36,11 +36,12 @@
 //! ```
 //!
 //! The magic is `CWUNOID`. The CRC32C covers the identity domain and bytes 0 through 23. Fresh
-//! creation writes the complete page and synchronizes the backing once.
+//! creation writes the complete page and synchronizes the backing once. Migration places the same
+//! page in a staged replacement before synchronizing that replacement.
 //!
 //! A fresh identity is written only when the serialized open observed the name missing and created
 //! its backing. A pre-existing name must contain a complete identity; an invalid or incomplete page
-//! is rejected without mutation.
+//! is rejected without mutation and ordinary blobs require explicit migration.
 //!
 //! # R15 root slots
 //!
@@ -87,6 +88,7 @@
 //! Root spellings separate local authority from group evidence:
 //!
 //! - `BatchPrepared` is a candidate and requires complete ring evidence.
+//! - `Committed` is the generation-one migration root with a zero witness binding.
 //! - `Finalized` is a locally selectable group result whose retained witness says whether it is
 //!   present or removed.
 //!
@@ -97,6 +99,7 @@
 //! Each spelling has an exact suffix rule:
 //!
 //! ```text
+//! Committed               zero witness binding and zero slot suffix
 //! BatchPrepared           exact framed witness and matching witness binding
 //! Finalized                exact retained witness and matching witness binding
 //! ```
@@ -105,6 +108,7 @@
 //!
 //! ```text
 //! BatchPrepared = 1
+//! Committed     = 2
 //! Finalized     = 3 + ((generation / 2) mod 2)
 //! ```
 //!
@@ -227,9 +231,9 @@
 //! # Namespace ownership
 //!
 //! The backend owns its ordinary blob header and physical namespace. Atomic names are opt-in and
-//! must not be opened through ordinary [`Storage`] while atomic handles exist. A new atomic blob
-//! starts from R15's all-zero generation-zero predecessor. There is no compatibility path for
-//! older experimental roots.
+//! must not be opened through ordinary [`Storage`] while atomic handles exist. Ordinary blobs enter
+//! this layout only through explicit migration. A new atomic blob starts from R15's all-zero
+//! generation-zero predecessor. There is no compatibility path for older experimental roots.
 //!
 //! Logical removal publishes a tombstone before physical unlink. Recovery makes every group final
 //! independently durable before removing any member. The exclusive storage-lineage contract lets
@@ -314,7 +318,7 @@ const IDENTITY_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_INCARNATION";
 const IDENTITY_GUARD_OFFSET: usize = 7;
 const IDENTITY_GUARD: u8 = 1;
 const IDENTITY_LEN: usize = 28;
-const INCARNATION_LEN: usize = 16;
+pub(crate) const INCARNATION_LEN: usize = 16;
 const ROOT_OFFSETS: [u64; 2] = [IDENTITY_PAGE_LEN, IDENTITY_PAGE_LEN + ROOT_SLOT_LEN];
 pub(crate) const DATA_OFFSET: u64 = IDENTITY_PAGE_LEN + 2 * ROOT_SLOT_LEN;
 const MAX_UNSYNCED_PAYLOAD_LEN: u64 = 64 * 1024 * 1024;
@@ -324,7 +328,7 @@ type RootBinding = [u8; ROOT_BINDING_LEN];
 type PayloadDigest = [u8; 32];
 type ParticipantOperation<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
 
-fn validate_atomic_location(partition: &str, name: &[u8]) -> Result<(), Error> {
+pub(crate) fn validate_atomic_location(partition: &str, name: &[u8]) -> Result<(), Error> {
     batch::validate_location(partition, name).map_err(Into::into)
 }
 
@@ -492,12 +496,13 @@ struct PayloadPreflushRound {
 
 /// Durable and transitional spellings encoded by the root guard.
 ///
-/// Finalized roots are locally selectable after their full slot grammar validates. This is a
-/// recovery classification, not proof that the installed bytes are durable. Finalized roots retain
-/// their local witness. Batch-prepared roots require a complete witness ring.
+/// Committed and finalized roots are locally selectable after their full slot grammar validates.
+/// This is a recovery classification, not proof that the installed bytes are durable. Finalized
+/// roots retain their local witness. Batch-prepared roots require a complete witness ring.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RootState {
     BatchPrepared,
+    Committed,
     Finalized,
 }
 
@@ -505,6 +510,7 @@ impl RootState {
     const fn guard(self, generation: u64) -> u8 {
         match self {
             Self::BatchPrepared => 1,
+            Self::Committed => 2,
             Self::Finalized => {
                 if (generation & 2) == 0 {
                     3
@@ -582,7 +588,7 @@ fn direct_group_id(
 
 /// Encode the complete canonical identity page for one namespace incarnation.
 ///
-/// Fresh creation writes this complete page before its durability barrier.
+/// Fresh creation and migration write this complete page before their durability barrier.
 fn encode_identity(identity: [u8; INCARNATION_LEN]) -> [u8; IDENTITY_PAGE_LEN as usize] {
     let mut page = [0u8; IDENTITY_PAGE_LEN as usize];
     page[..7].copy_from_slice(IDENTITY_MAGIC);
@@ -605,6 +611,33 @@ pub(crate) fn decode_identity(
     }
     let stored = u32::from_be_bytes(page[24..IDENTITY_LEN].try_into().unwrap());
     (stored == checksum(&[IDENTITY_DOMAIN, &page[..24]])).then(|| page[8..24].try_into().unwrap())
+}
+
+/// Build the fixed atomic prefix used by ordinary-to-atomic migration.
+///
+/// Migration starts at generation one with an independently readable committed root. The copied
+/// payload follows this prefix at its final atomic offset.
+pub(crate) fn migration_prefix(
+    incarnation: [u8; INCARNATION_LEN],
+    logical_len: u64,
+    integrity_checksum: u32,
+) -> [u8; DATA_OFFSET as usize] {
+    let mut prefix = [0; DATA_OFFSET as usize];
+    prefix[..IDENTITY_PAGE_LEN as usize].copy_from_slice(&encode_identity(incarnation));
+    let root = encode_root_value(
+        RootState::Committed,
+        Root {
+            generation: 1,
+            logical_len,
+            integrity_start: 0,
+            integrity_checksum,
+            integrity_scheme: IntegrityScheme::Unbound,
+            tag: [0; ATOMIC_BLOB_TAG_LEN],
+        },
+    );
+    let offset = ROOT_OFFSETS[1] as usize;
+    prefix[offset..offset + ROOT_LEN].copy_from_slice(&root);
+    prefix
 }
 
 /// Encode a root with a zero witness binding.
@@ -723,7 +756,10 @@ fn decode_root_fields(encoded: &[u8; ROOT_LEN]) -> Option<Root> {
 /// This does not validate slot parity, payload extent, integrity geometry, or the slot suffix.
 fn decode_root(encoded: &[u8; ROOT_LEN], state: RootState) -> Option<Root> {
     let root = decode_root_fields(encoded)?;
-    if encoded[ROOT_GUARD_OFFSET] != state.guard(root.generation) {
+    if encoded[ROOT_GUARD_OFFSET] != state.guard(root.generation)
+        || (state == RootState::Committed
+            && (root.generation != 1 || root_binding(encoded) != [0; ROOT_BINDING_LEN]))
+    {
         return None;
     }
     let stored = u32::from_be_bytes(encoded[ROOT_BODY_LEN..].try_into().unwrap());
@@ -735,9 +771,13 @@ fn decode_root(encoded: &[u8; ROOT_LEN], state: RootState) -> Option<Root> {
 
 /// Decode the first root spelling whose complete header grammar matches.
 fn decode_any_root(encoded: &[u8; ROOT_LEN]) -> Option<(RootState, Root)> {
-    [RootState::BatchPrepared, RootState::Finalized]
-        .into_iter()
-        .find_map(|state| decode_root(encoded, state).map(|root| (state, root)))
+    [
+        RootState::BatchPrepared,
+        RootState::Committed,
+        RootState::Finalized,
+    ]
+    .into_iter()
+    .find_map(|state| decode_root(encoded, state).map(|root| (state, root)))
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -828,6 +868,7 @@ impl Slot {
 
     const fn independent(self) -> Option<(Root, bool)> {
         match self {
+            Self::Root(RootState::Committed, root) => Some((root, false)),
             Self::Finalized { root, removed } => Some((root, removed)),
             Self::Zero | Self::Root(_, _) | Self::Raw => None,
         }
@@ -850,6 +891,7 @@ fn decode_slot(
             return Slot::Raw;
         };
         let suffix_valid = match state {
+            RootState::Committed => encoded[ROOT_LEN..].iter().all(|byte| *byte == 0),
             RootState::BatchPrepared => {
                 let Some(link) = batch::link_at(encoded, "", &[], root_offset) else {
                     return Slot::Raw;
@@ -2648,6 +2690,8 @@ pub(crate) trait Backend: Storage {
     ///
     /// Live operations hold shared exclusion through their I/O and cleanup. Namespace operations
     /// hold exclusive exclusion and drain detached payload preflushes before inspecting backings.
+    /// Filesystem storage operations share the namespace lock so a migration can own it before
+    /// transferring work to the background driver.
     fn atomic_resources(&self) -> AtomicResources;
 
     /// Generate a fresh identifier for an incarnation, opened token epoch, or multi-blob group.
@@ -2657,10 +2701,18 @@ pub(crate) trait Backend: Storage {
         identifier
     }
 
+    /// Durably replace one exact ordinary backing with the atomic layout for `incarnation`.
+    /// The caller owns this lineage's namespace lock through completion.
+    fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; INCARNATION_LEN],
+    ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
     /// Open the current exact name without creating or repairing it.
     ///
     /// An incomplete ordinary container is reported as absent. A complete legacy container is
-    /// rejected so its payload cannot be reinterpreted as atomic state.
+    /// rejected so its payload can only enter atomic storage through explicit migration.
     /// [`Storage::open`] owns any container-level recovery before atomic identity initialization.
     fn open_atomic_existing(
         &self,
@@ -4277,6 +4329,30 @@ async fn pause_admitted_operation_if_requested(lineage: &Arc<RwLock<()>>) {
 #[commonware_macros::stability(BETA)]
 impl<S: Backend> AtomicStorage for S {
     type AtomicBlob = Blob<S::Blob>;
+
+    fn migrate_atomic(
+        &self,
+        blob: Self::Blob,
+    ) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+        Box::pin(async move {
+            let resources = self.atomic_resources();
+            let driver = resources.driver.clone();
+            let worker = self.atomic_worker();
+            let admission = driver.reserve().await?;
+            let guard = resources.exclusion.clone().write_owned().await;
+            let namespace = resources.namespace.clone().lock_owned().await;
+            let task = async move {
+                let _guard = guard;
+                let _namespace = namespace;
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                pause_admitted_operation_if_requested(&resources.exclusion).await;
+                resources.payload_budget.drain().await?;
+                let incarnation = worker.new_atomic_identifier();
+                worker.migrate_atomic_backing(blob, incarnation).await
+            };
+            admission.drive(task).await
+        })
+    }
 
     fn open_atomic(
         &self,

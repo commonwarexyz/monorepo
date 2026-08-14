@@ -179,10 +179,10 @@ stability_scope!(BETA {
     /// mutation interface. The backend owns the ordinary container layout; the atomic identity and
     /// roots live in the blob's logical contents. A name belongs exclusively to either this
     /// interface or ordinary [`Storage`]: it must not be populated or mutated through both.
-    /// Existing names require a complete atomic identity and are never implicitly converted. At
-    /// most one independently opened handle for a name may be live: drop that handle and all of
-    /// its clones before reopening the name. Use clones of one returned handle for coordinated
-    /// concurrent access. Atomic namespace
+    /// Existing names require a complete atomic identity and are never implicitly converted; use
+    /// [`AtomicStorage::migrate_atomic`] for an ordinary blob. At most one independently opened
+    /// handle for a name may be live: drop that handle and all of its clones before reopening the
+    /// name. Use clones of one returned handle for coordinated concurrent access. Atomic namespace
     /// and recovery work is serialized across one storage value and its clones. Live operations on
     /// disjoint handles and carried-debt groups may proceed concurrently; operations sharing either
     /// are serialized. If a canceled observer leaves backing work in flight, including when the
@@ -200,6 +200,30 @@ stability_scope!(BETA {
     pub trait AtomicStorage: Storage {
         /// Blob type returned by atomic opens.
         type AtomicBlob: AtomicBlob;
+
+        /// Consume an ordinary blob and durably replace its current name with an atomic blob.
+        ///
+        /// The blob's logical contents are preserved. Pending writes are synchronized before
+        /// migration. The caller must exclude concurrent mutation and must pass the exact current
+        /// generation opened from this storage lineage. Existing handles remain readable after
+        /// replacement, but callers must reopen the migrated name.
+        ///
+        /// Cancellation or a mutable-storage error may leave either layout at the live name. After
+        /// cancellation, retain this storage lineage until its admitted work quiesces, then retry
+        /// with a freshly opened handle. A mutable-storage error is fatal to the storage instance;
+        /// reconstruct the lineage before reopening and retrying. Migration of an already atomic
+        /// blob is idempotent. In the canonical container used by atomic storage, a complete atomic
+        /// identity page at logical offset zero is reserved as the installed-image retry marker.
+        /// An ordinary value in that container that begins with the reserved page is interpreted
+        /// as an already installed image rather than wrapped as application data. Filesystem
+        /// implementations stream through a same-directory replacement inode with bounded memory
+        /// and temporarily require space for a complete copy. The source location must satisfy the
+        /// same witness-size bound as [`AtomicStorage::open_atomic`]. The Tokio filesystem
+        /// implementation supports migration only on Unix.
+        fn migrate_atomic(
+            &self,
+            blob: Self::Blob,
+        ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
         /// Open an existing atomic blob or create a new one.
         ///
@@ -327,10 +351,10 @@ stability_scope!(BETA {
         /// Return length, scheme, tag, and validated unfinished bytes from one coherent state.
         ///
         /// This reads, retains, and validates the complete unfinished unit before returning.
-        /// Unbound and variable-width units can span the entire encoded payload and are not limited
-        /// by the publication-recovery suffix budget. Operations requiring the same coherent state
-        /// wait for this validation. Close units or use an appropriately bounded chunk width when
-        /// snapshot cost must be bounded.
+        /// Unbound and variable-width units can span the entire encoded payload, including after
+        /// ordinary-to-atomic migration, and are not limited by the publication-recovery suffix
+        /// budget. Operations requiring the same coherent state wait for this validation. Close
+        /// units or use an appropriately bounded chunk width when snapshot cost must be bounded.
         fn integrity_snapshot(
             &self,
         ) -> impl std::future::Future<Output = Result<IntegritySnapshot, Error>> + Send;
