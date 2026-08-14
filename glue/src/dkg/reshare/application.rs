@@ -227,8 +227,9 @@ where
                         return false;
                     }
                 }
-                EpochInfoResponse::Pending | EpochInfoResponse::Following => {
+                response @ (EpochInfoResponse::Pending | EpochInfoResponse::Following) => {
                     debug!(
+                        following = matches!(response, EpochInfoResponse::Following),
                         "verification pending: final block epoch info cannot be derived locally"
                     );
                     future::pending::<()>().await;
