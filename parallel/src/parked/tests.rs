@@ -225,7 +225,7 @@ fn test_sort_by_and_join_and_spawn() {
     let (a, b) = strategy.join(|| 1u8, || 2u8);
     assert_eq!((a, b), (1, 2));
 
-    let result = futures::executor::block_on(strategy.spawn(|_| 42u8));
+    let result = futures::executor::block_on(strategy.spawn(1, |_| 42u8));
     assert_eq!(result, 42);
 }
 
@@ -277,8 +277,8 @@ fn test_single_worker_spawn_executes_inline() {
     use futures::FutureExt;
     // A 1-worker pool executes spawn at submission; the future is already resolved.
     let strategy = parked(1);
-    assert_eq!(strategy.spawn(|_| 7u8).now_or_never(), Some(7));
-    assert_eq!(strategy.manual().spawn(|_| 8u8).now_or_never(), Some(8));
+    assert_eq!(strategy.spawn(1, |_| 7u8).now_or_never(), Some(7));
+    assert_eq!(strategy.manual().spawn(1, |_| 8u8).now_or_never(), Some(8));
 }
 
 #[test]
@@ -475,10 +475,10 @@ fn test_matches_rayon_semantics_on_error_priority() {
 #[test]
 fn test_spawn_result_and_panic() {
     let strategy = parked(2);
-    assert_eq!(futures::executor::block_on(strategy.spawn(|_| 7u8)), 7);
+    assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 7u8)), 7);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        futures::executor::block_on(strategy.spawn(|_| -> u8 { panic!("spawn boom") }))
+        futures::executor::block_on(strategy.spawn(1, |_| -> u8 { panic!("spawn boom") }))
     }));
     assert_eq!(
         *result.unwrap_err().downcast_ref::<&str>().unwrap(),
@@ -491,7 +491,7 @@ fn test_detached_spawn_still_runs() {
     // Eager submission: dropping the returned future must not cancel the job.
     let strategy = parked(2);
     let (tx, rx) = std::sync::mpsc::channel();
-    drop(strategy.spawn(move |_| {
+    drop(strategy.manual().spawn(1, move |_| {
         tx.send(42u8).unwrap();
     }));
     assert_eq!(
@@ -512,16 +512,16 @@ fn test_member_poller_executes_pending_spawn() {
     // Occupy one worker with a job that blocks until the end of the test.
     let blocker = {
         let gate_rx = StdArc::clone(&gate_rx);
-        strategy.manual().spawn(move |_| {
+        strategy.manual().spawn(1, move |_| {
             let _ = gate_rx.lock().unwrap().recv();
         })
     };
 
     // The outer job runs on the remaining worker and block_on-polls an inner spawn: with
     // no free worker, only the member help path can execute it.
-    let outer = strategy
-        .manual()
-        .spawn(move |s| futures::executor::block_on(s.spawn(|_| 99u8)));
+    let outer = strategy.manual().spawn(1, move |s| {
+        futures::executor::block_on(s.spawn(1, |_| 99u8))
+    });
     assert_eq!(futures::executor::block_on(outer), 99);
 
     gate_tx.send(()).unwrap();
@@ -535,7 +535,7 @@ fn test_last_owner_dropped_inside_spawned_job() {
     let (tx, rx) = std::sync::mpsc::channel();
     {
         let strategy = parked(2);
-        let fut = strategy.spawn(move |s| {
+        let fut = strategy.manual().spawn(1, move |s| {
             std::thread::sleep(std::time::Duration::from_millis(20));
             drop(s); // possibly the last owner by now
             tx.send(1u8).unwrap();
@@ -558,7 +558,7 @@ fn test_dropping_handles_never_cancels_queued_spawns() {
         let strategy = parked(2);
         for i in 0..64u8 {
             let tx = tx.clone();
-            drop(strategy.spawn(move |_| {
+            drop(strategy.manual().spawn(1, move |_| {
                 tx.send(i).unwrap();
             }));
         }
@@ -582,7 +582,7 @@ fn test_manual_spawn_hands_off_blocking_jobs() {
     let futs: Vec<_> = (0..2)
         .map(|_| {
             let rx = StdArc::clone(&release_rx);
-            manual.spawn(move |_| {
+            manual.spawn(1, move |_| {
                 let _ = rx.lock().unwrap().recv();
             })
         })

@@ -483,51 +483,105 @@ impl Strategy for Parked {
         )
     }
 
-    fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+    #[track_caller]
+    fn spawn<F, T>(
+        &self,
+        len: usize,
+        f: F,
+    ) -> impl core::future::Future<Output = T> + Send + 'static + use<F, T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
     {
+        let workers = self.shared.workers();
+        let caller = Location::caller();
+
         // Mirror Rayon: a single-worker pool executes inline (offloading to the only
-        // worker could deadlock a job that waits on work only the submitter can create).
-        // The shutdown arm is a backstop: callers hold an owner clone, so a live handle
-        // implies a live pool, and the arm is unreachable through public use.
-        if self.shared.workers() <= 1 || self.shared.is_shutdown() {
-            return Either::Left(future::ready(f(self.clone())));
+        // worker could deadlock a job that waits on work only the submitter can create);
+        // a manual strategy has no policy (keep spawn's unconditional offload); otherwise
+        // the policy decides inline vs offload from the size hint. The shutdown arm is a
+        // backstop: callers hold an owner clone, so a live handle implies a live pool.
+        let (offload_it, measure) = if workers <= 1 || self.shared.is_shutdown() {
+            (false, false)
+        } else {
+            self.policy.as_ref().map_or((true, false), |policy| {
+                match policy.choose_spawn(caller, len, workers) {
+                    (policy::SpawnExecution::Inline, measure) => (false, measure),
+                    (policy::SpawnExecution::Offload, measure) => (true, measure),
+                }
+            })
+        };
+
+        if !offload_it {
+            let start = measure.then(std::time::Instant::now);
+            let result = f(self.clone());
+            if let (Some(start), Some(policy)) = (start, self.policy.as_ref()) {
+                policy.record_spawn(
+                    caller,
+                    len,
+                    workers,
+                    policy::SpawnExecution::Inline,
+                    start.elapsed(),
+                    None,
+                );
+            }
+            return Either::Left(future::ready(result));
         }
 
+        // Offload: the worker times the job's own wall (to estimate the inline cost); the
+        // returned future times the residual wait once joined.
+        let setup_start = measure.then(std::time::Instant::now);
         let (tx, mut rx) = oneshot::channel();
         let s = self.clone();
         let shared = Arc::clone(&self.shared);
         // Eager submission: the job is queued before the future is returned, so a caller
         // that drops the future (detached spawn) still gets its job executed.
         self.shared.enqueue(Box::new(move || {
+            let job_start = measure.then(std::time::Instant::now);
             // Catch the panic so a panicking job propagates to the awaiting task rather
             // than killing a pool worker.
             let result = panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
-            let _ = tx.send(result);
+            let job_wall = job_start.map(|start| start.elapsed());
+            let _ = tx.send((result, job_wall));
         }));
+        let recorder = measure.then(|| {
+            (
+                self.policy.clone(),
+                setup_start.map_or(core::time::Duration::ZERO, |start| start.elapsed()),
+            )
+        });
         Either::Right(async move {
+            // Time from the caller's first poll (when it joins) to the result: the part
+            // of the job not hidden behind the caller's interleaved work.
+            let poll_start = std::time::Instant::now();
             // When the polling thread is itself a member of THIS pool, waiting on the
             // channel could park the only worker able to run the job. Run pending pool
             // work inline until the job completes or an external poller takes over.
             // `is_member` checks pool identity, so a worker of another pool falls through
             // to the channel immediately.
-            loop {
-                if let Ok(Some(result)) = rx.try_recv() {
-                    return match result {
-                        Ok(value) => value,
-                        Err(payload) => panic::resume_unwind(payload),
-                    };
+            let (result, job_wall) = loop {
+                if let Ok(Some(payload)) = rx.try_recv() {
+                    break payload;
                 }
                 if !pool::is_member(&shared) || !shared.help_once() {
-                    break;
+                    break rx
+                        .await
+                        .unwrap_or_else(|_| panic!("strategy job dropped before completion"));
                 }
+            };
+            if let Some((Some(policy), setup)) = recorder {
+                policy.record_spawn(
+                    caller,
+                    len,
+                    workers,
+                    policy::SpawnExecution::Offload,
+                    setup.saturating_add(poll_start.elapsed()),
+                    job_wall,
+                );
             }
-            match rx.await {
-                Ok(Ok(value)) => value,
-                Ok(Err(payload)) => panic::resume_unwind(payload),
-                Err(_) => panic!("strategy job dropped before completion"),
+            match result {
+                Ok(value) => value,
+                Err(payload) => panic::resume_unwind(payload),
             }
         })
     }

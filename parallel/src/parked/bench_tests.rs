@@ -159,14 +159,14 @@ fn gate_spawn_roundtrip() {
     fn scenario<S: Strategy>(strategy: &S) -> Duration {
         // Warmup.
         for _ in 0..100 {
-            let fut = strategy.manual().spawn(|_| work(1, JOB_ROUNDS));
+            let fut = strategy.manual().spawn(1, |_| work(1, JOB_ROUNDS));
             black_box(work(2, CALLER_ROUNDS));
             black_box(futures::executor::block_on(fut));
         }
         let samples: Vec<Duration> = (0..ITERS)
             .map(|_| {
                 let (elapsed, out) = time(|| {
-                    let fut = strategy.manual().spawn(|_| work(1, JOB_ROUNDS));
+                    let fut = strategy.manual().spawn(1, |_| work(1, JOB_ROUNDS));
                     let caller = work(2, CALLER_ROUNDS);
                     (futures::executor::block_on(fut), caller)
                 });
