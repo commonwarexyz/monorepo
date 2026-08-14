@@ -12,9 +12,8 @@ use commonware_codec::DecodeExt as _;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
-use commonware_utils::{FuzzRng, TestRng, union_unique};
+use commonware_utils::{FuzzRng, union_unique};
 use ed25519_consensus::SigningKey as ConsensusSigningKey;
-use rand_core::Rng as _;
 
 const SCALAR_ORDER: [u8; 32] = [
     0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
@@ -22,69 +21,38 @@ const SCALAR_ORDER: [u8; 32] = [
 ];
 
 // Bias signing key material and key-exchange RNG seeds toward low-entropy patterns.
-const INTERESTING_SECRET_BYTES: [[u8; 32]; 4] =
-    [[0; 32], [0xff; 32], first_byte(1), last_byte(0x80)];
+const INTERESTING_SECRET_BYTES: [[u8; 32]; 4] = [
+    [0; 32],
+    [0xff; 32],
+    hex!("0x0100000000000000000000000000000000000000000000000000000000000000"),
+    hex!("0x0000000000000000000000000000000000000000000000000000000000000080"),
+];
 
 // Include every low-order coordinate on the curve and its twist, non-canonical aliases of 0 and
 // 1, the basepoint with both possible high bits, and the maximal encoding.
 const INTERESTING_X25519_PUBLIC_KEYS: [[u8; 32]; 10] = [
     [0; 32],
-    first_byte(1),
+    hex!("0x0100000000000000000000000000000000000000000000000000000000000000"),
     hex!("0xe0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
     hex!("0x5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
     hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
     hex!("0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
     hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-    first_byte(9),
-    with_high_bit(first_byte(9)),
+    hex!("0x0900000000000000000000000000000000000000000000000000000000000000"),
+    hex!("0x0900000000000000000000000000000000000000000000000000000000000080"),
     [0xff; 32],
 ];
-
-const fn first_byte(byte: u8) -> [u8; 32] {
-    let mut bytes = [0; 32];
-    bytes[0] = byte;
-    bytes
-}
-
-const fn last_byte(byte: u8) -> [u8; 32] {
-    let mut bytes = [0; 32];
-    bytes[31] = byte;
-    bytes
-}
-
-const fn with_high_bit(mut bytes: [u8; 32]) -> [u8; 32] {
-    bytes[31] |= 0x80;
-    bytes
-}
-
-const fn identity_encoding(sign: bool) -> [u8; 32] {
-    let mut bytes = [0; 32];
-    bytes[0] = 1;
-    if sign {
-        bytes[31] = 0x80;
-    }
-    bytes
-}
-
-const fn mostly_ff_encoding(first: u8, sign: bool) -> [u8; 32] {
-    let mut bytes = [0xff; 32];
-    bytes[0] = first;
-    if !sign {
-        bytes[31] = 0x7f;
-    }
-    bytes
-}
 
 // These are the canonical and non-canonical encodings of the two points with x = 0. They are
 // low order, so a signature with low-order A and R and s = 0 satisfies the cofactored ZIP215
 // verification equation for every message.
 const LOW_ORDER_ENCODINGS: [[u8; 32]; 6] = [
-    identity_encoding(false),
-    identity_encoding(true),
-    mostly_ff_encoding(0xec, false),
-    mostly_ff_encoding(0xec, true),
-    mostly_ff_encoding(0xee, false),
-    mostly_ff_encoding(0xee, true),
+    hex!("0x0100000000000000000000000000000000000000000000000000000000000000"),
+    hex!("0x0100000000000000000000000000000000000000000000000000000000000080"),
+    hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+    hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
 ];
 
 // Bias payloads around fixed Ed25519 widths, SHA-512 boundaries, and length-prefix transitions.
@@ -99,43 +67,6 @@ const INTERESTING_BATCH_SIZES: [usize; 17] =
 const MAX_BATCH_SIZE: usize = if cfg!(test) { 17 } else { 64 };
 const INTERESTING_BATCH_SIZE_COUNT: usize = if cfg!(test) { 12 } else { 17 };
 
-fn signing_key(seed: u64) -> SigningKey {
-    SigningKey::random(TestRng::new(seed))
-}
-
-fn decode_verifying_key(bytes: [u8; 32]) -> VerifyingKey {
-    VerifyingKey::decode(bytes.as_slice()).expect("a fixed-size key encoding must decode")
-}
-
-fn decode_signing_key(bytes: [u8; 32]) -> SigningKey {
-    SigningKey::decode(bytes.as_slice()).expect("a fixed-size key encoding must decode")
-}
-
-fn decode_exchange_public_key(bytes: [u8; 32]) -> ExchangePublicKey {
-    ExchangePublicKey::decode(bytes.as_slice()).expect("a fixed-size key encoding must decode")
-}
-
-fn decode_signature(bytes: [u8; 64]) -> Signature {
-    Signature::decode(bytes.as_slice()).expect("a fixed-size signature encoding must decode")
-}
-
-fn signature_bytes(signature: &Signature) -> [u8; 64] {
-    signature
-        .as_ref()
-        .try_into()
-        .expect("a signature is always 64 bytes")
-}
-
-fn arbitrary_key_seed(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-    Ok(match u.int_in_range(0u8..=5)? {
-        0 => 0,
-        1 => 1,
-        2 => u.arbitrary::<u8>()?.into(),
-        3 => u.arbitrary::<u16>()?.into(),
-        _ => u.arbitrary()?,
-    })
-}
-
 fn arbitrary_length(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
     if u.ratio(3, 4)? {
         Ok(*u.choose(&INTERESTING_LENGTHS)?)
@@ -146,15 +77,10 @@ fn arbitrary_length(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 
 fn arbitrary_bytes(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
     let len = arbitrary_length(u)?;
-    Ok(match u.int_in_range(0u8..=4)? {
+    Ok(match u.int_in_range(0u8..=3)? {
         0 => vec![0; len],
         1 => vec![u.arbitrary()?; len],
         2 => (0..len).map(|i| i as u8).collect(),
-        3 => {
-            let mut bytes = vec![0; len];
-            TestRng::new(u.arbitrary()?).fill_bytes(&mut bytes);
-            bytes
-        }
         _ => u.bytes(len)?.to_vec(),
     })
 }
@@ -234,11 +160,15 @@ impl Arbitrary<'_> for EncodedPoint {
             }
             5 => [0; 32],
             6 => [0xff; 32],
-            7 => signing_key(arbitrary_key_seed(u)?)
-                .verifying_key()
-                .as_ref()
-                .try_into()
-                .expect("a verifying key is always 32 bytes"),
+            7 => {
+                let SecretBytes(seed) = u.arbitrary()?;
+                SigningKey::decode(seed.as_slice())
+                    .unwrap()
+                    .verifying_key()
+                    .as_ref()
+                    .try_into()
+                    .unwrap()
+            }
             _ => u.arbitrary()?,
         };
         Ok(Self(bytes))
@@ -299,7 +229,7 @@ struct Signing {
 impl Signing {
     fn run(self) {
         let SecretBytes(seed) = self.seed;
-        let signing_key = decode_signing_key(seed);
+        let signing_key = SigningKey::decode(seed.as_slice()).unwrap();
         let consensus_key = ConsensusSigningKey::from(seed);
         assert_eq!(
             signing_key.verifying_key().as_ref(),
@@ -341,7 +271,8 @@ impl KeyExchange {
             "key exchange: {self:#?}",
         );
 
-        let shared = secret_key.exchange(&decode_exchange_public_key(public_key_bytes));
+        let public_key = ExchangePublicKey::decode(public_key_bytes.as_slice()).unwrap();
+        let shared = secret_key.exchange(&public_key);
         let dalek_shared = dalek_secret
             .diffie_hellman(&x25519_dalek::PublicKey::from(public_key_bytes))
             .to_bytes();
@@ -360,12 +291,13 @@ struct Item {
 }
 
 impl Item {
-    fn signed(u: &mut Unstructured<'_>, seed: Option<u64>) -> arbitrary::Result<Self> {
+    fn signed(u: &mut Unstructured<'_>, seed: Option<SecretBytes>) -> arbitrary::Result<Self> {
         let Payload { namespace, message } = u.arbitrary()?;
-        let signing_key = signing_key(match seed {
+        let SecretBytes(seed) = match seed {
             Some(seed) => seed,
-            None => arbitrary_key_seed(u)?,
-        });
+            None => u.arbitrary()?,
+        };
+        let signing_key = SigningKey::decode(seed.as_slice()).unwrap();
         let verifying_key = signing_key.verifying_key();
         let signature = signing_key.sign(&namespace, &message);
         Ok(Self {
@@ -378,18 +310,19 @@ impl Item {
 
     fn low_order(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let Payload { namespace, message } = u.arbitrary()?;
-        let verifying_key = decode_verifying_key(*u.choose(&LOW_ORDER_ENCODINGS)?);
+        let bytes = u.choose(&LOW_ORDER_ENCODINGS)?;
+        let verifying_key = VerifyingKey::decode(bytes.as_slice()).unwrap();
         let mut signature = [0; 64];
         signature[..32].copy_from_slice(u.choose(&LOW_ORDER_ENCODINGS)?);
         Ok(Self {
             namespace,
             message,
             verifying_key,
-            signature: decode_signature(signature),
+            signature: Signature::decode(signature.as_slice()).unwrap(),
         })
     }
 
-    fn valid(u: &mut Unstructured<'_>, seed: Option<u64>) -> arbitrary::Result<Self> {
+    fn valid(u: &mut Unstructured<'_>, seed: Option<SecretBytes>) -> arbitrary::Result<Self> {
         if seed.is_none() && u.ratio(1, 8)? {
             Self::low_order(u)
         } else {
@@ -408,8 +341,8 @@ impl Item {
         Ok(Self {
             namespace,
             message,
-            verifying_key: decode_verifying_key(verifying_key),
-            signature: decode_signature(signature),
+            verifying_key: VerifyingKey::decode(verifying_key.as_slice()).unwrap(),
+            signature: Signature::decode(signature.as_slice()).unwrap(),
         })
     }
 
@@ -419,19 +352,19 @@ impl Item {
             1 => mutate_bytes(&mut self.message, u)?,
             2 => {
                 let EncodedPoint(bytes) = u.arbitrary()?;
-                self.verifying_key = decode_verifying_key(bytes);
+                self.verifying_key = VerifyingKey::decode(bytes.as_slice()).unwrap();
             }
             3 => {
                 let EncodedPoint(r) = u.arbitrary()?;
-                let mut signature = signature_bytes(&self.signature);
+                let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
                 signature[..32].copy_from_slice(&r);
-                self.signature = decode_signature(signature);
+                self.signature = Signature::decode(signature.as_slice()).unwrap();
             }
             4 => {
                 let EncodedScalar(s) = u.arbitrary()?;
-                let mut signature = signature_bytes(&self.signature);
+                let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
                 signature[32..].copy_from_slice(&s);
-                self.signature = decode_signature(signature);
+                self.signature = Signature::decode(signature.as_slice()).unwrap();
             }
             _ => self.make_scalar_noncanonical(),
         }
@@ -446,9 +379,9 @@ impl Item {
     }
 
     fn make_scalar_noncanonical(&mut self) {
-        let mut signature = signature_bytes(&self.signature);
+        let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
         signature[32..].copy_from_slice(&SCALAR_ORDER);
-        self.signature = decode_signature(signature);
+        self.signature = Signature::decode(signature.as_slice()).unwrap();
     }
 
     fn verify(&self) -> bool {
@@ -470,7 +403,7 @@ impl Arbitrary<'_> for Item {
 
 #[derive(Debug)]
 struct Batch {
-    rng_seed: u64,
+    rng_seed: SecretBytes,
     items: Vec<Item>,
 }
 
@@ -478,7 +411,7 @@ impl Arbitrary<'_> for Batch {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let len = arbitrary_batch_size(u)?;
         let rng_seed = u.arbitrary()?;
-        let shared_seed = arbitrary_key_seed(u)?;
+        let shared_seed = u.arbitrary()?;
         let items = match u.int_in_range(0u8..=5)? {
             0 => (0..len)
                 .map(|_| Item::valid(u, None))
@@ -528,7 +461,8 @@ impl Batch {
                 &item.signature,
             );
         }
-        let actual = batch.verify(&mut TestRng::new(self.rng_seed), &Sequential);
+        let SecretBytes(rng_seed) = self.rng_seed;
+        let actual = batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), &Sequential);
         assert_eq!(actual, expected, "batch: {self:#?}");
     }
 }
@@ -563,96 +497,45 @@ pub mod fuzz {
 
     #[cfg(test)]
     #[test]
-    fn test_fuzz() {
+    fn minifuzz_batch_matches_individual() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(32)
-            .test(|u| u.arbitrary::<Plan>()?.run(u));
+            .test(|u| Plan::BatchMatchesIndividual.run(u));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn minifuzz_signing_matches_consensus() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::SigningMatchesConsensus.run(u));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn minifuzz_key_exchange_matches_dalek() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::KeyExchangeMatchesDalek.run(u));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_exchange_public_key, decode_signature, decode_signing_key, decode_verifying_key,
+        ExchangePublicKey, Signature, VerifyingKey,
         vectors::{RFC7748_X25519, RFC7748_X25519_DIFFIE_HELLMAN, RFC8032_ED25519, ZIP215_POINTS},
     };
-    use crate::{
-        key_exchange::SecretKey,
-        signing::{BatchVerifier, SigningKey},
-    };
-    use commonware_math::algebra::Random as _;
-    use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
-    use core::convert::Infallible;
-    use rand_core::{TryCryptoRng, TryRng};
-
-    const ZIP215_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
-
-    struct VectorRng {
-        bytes: [u8; 32],
-        position: usize,
-    }
-
-    impl VectorRng {
-        const fn new(bytes: [u8; 32]) -> Self {
-            Self { bytes, position: 0 }
-        }
-
-        fn take<const N: usize>(&mut self) -> [u8; N] {
-            let end = self
-                .position
-                .checked_add(N)
-                .expect("vector RNG position must not overflow");
-            let bytes = self
-                .bytes
-                .get(self.position..end)
-                .expect("vector RNG must contain enough bytes")
-                .try_into()
-                .expect("vector RNG slice must have the requested length");
-            self.position = end;
-            bytes
-        }
-    }
-
-    impl TryRng for VectorRng {
-        type Error = Infallible;
-
-        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-            Ok(u32::from_le_bytes(self.take()))
-        }
-
-        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-            Ok(u64::from_le_bytes(self.take()))
-        }
-
-        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-            let end = self
-                .position
-                .checked_add(dst.len())
-                .expect("vector RNG position must not overflow");
-            dst.copy_from_slice(
-                self.bytes
-                    .get(self.position..end)
-                    .expect("vector RNG must contain enough bytes"),
-            );
-            self.position = end;
-            Ok(())
-        }
-    }
-
-    // SAFETY: This deterministic adapter is not cryptographically secure. It implements
-    // CryptoRng only to inject RFC scalar bytes through the public random key-construction API.
-    impl TryCryptoRng for VectorRng {}
-
-    fn exchange_secret_key(bytes: [u8; 32]) -> SecretKey {
-        SecretKey::random(VectorRng::new(bytes))
-    }
+    use crate::{key_exchange::SecretKey, signing::SigningKey};
+    use commonware_codec::DecodeExt as _;
 
     #[test]
     fn rfc8032_ed25519_vectors() {
         for vector in RFC8032_ED25519 {
-            let signing_key: SigningKey = decode_signing_key(vector.secret_key);
+            let signing_key = SigningKey::decode(vector.secret_key.as_slice()).unwrap();
             assert_eq!(
                 signing_key.verifying_key().as_ref(),
                 vector.public_key,
@@ -671,8 +554,9 @@ mod tests {
     #[test]
     fn rfc7748_x25519_vectors() {
         for vector in RFC7748_X25519 {
-            let shared_secret = exchange_secret_key(vector.scalar)
-                .exchange(&decode_exchange_public_key(vector.u_coordinate))
+            let public_key = ExchangePublicKey::decode(vector.u_coordinate.as_slice()).unwrap();
+            let shared_secret = SecretKey::from_raw(vector.scalar)
+                .exchange(&public_key)
                 .expect("RFC 7748 output is contributory");
             assert_eq!(shared_secret.as_bytes(), &vector.output);
         }
@@ -681,16 +565,18 @@ mod tests {
     #[test]
     fn rfc7748_x25519_diffie_hellman_vector() {
         let vector = &RFC7748_X25519_DIFFIE_HELLMAN;
-        let alice = exchange_secret_key(vector.alice_secret);
-        let bob = exchange_secret_key(vector.bob_secret);
+        let alice = SecretKey::from_raw(vector.alice_secret);
+        let bob = SecretKey::from_raw(vector.bob_secret);
         assert_eq!(alice.public_key().as_ref(), vector.alice_public);
         assert_eq!(bob.public_key().as_ref(), vector.bob_public);
 
+        let bob_public = ExchangePublicKey::decode(vector.bob_public.as_slice()).unwrap();
+        let alice_public = ExchangePublicKey::decode(vector.alice_public.as_slice()).unwrap();
         let alice_shared = alice
-            .exchange(&decode_exchange_public_key(vector.bob_public))
+            .exchange(&bob_public)
             .expect("RFC 7748 Bob public key is contributory");
         let bob_shared = bob
-            .exchange(&decode_exchange_public_key(vector.alice_public))
+            .exchange(&alice_public)
             .expect("RFC 7748 Alice public key is contributory");
         assert_eq!(alice_shared.as_bytes(), &vector.shared_secret);
         assert_eq!(bob_shared.as_bytes(), &vector.shared_secret);
@@ -698,27 +584,25 @@ mod tests {
 
     #[test]
     fn zip215_verification_vectors() {
+        const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
+
         let message = b"Zcash";
-        let mut batch = BatchVerifier::new(ZIP215_POINTS.len() * ZIP215_POINTS.len());
 
         // These are the 196 ZIP215 test vectors: every pairing of the eight canonical
         // low-order encodings and their six non-canonical aliases. With s = 0, each pair
         // satisfies the cofactored verification equation for every message.
         for public_key_bytes in ZIP215_POINTS {
             for r_bytes in ZIP215_POINTS {
-                let verifying_key = decode_verifying_key(public_key_bytes);
+                let verifying_key = VerifyingKey::decode(public_key_bytes.as_slice()).unwrap();
                 let mut signature_bytes = [0u8; 64];
                 signature_bytes[..32].copy_from_slice(&r_bytes);
-                let signature = decode_signature(signature_bytes);
+                let signature = Signature::decode(signature_bytes.as_slice()).unwrap();
 
                 assert!(
-                    verifying_key.verify(ZIP215_NAMESPACE, message, &signature),
+                    verifying_key.verify(NAMESPACE, message, &signature),
                     "ZIP215 vector failed for A={public_key_bytes:?}, R={r_bytes:?}",
                 );
-                batch.add(ZIP215_NAMESPACE, message, &verifying_key, &signature);
             }
         }
-
-        assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 }

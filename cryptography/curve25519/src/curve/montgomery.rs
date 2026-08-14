@@ -73,23 +73,6 @@ mod tests {
     use commonware_formatting::hex;
 
     #[test]
-    fn rfc7748_vector_1() {
-        let scalar = hex!("0xa546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4");
-        let u = hex!("0xe6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c");
-        let expected = hex!("0xc3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
-        assert_eq!(x25519(&scalar, &u), expected);
-    }
-
-    #[test]
-    fn rfc7748_vector_2() {
-        let scalar = hex!("0x4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d");
-        // Bit 255 of this coordinate is set, checking that it gets ignored.
-        let u = hex!("0xe5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493");
-        let expected = hex!("0x95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957");
-        assert_eq!(x25519(&scalar, &u), expected);
-    }
-
-    #[test]
     fn rfc7748_iterated() {
         let mut k = hex!("0x0900000000000000000000000000000000000000000000000000000000000000");
         let mut u = k;

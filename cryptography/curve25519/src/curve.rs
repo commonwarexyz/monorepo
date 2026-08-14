@@ -900,32 +900,6 @@ pub fn test_backend() -> impl Backend {
     portable::Backend::new()
 }
 
-#[cfg(test)]
-#[test]
-fn test_fuzz() {
-    // The fully inlined NEON group formulas need more than the test harness's default stack in
-    // unoptimized builds.
-    let run = || {
-        commonware_invariants::minifuzz::test(|u| u.arbitrary::<test::Plan>()?.run(u));
-    };
-    if cfg!(target_arch = "aarch64") {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(run)
-            .unwrap()
-            .join()
-            .unwrap();
-    } else {
-        run();
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn test_backend_at_bounds() {
-    test::check_backend_at_bounds();
-}
-
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
 /// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection;

@@ -424,57 +424,20 @@ impl BatchVerifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchVerifier, Signature, SigningKey, VerifyingKey};
-    use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, union_unique};
-    use ed25519_consensus::{
-        Signature as RefSignature, SigningKey as RefSigningKey, VerificationKey as RefVerifyingKey,
-    };
-    use rand_core::Rng;
-
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
-    const WRONG_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST_WRONG";
+    use super::SigningKey;
 
     #[test]
-    fn sign_matches_reference_implementation() {
-        let mut rng = test_rng();
-        for i in 0..16 {
-            let mut seed = [0u8; 32];
-            rng.fill_bytes(&mut seed);
-            let signing_key = SigningKey::from_seed(seed);
-            let reference_key = RefSigningKey::from(seed);
-            let message = format!("message {i}").into_bytes();
+    fn signature_is_bound_to_namespace() {
+        const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
+        const WRONG_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST_WRONG";
 
-            let verifying_key = signing_key.verifying_key();
-            assert_eq!(
-                verifying_key.as_ref(),
-                reference_key.verification_key().to_bytes()
-            );
+        let signing_key = SigningKey::from_seed([42; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let message = b"message";
+        let signature = signing_key.sign(NAMESPACE, message);
 
-            let signature = signing_key.sign(NAMESPACE, &message);
-            let reference_signature = reference_key.sign(&union_unique(NAMESPACE, &message));
-            assert_eq!(signature.bytes, reference_signature.to_bytes());
-            assert!(verifying_key.verify(NAMESPACE, &message, &signature));
-            assert!(!verifying_key.verify(WRONG_NAMESPACE, &message, &signature));
-        }
-    }
-
-    #[test]
-    fn batch_verifier_accepts_own_signatures() {
-        let mut rng = test_rng();
-        let mut verifier = BatchVerifier::new(16);
-        for i in 0..16 {
-            let signing_key = SigningKey::random(&mut rng);
-            let message = format!("message {i}").into_bytes();
-            verifier.add(
-                NAMESPACE,
-                &message,
-                &signing_key.verifying_key(),
-                &signing_key.sign(NAMESPACE, &message),
-            );
-        }
-        assert!(verifier.verify(&mut rng, &Sequential));
+        assert!(verifying_key.verify(NAMESPACE, message, &signature));
+        assert!(!verifying_key.verify(WRONG_NAMESPACE, message, &signature));
     }
 
     #[test]
@@ -483,53 +446,6 @@ mod tests {
 
         assert_zeroize_on_drop::<SigningKey>();
         assert!(core::mem::needs_drop::<SigningKey>());
-    }
-
-    #[test]
-    fn zip215_accepts_negative_zero_encodings() {
-        let mut positive_identity = [0u8; 32];
-        positive_identity[0] = 1;
-        positive_identity[31] = 0x80;
-
-        let mut negative_identity = [0xff; 32];
-        negative_identity[0] = 0xec;
-
-        let mut non_canonical_positive_identity = [0xff; 32];
-        non_canonical_positive_identity[0] = 0xee;
-
-        let encodings = [
-            positive_identity,
-            negative_identity,
-            non_canonical_positive_identity,
-        ];
-        let message = b"negative-zero encoding";
-        let namespaced_message = union_unique(NAMESPACE, message);
-        let mut rng = test_rng();
-        let mut batch = BatchVerifier::new(encodings.len());
-
-        for encoding in encodings {
-            let verifying_key = VerifyingKey {
-                bytes: encoding,
-                point: None,
-            };
-            let mut signature_bytes = [0u8; 64];
-            signature_bytes[..32].copy_from_slice(&encoding);
-            let signature = Signature {
-                bytes: signature_bytes,
-            };
-
-            let reference_key = RefVerifyingKey::try_from(encoding).unwrap();
-            let reference_signature = RefSignature::from(signature_bytes);
-            assert!(
-                reference_key
-                    .verify(&reference_signature, &namespaced_message)
-                    .is_ok()
-            );
-            assert!(verifying_key.verify(NAMESPACE, message, &signature));
-            batch.add(NAMESPACE, message, &verifying_key, &signature);
-        }
-
-        assert!(batch.verify(&mut rng, &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]

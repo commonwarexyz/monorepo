@@ -213,6 +213,8 @@ def parse_zip215_points(text: str) -> list[str]:
 def hex_expr(value: str, indent: str) -> str:
     if not value:
         return "commonware_formatting::hex!()"
+    if len(value) <= 4:
+        return f'commonware_formatting::hex!("0x{value}")'
     chunks = [value[i : i + 64] for i in range(0, len(value), 64)]
     lines = ["commonware_formatting::hex!("]
     for index, chunk in enumerate(chunks):

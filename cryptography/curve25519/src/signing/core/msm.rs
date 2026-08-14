@@ -403,48 +403,46 @@ pub(super) fn multiscalar_mul<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signing::core::scalar::test_support::rand_scalar;
+    use arbitrary::Unstructured;
+    use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
-    use ed25519_consensus::SigningKey;
-    use rand_core::Rng;
 
     /// The widths every differential test sweeps: [`width_for`]'s full output range.
     const TEST_WIDTHS: [u32; 5] = [6, 7, 8, 9, 10];
 
-    /// Returns `n` distinct valid 32-byte point encodings, using `ed25519-consensus` verification
-    /// keys as a source of arbitrary valid points (this crate has no point *compression* yet, only
-    /// decompression, so real signature-scheme keys are the easiest way to get valid encodings).
-    fn valid_point_bytes(n: usize) -> Vec<[u8; 32]> {
-        let mut rng = test_rng();
+    /// Returns `n` affine points selected directly from arbitrary encodings. Invalid encodings
+    /// map to one of the two basic subgroup edge cases so every input remains usable.
+    fn arbitrary_affine_points(
+        u: &mut Unstructured<'_>,
+        n: usize,
+    ) -> arbitrary::Result<Vec<GAffine>> {
         (0..n)
             .map(|_| {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                SigningKey::from(seed).verification_key().to_bytes()
+                let bytes: [u8; 32] = u.arbitrary()?;
+                Ok(GAffine::decompress(&bytes).unwrap_or_else(|| {
+                    if bytes[0] & 1 == 0 {
+                        GAffine::IDENTITY
+                    } else {
+                        GAffine::BASEPOINT
+                    }
+                }))
             })
             .collect()
     }
 
-    /// Returns `n` distinct affine points via [`valid_point_bytes`] and decompression.
-    fn rand_affine_points(n: usize) -> Vec<GAffine> {
-        valid_point_bytes(n)
-            .iter()
-            .map(|b| GAffine::decompress(b).unwrap())
+    /// Returns `n` [`Term`]s over arbitrary points and scalars, recoded at `width`.
+    fn arbitrary_terms(
+        u: &mut Unstructured<'_>,
+        n: usize,
+        width: u32,
+    ) -> arbitrary::Result<Vec<Term>> {
+        arbitrary_affine_points(u, n)?
+            .into_iter()
+            .map(|point| {
+                let scalar: Scalar = u.arbitrary()?;
+                Ok(Term::new(point, &scalar, width))
+            })
             .collect()
-    }
-
-    /// Returns `n` [`Term`]s over random points and scalars, recoded at `width`.
-    fn rand_terms(n: usize, width: u32) -> Vec<Term> {
-        let mut rng = test_rng();
-        rand_affine_points(n)
-            .iter()
-            .map(|p| Term::new(*p, &rand_scalar(&mut rng), width))
-            .collect()
-    }
-
-    fn add_points(left: G, right: G) -> G {
-        left.add(right)
     }
 
     fn points_equal(actual: G, expected: G) -> bool {
@@ -502,22 +500,32 @@ mod tests {
     #[test]
     fn matches_naive_double_and_add() {
         let backend = crate::curve::test_backend();
-        let mut rng = test_rng();
-        for n in [0, 1, 2, 5, 8, 9, 32, 64, 100] {
-            let points = rand_affine_points(n);
-            let scalars: Vec<Scalar> = (0..n).map(|_| rand_scalar(&mut rng)).collect();
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(8)
+            .test(|u| {
+                let points = arbitrary_affine_points(u, 100)?;
+                let scalars = (0..100)
+                    .map(|_| u.arbitrary())
+                    .collect::<arbitrary::Result<Vec<Scalar>>>()?;
 
-            let expected = points
-                .iter()
-                .zip(&scalars)
-                .fold(G::IDENTITY, |acc, (point, scalar)| {
-                    acc.add(point.to_extended().scalar_mul(scalar.bits_be()))
-                });
-            for width in TEST_WIDTHS {
-                let actual = multiscalar_mul_points_serial(backend, &points, &scalars, width);
-                assert!(points_equal(actual, expected), "n={n} width={width}");
-            }
-        }
+                for n in [0, 1, 2, 5, 8, 9, 32, 64, 100] {
+                    let points = &points[..n];
+                    let scalars = &scalars[..n];
+                    let expected =
+                        points
+                            .iter()
+                            .zip(scalars)
+                            .fold(G::IDENTITY, |acc, (point, scalar)| {
+                                acc.add(point.to_extended().scalar_mul(scalar.bits_be()))
+                            });
+                    for width in TEST_WIDTHS {
+                        let actual = multiscalar_mul_points_serial(backend, points, scalars, width);
+                        assert!(points_equal(actual, expected), "n={n} width={width}");
+                    }
+                }
+                Ok(())
+            });
     }
 
     /// Slice boundaries are pure layout: any split of the same terms (including `LANES`-unaligned
@@ -526,30 +534,44 @@ mod tests {
     #[test]
     fn chunked_matches_single_chunk() {
         let backend = crate::curve::test_backend();
-        for n in [1, 2, 5, 8, 9, 32, 64, 100] {
-            let terms = rand_terms(n, 7);
-            let single = split_terms(rand_terms(n, 7), &[]);
-            let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
-            chunks.push(Vec::new());
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(8)
+            .test(|u| {
+                let terms = arbitrary_terms(u, 100, 7)?;
+                for n in [1, 2, 5, 8, 9, 32, 64, 100] {
+                    let terms = terms[..n].to_vec();
+                    let single = split_terms(terms.clone(), &[]);
+                    let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
+                    chunks.push(Vec::new());
 
-            let expected = multiscalar_mul_terms_serial(backend, &refs(&single), 7);
-            let actual = multiscalar_mul_terms_serial(backend, &refs(&chunks), 7);
-            assert!(points_equal(actual, expected));
-        }
+                    let expected = multiscalar_mul_terms_serial(backend, &refs(&single), 7);
+                    let actual = multiscalar_mul_terms_serial(backend, &refs(&chunks), 7);
+                    assert!(points_equal(actual, expected));
+                }
+                Ok(())
+            });
     }
 
     #[test]
     fn strategy_path_matches_serial() {
         let backend = crate::curve::test_backend();
-        for n in [0, 1, 2, 5, 32, 600] {
-            for width in TEST_WIDTHS {
-                let chunks = split_terms(rand_terms(n, width), &[64, 64, 64, 64]);
-                let chunks = refs(&chunks);
-                let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
-                let actual = multiscalar_mul(backend, &chunks, width, &Sequential);
-                assert!(points_equal(actual, expected), "n={n} width={width}");
-            }
-        }
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(2)
+            .test(|u| {
+                for width in TEST_WIDTHS {
+                    let terms = arbitrary_terms(u, 600, width)?;
+                    for n in [0, 1, 2, 5, 32, 600] {
+                        let chunks = split_terms(terms[..n].to_vec(), &[64, 64, 64, 64]);
+                        let chunks = refs(&chunks);
+                        let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
+                        let actual = multiscalar_mul(backend, &chunks, width, &Sequential);
+                        assert!(points_equal(actual, expected), "n={n} width={width}");
+                    }
+                }
+                Ok(())
+            });
     }
 
     #[test]
@@ -561,15 +583,23 @@ mod tests {
             .unwrap()
             .manual();
 
-        for n in [0, 1, 300, 600, 1000] {
-            for width in [6, 8, 10] {
-                let chunks = split_terms(rand_terms(n, width), &[128, 128, 128, 128, 128, 128]);
-                let chunks = refs(&chunks);
-                let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
-                let actual = multiscalar_mul(backend, &chunks, width, &strategy);
-                assert!(points_equal(actual, expected), "n={n} width={width}");
-            }
-        }
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(2)
+            .test(|u| {
+                for width in [6, 8, 10] {
+                    let terms = arbitrary_terms(u, 1000, width)?;
+                    for n in [0, 1, 300, 600, 1000] {
+                        let chunks =
+                            split_terms(terms[..n].to_vec(), &[128, 128, 128, 128, 128, 128]);
+                        let chunks = refs(&chunks);
+                        let expected = multiscalar_mul_terms_serial(backend, &chunks, width);
+                        let actual = multiscalar_mul(backend, &chunks, width, &strategy);
+                        assert!(points_equal(actual, expected), "n={n} width={width}");
+                    }
+                }
+                Ok(())
+            });
     }
 
     /// Splitting a window's bucket fill at an arbitrary global index (deliberately not a slice
@@ -581,67 +611,79 @@ mod tests {
     fn split_window_partials_match_whole_range() {
         let backend = crate::curve::test_backend();
         const WIDTH: u32 = 7;
-        for n in [1, 2, 5, 8, 9, 32, 64, 100] {
-            let chunks = split_terms(rand_terms(n, WIDTH), &[n / 3, n / 3]);
-            let chunks = refs(&chunks);
-            let total = total_terms(&chunks);
-            let mid = total / 2;
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(8)
+            .test(|u| {
+                let terms = arbitrary_terms(u, 100, WIDTH)?;
+                for n in [1, 2, 5, 8, 9, 32, 64, 100] {
+                    let chunks = split_terms(terms[..n].to_vec(), &[n / 3, n / 3]);
+                    let chunks = refs(&chunks);
+                    let total = total_terms(&chunks);
+                    let mid = total / 2;
 
-            let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
+                    let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
 
-            let nw = num_windows(WIDTH);
-            let mut transposed_windows = vec![G::IDENTITY; nw];
-            let mut buckets = transposed::identity_buckets(num_buckets(WIDTH));
-            for (window, partial) in transposed_windows.iter_mut().enumerate() {
-                *partial = add_points(
-                    transposed::window_partial(
-                        backend,
-                        &chunks,
-                        0,
-                        mid,
-                        window,
-                        WIDTH,
-                        &mut buckets,
-                    ),
-                    transposed::window_partial(
-                        backend,
-                        &chunks,
-                        mid,
-                        total,
-                        window,
-                        WIDTH,
-                        &mut buckets,
-                    ),
-                );
-            }
+                    let nw = num_windows(WIDTH);
+                    let mut transposed_windows = vec![G::IDENTITY; nw];
+                    let mut buckets = transposed::identity_buckets(num_buckets(WIDTH));
+                    for (window, partial) in transposed_windows.iter_mut().enumerate() {
+                        let left = transposed::window_partial(
+                            backend,
+                            &chunks,
+                            0,
+                            mid,
+                            window,
+                            WIDTH,
+                            &mut buckets,
+                        );
+                        let right = transposed::window_partial(
+                            backend,
+                            &chunks,
+                            mid,
+                            total,
+                            window,
+                            WIDTH,
+                            &mut buckets,
+                        );
+                        *partial = left.add(right);
+                    }
 
-            assert!(points_equal(
-                fold_windows(backend, &transposed_windows, WIDTH),
-                expected,
-            ));
-        }
+                    assert!(points_equal(
+                        fold_windows(backend, &transposed_windows, WIDTH),
+                        expected,
+                    ));
+                }
+                Ok(())
+            });
     }
 
     /// [`pieces`] must hand back exactly the requested global range, in order, for any cut --
     /// including cuts inside slices, across slice boundaries, and touching empty slices.
     #[test]
     fn pieces_covers_exact_global_ranges() {
-        let chunks = split_terms(rand_terms(50, 7), &[1, 7, 0, 24]);
-        let mut chunks = refs(&chunks);
-        chunks.insert(2, &[]);
-        let total = total_terms(&chunks);
-        assert_eq!(total, 50);
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(8)
+            .test(|u| {
+                let chunks = split_terms(arbitrary_terms(u, 50, 7)?, &[1, 7, 0, 24]);
+                let mut chunks = refs(&chunks);
+                chunks.insert(2, &[]);
+                let total = total_terms(&chunks);
+                assert_eq!(total, 50);
 
-        let flat: Vec<*const Term> = chunks
-            .iter()
-            .flat_map(|chunk| chunk.iter().map(|t| t as *const Term))
-            .collect();
-        for (start, end) in [(0, 50), (0, 0), (3, 3), (0, 1), (7, 9), (1, 40), (49, 50)] {
-            let got: Vec<*const Term> = pieces(&chunks, start, end)
-                .flat_map(|piece| piece.iter().map(|t| t as *const Term))
-                .collect();
-            assert_eq!(got, flat[start..end], "range ({start}, {end})");
-        }
+                let flat: Vec<*const Term> = chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.iter().map(|t| t as *const Term))
+                    .collect();
+                for (start, end) in [(0, 50), (0, 0), (3, 3), (0, 1), (7, 9), (1, 40), (49, 50)] {
+                    let got: Vec<*const Term> = pieces(&chunks, start, end)
+                        .flat_map(|piece| piece.iter().map(|t| t as *const Term))
+                        .collect();
+                    assert_eq!(got, flat[start..end], "range ({start}, {end})");
+                }
+                Ok(())
+            });
     }
 
     #[test]

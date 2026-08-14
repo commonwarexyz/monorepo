@@ -17,6 +17,28 @@ pub enum Plan {
 impl Plan {
     /// Runs the operation with the best backend supported by this CPU.
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        struct Run<'a, 'b> {
+            plan: Plan,
+            u: &'a mut Unstructured<'b>,
+        }
+
+        impl WithBackend for Run<'_, '_> {
+            type Output = arbitrary::Result<()>;
+
+            fn call<B: Backend>(self, backend: B) -> Self::Output {
+                match self.plan {
+                    Plan::Field => {
+                        fuzz_field(self.u, backend)?;
+                        fuzz_field_matches_portable(self.u, backend)
+                    }
+                    Plan::Group => {
+                        fuzz_group(self.u, backend)?;
+                        fuzz_group_matches_portable(self.u, backend)
+                    }
+                }
+            }
+        }
+
         super::with_backend(Run { plan: self, u })
     }
 }
@@ -289,87 +311,81 @@ fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
     Ok(())
 }
 
-fn run_with_backend<B: Backend>(
-    plan: Plan,
-    u: &mut Unstructured<'_>,
-    backend: B,
-) -> arbitrary::Result<()> {
-    match plan {
-        Plan::Field => {
-            fuzz_field(u, backend)?;
-            fuzz_field_matches_portable(u, backend)
+#[cfg(test)]
+#[test]
+fn backend_at_bounds() {
+    struct CheckBackendAtBounds;
+
+    impl WithBackend for CheckBackendAtBounds {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) -> Self::Output {
+            let reference = super::portable::Backend::new();
+            let max = FVec {
+                limbs: [[MASK_52; LANES]; 5],
+            };
+            let zero = FVec::splat(F::ZERO);
+            assert_f_eq(
+                reference.add(max, max),
+                backend.add(max, max),
+                "backend addition at bound",
+            );
+            assert_f_eq(
+                reference.sub(zero, max),
+                backend.sub(zero, max),
+                "backend subtraction at bound",
+            );
+            assert_f_eq(
+                reference.neg(max),
+                backend.neg(max),
+                "backend negation at bound",
+            );
+            assert_f_eq(
+                reference.mul(max, max),
+                backend.mul(max, max),
+                "backend multiplication at bound",
+            );
+            assert_f_eq(
+                reference.square(max),
+                backend.square(max),
+                "backend square at bound",
+            );
         }
-        Plan::Group => {
-            fuzz_group(u, backend)?;
-            fuzz_group_matches_portable(u, backend)
-        }
     }
-}
 
-struct Run<'a, 'b> {
-    plan: Plan,
-    u: &'a mut Unstructured<'b>,
-}
-
-impl WithBackend for Run<'_, '_> {
-    type Output = arbitrary::Result<()>;
-
-    fn call<B: Backend>(self, backend: B) -> Self::Output {
-        run_with_backend(self.plan, self.u, backend)
-    }
-}
-
-/// Compares field operations at the loosest input allowed by [`FVec`].
-#[cfg(test)]
-fn check_backend_at_bounds_with_backend<B: Backend>(backend: B) {
-    let reference = super::portable::Backend::new();
-    let max = FVec {
-        limbs: [[MASK_52; LANES]; 5],
-    };
-    let zero = FVec::splat(F::ZERO);
-    assert_f_eq(
-        reference.add(max, max),
-        backend.add(max, max),
-        "backend addition at bound",
-    );
-    assert_f_eq(
-        reference.sub(zero, max),
-        backend.sub(zero, max),
-        "backend subtraction at bound",
-    );
-    assert_f_eq(
-        reference.neg(max),
-        backend.neg(max),
-        "backend negation at bound",
-    );
-    assert_f_eq(
-        reference.mul(max, max),
-        backend.mul(max, max),
-        "backend multiplication at bound",
-    );
-    assert_f_eq(
-        reference.square(max),
-        backend.square(max),
-        "backend square at bound",
-    );
-}
-
-#[cfg(test)]
-struct CheckBackendAtBounds;
-
-#[cfg(test)]
-impl WithBackend for CheckBackendAtBounds {
-    type Output = ();
-
-    fn call<B: Backend>(self, backend: B) -> Self::Output {
-        check_backend_at_bounds_with_backend(backend);
-    }
-}
-
-/// Compares the dispatched backend with the portable backend at field input bounds.
-#[cfg(test)]
-pub fn check_backend_at_bounds() {
     super::with_backend(CheckBackendAtBounds);
+}
+
+#[cfg(test)]
+#[test]
+fn minifuzz_field() {
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(100)
+        .test(|u| Plan::Field.run(u));
+}
+
+#[cfg(test)]
+#[test]
+fn minifuzz_group() {
+    // The fully inlined NEON group formulas need more than the test harness's default stack in
+    // unoptimized builds.
+    let run = || {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::Group.run(u));
+    };
+    if cfg!(target_arch = "aarch64") {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
+    } else {
+        run();
+    }
 }
 
 /// Checks that a backend's field operations match the portable backend.
@@ -432,37 +448,35 @@ fn fuzz_group_matches_portable<B: Backend>(
     Ok(())
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy)]
-struct DispatchComputation {
-    field: FVec,
-    point: GVec,
-    affine: GAffineVec,
-}
-
-#[cfg(test)]
-impl WithBackend for DispatchComputation {
-    type Output = (FVec, GVec);
-
-    fn call<B: Backend>(self, backend: B) -> Self::Output {
-        let field = backend.sub(
-            backend.add(
-                backend.mul(self.field, self.point.x),
-                backend.square(self.point.y),
-            ),
-            backend.neg(self.field),
-        );
-        let point = backend.g_add_mixed(
-            backend.g_add(backend.g_double(self.point), self.point),
-            self.affine,
-        );
-        (field, point)
-    }
-}
-
 /// Checks the runtime dispatch path as one multi-operation computation.
 #[test]
 fn with_backend_matches_portable() {
+    #[derive(Clone, Copy)]
+    struct DispatchComputation {
+        field: FVec,
+        point: GVec,
+        affine: GAffineVec,
+    }
+
+    impl WithBackend for DispatchComputation {
+        type Output = (FVec, GVec);
+
+        fn call<B: Backend>(self, backend: B) -> Self::Output {
+            let field = backend.sub(
+                backend.add(
+                    backend.mul(self.field, self.point.x),
+                    backend.square(self.point.y),
+                ),
+                backend.neg(self.field),
+            );
+            let point = backend.g_add_mixed(
+                backend.g_add(backend.g_double(self.point), self.point),
+                self.affine,
+            );
+            (field, point)
+        }
+    }
+
     let portable = super::portable::Backend::new();
     let basepoint = basepoint(portable);
     let point = scale(portable, basepoint, 13);

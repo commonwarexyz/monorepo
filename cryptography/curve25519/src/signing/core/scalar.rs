@@ -284,25 +284,27 @@ impl Scalar {
     }
 }
 
-/// Test-only helpers shared across this crate's test modules.
 #[cfg(test)]
-pub mod test_support {
-    use super::Scalar;
-    use rand_core::Rng;
-
-    /// Returns a uniformly random canonical scalar, by reducing 64 random bytes mod `L`.
-    pub fn rand_scalar(rng: &mut impl Rng) -> Scalar {
-        let mut bytes = [0u8; 64];
-        rng.fill_bytes(&mut bytes);
-        Scalar::from_bytes_mod_order_wide(&bytes)
+impl<'a> arbitrary::Arbitrary<'a> for Scalar {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(match u.int_in_range(0u8..=5)? {
+            0 => Self::ZERO,
+            1 => Self::from_u128(1),
+            2 => {
+                let mut l_minus_one = L;
+                l_minus_one[0] -= 1;
+                Self(l_minus_one)
+            }
+            3 => Self::from_u128(u.arbitrary()?),
+            _ => Self::from_bytes_mod_order_wide(&u.arbitrary()?),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{L, Scalar, limbs_lt, limbs_sub, test_support::rand_scalar};
-    use commonware_utils::test_rng;
-    use rand_core::Rng;
+    use super::{L, Scalar, limbs_lt, limbs_sub};
+    use commonware_invariants::minifuzz::Builder;
     use zeroize::Zeroize;
 
     /// Returns `(2*a + bit) mod 2^256`, the left-shift-by-one step of the bit-serial reduction
@@ -337,14 +339,16 @@ mod tests {
 
     #[test]
     fn from_bytes_mod_order_wide_matches_naive_reference() {
-        let mut rng = test_rng();
-        for _ in 0..1024 {
-            let mut bytes = [0u8; 64];
-            rng.fill_bytes(&mut bytes);
-            let expected = reduce_wide_naive(&bytes);
-            let actual = Scalar::from_bytes_mod_order_wide(&bytes);
-            assert_eq!(actual.0, expected.0);
-        }
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(1024)
+            .test(|u| {
+                let bytes: [u8; 64] = u.arbitrary()?;
+                let expected = reduce_wide_naive(&bytes);
+                let actual = Scalar::from_bytes_mod_order_wide(&bytes);
+                assert_eq!(actual.0, expected.0);
+                Ok(())
+            });
     }
 
     #[test]
@@ -378,20 +382,23 @@ mod tests {
 
     #[test]
     fn mul_mod_l_matches_naive_reference() {
-        let mut rng = test_rng();
-        for _ in 0..1024 {
-            let a = rand_scalar(&mut rng);
-            let b = rand_scalar(&mut rng);
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(1024)
+            .test(|u| {
+                let a: Scalar = u.arbitrary()?;
+                let b: Scalar = u.arbitrary()?;
 
-            let wide = super::limbs_mul_wide(&a.0, &b.0);
-            let mut bytes = [0u8; 64];
-            for (i, limb) in wide.iter().enumerate() {
-                bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
-            }
-            let expected = reduce_wide_naive(&bytes);
+                let wide = super::limbs_mul_wide(&a.0, &b.0);
+                let mut bytes = [0u8; 64];
+                for (i, limb) in wide.iter().enumerate() {
+                    bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+                }
+                let expected = reduce_wide_naive(&bytes);
 
-            assert_eq!(a.mul_mod_l(&b).0, expected.0);
-        }
+                assert_eq!(a.mul_mod_l(&b).0, expected.0);
+                Ok(())
+            });
     }
 
     #[test]
@@ -399,24 +406,27 @@ mod tests {
         const WIDTH: u32 = 6;
         const N: usize = 256usize.div_ceil(WIDTH as usize) + 1;
 
-        let mut rng = test_rng();
-        for _ in 0..64 {
-            let s = rand_scalar(&mut rng);
-            let digits = s.signed_digits::<N>(WIDTH);
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let s: Scalar = u.arbitrary()?;
+                let digits = s.signed_digits::<N>(WIDTH);
 
-            let base = Scalar::from_u128(1u128 << WIDTH);
-            let mut reconstructed = Scalar::ZERO;
-            let mut power = Scalar::from_u128(1);
-            for &digit in &digits {
-                let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
-                let term = power.mul_mod_l(&magnitude);
-                let term = if digit < 0 { term.neg_mod_l() } else { term };
-                reconstructed = reconstructed.add_mod_l(&term);
-                power = power.mul_mod_l(&base);
-            }
+                let base = Scalar::from_u128(1u128 << WIDTH);
+                let mut reconstructed = Scalar::ZERO;
+                let mut power = Scalar::from_u128(1);
+                for &digit in &digits {
+                    let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
+                    let term = power.mul_mod_l(&magnitude);
+                    let term = if digit < 0 { term.neg_mod_l() } else { term };
+                    reconstructed = reconstructed.add_mod_l(&term);
+                    power = power.mul_mod_l(&base);
+                }
 
-            assert_eq!(reconstructed.0, s.0);
-        }
+                assert_eq!(reconstructed.0, s.0);
+                Ok(())
+            });
     }
 
     #[test]
@@ -425,13 +435,16 @@ mod tests {
         const N: usize = 256usize.div_ceil(WIDTH as usize) + 1;
         let half = 1i32 << (WIDTH - 1);
 
-        let mut rng = test_rng();
-        for _ in 0..64 {
-            let s = rand_scalar(&mut rng);
-            for digit in s.signed_digits::<N>(WIDTH) {
-                assert!((-half..half).contains(&digit));
-            }
-        }
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let s: Scalar = u.arbitrary()?;
+                for digit in s.signed_digits::<N>(WIDTH) {
+                    assert!((-half..half).contains(&digit));
+                }
+                Ok(())
+            });
     }
 
     #[test]

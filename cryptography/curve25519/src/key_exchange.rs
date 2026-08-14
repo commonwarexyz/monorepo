@@ -51,6 +51,12 @@ impl Random for SecretKey {
 
 // Public methods.
 impl SecretKey {
+    /// Constructs a secret key from raw scalar bytes for test-vector checks.
+    #[cfg(test)]
+    pub(crate) const fn from_raw(bytes: [u8; 32]) -> Self {
+        Self { bytes }
+    }
+
     /// The public key to send to the other party.
     pub fn public_key(&self) -> PublicKey {
         PublicKey {
@@ -149,57 +155,6 @@ impl SharedSecret {
 mod tests {
     use super::{BASEPOINT_U, PublicKey, SecretKey, SharedSecret};
     use commonware_formatting::hex;
-    use commonware_math::algebra::Random;
-    use commonware_utils::test_rng;
-    use rand_core::Rng;
-
-    #[test]
-    fn rfc7748_diffie_hellman_vector() {
-        // Test vectors from RFC 7748, section 6.1.
-        let alice = SecretKey {
-            bytes: hex!("0x77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"),
-        };
-        let bob = SecretKey {
-            bytes: hex!("0x5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"),
-        };
-        let alice_public = alice.public_key();
-        let bob_public = bob.public_key();
-        assert_eq!(
-            alice_public.bytes,
-            hex!("0x8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
-        );
-        assert_eq!(
-            bob_public.bytes,
-            hex!("0xde9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
-        );
-        let expected = hex!("0x4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
-        assert_eq!(
-            alice
-                .exchange(&bob_public)
-                .expect("contributory")
-                .as_bytes(),
-            &expected
-        );
-        assert_eq!(
-            bob.exchange(&alice_public)
-                .expect("contributory")
-                .as_bytes(),
-            &expected
-        );
-    }
-
-    #[test]
-    fn exchange_is_commutative() {
-        let mut rng = test_rng();
-        for _ in 0..8 {
-            let alice = SecretKey::random(&mut rng);
-            let bob = SecretKey::random(&mut rng);
-            let (alice_public, bob_public) = (alice.public_key(), bob.public_key());
-            let alice_shared = alice.exchange(&bob_public).expect("contributory");
-            let bob_shared = bob.exchange(&alice_public).expect("contributory");
-            assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
-        }
-    }
 
     #[test]
     fn secret_types_zeroize_on_drop() {
@@ -272,33 +227,9 @@ mod tests {
             // u = p + 1, a non-canonical encoding of 1.
             hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
         ];
-        let mut rng = test_rng();
         for bytes in low_order {
-            let secret = SecretKey::random(&mut rng);
+            let secret = SecretKey::from_raw([42; 32]);
             assert!(secret.exchange(&PublicKey { bytes }).is_none());
-        }
-    }
-
-    #[test]
-    fn matches_reference_implementation() {
-        let mut rng = test_rng();
-        for _ in 0..16 {
-            let mut secret_bytes = [0u8; 32];
-            rng.fill_bytes(&mut secret_bytes);
-            let mut u = [0u8; 32];
-            rng.fill_bytes(&mut u);
-
-            let secret = SecretKey {
-                bytes: secret_bytes,
-            };
-            assert_eq!(
-                secret.public_key().bytes,
-                x25519_dalek::x25519(secret_bytes, x25519_dalek::X25519_BASEPOINT_BYTES)
-            );
-            let shared = secret
-                .exchange(&PublicKey { bytes: u })
-                .expect("random coordinate is contributory");
-            assert_eq!(shared.as_bytes(), &x25519_dalek::x25519(secret_bytes, u));
         }
     }
 
