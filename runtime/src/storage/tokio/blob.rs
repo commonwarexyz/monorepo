@@ -39,6 +39,33 @@ static WRITE_PAUSE: commonware_utils::sync::Mutex<Option<WritePause>> =
     commonware_utils::sync::Mutex::new(None);
 
 #[cfg(test)]
+pub(crate) fn pause_write(
+    partition: &str,
+    name: &[u8],
+) -> (
+    oneshot::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+    oneshot::Receiver<()>,
+) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+    let (completed_tx, completed_rx) = oneshot::channel();
+    let pause = WritePause {
+        partition: partition.to_string(),
+        name: name.to_vec(),
+        entered: entered_tx,
+        resume: resume_rx,
+        completed: completed_tx,
+    };
+    let previous = WRITE_PAUSE.lock().replace(pause);
+    assert!(
+        previous.is_none(),
+        "only one Tokio write may be paused at a time"
+    );
+    (entered_rx, resume_tx, completed_rx)
+}
+
+#[cfg(test)]
 fn take_write_pause(partition: &str, name: &[u8]) -> Option<WritePause> {
     let mut pause = WRITE_PAUSE.lock();
     let matches = pause

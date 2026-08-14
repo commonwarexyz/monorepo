@@ -4722,3 +4722,6 @@ impl<B: BackingBlob> AtomicBlob for Blob<B> {
         await_publication_start(completion, started_receiver).await
     }
 }
+
+#[cfg(test)]
+mod tests;
