@@ -9,8 +9,8 @@
 //!
 //! [`BufferPool`] is `Send + Sync` and can be safely shared across threads.
 //! Allocation and deallocation use atomic counters together with a global
-//! freelist made of hard-bounded mutex-protected stripes, plus per-thread
-//! caches.
+//! freelist split across mutex-protected stripes, each with a fixed slot limit,
+//! plus per-thread caches.
 //!
 //! Global freelist operations use blocking mutexes. After a local cache miss or
 //! spill, an operation can wait for a stripe lock. A preempted lock holder can

@@ -113,7 +113,7 @@ const MIN_STRIPES: usize = 8;
 /// configured parallelism is extremely large.
 const MAX_STRIPES: usize = 4_096;
 
-/// One cache-isolated, hard-bounded collection of globally free slots.
+/// One cache-isolated collection of globally free slots with a fixed slot limit.
 struct Stripe {
     /// Completion-accurate nonempty hint used to skip empty stripe locks.
     ///
@@ -178,9 +178,9 @@ impl Stripe {
 ///
 /// The freelist owns every stable pooled-owner slot and the exact layout used
 /// for its data allocation. Globally available slots are stored as compact ids
-/// in hard-bounded stripes. Checked-out buffers and thread-local caches may
-/// temporarily own slots, but their leases keep this freelist alive until they
-/// return.
+/// in stripes with fixed slot limits. Checked-out buffers and thread-local
+/// caches may temporarily own slots, but their leases keep this freelist alive
+/// until they return.
 pub struct Freelist {
     /// Exact layout shared by every data allocation in this size class.
     layout: Layout,
@@ -300,7 +300,7 @@ impl Freelist {
     /// limits sum exactly to `capacity`.
     #[inline(always)]
     const fn stripe_capacity(capacity: usize, stripes: usize, stripe: usize) -> usize {
-        ((capacity - 1 - stripe) / stripes) + 1
+        (capacity - stripe).div_ceil(stripes)
     }
 
     /// Creates a new tracked buffer and assigns its permanent slot id.
@@ -361,8 +361,9 @@ impl Freelist {
     /// Returns several uniquely owned buffers to global availability.
     ///
     /// The iterator is consumed into compact slot ids before any slot is
-    /// published. Publication starts at the current thread's home and fills one
-    /// hard-bounded stripe at a time. No two stripe locks are held together.
+    /// published. Publication starts at the current thread's home and fills
+    /// each stripe only to its fixed slot limit. No two stripe locks are held
+    /// together.
     ///
     /// The iterator must contain distinct buffers created by this freelist. It
     /// should not panic because buffers yielded before a panic may leak.
@@ -388,10 +389,15 @@ impl Freelist {
         slots.push(second.into_slot());
         slots.extend(buffers.map(PooledBuffer::into_slot));
 
+        // The iterator is fully staged, so publication performs no caller work
+        // or scratch allocation while a stripe is locked.
         let start = self.home_stripe();
         while !slots.is_empty() {
             let before = slots.len();
             for offset in 0..self.stripes.len() {
+                // Fill only the stripe's fixed remaining room so pushes cannot
+                // allocate under the lock. Publish an empty-to-nonempty
+                // transition before unlocking.
                 let stripe = &self.stripes[(start + offset) & self.stripe_mask];
                 let mut free = stripe.lock();
                 let count = (stripe.limit - free.len()).min(slots.len());
@@ -400,7 +406,6 @@ impl Freelist {
                     free.push(slots.pop().expect("count is bounded by length"));
                 }
                 if was_empty && count != 0 {
-                    // One publication covers every slot inserted under this lock.
                     stripe.available.store(true, Ordering::Release);
                 }
                 if slots.is_empty() {
@@ -408,8 +413,9 @@ impl Freelist {
                 }
             }
 
+            // Valid returns guarantee aggregate room, but racing operations can
+            // move it throughout a pass. Yield only when the pass parks nothing.
             if slots.len() == before {
-                // Racing takes and puts can move aggregate room for a full pass.
                 thread::yield_now();
             }
         }
@@ -426,6 +432,10 @@ impl Freelist {
     #[inline]
     pub fn take(&self) -> Option<PooledBuffer> {
         let start = self.home_stripe();
+
+        // A negative hint can skip locking. A positive hint requires an
+        // authoritative check under the mutex because another taker may have
+        // emptied the stripe.
         for offset in 0..self.stripes.len() {
             let stripe = &self.stripes[(start + offset) & self.stripe_mask];
             if !stripe.available.load(Ordering::Acquire) {
@@ -465,6 +475,8 @@ impl Freelist {
             return 1;
         }
 
+        // Keep scans that observe only negative hints allocation-free. Reserve
+        // detached-slot scratch after the first positive hint but before locking.
         let mut detached = Vec::new();
         let start = self.home_stripe();
         for offset in 0..self.stripes.len() {
@@ -473,10 +485,11 @@ impl Freelist {
                 continue;
             }
             if detached.capacity() == 0 {
-                // Reserve only after a potentially productive hint, while
-                // keeping allocator work outside the critical section.
                 detached = Vec::with_capacity(max);
             }
+
+            // Detach only compact slot ids while this stripe is locked. Buffer
+            // reconstruction and caller callbacks remain outside every lock.
             let mut free = stripe.lock();
             while detached.len() < max {
                 let Some(slot) = stripe.pop(&mut free) else {
@@ -492,6 +505,9 @@ impl Freelist {
         if detached.is_empty() {
             return 0;
         }
+
+        // No stripe locks remain held, so callbacks may safely reenter the
+        // freelist while ownership of each detached slot is transferred.
         let count = detached.len();
         for slot in detached {
             on_buffer(self.claim(slot));
