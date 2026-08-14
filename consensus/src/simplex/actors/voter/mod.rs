@@ -232,8 +232,7 @@ mod tests {
 
     /// Helper to set up a voter actor for tests.
     async fn setup_voter<E, S, L>(
-        context: &deterministic::Context,
-        voter_context: E,
+        context: &E,
         oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
         participants: &[S::PublicKey],
         schemes: &[S],
@@ -244,7 +243,7 @@ mod tests {
         mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
         mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
-        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
+        mocks::reporter::Reporter<E, S, L, Sha256Digest>,
     )
     where
         E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
@@ -305,9 +304,9 @@ mod tests {
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
-            page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
-        let (voter, mailbox) = Actor::new(voter_context, voter_cfg);
+        let (voter, mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
         let (resolver_sender, resolver_receiver) =
             mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -1405,7 +1404,6 @@ mod tests {
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
-                    context.child("actor"),
                     &oracle,
                     &participants,
                     &schemes,
@@ -1524,7 +1522,6 @@ mod tests {
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
-                    context.child("actor"),
                     &oracle,
                     &participants,
                     &schemes,
@@ -1656,7 +1653,6 @@ mod tests {
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
-                    context.child("actor"),
                     &oracle,
                     &participants,
                     &schemes,
@@ -2584,7 +2580,6 @@ mod tests {
 
             let (mut mailbox, mut batcher, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -2712,7 +2707,6 @@ mod tests {
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -2818,7 +2812,6 @@ mod tests {
                 RoundRobin::<Sha256>::default().with_term(TermLength::new(NZU32!(3)), Duration::from_secs(20), ViewDelta::new(0));
             let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -2962,7 +2955,6 @@ mod tests {
 
             let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -3059,13 +3051,12 @@ mod tests {
 
             let pending_syncs = PendingSyncs::default();
             let voter_context = DelayedSyncContext {
-                inner: context.child("actor"),
+                inner: context.child("voter"),
                 pending: pending_syncs.clone(),
             };
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
             let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
-                &context,
-                voter_context,
+                &voter_context,
                 &oracle,
                 &participants,
                 &schemes,
@@ -3156,7 +3147,6 @@ mod tests {
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -3262,7 +3252,6 @@ mod tests {
 
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -3389,7 +3378,6 @@ mod tests {
 
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -3569,7 +3557,6 @@ mod tests {
             let elector = L::default();
             let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -3665,7 +3652,6 @@ mod tests {
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
-                    context.child("actor"),
                     &oracle,
                     &participants,
                     &schemes,
@@ -3774,7 +3760,6 @@ mod tests {
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _reporter) =
                 setup_voter(
                     &context,
-                    context.child("actor"),
                     &oracle,
                     &participants,
                     &schemes,
@@ -4656,7 +4641,6 @@ mod tests {
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -4752,7 +4736,6 @@ mod tests {
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -7219,7 +7202,6 @@ mod tests {
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -7495,7 +7477,6 @@ mod tests {
                     .await;
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -7610,7 +7591,6 @@ mod tests {
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -7730,7 +7710,6 @@ mod tests {
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -7883,7 +7862,6 @@ mod tests {
                 .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -8027,7 +8005,6 @@ mod tests {
             // Set up voter with Certifier::Cancel
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -8164,7 +8141,6 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -8579,7 +8555,6 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -8780,7 +8755,6 @@ mod tests {
             // This simulates coding marshal's deferred_verify finding context mismatch
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -8919,7 +8893,6 @@ mod tests {
             // Set up voter with Certifier::Pending (certify hangs indefinitely).
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -9072,7 +9045,6 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -9218,7 +9190,6 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -9351,7 +9322,6 @@ mod tests {
 
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
@@ -9504,7 +9474,6 @@ mod tests {
 
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
                 &context,
-                context.child("actor"),
                 &oracle,
                 &participants,
                 &schemes,
