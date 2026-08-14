@@ -139,8 +139,8 @@ struct Stripe {
 impl Stripe {
     /// Creates a stripe from its preallocated initial free-slot vector.
     fn new(free: Vec<u32>, limit: usize) -> Self {
-        debug_assert!(free.len() <= limit);
-        debug_assert!(free.capacity() >= limit);
+        assert!(free.len() <= limit);
+        assert!(free.capacity() >= limit);
         Self {
             available: AtomicBool::new(!free.is_empty()),
             free: Mutex::new(free),
@@ -351,7 +351,6 @@ impl Freelist {
                 }
 
                 let was_empty = free.is_empty();
-                debug_assert!(free.len() < free.capacity());
                 free.push(slot);
                 if was_empty {
                     // Publish the first insertion before releasing the lock.
@@ -403,7 +402,6 @@ impl Freelist {
                 let count = (stripe.limit - free.len()).min(slots.len());
                 let was_empty = free.is_empty();
                 for _ in 0..count {
-                    debug_assert!(free.len() < free.capacity());
                     free.push(slots.pop().expect("count is bounded by length"));
                 }
                 if was_empty && count != 0 {
@@ -503,17 +501,20 @@ impl Freelist {
 
     /// Deallocates every buffer currently parked in this freelist.
     ///
-    /// Each stripe receives an empty vector with the same reserved capacity
-    /// while locked. Detached buffers are deallocated after unlocking. Creation
-    /// permits remain consumed, so a later return can reuse the reserved room
-    /// but draining never permits a second allocation for an existing slot.
+    /// Each stripe receives a preallocated empty vector while locked. Detached
+    /// buffers are deallocated after unlocking. Creation permits remain
+    /// consumed, so a later return can reuse the reserved room but draining
+    /// never permits a second allocation for an existing slot.
     pub fn drain(&self) -> usize {
         let mut drained = 0;
 
         for stripe in &self.stripes {
+            // Allocate before locking so late returns never wait for allocator
+            // work that is independent of the protected vector swap.
+            let replacement = Vec::with_capacity(stripe.limit);
             let detached = {
                 let mut free = stripe.lock();
-                let detached = std::mem::replace(&mut *free, Vec::with_capacity(stripe.limit));
+                let detached = std::mem::replace(&mut *free, replacement);
                 stripe.available.store(false, Ordering::Release);
                 detached
             };

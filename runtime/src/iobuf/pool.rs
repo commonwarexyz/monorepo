@@ -12,6 +12,11 @@
 //! freelist made of hard-bounded mutex-protected stripes, plus per-thread
 //! caches.
 //!
+//! Global freelist operations use blocking mutexes. After a local cache miss or
+//! spill, an operation can wait for a stripe lock. A preempted lock holder can
+//! therefore delay the operation even when another stripe could provide or
+//! accept a buffer.
+//!
 //! # Pool Lifecycle
 //!
 //! Tracked buffers held by pooled views or cached in thread-local bins keep a
