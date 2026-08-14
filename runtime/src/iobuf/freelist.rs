@@ -570,6 +570,14 @@ impl Freelist {
     }
 }
 
+impl Drop for Freelist {
+    fn drop(&mut self) {
+        // Outstanding slots keep the size class alive, so only globally parked
+        // buffers can remain when the final freelist reference is dropped.
+        self.drain();
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
         /// Next process-local id assigned to a thread that touches a freelist.
@@ -612,15 +620,6 @@ fn current_thread_id() -> usize {
     })
 }
 
-impl Drop for Freelist {
-    fn drop(&mut self) {
-        // Outstanding slots keep the size class alive, so only globally parked
-        // buffers can remain when the final freelist reference is dropped.
-        self.drain();
-    }
-}
-
-/// Native unit tests and helpers shared with buffer-pool tests.
 #[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
@@ -1133,7 +1132,6 @@ pub(super) mod tests {
     }
 }
 
-/// Exhaustive concurrency models for freelist ownership transfers.
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
