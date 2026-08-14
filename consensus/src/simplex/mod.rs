@@ -245,13 +245,13 @@
 //!
 //! ### Pipelined Handoff
 //!
-//! A term's first proposal waits for certified ancestry from the prior term, so every term
-//! boundary pays one network trip to distribute the proposal after that ancestry certifies. An
-//! elector that can name a term's leader before the term starts (see
+//! A term's first proposal waits for certified ancestry from the prior term. This delays proposal
+//! distribution by one network trip at every term boundary. An elector that can name a term's
+//! leader before the term starts (see
 //! [`elector::Elector::elect_ahead`]) can opt into pipelining the handoff. The incoming leader
-//! then proposes on the outgoing term's final view as soon as it holds a valid proposal for
-//! that view, without waiting for the view to certify. If no such proposal arrives, the leader
-//! proposes on entering the term as usual. The handoff needs nothing from validators: they
+//! then proposes on the outgoing term's final view as soon as it holds a valid proposal for that
+//! view. It does not wait for the view to certify. If no such proposal arrives, the leader
+//! proposes on entering the term as usual. Non-leader validators keep the same behavior: they
 //! buffer votes for the next term start and verify the early proposal against explicitly
 //! certified ancestry once the outgoing view certifies.
 //!
@@ -261,10 +261,9 @@
 //! view except the term start, so the handoff only moves each term's first view one network
 //! trip earlier.
 //!
-//! Pipelining the handoff adds a trust assumption on the outgoing leader. If a tip the incoming
-//! leader voted for never notarizes (for example, because the outgoing leader equivocated), the
-//! pipelined proposal built on it fails with it. The usual timeout path then nullifies the
-//! incoming term. The feature is therefore opt-in (see
+//! Pipelining the handoff trusts the outgoing leader not to equivocate. If the outgoing tip never
+//! notarizes, validators cannot use the pipelined proposal built on it. The usual timeout path
+//! then nullifies the incoming term. The feature is therefore opt-in (see
 //! [`elector::RoundRobin::with_pipelined_handoff`]) and only electors whose leaders are
 //! derivable without a certificate can support it.
 //!
@@ -1911,10 +1910,9 @@ mod tests {
     /// tip, like an intra-term view, instead of two (the proposal otherwise
     /// distributes only after the tip certifies).
     ///
-    /// Sustained throughput is the wrong metric here: without the handoff,
-    /// intra-term optimism refills the pipeline one view after the boundary
-    /// stall, so average block time barely moves. The saving is where each
-    /// boundary view lands relative to its parent.
+    /// Without the handoff, intra-term optimism refills the pipeline one view
+    /// after the boundary stall. The handoff therefore barely changes average
+    /// block time. This test measures each boundary view relative to its parent.
     #[test_traced]
     fn test_pipelined_handoff_reduces_boundary_latency() {
         let measured_views = 10u64..=100;

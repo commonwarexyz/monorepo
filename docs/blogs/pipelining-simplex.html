@@ -240,9 +240,9 @@ Chou</a></div>
         path.</p>
         <p>The term boundary is also a leader handoff, so optimistic
         work stops there by default: the first view of a new term must
-        start from certified ancestry. The incoming leader can opt into
-        a <em>pipelined handoff</em> instead, proposing on the outgoing
-        leader’s tip before it notarizes, at the cost of trusting that
+        start from certified ancestry. A <em>pipelined handoff</em> lets
+        the incoming leader propose on the outgoing leader’s tip before
+        it notarizes. The incoming leader therefore trusts the outgoing
         leader not to equivocate. Rotating leaders benefit most, since
         every view is a handoff. Together, these rules let Simplex views
         pipeline without changing the evidence required for
