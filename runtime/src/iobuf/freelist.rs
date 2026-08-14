@@ -166,8 +166,8 @@ impl Stripe {
         // so the locked vector may already be empty.
         let slot = free.pop()?;
 
+        // Publish the last removal before releasing the stripe lock.
         if free.is_empty() {
-            // Publish the last removal before releasing the stripe lock.
             self.available.store(false, Ordering::Release);
         }
         Some(slot)
