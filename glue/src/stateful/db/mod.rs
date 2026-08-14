@@ -104,10 +104,15 @@ use tracing::debug;
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
+mod cell;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
+mod snapshot;
+
+pub use cell::{Mutator, ReadHandle, ReadLease, gate};
+pub use snapshot::{Publisher, Reader as SnapshotReader};
 
 /// A database shared across tasks.
 ///
