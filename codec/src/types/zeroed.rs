@@ -1,6 +1,6 @@
 //! Implementation of [Zeroed], a fixed-count run of zero bytes.
 
-use crate::{BufsMut, EncodeSize, Error, Read, Write, util::at_least};
+use crate::{BufsMut, EncodeSize, Error, Read, Write, util::ensure_zeros};
 use bytes::{Buf, BufMut};
 
 /// A value representing exactly `n` zeroed bytes.
@@ -55,6 +55,14 @@ impl EncodeSize for Zeroed {
     fn encode_size(&self) -> usize {
         self.n
     }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        // write_bufs pushes the zero region as a separate chunk via
+        // `BufsMut::push` rather than writing it into the inline buffer, so
+        // pooled encoding shouldn't reserve inline space for it too.
+        0
+    }
 }
 
 impl Read for Zeroed {
@@ -62,12 +70,7 @@ impl Read for Zeroed {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, n: &Self::Cfg) -> Result<Self, Error> {
-        at_least(buf, *n)?;
-        let mut bytes = vec![0u8; *n];
-        buf.copy_to_slice(&mut bytes);
-        if bytes.iter().any(|&b| b != 0) {
-            return Err(Error::Invalid("Zeroed", "bytes are not zero"));
-        }
+        ensure_zeros(buf, *n)?;
         Ok(Self { n: *n })
     }
 }
@@ -92,12 +95,33 @@ mod tests {
     }
 
     #[test]
+    fn test_zeroed_write_bufs_matches_write() {
+        use crate::types::tests::TrackingWriteBuf;
+
+        for n in [0, 1, 8, 300] {
+            let value = Zeroed::new(n);
+
+            let direct = value.encode();
+
+            let mut pooled = TrackingWriteBuf::new();
+            value.write_bufs(&mut pooled);
+            let via_pool = pooled.freeze();
+
+            assert_eq!(
+                direct.as_ref(),
+                via_pool.as_ref(),
+                "write_bufs output must be byte-identical to write for n={n}"
+            );
+        }
+    }
+
+    #[test]
     fn test_zeroed_rejects_non_zero_byte() {
         let mut bytes = vec![0u8; 8];
         bytes[5] = 1;
         assert!(matches!(
             Zeroed::decode_cfg(bytes.as_slice(), &8),
-            Err(Error::Invalid("Zeroed", _))
+            Err(Error::Invalid("codec", _))
         ));
     }
 
