@@ -20,7 +20,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
-        db::{DatabaseSet, Merkleized as _, Publisher, SyncEngineConfig},
+        db::{DatabaseSet, HandlesOf, Merkleized as _, Publisher, SyncEngineConfig},
     },
 };
 use commonware_actor::Feedback;
@@ -947,7 +947,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -955,7 +954,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
             &mut self.inner,
             context,
             ancestry,
-            databases,
             batches,
             input,
         )
@@ -970,7 +968,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         let gate = self.verify_gates.lock().pop_front();
@@ -982,7 +979,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
             &mut self.inner,
             context,
             ancestry,
-            databases,
             batches,
         )
         .await
@@ -992,14 +988,12 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
-        databases: &Self::Databases,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
         <MultiApp as Application<deterministic::Context>>::apply(
             &mut self.inner,
             context,
             block,
-            databases,
             batches,
         )
         .await
@@ -1009,13 +1003,13 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
-        databases: &Self::Databases,
+        handles: HandlesOf<Self::Databases, deterministic::Context>,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
-            databases,
+            handles,
         )
         .await;
         let gate = self.finalize_gate.lock().take();
@@ -1044,7 +1038,8 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases);
+    >>::new_batches(&databases.handles())
+    .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
 
@@ -1054,7 +1049,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let merkleized = App::execute(height, &databases, batches).await;
+        let merkleized = App::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {
             context: Context {
@@ -1098,14 +1093,15 @@ async fn build_multi_chain(
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases);
+    >>::new_batches(&databases.handles())
+    .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
     let mut speculative = Vec::with_capacity(blocks as usize);
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let (merkleized_a, merkleized_b) = MultiApp::execute(height, &databases, batches).await;
+        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = MultiBlock {
@@ -1423,11 +1419,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         finalize_started
             .await
             .expect("first multi-QMDB finalization should reach the application gate");
-        // Applying consumes the database set, so every descendant verification was
-        // cancelled before the winner was applied, dropping the gate it held.
+        // The descendant verifications are untouched by the apply: each is still
+        // waiting in the application, holding the gate it was given.
         assert!(
-            verify_releases.iter().all(|release| release.is_closed()),
-            "the first finalization should have cancelled every verification",
+            verify_releases.iter().all(|release| !release.is_closed()),
+            "an apply must not disturb a running verification",
         );
 
         // A queued finalization is not active until the current one completes.
@@ -1460,8 +1456,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 panic!("multi-QMDB finalizations did not become durable");
             },
         }
-        // The stood-down verifications re-run ungated, since their gates went with
-        // the attempts that held them.
+        // Released, the verifications finish on the attempts they were already
+        // running when the finalizations landed.
+        for release in verify_releases {
+            let _ = release.send(());
+        }
         for (index, certification) in certifications {
             select! {
                 result = certification => {

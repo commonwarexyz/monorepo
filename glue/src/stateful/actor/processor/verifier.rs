@@ -1,7 +1,6 @@
 use super::{
     Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, VerificationProgress, VerificationResult, await_or_cancel, fetch_ancestor,
-    is_already_processed,
+    VerificationResult, await_or_cancel, fetch_ancestor, is_already_processed,
 };
 use crate::stateful::{actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
@@ -55,19 +54,20 @@ where
 }
 
 /// Executes one independently-polled verification request.
-/// The application is cloned per request, but the database set is borrowed from
-/// the processor that owns it, so every job ends before the set is consumed.
-pub(in crate::stateful::actor) struct Verifier<'a, E, A>
+///
+/// Carries only read capability and speculative state, so a job outlives any
+/// number of applies. Its batch operations pause while one is running.
+pub(in crate::stateful::actor) struct Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     pub(super) app: A,
-    pub(super) execution: &'a Execution<E, A>,
+    pub(super) execution: Execution<E, A>,
     pub(super) replays: ReplayFlights<PendingDigest<A, E>>,
 }
 
-impl<E, A> Clone for Verifier<'_, E, A>
+impl<E, A> Clone for Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -75,13 +75,13 @@ where
     fn clone(&self) -> Self {
         Self {
             app: self.app.clone(),
-            execution: self.execution,
+            execution: self.execution.clone(),
             replays: self.replays.clone(),
         }
     }
 }
 
-impl<E, A> Verifier<'_, E, A>
+impl<E, A> Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -94,7 +94,6 @@ where
         marshal: MarshalMailbox<S, V>,
         consensus_context: A::Context,
         ancestry: impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
     ) -> VerificationResult
     where
@@ -144,14 +143,7 @@ where
         // Reconstruct the candidate's parent state. This is the only phase
         // shared across requests, keyed by the acquired parent's block digest.
         let parent = match self
-            .prepare_parent(
-                context,
-                marshal,
-                block_digest,
-                &mut ancestry,
-                progress,
-                verification,
-            )
+            .prepare_parent(context, marshal, block_digest, &mut ancestry, verification)
             .await
         {
             Ok(parent) => parent,
@@ -159,7 +151,6 @@ where
             Err(PrepareFailure::Cancelled) => return VerificationResult::Cancelled,
         };
 
-        progress.verifying(block_digest, parent.digest, consensus_context.round());
         let result = self
             .verify(
                 context,
@@ -226,7 +217,6 @@ where
         marshal: MarshalMailbox<S, V>,
         block_digest: PendingDigest<A, E>,
         ancestry: &mut impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
     ) -> Result<PreparedParent<A, E>, PrepareFailure>
     where
@@ -242,8 +232,8 @@ where
                     "verification request waiting on incomplete parent ancestry"
                 );
 
-                // As with incomplete candidate ancestry, only cancellation or
-                // actor-driven invalidation should release this pending request.
+                // As with incomplete candidate ancestry, only the caller
+                // leaving should release this pending request.
                 verification.cancelled().await;
                 return Err(PrepareFailure::Cancelled);
             }
@@ -264,10 +254,7 @@ where
                 marshal,
                 block.clone(),
                 verification,
-                Some(ReplayTracking {
-                    flights: &self.replays,
-                    progress,
-                }),
+                Some(&self.replays),
             )
             .await
         {
@@ -332,7 +319,6 @@ where
                     consensus_context,
                 ),
                 ancestry,
-                &self.execution.databases,
                 parent.batches,
             ),
         )

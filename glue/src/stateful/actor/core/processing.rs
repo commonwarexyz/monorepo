@@ -1,12 +1,9 @@
 //! The post-sync processing loop of the stateful actor.
 //!
-//! The loop alternates between sharing the processor and mutating it. While
-//! shared, verification jobs and any active proposal are polled together,
-//! each holding a borrow of the processor. Applying a finalized block,
-//! pruning, and capturing a fresh snapshot all consume the database set, so
-//! before any of them the loop cancels every job and takes the processor
-//! back. Requests still worth answering are then re-scheduled against the
-//! state the transition installs.
+//! The loop owns the database set and is the only thing that mutates it.
+//! Verification jobs hold read handles instead, so they are never cancelled: a
+//! job that is mid-read when a finalized block arrives finishes that read, the
+//! apply runs, and the job continues against the state it installs.
 //!
 //! Each finalized block is applied to the databases, its flush deferred to a
 //! pool, and a snapshot of the applied state staged for publication. The loop
@@ -25,7 +22,7 @@ use crate::stateful::{
             mailbox::Message,
             verifications::{Handler as Verifications, Request as VerificationRequest},
         },
-        processor::{Applied, PendingSyncTargets, Processor, Prune},
+        processor::{Applied, Processor},
     },
     db::{Publisher, SnapshotsOf},
 };
@@ -40,44 +37,15 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, signal::Signal};
-use commonware_utils::{Acknowledgement as _, acknowledgement::Exact, futures::Pool};
+use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_utils::{Acknowledgement as _, futures::Pool};
 use futures::{
     FutureExt as _,
     future::{Either, ready},
 };
 use rand_core::Rng;
-use std::sync::{Arc, mpsc::TryRecvError};
-use tracing::{Instrument as _, Span, debug, info_span};
-
-/// Work that consumes the database set. The loop cancels every verification
-/// job and takes the processor back before running one.
-enum Transition<B, P> {
-    Finalize {
-        block: B,
-        acknowledgement: Exact,
-        span: Span,
-    },
-    Prune(P),
-    Refresh,
-}
-
-/// The processor, the transition to run, and the verification requests to
-/// re-schedule afterward.
-///
-/// Owning the processor by value proves no verification job still borrows it,
-/// so [`Processing::apply_transition`] can run its consuming operations. It
-/// does not by itself prove the job pool drained or that replays released
-/// their claims. Those are asserted separately.
-struct Quiescent<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    processor: Processor<E, A>,
-    transition: Transition<Arc<A::Block>, Prune<PendingSyncTargets<A, E>>>,
-    retry: Vec<VerificationRequest<E, A>>,
-}
+use std::sync::mpsc::TryRecvError;
+use tracing::{Instrument as _, debug, info_span};
 
 /// A single unit of work for the processing loop: a mailbox message to handle,
 /// or deferred maintenance (a prune, or a fresh post-prune capture) run while
@@ -117,16 +85,20 @@ where
 
 impl<E, A, S, V> Processing<E, A, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
+    E: Rng + Spawner + Metrics + Clock + 'static,
+    A: Application<E> + 'static,
+    S: Scheme + 'static,
+    V: Variant<ApplicationBlock = A::Block> + 'static,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
+    /// Run the loop until shutdown.
+    ///
+    /// `deferred` holds verification requests that arrived during state sync
+    /// and have not started yet.
     pub async fn start(
         mut self,
         mut processor: Processor<E, A>,
-        mut retry: Vec<VerificationRequest<E, A>>,
+        deferred: Vec<VerificationRequest<E, A>>,
     ) {
         // Deferred finalize flushes, each releasing its block's marshal
         // acknowledgement once the flush completes (see `Barrier`).
@@ -140,56 +112,24 @@ where
         // time.
         let mut shutdown = self.context.stopped();
 
-        loop {
-            let Some(quiescent) = self
-                .run_until_transition(
-                    processor,
-                    retry,
-                    &mut syncs,
-                    &mut pending_prune,
-                    &mut shutdown,
-                )
-                .await
-            else {
-                return;
-            };
-            (processor, retry) = self
-                .apply_transition(quiescent, &mut syncs, &mut pending_prune)
-                .await;
-        }
-    }
-
-    /// Poll verification and any active proposal, all sharing the processor,
-    /// until an event needs to consume the database set. Every job is then
-    /// cancelled, so the caller gets the processor back free to mutate.
-    ///
-    /// Returns [`None`] when the actor should stop.
-    async fn run_until_transition(
-        &mut self,
-        processor: Processor<E, A>,
-        retry: Vec<VerificationRequest<E, A>>,
-        syncs: &mut Pool<(Height, bool)>,
-        pending_prune: &mut Option<Prune<PendingSyncTargets<A, E>>>,
-        shutdown: &mut Signal,
-    ) -> Option<Quiescent<E, A>> {
         let mut deferred_message = None;
         let mut verifications = Verifications::new(self.marshal.clone());
-        for request in retry {
+        for request in deferred {
             verifications.schedule(processor.verifier(), request);
         }
 
-        let (transition, retry) = loop {
+        loop {
             // Observe every already-completed flush (releasing its marshal
             // acknowledgement) before taking the next unit of work.
             while let Some((height, durable)) = syncs.next_completed().now_or_never() {
                 if !self.snapshot_publisher.complete(height, durable) {
-                    return None;
+                    return;
                 }
             }
 
             // Publish completed verdicts before admitting another message, so
             // continuous mailbox traffic cannot starve them under the biased
-            // `select!`. A later finalization cannot retroactively invalidate them.
+            // `select!`.
             verifications.complete_ready();
 
             // A message deferred by an active proposal is the FIFO barrier
@@ -216,7 +156,7 @@ where
                     // flush completions and verification jobs while idle.
                     None => {
                         let mailbox = &mut self.mailbox;
-                        let syncs = &mut *syncs;
+                        let syncs = &mut syncs;
                         let snapshot_publisher = &mut self.snapshot_publisher;
                         let verifications = &mut verifications;
                         Either::Right(async move {
@@ -246,18 +186,20 @@ where
                 },
                 Err(TryRecvError::Disconnected) => {
                     debug!("mailbox closed, stopping processing");
-                    return None;
+                    return;
                 }
             };
 
             let step = select! {
-                _ = &mut *shutdown => {
+                _ = &mut shutdown => {
                     debug!("shutdown signal received, stopping processing");
-                    return None;
+                    return;
                 },
                 step = next => step,
             };
-            let step = step?;
+            let Some(step) = step else {
+                return;
+            };
 
             match step {
                 Step::Message(Message::Propose {
@@ -347,8 +289,6 @@ where
                 }) => {
                     let span = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        // The observer only reads applied state, so
-                        // verification jobs keep being polled while it runs.
                         let notify =
                             processor.notify_finalized(self.context.as_present(), block.as_ref());
                         async {
@@ -360,109 +300,29 @@ where
                         continue;
                     }
 
-                    // Applying consumes the database set, so every running
-                    // verification is cancelled first. Requests the finalized
-                    // winner provably invalidates are rejected, and the rest
-                    // are re-scheduled after the apply against the state it
-                    // installs.
-                    let boundary = processor.finalization_boundary(block.as_ref());
-                    let (retry, reject) = verifications
-                        .quiesce_where(|progress| boundary.disposition(progress))
+                    // The apply owns mutation. Live verification jobs pause at
+                    // their next batch operation and resume afterward, so they
+                    // keep being polled throughout.
+                    let applied;
+                    (processor, applied) = verifications
+                        .drive(processor.finalize(self.context.as_present(), block.as_ref()))
+                        .instrument(span.clone())
                         .await;
-                    drop(boundary);
-                    for verification in reject {
-                        verification.respond(false);
-                    }
-                    break (
-                        Transition::Finalize {
-                            block,
-                            acknowledgement,
-                            span,
-                        },
-                        retry,
-                    );
-                }
-                Step::Prune(prune) => {
-                    // The prune target must be durable, but later blocks remain
-                    // available in marshal for replay and do not delay
-                    // maintenance. Verification may complete during this wait;
-                    // later mailbox work stays ordered behind the prune.
-                    while self.snapshot_publisher.blocks_prune(prune.barrier_height) {
-                        select! {
-                            (height, durable) = syncs.next_completed() => {
-                                if !self.snapshot_publisher.complete(height, durable) {
-                                    return None;
-                                }
-                            },
-                            _ = verifications.next_completed() => {},
-                        }
-                    }
 
-                    // Pruning and the capture that follows both consume the
-                    // set, so verification stays cancelled for the whole
-                    // maintenance window.
-                    let retry = verifications.quiesce().await;
-                    break (Transition::Prune(prune), retry);
-                }
-                Step::Refresh => {
-                    // The served snapshot went stale at the last prune and no
-                    // later flush replaced it. Every flush has drained, so the
-                    // applied state is durable and can publish directly.
-                    // Capturing consumes the set, so verification is cancelled.
-                    let retry = verifications.quiesce().await;
-                    break (Transition::Refresh, retry);
-                }
-            }
-        };
-
-        assert!(
-            verifications.is_empty(),
-            "a verification job was still live after quiesce",
-        );
-        drop(verifications);
-        Some(Quiescent {
-            processor,
-            transition,
-            retry,
-        })
-    }
-
-    /// Run the chosen transition, then hand back the processor and the
-    /// requests to re-run against the state it installs.
-    async fn apply_transition(
-        &mut self,
-        quiescent: Quiescent<E, A>,
-        syncs: &mut Pool<(Height, bool)>,
-        pending_prune: &mut Option<Prune<PendingSyncTargets<A, E>>>,
-    ) -> (Processor<E, A>, Vec<VerificationRequest<E, A>>) {
-        let Quiescent {
-            mut processor,
-            transition,
-            retry,
-        } = quiescent;
-        assert!(
-            processor.replays_idle(),
-            "verification replay was still active after cancelling",
-        );
-        match transition {
-            Transition::Finalize {
-                block,
-                acknowledgement,
-                span,
-            } => {
-                let applied;
-                (processor, applied) = processor
-                    .finalize(self.context.as_present(), block.as_ref())
-                    .instrument(span.clone())
-                    .await;
-                // Keep the publication bookkeeping under the same span.
-                let _span = span.entered();
-                if let Some(Applied {
-                    snapshots,
-                    barrier,
-                    prune,
-                }) = applied
-                {
+                    // Keep the publication bookkeeping under the same span.
+                    let _span = span.entered();
+                    let Some(Applied {
+                        snapshots,
+                        barrier,
+                        prune,
+                    }) = applied
+                    else {
+                        // Duplicate report: marshal redelivers a processed height
+                        // only after a restart, where startup aligned the databases
+                        // to durable state.
+                        acknowledgement.acknowledge();
+                        continue;
+                    };
                     debug!(
                         height = block.height().get(),
                         "applied finalized database batch"
@@ -483,32 +343,46 @@ where
                         (height, durable)
                     });
                     if let Some(prune) = prune {
-                        *pending_prune = Some(prune);
+                        pending_prune = Some(prune);
                     }
-                } else {
-                    // Duplicate report: marshal redelivers a processed height
-                    // only after a restart, where startup aligned the databases
-                    // to durable state.
-                    acknowledgement.acknowledge();
                 }
-            }
-            Transition::Prune(prune) => {
-                processor = processor.prune(prune, &self.marshal).await;
-                // The published snapshot predates this prune and keeps the pruned
-                // storage alive, as do snapshots staged before it.
-                if !self.snapshot_publisher.mark_stale() {
-                    processor = processor
-                        .publish_snapshot(&mut self.snapshot_publisher)
+                Step::Prune(prune) => {
+                    // The prune target must be durable, but later blocks remain
+                    // available in marshal for replay and do not delay
+                    // maintenance. Later mailbox work stays ordered behind the
+                    // prune.
+                    while self.snapshot_publisher.blocks_prune(prune.barrier_height) {
+                        select! {
+                            (height, durable) = syncs.next_completed() => {
+                                if !self.snapshot_publisher.complete(height, durable) {
+                                    return;
+                                }
+                            },
+                            _ = verifications.next_completed() => {},
+                        }
+                    }
+
+                    processor = verifications
+                        .drive(processor.prune(prune, &self.marshal))
+                        .await;
+                    // The published snapshot predates this prune and keeps the pruned
+                    // storage alive, as do snapshots staged before it.
+                    if !self.snapshot_publisher.mark_stale() {
+                        processor = verifications
+                            .drive(processor.publish_snapshot(&mut self.snapshot_publisher))
+                            .await;
+                    }
+                }
+                Step::Refresh => {
+                    // The served snapshot went stale at the last prune and no
+                    // later flush replaced it. Every flush has drained, so the
+                    // applied state is durable and can publish directly.
+                    processor = verifications
+                        .drive(processor.publish_snapshot(&mut self.snapshot_publisher))
                         .await;
                 }
             }
-            Transition::Refresh => {
-                processor = processor
-                    .publish_snapshot(&mut self.snapshot_publisher)
-                    .await;
-            }
         }
-        (processor, retry)
     }
 }
 
@@ -536,7 +410,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{Publisher, Reader, Single, SnapshotsOf},
+        db::{HandlesOf, Publisher, Reader, Single, SnapshotsOf},
         tests::{
             fixtures,
             mocks::{
@@ -609,7 +483,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -625,7 +498,6 @@ mod tests {
             &mut self,
             context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             self.observed_contexts.lock().push(context.0.name());
@@ -645,7 +517,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> TestMerkleized {
             TestMerkleized
@@ -682,7 +553,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -693,7 +563,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
@@ -709,7 +578,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> TestMerkleized {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
@@ -727,7 +595,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _databases: &Self::Databases,
+            _handles: HandlesOf<Self::Databases, deterministic::Context>,
         ) {
             let gate = self.finalized_gate.lock().take();
             if let Some(mut gate) = gate {
@@ -833,7 +701,6 @@ mod tests {
             false,
         )
         .await;
-
         let control = FlushControl::default();
         let databases = Single::from(TestDb::gated(control.clone()));
         let pruning = prune_config
@@ -1290,17 +1157,12 @@ mod tests {
     }
 
     #[test]
-    fn finalization_retries_compatible_verification() {
+    fn finalization_keeps_compatible_verification_running() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (parent_gate, parent_started, parent_release) = application_gate();
             let (child_gate, child_started, child_release) = application_gate();
-            let (retry_gate, retry_started, retry_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([
-                    parent_gate,
-                    child_gate,
-                    retry_gate,
-                ]))),
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
                 observed_contexts: Arc::default(),
@@ -1344,27 +1206,21 @@ mod tests {
                 .await
                 .expect("finalized parent should be acknowledged");
 
-            // Applying the parent consumes the database set, so the child's first
-            // attempt was cancelled before the apply. Being compatible, the
-            // request re-runs against the state the finalization installed.
-            assert!(
-                child_release.send(()).is_err(),
-                "the first attempt should have been cancelled",
-            );
-            retry_started
-                .await
-                .expect("compatible verification should re-run");
-            retry_release.send(()).expect("re-run should remain active");
+            // The apply does not touch the child's attempt. It is still waiting
+            // in the application and answers from that same attempt.
+            child_release
+                .send(())
+                .expect("the attempt should still be live after the apply");
             assert!(verify_child.await);
             actor.abort();
         });
     }
 
     #[test]
-    fn finalization_invalidates_incompatible_verification() {
+    fn finalization_refuses_incompatible_verification_result() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (fork_gate, fork_started, fork_release) = application_gate();
-            let (child_gate, child_started, mut child_release) = application_gate();
+            let (child_gate, child_started, child_release) = application_gate();
             let app = GatedApp {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([fork_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
@@ -1405,12 +1261,6 @@ mod tests {
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
-            select! {
-                _ = child_release.closed() => {},
-                _ = context.sleep(Duration::from_millis(100)) => {
-                    panic!("incompatible verification was not cancelled");
-                },
-            }
             let mut waiter = Box::pin(waiter);
             select! {
                 result = &mut waiter => {
@@ -1420,12 +1270,19 @@ mod tests {
                     panic!("winning block was not acknowledged");
                 },
             }
+
+            // The losing child runs to completion. Its parent is gone from the
+            // pending set, so caching its result is refused and the verdict is
+            // false.
+            child_release
+                .send(())
+                .expect("the attempt should still be live after the apply");
             select! {
                 valid = &mut verify_child => {
                     assert!(!valid, "verification on a finalized-away fork must fail");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
-                    panic!("incompatible verification retry did not resolve");
+                    panic!("incompatible verification did not resolve");
                 },
             }
             actor.abort();
@@ -1437,7 +1294,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (parent_gate, parent_started, parent_release) = application_gate();
             let (child_gate, child_started, child_release) = application_gate();
-            let (grandchild_gate, grandchild_started, mut grandchild_release) = application_gate();
+            let (grandchild_gate, grandchild_started, grandchild_release) = application_gate();
             let app = GatedApp {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([
                     parent_gate,
@@ -1500,8 +1357,10 @@ mod tests {
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
-            grandchild_release.closed().await;
             waiter.await.expect("winning block should be acknowledged");
+            grandchild_release
+                .send(())
+                .expect("the attempt should still be live after the apply");
 
             let result = select! {
                 valid = &mut verify_grandchild => Some(valid),
@@ -1702,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_cancels_shared_replay() {
+    fn finalization_does_not_wait_for_a_shared_replay() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
@@ -1781,12 +1640,8 @@ mod tests {
             let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
             context.sleep(Duration::from_millis(10)).await;
 
-            // Applying the winner consumes the database set, so the shared replay
-            // was cancelled before the apply.
-            assert!(
-                apply_release.send(()).is_err(),
-                "the shared replay should have been cancelled",
-            );
+            // The apply does not wait for the shared replay. Because that replay
+            // has not cached the winner yet, the finalization reconstructs it.
             finalized_started
                 .await
                 .expect("finalization hook should start");
@@ -1797,24 +1652,24 @@ mod tests {
                 .await
                 .expect("finalized parent should be acknowledged");
 
-            // Both siblings descend from the winner, so both re-run instead of being
-            // rejected. Their parent is now the processed anchor, so neither needs a
-            // replay the second time.
+            // The shared replay is still live afterward. Its parent is now the
+            // processed anchor, so both siblings continue from it.
+            apply_release
+                .send(())
+                .expect("the shared replay should still be live after the apply");
             verify_started
                 .await
-                .expect("compatible verification should re-run");
+                .expect("verification should reach the application");
             let _ = verify_release.send(());
             assert!(first.await);
             assert!(second.await);
             assert_eq!(
                 apply_calls.load(Ordering::SeqCst),
                 2,
-                "cancelling the winner's replay costs the finalization one \
-                 reconstruction, and the retries need none",
+                "the finalization reconstructs the winner once, and the siblings \
+                 need no further replay",
             );
-            // Not an exact count. A later cancellation, such as the capture that
-            // republishes after the flush, can re-run a verification again.
-            assert!(verify_calls.load(Ordering::SeqCst) >= 2);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
             actor.abort();
             drop(marshal.guards);
         });
@@ -1893,18 +1748,13 @@ mod tests {
             );
 
             let (acknowledgement, waiter) = Exact::handle();
-            let mut waiter = Box::pin(waiter);
             let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
-            assert!(
-                poll!(&mut waiter).is_pending(),
-                "finalization must wait for the existing winner computation",
-            );
+            waiter
+                .await
+                .expect("the cached winner should finalize while its replay runs");
             replay_release
                 .send(())
                 .expect("winner replay should remain active");
-            waiter
-                .await
-                .expect("cached winner should finalize after replay completes");
             let valid = verify_child.await;
             actor.abort();
             drop(marshal.guards);
@@ -2147,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn pruning_cancels_replay_before_database_prune() {
+    fn pruning_does_not_disturb_a_live_replay() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let block1 = TestBlock::child(&genesis, 1);
@@ -2165,12 +2015,11 @@ mod tests {
                 true,
             )
             .await;
-            let (first_gate, first_started, mut first_release) = application_gate();
-            let (second_gate, second_started, second_release) = application_gate();
+            let (replay_gate, replay_started, replay_release) = application_gate();
             let apply_calls = Arc::new(AtomicUsize::new(0));
             let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
                 verify_gate: Arc::new(Mutex::new(None)),
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
@@ -2227,7 +2076,9 @@ mod tests {
             assert!(poll!(&mut verify).is_pending());
 
             select! {
-                result = first_started => result.expect("verification should start before pruning"),
+                result = replay_started => {
+                    result.expect("verification should start before pruning");
+                },
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!(
                         "verification did not start: flushes={} pruned={}",
@@ -2242,20 +2093,22 @@ mod tests {
                 .send(Ok(()))
                 .expect("target flush should be pending");
             waiter1.await.expect("target block should be acknowledged");
-            first_release.closed().await;
+
+            // The prune runs while the replay is still parked in the
+            // application, and the replay then finishes on its first attempt.
             while control.pruned.lock().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
-
-            second_started
-                .await
-                .expect("live replay should restart after pruning");
-            second_release
+            replay_release
                 .send(())
-                .expect("restarted replay should remain active");
+                .expect("the replay should still be live after pruning");
             assert!(verify.await);
             assert_eq!(control.pruned.lock().clone(), vec![1]);
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                apply_calls.load(Ordering::SeqCst),
+                3,
+                "two finalizations reconstruct their own blocks, plus the replay",
+            );
             assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
 
             let release = control.flushes.lock().remove(0);

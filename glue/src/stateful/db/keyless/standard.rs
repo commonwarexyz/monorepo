@@ -2,12 +2,12 @@
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by
-//! [`Location`] rather than by key. Positional batch reads borrow the
-//! database.
+//! [`Location`] rather than by key. Positional batch reads lease the
+//! database through the batch's [`ReadHandle`].
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -35,10 +35,12 @@ use std::{ops::Deref, sync::Arc};
 
 /// Wraps a keyless [`UnmerkleizedBatch`] to implement
 /// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
-pub struct KeylessUnmerkleized<F, V, H, S>
+pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -46,12 +48,15 @@ where
     batch: UnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
+    handle: ReadHandle<Keyless<F, E, V, C, H, S>>,
 }
 
-impl<F, V, H, S> Deref for KeylessUnmerkleized<F, V, H, S>
+impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -63,10 +68,12 @@ where
     }
 }
 
-impl<F, V, H, S> KeylessUnmerkleized<F, V, H, S>
+impl<F, E, V, C, H, S> KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -85,32 +92,21 @@ where
     }
 
     /// Read a value by location, falling back to applied state.
-    pub async fn get<E, C>(
-        &self,
-        location: Location<F>,
-        db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Option<V::Value>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, V>>,
-    {
-        self.batch.get(location, db).await
+    pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
+        self.batch.get(location, &*self.handle.read().await).await
     }
 
     /// Read multiple values by location, falling back to applied state.
     ///
     /// Locations must be sorted in ascending order. Returns results in the same
     /// order as the input locations.
-    pub async fn get_many<E, C>(
+    pub async fn get_many(
         &self,
         locations: &[Location<F>],
-        db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, V>>,
-    {
-        self.batch.get_many(locations, db).await
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.batch
+            .get_many(locations, &*self.handle.read().await)
+            .await
     }
 
     /// Append a value to the speculative batch.
@@ -122,21 +118,44 @@ where
 
 /// Wraps a keyless [`MerkleizedBatch`] to implement
 /// [`Merkleized`](crate::stateful::db::Merkleized).
-pub struct KeylessMerkleized<F, V, H, S>
+pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
+    handle: ReadHandle<Keyless<F, E, V, C, H, S>>,
 }
 
-impl<F, V, H, S> Deref for KeylessMerkleized<F, V, H, S>
+impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -148,46 +167,7 @@ where
     }
 }
 
-impl<F, V, H, S> KeylessMerkleized<F, V, H, S>
-where
-    F: Family,
-    V: ValueEncoding,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    /// Read a value by location, falling back to applied state.
-    pub async fn get<E, C>(
-        &self,
-        location: Location<F>,
-        db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Option<V::Value>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, V>>,
-    {
-        self.inner.get(location, db).await
-    }
-
-    /// Read multiple values by location, falling back to applied state.
-    ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
-    pub async fn get_many<E, C>(
-        &self,
-        locations: &[Location<F>],
-        db: &Keyless<F, E, V, C, H, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, V>>,
-    {
-        self.inner.get_many(locations, db).await
-    }
-}
-
-impl<F, E, V, C, H, S> UnmerkleizedTrait<Keyless<F, E, V, C, H, S>>
-    for KeylessUnmerkleized<F, V, H, S>
+impl<F, E, V, C, H, S> KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -197,28 +177,64 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    type Merkleized = KeylessMerkleized<F, V, H, S>;
-    type Error = Error<F>;
+    /// Read a value by location, falling back to applied state.
+    pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
+        self.inner.get(location, &*self.handle.read().await).await
+    }
 
-    async fn merkleize(self, db: &Keyless<F, E, V, C, H, S>) -> Result<Self::Merkleized, Error<F>> {
-        let merkleized = self
-            .batch
-            .merkleize(db, self.metadata, self.inactivity_floor)
-            .await;
-        Ok(KeylessMerkleized { inner: merkleized })
+    /// Read multiple values by location, falling back to applied state.
+    ///
+    /// Locations must be sorted in ascending order. Returns results in the same
+    /// order as the input locations.
+    pub async fn get_many(
+        &self,
+        locations: &[Location<F>],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.inner
+            .get_many(locations, &*self.handle.read().await)
+            .await
     }
 }
 
-impl<F, V, H, S> MerkleizedTrait for KeylessMerkleized<F, V, H, S>
+impl<F, E, V, C, H, S> UnmerkleizedTrait for KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    type Merkleized = KeylessMerkleized<F, E, V, C, H, S>;
+    type Error = Error<F>;
+
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            inactivity_floor,
+            handle,
+        } = self;
+        let inner = batch
+            .merkleize(&*handle.read().await, metadata, inactivity_floor)
+            .await;
+        Ok(KeylessMerkleized { inner, handle })
+    }
+}
+
+impl<F, E, V, C, H, S> MerkleizedTrait for KeylessMerkleized<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     type Digest = H::Digest;
-    type Unmerkleized = KeylessUnmerkleized<F, V, H, S>;
+    type Unmerkleized = KeylessUnmerkleized<F, E, V, C, H, S>;
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -228,6 +244,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
+            handle: self.handle.clone(),
         }
     }
 }
@@ -240,8 +257,10 @@ where
     H: Hasher + 'static,
     S: Strategy,
 {
-    type Unmerkleized = KeylessUnmerkleized<F, FixedEncoding<V>, H, S>;
-    type Merkleized = KeylessMerkleized<F, FixedEncoding<V>, H, S>;
+    type Unmerkleized =
+        KeylessUnmerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
+    type Merkleized =
+        KeylessMerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
     type Error = Error<F>;
     type Config = fixed::Config<S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -258,11 +277,16 @@ where
         )
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         KeylessUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -320,8 +344,22 @@ where
     H: Hasher + 'static,
     S: Strategy,
 {
-    type Unmerkleized = KeylessUnmerkleized<F, VariableEncoding<V>, H, S>;
-    type Merkleized = KeylessMerkleized<F, VariableEncoding<V>, H, S>;
+    type Unmerkleized = KeylessUnmerkleized<
+        F,
+        E,
+        VariableEncoding<V>,
+        VariableJournal<E, variable::Operation<F, V>>,
+        H,
+        S,
+    >;
+    type Merkleized = KeylessMerkleized<
+        F,
+        E,
+        VariableEncoding<V>,
+        VariableJournal<E, variable::Operation<F, V>>,
+        H,
+        S,
+    >;
     type Error = Error<F>;
     type Config = variable::Config<<variable::Operation<F, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -338,11 +376,16 @@ where
         )
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         KeylessUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -465,6 +508,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::{db::gate, tests::mocks::finalize};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -527,20 +571,21 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let (mutator, handle) = gate(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+                .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
 
-            let (db, snapshot, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
+            let (_mutator, snapshot, durability) = finalize(mutator, merkleized).await;
             durability.await.expect("finalize flush failed");
 
+            let db = handle.read().await;
             assert_eq!(
                 db.get(mmr::Location::new(1)).await.unwrap(),
                 Some(U64::new(7))
@@ -564,12 +609,14 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let (_mutator, handle) = gate(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle)
+                .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
 
@@ -615,42 +662,40 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-floor-carry", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let (mutator, handle) = gate(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+                .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
+            let (mutator, _, durability) = finalize(mutator, merkleized).await;
             durability.await.expect("finalize flush failed");
 
             // A fresh batch without an explicit floor must commit at the raised
             // floor instead of regressing it to zero.
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db).append(U64::new(8));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+                .await
+                .append(U64::new(8));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
             let fork = MerkleizedTrait::new_batch(&merkleized);
-            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
+            let (mutator, _, durability) = finalize(mutator, merkleized).await;
             durability.await.expect("finalize flush failed");
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*handle.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
 
             // The same holds for a batch forked from a merkleized parent.
             let fork = fork.append(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork)
                 .await
                 .unwrap();
-            let (db, _, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
+            let (_mutator, _, durability) = finalize(mutator, merkleized).await;
             durability.await.expect("finalize flush failed");
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*handle.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
         });
     }

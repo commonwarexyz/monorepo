@@ -5,7 +5,7 @@
 //! adapters expose set and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -31,27 +31,32 @@ use commonware_utils::{Array, channel::mpsc};
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps an unjournaled immutable batch before merkleization.
-pub struct ImmutableUnjournaledUnmerkleized<F, K, V, H, S>
+pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
+    handle: ReadHandle<CompactDb<F, E, K, V, H, C, S>>,
 }
 
-impl<F, K, V, H, S> Deref for ImmutableUnjournaledUnmerkleized<F, K, V, H, S>
+impl<F, E, K, V, H, C, S> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Target = CompactUnmerkleizedBatch<F, H, K, V, S>;
@@ -61,13 +66,15 @@ where
     }
 }
 
-impl<F, K, V, H, S> ImmutableUnjournaledUnmerkleized<F, K, V, H, S>
+impl<F, E, K, V, H, C, S> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     /// Set commit metadata included in the next merkleization.
@@ -90,25 +97,49 @@ where
 }
 
 /// Wraps an unjournaled immutable batch after merkleization.
-pub struct ImmutableUnjournaledMerkleized<F, K, V, H, S>
+pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
+    handle: ReadHandle<CompactDb<F, E, K, V, H, C, S>>,
 }
 
-impl<F, K, V, H, S> Deref for ImmutableUnjournaledMerkleized<F, K, V, H, S>
+impl<F, E, K, V, H, C, S> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<F, E, K, V, H, C, S> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, C, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Target = CompactMerkleizedBatch<F, H::Digest, K, V, S>;
@@ -118,45 +149,48 @@ where
     }
 }
 
-impl<F, E, K, V, H, S, C> UnmerkleizedTrait<CompactDb<F, E, K, V, H, C, S>>
-    for ImmutableUnjournaledUnmerkleized<F, K, V, H, S>
+impl<F, E, K, V, H, C, S> UnmerkleizedTrait
+    for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    type Merkleized = ImmutableUnjournaledMerkleized<F, K, V, H, S>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, C, S>;
     type Error = Error<F>;
 
-    async fn merkleize(
-        self,
-        db: &CompactDb<F, E, K, V, H, C, S>,
-    ) -> Result<Self::Merkleized, Error<F>> {
-        let merkleized = self
-            .batch
-            .merkleize(db, self.metadata, self.inactivity_floor)
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            inactivity_floor,
+            handle,
+        } = self;
+        let inner = batch
+            .merkleize(&*handle.read().await, metadata, inactivity_floor)
             .await;
-        Ok(ImmutableUnjournaledMerkleized { inner: merkleized })
+        Ok(ImmutableUnjournaledMerkleized { inner, handle })
     }
 }
 
-impl<F, K, V, H, S> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, K, V, H, S>
+impl<F, E, K, V, H, C, S> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, C, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
+    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, K, V, H, S>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C, S>;
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -166,6 +200,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
+            handle: self.handle.clone(),
         }
     }
 }
@@ -180,8 +215,8 @@ where
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, K, FixedEncoding<V>, H, S>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, K, FixedEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, (), S>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, (), S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -198,11 +233,16 @@ where
         }
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         ImmutableUnjournaledUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -256,8 +296,8 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, K, VariableEncoding<V>, H, S>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, K, VariableEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, VariableEncoding<V>, H, C, S>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, C, S>;
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -274,11 +314,16 @@ where
         }
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         ImmutableUnjournaledUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -399,7 +444,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::SyncEngineConfig;
+    use crate::stateful::db::{DatabaseSet, Single, SyncEngineConfig};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -538,20 +583,22 @@ mod tests {
             let value = Sha256::hash(&[&[2]]);
             let metadata = Sha256::hash(&[&[3]]);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let set = Single::from(db);
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(set.handle())
+                .await
                 .set(key, value)
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (db, snapshot, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
-            durability.await.expect("finalize flush failed");
+            let (set, snapshot, barrier) = DatabaseSet::finalize(set, merkleized).await;
+            assert!(barrier.durable().await, "finalize flush failed");
 
+            let db = set.handle();
+            let db = db.read().await;
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get_metadata(), Some(metadata));
 

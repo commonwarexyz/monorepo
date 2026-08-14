@@ -248,6 +248,7 @@ mod tests {
         type Snapshots = ();
         type Config = u64;
         type SyncTargets = u64;
+        type Handles = ();
 
         async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
             Self(config)
@@ -257,7 +258,9 @@ mod tests {
             0
         }
 
-        fn new_batches(&self) -> Self::Unmerkleized {
+        fn handles(&self) -> Self::Handles {}
+
+        async fn new_batches(_handles: &Self::Handles) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
@@ -281,7 +284,7 @@ mod tests {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        fn applied_targets(&self) -> Self::SyncTargets {
+        async fn applied_targets(&self) -> Self::SyncTargets {
             self.0
         }
 
@@ -337,7 +340,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -348,7 +350,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             unreachable!("WedgeApp only serves the syncer harness")
@@ -358,7 +359,6 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _databases: &Self::Databases,
             _batches: TestUnmerkleized,
         ) -> TestMerkleized {
             unreachable!("WedgeApp only serves the syncer harness")
@@ -442,7 +442,7 @@ mod tests {
             .await;
 
             assert_eq!(startup.sync.anchor.height, Height::new(2));
-            assert_eq!(startup.sync.databases.applied_targets(), 2);
+            assert_eq!(startup.sync.databases.applied_targets().await, 2);
             assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
         });
     }

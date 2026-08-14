@@ -1,13 +1,14 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. The wrapper types here keep that shape: reads and
-//! merkleization borrow the database at each call, so batches hold no database
-//! handle and dropping one never drops the database.
+//! read-through to applied state. The wrapper types here hold a [`ReadHandle`]
+//! to their database and lease it for each such call, so a batch stays usable
+//! across applies of compatible batches and never delays a mutation by more
+//! than one storage call.
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -47,17 +48,24 @@ use std::{
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
 
+/// The `any` database type the wrapper batches read through.
+type AnyDb<F, E, C, I, H, U, S> = Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>;
+
 /// Wraps a QMDB [`UnmerkleizedBatch`] to implement [`Unmerkleized`](super::Unmerkleized).
-pub struct AnyUnmerkleized<F, H, U, S>
+pub struct AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
     metadata: Option<U::Value>,
+    handle: ReadHandle<AnyDb<F, E, C, I, H, U, S>>,
 }
 
 /// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`].
@@ -65,24 +73,31 @@ where
 /// A branch-scoped view of the database. It stays valid only while every batch finalized on
 /// the database is an ancestor of this batch (see [`MerkleizedBatch`]'s branch-validity
 /// contract).
-pub struct AnyStaged<F, H, U, S>
+pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
     metadata: Option<U::Value>,
+    handle: ReadHandle<AnyDb<F, E, C, I, H, U, S>>,
 }
 
 /// Key-value operations shared by both `any` update kinds.
-impl<F, H, U, S> AnyUnmerkleized<F, H, U, S>
+impl<F, E, C, I, H, U, S> AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -94,54 +109,36 @@ where
     }
 
     /// Read a value by key, falling back to applied state.
-    pub async fn get<E, C, I>(
-        &self,
-        key: &U::Key,
-        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<Option<U::Value>, Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.batch.get(key, db).await
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
+        self.batch.get(key, &*self.handle.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many<E, C, I>(
-        &self,
-        keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<Vec<Option<U::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.batch.get_many(keys, db).await
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        self.batch.get_many(keys, &*self.handle.read().await).await
     }
 
     /// Read multiple values and return a staged batch for the same keys.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn stage<E, C, I>(
+    pub async fn stage(
         self,
         keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, H, U, S>), Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let (values, staged) = self.batch.stage(keys, db).await?;
+    ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            handle,
+        } = self;
+        let (values, staged) = batch.stage(keys, &*handle.read().await).await?;
         Ok((
             values,
             AnyStaged {
                 staged,
-                metadata: self.metadata,
+                metadata,
+                handle,
             },
         ))
     }
@@ -154,22 +151,29 @@ where
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] to implement [`Merkleized`](super::Merkleized).
-pub struct AnyMerkleized<F, H, U, S>
+pub struct AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
+    handle: ReadHandle<AnyDb<F, E, C, I, H, U, S>>,
 }
 
-impl<F, H, U, S> Deref for AnyUnmerkleized<F, H, U, S>
+impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -180,11 +184,33 @@ where
     }
 }
 
-impl<F, H, U, S> Deref for AnyMerkleized<F, H, U, S>
+impl<F, E, C, I, H, U, S> Clone for AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<F, E, C, I, H, U, S> Deref for AnyMerkleized<F, E, C, I, H, U, S>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -196,11 +222,14 @@ where
 }
 
 /// Read-expansion operations for the `any` staged batch.
-impl<F, H, U, S> AnyStaged<F, H, U, S>
+impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -217,35 +246,38 @@ where
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
     /// and does not observe values computed for earlier staged slots but not yet passed to
     /// `merkleize`.
-    pub async fn expand<E, C, I>(
+    pub async fn expand(
         self,
         keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let (range, values, staged) = self.staged.expand(keys, db).await?;
+    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+        let Self {
+            staged,
+            metadata,
+            handle,
+        } = self;
+        let (range, values, staged) = staged.expand(keys, &*handle.read().await).await?;
         Ok((
             range,
             values,
             Self {
                 staged,
-                metadata: self.metadata,
+                metadata,
+                handle,
             },
         ))
     }
 }
 
 /// Staged merkleize for the `any` unordered update kind.
-impl<F, H, K, V, S> AnyStaged<F, H, unordered::Update<K, V>, S>
+impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
+    E: Context,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
     K: Key,
     V: ValueEncoding + 'static,
-    H: Hasher,
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
@@ -262,32 +294,33 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, unordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<AnyMerkleized<F, H, unordered::Update<K, V>, S>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let inner = self
-            .staged
-            .merkleize(updates, upserts, self.metadata, db)
+    ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
+        let Self {
+            staged,
+            metadata,
+            handle,
+        } = self;
+        let inner = staged
+            .merkleize(updates, upserts, metadata, &*handle.read().await)
             .await?;
-        Ok(AnyMerkleized { inner })
+        Ok(AnyMerkleized { inner, handle })
     }
 }
 
 /// Staged merkleize for the `any` ordered update kind.
-impl<F, H, K, V, S> AnyStaged<F, H, ordered::Update<K, V>, S>
+impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
+    E: Context,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
+    I: OrderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
     K: Key,
     V: ValueEncoding + 'static,
-    H: Hasher,
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
@@ -304,130 +337,118 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, ordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<AnyMerkleized<F, H, ordered::Update<K, V>, S>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
-        I: OrderedIndex<Value = Location<F>> + 'static,
-    {
-        let inner = self
-            .staged
-            .merkleize(updates, upserts, self.metadata, db)
+    ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
+        let Self {
+            staged,
+            metadata,
+            handle,
+        } = self;
+        let inner = staged
+            .merkleize(updates, upserts, metadata, &*handle.read().await)
             .await?;
-        Ok(AnyMerkleized { inner })
+        Ok(AnyMerkleized { inner, handle })
     }
 }
 
 /// Read-through operations for the `any` merkleized batch.
-impl<F, H, U, S> AnyMerkleized<F, H, U, S>
+impl<F, E, C, I, H, U, S> AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     /// Read a value by key, falling back to applied state.
-    pub async fn get<E, C, I>(
-        &self,
-        key: &U::Key,
-        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<Option<U::Value>, Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.inner.get(key, db).await
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
+        self.inner.get(key, &*self.handle.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many<E, C, I>(
-        &self,
-        keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<Vec<Option<U::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.inner.get_many(keys, db).await
+    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        self.inner.get_many(keys, &*self.handle.read().await).await
     }
 }
 
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `any` unordered update kind.
-impl<F, E, C, I, H, K, V, S>
-    UnmerkleizedTrait<Db<F, E, C, I, H, unordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>>
-    for AnyUnmerkleized<F, H, unordered::Update<K, V>, S>
+impl<F, E, C, I, H, K, V, S> UnmerkleizedTrait
+    for AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
     E: Context,
-    K: Key,
-    V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
+    K: Key,
+    V: ValueEncoding + 'static,
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    type Merkleized = AnyMerkleized<F, H, unordered::Update<K, V>, S>;
+    type Merkleized = AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>;
     type Error = Error<F>;
 
-    async fn merkleize(
-        self,
-        db: &Db<F, E, C, I, H, unordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<Self::Merkleized, Error<F>> {
-        let merkleized = self.batch.merkleize(db, self.metadata).await?;
-        Ok(AnyMerkleized { inner: merkleized })
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            handle,
+        } = self;
+        let inner = batch.merkleize(&*handle.read().await, metadata).await?;
+        Ok(AnyMerkleized { inner, handle })
     }
 }
 
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `any` ordered update kind.
-impl<F, E, C, I, H, K, V, S>
-    UnmerkleizedTrait<Db<F, E, C, I, H, ordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>>
-    for AnyUnmerkleized<F, H, ordered::Update<K, V>, S>
+impl<F, E, C, I, H, K, V, S> UnmerkleizedTrait
+    for AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
     E: Context,
-    K: Key,
-    V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
+    K: Key,
+    V: ValueEncoding + 'static,
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    type Merkleized = AnyMerkleized<F, H, ordered::Update<K, V>, S>;
+    type Merkleized = AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>;
     type Error = Error<F>;
 
-    async fn merkleize(
-        self,
-        db: &Db<F, E, C, I, H, ordered::Update<K, V>, ANY_BITMAP_CHUNK_BYTES, S>,
-    ) -> Result<Self::Merkleized, Error<F>> {
-        let merkleized = self.batch.merkleize(db, self.metadata).await?;
-        Ok(AnyMerkleized { inner: merkleized })
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            handle,
+        } = self;
+        let inner = batch.merkleize(&*handle.read().await, metadata).await?;
+        Ok(AnyMerkleized { inner, handle })
     }
 }
 
 /// Implement [`Merkleized`](MerkleizedTrait) for all supported `any` update kinds.
-impl<F, H, U, S> MerkleizedTrait for AnyMerkleized<F, H, U, S>
+impl<F, E, C, I, H, U, S> MerkleizedTrait for AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
-    U: Update,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
 {
     type Digest = H::Digest;
-    type Unmerkleized = AnyUnmerkleized<F, H, U, S>;
+    type Unmerkleized = AnyUnmerkleized<F, E, C, I, H, U, S>;
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -436,6 +457,7 @@ where
         AnyUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
+            handle: self.handle.clone(),
         }
     }
 }
@@ -461,8 +483,24 @@ where
     T: Translator,
     S: Strategy,
 {
-    type Unmerkleized = AnyUnmerkleized<F, H, unordered::Update<K, FixedEncoding<V>>, S>;
-    type Merkleized = AnyMerkleized<F, H, unordered::Update<K, FixedEncoding<V>>, S>;
+    type Unmerkleized = AnyUnmerkleized<
+        F,
+        E,
+        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
+        UnorderedIdx<T, Location<F>>,
+        H,
+        unordered::Update<K, FixedEncoding<V>>,
+        S,
+    >;
+    type Merkleized = AnyMerkleized<
+        F,
+        E,
+        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
+        UnorderedIdx<T, Location<F>>,
+        H,
+        unordered::Update<K, FixedEncoding<V>>,
+        S,
+    >;
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -480,10 +518,12 @@ where
         )
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let batch = handle.read().await.new_batch();
         AnyUnmerkleized {
-            batch: Db::new_batch(self),
+            batch,
             metadata: None,
+            handle,
         }
     }
 
@@ -555,8 +595,24 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
-    type Unmerkleized = AnyUnmerkleized<F, H, unordered::Update<K, VariableEncoding<V>>, S>;
-    type Merkleized = AnyMerkleized<F, H, unordered::Update<K, VariableEncoding<V>>, S>;
+    type Unmerkleized = AnyUnmerkleized<
+        F,
+        E,
+        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
+        UnorderedIdx<T, Location<F>>,
+        H,
+        unordered::Update<K, VariableEncoding<V>>,
+        S,
+    >;
+    type Merkleized = AnyMerkleized<
+        F,
+        E,
+        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
+        UnorderedIdx<T, Location<F>>,
+        H,
+        unordered::Update<K, VariableEncoding<V>>,
+        S,
+    >;
     type Error = Error<F>;
     type Config = VariableConfig<
         T,
@@ -582,10 +638,12 @@ where
         )
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let batch = handle.read().await.new_batch();
         AnyUnmerkleized {
-            batch: Db::new_batch(self),
+            batch,
             metadata: None,
+            handle,
         }
     }
 
@@ -733,6 +791,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{DatabaseSet, Single};
     use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
@@ -797,26 +856,21 @@ mod tests {
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
+            let set = Single::from(db);
             let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
-            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db);
+            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle()).await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
                 .await
                 .unwrap();
-            let db = {
-                let (db, _, durability) =
-                    <UnorderedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                        .await
-                        .unwrap();
-                durability.await.expect("finalize flush failed");
-                db
-            };
+            let (set, _, barrier) = DatabaseSet::finalize(set, merkleized).await;
+            assert!(barrier.durable().await, "finalize flush failed");
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let read_keys = [key(1), key(2), key(999)];
@@ -825,8 +879,8 @@ mod tests {
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db);
-            let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
+            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle()).await;
+            let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (slot, value) in &indexed_updates {
                 explicit = explicit.write(read_keys[*slot], *value);
             }
@@ -834,22 +888,21 @@ mod tests {
                 explicit = explicit.write(*k, *v);
             }
             let explicit_root =
-                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata), &db)
+                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
                     .await
                     .unwrap()
                     .root();
 
             // Staged path, with metadata set on the staged handle.
-            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db);
+            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle()).await;
             let split = 2;
-            let (mut staged_values, staged) =
-                staged_batch.stage(&keys[..split], &db).await.unwrap();
-            let (range, suffix_values, staged) = staged.expand(&keys[split..], &db).await.unwrap();
+            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
             assert_eq!(range, split..keys.len());
             staged_values.extend(suffix_values);
             let staged_root = staged
                 .with_metadata(metadata)
-                .merkleize(indexed_updates.clone(), upserts.clone(), &db)
+                .merkleize(indexed_updates.clone(), upserts.clone())
                 .await
                 .unwrap()
                 .root();
@@ -858,11 +911,12 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch =
-                <UnorderedFixedDb as ManagedDb<_>>::new_batch(&db).with_metadata(metadata);
-            let (carried_values, staged) = carried_batch.stage(&keys, &db).await.unwrap();
+            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle())
+                .await
+                .with_metadata(metadata);
+            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
             let carried_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone(), &db)
+                .merkleize(indexed_updates.clone(), upserts.clone())
                 .await
                 .unwrap()
                 .root();
@@ -881,9 +935,9 @@ mod tests {
         Sequential,
     >;
 
-    /// `finalize` must return, with the batch readable on the returned
-    /// database, while its flush is still parked at the storage layer.
-    /// Durability is reported only on the returned handle, and the captured
+    /// `finalize` must return, with the batch readable through the set's
+    /// handles, while its flush is still parked at the storage layer.
+    /// Durability is reported only on the returned barrier, and the captured
     /// snapshot must already prove the post-apply state.
     #[test]
     fn finalize_defers_flush_to_returned_handle() {
@@ -900,30 +954,32 @@ mod tests {
             )
             .await
             .unwrap();
+            let set = Single::from(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
-            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(&db).write(key, Some(value));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(set.handle())
+                .await
+                .write(key, Some(value));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            let (db, snapshot, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
+            let (set, snapshot, barrier) = DatabaseSet::finalize(set, merkleized).await;
 
             // The flush is parked, yet the batch is already readable.
             assert!(
                 pending.starts() > pending.completions(),
                 "finalize must leave its flush parked",
             );
-            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            let db = set.handle();
+            assert_eq!(db.read().await.get(&key).await.unwrap(), Some(value));
 
             // The snapshot freezes at the post-apply boundary and proves the
             // just-applied state, independent of durability.
             let size = Location::new(snapshot.bounds().end);
             assert_eq!(
                 size,
-                db.bounds().end,
+                db.read().await.bounds().end,
                 "snapshot must cover the applied batch"
             );
             let (response, _) = SyncSource::serve(
@@ -941,12 +997,17 @@ mod tests {
             let root = proof
                 .reconstruct_root(&qmdb::hasher::<Sha256>(), &[op.encode()], size - 1)
                 .expect("served proof must reconstruct");
-            assert_eq!(root, db.root(), "snapshot must prove the post-apply root");
+            assert_eq!(
+                root,
+                db.read().await.root(),
+                "snapshot must prove the post-apply root"
+            );
 
             release_pending_syncs(&pending);
-            drive_pending_syncs(&pending, sync)
-                .await
-                .expect("flush must succeed once released");
+            assert!(
+                drive_pending_syncs(&pending, barrier.durable()).await,
+                "flush must succeed once released"
+            );
         });
     }
 }

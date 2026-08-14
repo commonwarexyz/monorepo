@@ -36,12 +36,11 @@ impl App {
 
     async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
-        databases: &Database<E>,
         batches: UnmerkleizedOf<Database<E>, E>,
     ) -> MerkleizedOf<Database<E>, E> {
         batches
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
-            .merkleize(databases.as_ref())
+            .merkleize()
             .await
             .expect("height write must merkleize")
     }
@@ -66,7 +65,6 @@ where
         &mut self,
         context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -74,7 +72,7 @@ where
         let payload = input.upstream.payload;
         let parent = ancestry.next().await?;
         let height = parent.height().next();
-        let merkleized = Self::execute(height, databases, batches).await;
+        let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
@@ -91,7 +89,6 @@ where
         &mut self,
         _context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> Option<MerkleizedOf<Self::Databases, E>> {
         // Validation from higher layers:
@@ -100,7 +97,7 @@ where
         // - Reshare `Payload` validation is handled by `reshare::Application`
 
         let block = ancestry.next().await?;
-        let merkleized = Self::execute(block.height(), databases, batches).await;
+        let merkleized = Self::execute(block.height(), batches).await;
         Some(merkleized)
     }
 
@@ -108,10 +105,9 @@ where
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> MerkleizedOf<Self::Databases, E> {
-        Self::execute(block.height(), databases, batches).await
+        Self::execute(block.height(), batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {

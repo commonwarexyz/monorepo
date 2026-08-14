@@ -16,6 +16,28 @@
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
 //!
+//! # Read access and mutation
+//!
+//! Each database sits behind a gate ([`gate`]) that splits two capabilities the
+//! database handle used to bundle together. The gate owns the database. The set
+//! holds the only [`Mutator`], which is not [`Clone`], so mutation is uniquely
+//! permitted. Batches hold a [`ReadHandle`], which is freely cloned and grants a
+//! [`ReadLease`] covering exactly one storage call.
+//!
+//! Because a lease never spans application code, a mutation waits at most one
+//! storage call to start, and work holding a handle is never cancelled: it
+//! pauses at its next read and resumes once the mutation completes. A mutation
+//! that is interrupted leaves the gate poisoned, which is reachable only while
+//! the mutating task is being torn down.
+//!
+//! Two invariants keep this sound. A batch handed to [`ManagedDb::finalize`]
+//! must not read through its own handle, because that call runs while the write
+//! side is held. And a [`Mutator`] must outlive the handles from the same gate:
+//! it is a capability, not the thing keeping the database alive, so readers
+//! would otherwise go on answering from a database that can never advance. Both
+//! hold structurally today, because the set holds the [`Mutator`] and every
+//! handle lives in a batch that set outlives.
+//!
 //! # State Sync
 //!
 //! State sync orchestration is expressed by two traits:
@@ -105,20 +127,24 @@ use tracing::debug;
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
+mod cell;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
 mod snapshot;
 
+pub use cell::{Mutator, ReadHandle, ReadLease, gate};
 pub use snapshot::{Publisher, Reader};
 
 /// Mutable batch state before merkleization.
 ///
 /// Concrete types provide key-value operations (`get`, `write`, `set`,
 /// `append`, etc.) as inherent methods; the generic wrapper only needs
-/// [`merkleize`](Self::merkleize).
-pub trait Unmerkleized<D>: Sized + Send {
+/// [`merkleize`](Self::merkleize). Batches carry a [`ReadHandle`] to the
+/// database they were created from, so every operation reads the right
+/// database and no operation can delay a mutation by more than one call.
+pub trait Unmerkleized: Sized + Send {
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
 
@@ -127,19 +153,18 @@ pub trait Unmerkleized<D>: Sized + Send {
 
     /// Resolve all mutations, compute the new state root, and produce a
     /// merkleized batch.
-    ///
-    /// `db` must be the database the batch was created from.
-    fn merkleize(
-        self,
-        db: &D,
-    ) -> impl Future<Output = Result<Self::Merkleized, Self::Error>> + Send;
+    fn merkleize(self) -> impl Future<Output = Result<Self::Merkleized, Self::Error>> + Send;
 }
 
 /// Sealed batch state with a computed root.
 ///
 /// The application uses [`root`](Self::root) in block headers, and the wrapper
 /// later finalizes this batch.
-pub trait Merkleized: Sized + Send + Sync {
+///
+/// Implementations are handles over shared batch state, so [`Clone`] is cheap.
+/// The wrapper relies on it to keep a block forkable while that same block is
+/// being applied.
+pub trait Merkleized: Clone + Sized + Send + Sync {
     /// The digest type used for the state root.
     type Digest: Digest;
 
@@ -159,8 +184,8 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Implementations create new batches from applied state and apply finalized
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
-/// Batches hold no database handle. Reads borrow the database at each call and
-/// fall back from pending batch state to applied state through that reference.
+/// Batches carry a [`ReadHandle`] to their database. Reads acquire a short
+/// lease per call and fall back from pending batch state to applied state.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
@@ -170,10 +195,11 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Mutating methods take the database by value and return it on success. If a mutating
 /// method returns an error, or its future is dropped before it finishes, the database is
 /// gone: state that was not yet durable is discarded, but everything already on disk stays
-/// recoverable.
+/// recoverable. Behind a gate that leaves the database poisoned, so later reads park
+/// rather than observe a database that is missing.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
-    type Unmerkleized: Unmerkleized<Self, Merkleized = Self::Merkleized>;
+    type Unmerkleized: Unmerkleized<Merkleized = Self::Merkleized>;
 
     /// A batch whose root has been computed but has not yet been applied to
     /// the underlying database.
@@ -209,7 +235,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Create a new unmerkleized batch rooted at the database's applied
     /// state.
-    fn new_batch(&self) -> Self::Unmerkleized;
+    ///
+    /// The batch keeps `handle` and leases the database through it on every
+    /// read, so it stays valid across applies of compatible batches.
+    fn new_batch(handle: ReadHandle<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Return true if a merkleized batch matches a sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
@@ -345,7 +374,10 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     type Unmerkleized: Send;
 
     /// One [`ManagedDb::Merkleized`] per database, shaped like [`Self::Unmerkleized`].
-    type Merkleized: Send + Sync;
+    ///
+    /// [`Clone`] is cheap (see [`Merkleized`]) and the wrapper uses it to keep a
+    /// block forkable while that block is being applied.
+    type Merkleized: Clone + Send + Sync;
 
     /// One [`ManagedDb::Snapshot`] per database, shaped like [`Self::Unmerkleized`].
     type Snapshots: Send + Sync + 'static;
@@ -359,14 +391,27 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// [`Self::Config`].
     type SyncTargets: Clone + PartialEq + Send + Sync;
 
+    /// One [`ReadHandle`] per database, shaped like [`Self::Unmerkleized`].
+    ///
+    /// Handles are cloned into batches, and hooks that read applied state
+    /// directly acquire leases through them.
+    type Handles: Clone + Send + Sync + 'static;
+
     /// Construct the database set from its configuration.
     fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
 
     /// Return the sync targets produced by a newly initialized database set.
     fn initial_sync_targets() -> Self::SyncTargets;
 
+    /// Read handles over the set's databases.
+    fn handles(&self) -> Self::Handles;
+
     /// Create unmerkleized batches from each database's applied state.
-    fn new_batches(&self) -> Self::Unmerkleized;
+    ///
+    /// Takes handles rather than `&self` because verification jobs build
+    /// batches without holding the set. Methods that do take the set are the
+    /// ones only its owner calls.
+    fn new_batches(handles: &Self::Handles) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Create child unmerkleized batches from a pending merkleized parent.
     ///
@@ -379,7 +424,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// Return sync targets for the set's currently applied state.
     ///
     /// Applied state may be ahead of durable state while a flush is pending.
-    fn applied_targets(&self) -> Self::SyncTargets;
+    fn applied_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 
     /// Apply each merkleized batch's changeset to its underlying database, capture each
     /// database's snapshot, and begin persisting them.
@@ -425,21 +470,32 @@ pub type SnapshotsOf<D, E> = <D as DatabaseSet<E>>::Snapshots;
 /// Syntactic sugar for the type of sync targets used by a given [DatabaseSet] D.
 pub type SyncTargetsOf<D, E> = <D as DatabaseSet<E>>::SyncTargets;
 
+/// Syntactic sugar for the type of read handles used by a given [DatabaseSet] D.
+pub type HandlesOf<D, E> = <D as DatabaseSet<E>>::Handles;
+
 /// A one-database set.
 ///
-/// Reaching the database is explicit through [`AsRef`], so a set never stands in
-/// for the database it holds.
-pub struct Single<T>(T);
-
-impl<T> AsRef<T> for Single<T> {
-    fn as_ref(&self) -> &T {
-        &self.0
-    }
+/// The database lives behind a gate. The set holds the sole [`Mutator`] and a
+/// [`ReadHandle`] it clones into batches.
+pub struct Single<T> {
+    mutator: Mutator<T>,
+    handle: ReadHandle<T>,
 }
 
 impl<T> From<T> for Single<T> {
     fn from(database: T) -> Self {
-        Self(database)
+        let (mutator, handle) = gate(database);
+        Self { mutator, handle }
+    }
+}
+
+impl<T> Single<T> {
+    /// A read handle over the set's database.
+    ///
+    /// Same handle as [`DatabaseSet::handles`], reachable without naming the
+    /// runtime the set is used with.
+    pub fn handle(&self) -> ReadHandle<T> {
+        self.handle.clone()
     }
 }
 
@@ -453,10 +509,11 @@ where
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
     type Snapshots = T::Snapshot;
+    type Handles = ReadHandle<T>;
 
     async fn init(context: E, config: Self::Config) -> Self {
         match T::init(context.child("db"), config).await {
-            Ok(database) => Self(database),
+            Ok(database) => Self::from(database),
             Err(err) => panic!(
                 "database init failed (type {}): {err:?}",
                 core::any::type_name::<T>(),
@@ -468,8 +525,12 @@ where
         T::initial_sync_target()
     }
 
-    fn new_batches(&self) -> Self::Unmerkleized {
-        self.0.new_batch()
+    fn handles(&self) -> Self::Handles {
+        self.handle()
+    }
+
+    async fn new_batches(handles: &Self::Handles) -> Self::Unmerkleized {
+        T::new_batch(handles.clone()).await
     }
 
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -480,33 +541,28 @@ where
         T::matches_sync_target(batches, targets)
     }
 
-    fn applied_targets(&self) -> Self::SyncTargets {
-        T::sync_target(&self.0)
+    async fn applied_targets(&self) -> Self::SyncTargets {
+        self.handle.read().await.sync_target()
     }
 
     async fn finalize(self, batches: Self::Merkleized) -> (Self, Self::Snapshots, Barrier) {
-        let (database, snapshot, sync) = finalize_or_panic(self.0, batches, None).await;
+        let (member, snapshot, sync) = finalize_or_panic(self, batches, None).await;
         let barrier = Barrier {
             syncs: vec![(core::any::type_name::<T>(), None, sync)],
         };
-        (Self(database), snapshot, barrier)
+        (member, snapshot, barrier)
     }
 
     async fn snapshot(self) -> (Self, Self::Snapshots) {
-        let (database, snapshot) = snapshot_or_panic(self.0, None).await;
-        (Self(database), snapshot)
+        snapshot_or_panic(self, None).await
     }
 
     async fn prune(self, targets: &Self::SyncTargets) -> Self {
-        Self(prune_or_panic(self.0, targets, None).await)
+        prune_or_panic(self, targets, None).await
     }
 
     async fn rewind_to_targets(self, targets: Self::SyncTargets) -> Self {
-        if T::sync_target(&self.0) == targets {
-            self
-        } else {
-            Self(rewind_or_panic(self.0, targets, None).await)
-        }
+        rewind_or_panic(self, targets, None).await
     }
 }
 
@@ -751,7 +807,7 @@ where
             T::sync_target(&database) == converged_target,
             "state sync database target does not match the coordinator target",
         );
-        Ok((Self(database), converged_anchor))
+        Ok((Self::from(database), converged_anchor))
     }
 }
 
@@ -805,22 +861,24 @@ where
     target_tx.send_lossy(new_target).await
 }
 
-/// Implement [`DatabaseSet`] for a tuple of [`ManagedDb`] instances owned by value.
+/// Implement [`DatabaseSet`] for a tuple of gated one-database sets.
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
         impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
-            for ($($T,)+)
+            for ($(Single<$T>,)+)
         {
             type Unmerkleized = ($($T::Unmerkleized,)+);
             type Merkleized = ($($T::Merkleized,)+);
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
             type Snapshots = ($($T::Snapshot,)+);
+            type Handles = ($(ReadHandle<$T>,)+);
 
             async fn init(context: E, config: Self::Config) -> Self {
                 join!($(
                     async {
-                        $T::init(
+                        Single::from(
+                            $T::init(
                                 context.child(concat!("db_", stringify!($idx))),
                                 config.$idx,
                             )
@@ -831,7 +889,8 @@ macro_rules! impl_database_set {
                                 ", type ",
                                 stringify!($T),
                                 ")",
-                            ))
+                            )),
+                        )
                     },
                 )+)
             }
@@ -840,8 +899,14 @@ macro_rules! impl_database_set {
                 ($($T::initial_sync_target(),)+)
             }
 
-            fn new_batches(&self) -> Self::Unmerkleized {
-                ($(self.$idx.new_batch(),)+)
+            fn handles(&self) -> Self::Handles {
+                ($(self.$idx.handle.clone(),)+)
+            }
+
+            async fn new_batches(handles: &Self::Handles) -> Self::Unmerkleized {
+                join!($(
+                    $T::new_batch(handles.$idx.clone()),
+                )+)
             }
 
             fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -852,8 +917,10 @@ macro_rules! impl_database_set {
                 $($T::matches_sync_target(&batches.$idx, &targets.$idx))&&+
             }
 
-            fn applied_targets(&self) -> Self::SyncTargets {
-                ($($T::sync_target(&self.$idx),)+)
+            async fn applied_targets(&self) -> Self::SyncTargets {
+                join!($(
+                    async { self.$idx.handle.read().await.sync_target() },
+                )+)
             }
 
             async fn finalize(self, batches: Self::Merkleized) -> (Self, Self::Snapshots, Barrier) {
@@ -889,13 +956,7 @@ macro_rules! impl_database_set {
 
             async fn rewind_to_targets(self, targets: Self::SyncTargets) -> Self {
                 join!($(
-                    async {
-                        if $T::sync_target(&self.$idx) == targets.$idx {
-                            self.$idx
-                        } else {
-                            rewind_or_panic(self.$idx, targets.$idx, Some($idx)).await
-                        }
-                    },
+                    rewind_or_panic(self.$idx, targets.$idx, Some($idx)),
                 )+)
             }
         }
@@ -948,7 +1009,7 @@ struct CoordinatorSyncSenders<T> {
 
 macro_rules! impl_state_sync_set {
     ($($T:ident : $S:ident : $idx:tt),+) => {
-        impl<E, D, $($T, $S),+> StateSyncSet<E, ($($S,)+), D> for ($($T,)+)
+        impl<E, D, $($T, $S),+> StateSyncSet<E, ($($S,)+), D> for ($(Single<$T>,)+)
         where
             E: Send + Sync + Spawner + Metrics + 'static,
             D: Digest + 'static,
@@ -1223,11 +1284,11 @@ macro_rules! impl_state_sync_set {
                     return Err(err);
                 }
 
-                let synced = ($(synced.$idx?,)+);
+                let synced = ($(Single::from(synced.$idx?),)+);
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
-                if <Self as DatabaseSet<E>>::applied_targets(&synced) != converged_targets {
+                if <Self as DatabaseSet<E>>::applied_targets(&synced).await != converged_targets {
                     return Err(
                         "state sync database targets do not match the coordinator target set"
                             .into(),
@@ -1619,89 +1680,116 @@ where
 
 #[tracing::instrument(name = "stateful.db.snapshot_or_panic", level = "info", skip_all, fields(index = index))]
 async fn snapshot_or_panic<E, T: ManagedDb<E>>(
-    database: T,
+    member: Single<T>,
     index: Option<usize>,
-) -> (T, T::Snapshot) {
+) -> (Single<T>, T::Snapshot) {
     // Capture failures are fatal by design: a set that cannot snapshot its applied
     // state cannot publish, and other members may already have captured.
-    match database.snapshot().await {
-        Ok(result) => result,
-        Err(err) => {
-            let index = index.map_or(String::new(), |i| format!("index {i}, "));
-            panic!(
-                "database snapshot capture failed ({index}type {}): {err:?}",
-                core::any::type_name::<T>(),
-            );
-        }
-    }
+    let Single { mutator, handle } = member;
+    let (mutator, snapshot) = mutator
+        .mutate(|database| async move {
+            match database.snapshot().await {
+                Ok(result) => result,
+                Err(err) => {
+                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                    panic!(
+                        "database snapshot capture failed ({index}type {}): {err:?}",
+                        core::any::type_name::<T>(),
+                    );
+                }
+            }
+        })
+        .await;
+    (Single { mutator, handle }, snapshot)
 }
 
 #[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
-    database: T,
+    member: Single<T>,
     batch: T::Merkleized,
     index: Option<usize>,
-) -> (T, T::Snapshot, Handle<()>) {
+) -> (Single<T>, T::Snapshot, Handle<()>) {
     // Mutable finalize failures are fatal by design because the batch may already have been
     // applied to other databases in the same set, leaving partially applied state.
-    match database.finalize(batch).await {
-        Ok(result) => result,
-        Err(err) => {
-            let index = index.map_or(String::new(), |i| format!("index {i}, "));
-            panic!(
-                "database finalize failed ({index}type {}): {err:?}",
-                core::any::type_name::<T>(),
-            );
-        }
-    }
+    let Single { mutator, handle } = member;
+    let (mutator, (snapshot, sync)) = mutator
+        .mutate(|database| async move {
+            match database.finalize(batch).await {
+                Ok((database, snapshot, sync)) => (database, (snapshot, sync)),
+                Err(err) => {
+                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                    panic!(
+                        "database finalize failed ({index}type {}): {err:?}",
+                        core::any::type_name::<T>(),
+                    );
+                }
+            }
+        })
+        .await;
+    (Single { mutator, handle }, snapshot, sync)
 }
 
 #[tracing::instrument(name = "stateful.db.rewind_or_panic", level = "info", skip_all, fields(index = index))]
 async fn rewind_or_panic<E, T: ManagedDb<E>>(
-    database: T,
+    member: Single<T>,
     target: T::SyncTarget,
     index: Option<usize>,
-) -> T {
+) -> Single<T> {
     // Mutable rewind failures are fatal by design because the database handle
     // may be internally diverged after a failed rewind.
-    match database.rewind_to_target(target).await {
-        Ok(database) => database,
-        Err(err) => {
-            let index = index.map_or(String::new(), |i| format!("index {i}, "));
-            panic!(
-                "database rewind failed ({index}type {}): {err:?}",
-                core::any::type_name::<T>(),
-            );
-        }
-    }
+    let Single { mutator, handle } = member;
+    let (mutator, ()) = mutator
+        .mutate(|database| async move {
+            if T::sync_target(&database) == target {
+                return (database, ());
+            }
+            match database.rewind_to_target(target).await {
+                Ok(database) => (database, ()),
+                Err(err) => {
+                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                    panic!(
+                        "database rewind failed ({index}type {}): {err:?}",
+                        core::any::type_name::<T>(),
+                    );
+                }
+            }
+        })
+        .await;
+    Single { mutator, handle }
 }
 
 #[tracing::instrument(name = "stateful.db.prune_or_panic", level = "info", skip_all, fields(index = index))]
 async fn prune_or_panic<E, T: ManagedDb<E>>(
-    database: T,
+    member: Single<T>,
     target: &T::SyncTarget,
     index: Option<usize>,
-) -> T {
+) -> Single<T> {
     // Prune failures are fatal because pruning may already have discarded part
     // of the retained history before the error surfaced.
-    match database.prune(target).await {
-        Ok(database) => database,
-        Err(err) => {
-            let index = index.map_or(String::new(), |i| format!("index {i}, "));
-            panic!(
-                "database prune failed ({index}type {}): {err:?}",
-                core::any::type_name::<T>(),
-            );
-        }
-    }
+    let Single { mutator, handle } = member;
+    let (mutator, ()) = mutator
+        .mutate(|database| async move {
+            match database.prune(target).await {
+                Ok(database) => (database, ()),
+                Err(err) => {
+                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                    panic!(
+                        "database prune failed ({index}type {}): {err:?}",
+                        core::any::type_name::<T>(),
+                    );
+                }
+            }
+        })
+        .await;
+    Single { mutator, handle }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
-        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Single, StateSyncDb, StateSyncSet, SyncEngineConfig,
-        TipUpdate, drain_single_tip_updates,
+        MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Mutator, ReadHandle, Single, StateSyncDb,
+        StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates, gate,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -1726,12 +1814,12 @@ mod tests {
     };
 
     mod managed_db_lifecycle {
-        use super::ManagedDb;
+        use super::{ManagedDb, Mutator, gate};
         use crate::stateful::db::Unmerkleized;
         use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
         use commonware_runtime::{
-            Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+            Handle, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
         };
         use commonware_storage::{
             journal::contiguous::{
@@ -2042,21 +2130,38 @@ mod tests {
             }
         }
 
+        /// Finalize `batch` through the gate, returning the snapshot and flush handle.
+        async fn finalize<T: ManagedDb<Context>>(
+            mutator: Mutator<T>,
+            batch: T::Merkleized,
+        ) -> (Mutator<T>, T::Snapshot, Handle<()>) {
+            let (mutator, (snapshot, sync)) = mutator
+                .mutate(|db| async move {
+                    let (db, snapshot, sync) = T::finalize(db, batch).await.unwrap_or_else(|err| {
+                        panic!("finalize failed: {err:?}");
+                    });
+                    (db, (snapshot, sync))
+                })
+                .await;
+            (mutator, snapshot, sync)
+        }
+
         async fn assert_initial_sync_target_and_finalize<T>(context: Context, config: T::Config)
         where
             T: ManagedDb<Context> + 'static,
-            <T::Unmerkleized as Unmerkleized<T>>::Error: Debug,
+            <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
         {
             let initial = T::initial_sync_target();
             let db = T::init(context, config).await.unwrap();
             assert_eq!(initial, db.sync_target());
-            let batch = db
-                .new_batch()
-                .merkleize(&db)
+            let (mutator, handle) = gate(db);
+            let batch = T::new_batch(handle)
+                .await
+                .merkleize()
                 .await
                 .expect("empty batch must merkleize");
-            let (_db, snapshot, sync) = T::finalize(db, batch).await.unwrap();
+            let (_mutator, snapshot, sync) = finalize(mutator, batch).await;
             drop(snapshot);
             sync.await.expect("empty batch finalize flush failed");
         }
@@ -2108,7 +2213,7 @@ mod tests {
             #[case] config: fn(&Context, &str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
-            <T::Unmerkleized as Unmerkleized<T>>::Error: Debug,
+            <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
@@ -2120,34 +2225,43 @@ mod tests {
         async fn assert_rewind_restores_finalized_target<T>(context: Context, config: T::Config)
         where
             T: ManagedDb<Context> + 'static,
-            <T::Unmerkleized as Unmerkleized<T>>::Error: Debug,
+            <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
         {
             let db = T::init(context, config).await.unwrap();
-            let batch = db
-                .new_batch()
-                .merkleize(&db)
+            let (mutator, handle) = gate(db);
+            let batch = T::new_batch(handle.clone())
+                .await
+                .merkleize()
                 .await
                 .expect("first batch must merkleize");
-            let (db, snapshot, sync) = T::finalize(db, batch).await.unwrap();
+            let (mutator, snapshot, sync) = finalize(mutator, batch).await;
             drop(snapshot);
             sync.await.expect("first finalize flush failed");
-            let target = db.sync_target();
+            let target = handle.read().await.sync_target();
 
-            let batch = db
-                .new_batch()
-                .merkleize(&db)
+            let batch = T::new_batch(handle.clone())
+                .await
+                .merkleize()
                 .await
                 .expect("second batch must merkleize");
-            let (db, snapshot, sync) = T::finalize(db, batch).await.unwrap();
+            let (mutator, snapshot, sync) = finalize(mutator, batch).await;
             drop(snapshot);
             sync.await.expect("second finalize flush failed");
 
-            let db = db
-                .rewind_to_target(target.clone())
-                .await
-                .unwrap_or_else(|_| panic!("rewind to finalized target failed"));
-            assert_eq!(db.sync_target(), target);
+            let (_mutator, ()) = mutator
+                .mutate(|db| {
+                    let target = target.clone();
+                    async move {
+                        let db = db
+                            .rewind_to_target(target)
+                            .await
+                            .unwrap_or_else(|_| panic!("rewind to finalized target failed"));
+                        (db, ())
+                    }
+                })
+                .await;
+            assert_eq!(handle.read().await.sync_target(), target);
         }
 
         #[rstest]
@@ -2197,7 +2311,7 @@ mod tests {
             #[case] config: fn(&Context, &str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
-            <T::Unmerkleized as Unmerkleized<T>>::Error: Debug,
+            <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
@@ -2248,7 +2362,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2285,7 +2399,7 @@ mod tests {
             unreachable!("CountingRewindDb is constructed directly in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2324,7 +2438,7 @@ mod tests {
             Ok(Self { prune_count })
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2434,7 +2548,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2476,7 +2590,7 @@ mod tests {
             Ok(Self)
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2501,7 +2615,7 @@ mod tests {
     #[test]
     fn tuple_rewind_to_targets_skips_already_aligned_databases() {
         deterministic::Runner::default().start(|_context| async move {
-            type RewindPair = (CountingRewindDb, CountingRewindDb);
+            type RewindPair = (Single<CountingRewindDb>, Single<CountingRewindDb>);
 
             let left = CountingRewindDb {
                 current_target: 2,
@@ -2512,18 +2626,19 @@ mod tests {
                 rewind_count: 0,
             };
 
-            let (left, right) =
-                <RewindPair as DatabaseSet<deterministic::Context>>::rewind_to_targets(
-                    (left, right),
-                    (1, 1),
-                )
-                .await;
+            let databases: RewindPair = (Single::from(left), Single::from(right));
+            let databases = <RewindPair as DatabaseSet<deterministic::Context>>::rewind_to_targets(
+                databases,
+                (1, 1),
+            )
+            .await;
 
-            assert_eq!(left.current_target, 1);
-            assert_eq!(left.rewind_count, 1);
+            let (left, right) = (databases.0.handle(), databases.1.handle());
+            assert_eq!(left.read().await.current_target, 1);
+            assert_eq!(left.read().await.rewind_count, 1);
 
-            assert_eq!(right.current_target, 1);
-            assert_eq!(right.rewind_count, 0);
+            assert_eq!(right.read().await.current_target, 1);
+            assert_eq!(right.read().await.rewind_count, 0);
         });
     }
 
@@ -2535,12 +2650,7 @@ mod tests {
                 prune_count: prune_count.clone(),
             });
 
-            let _database =
-                <Single<PruneCountingDb> as DatabaseSet<deterministic::Context>>::prune(
-                    database,
-                    &(),
-                )
-                .await;
+            let _database = DatabaseSet::<deterministic::Context>::prune(database, &()).await;
 
             assert_eq!(prune_count.load(Ordering::SeqCst), 1);
         });
@@ -2564,7 +2674,7 @@ mod tests {
             unreachable!("BlockingFinalizeDb is constructed directly in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2612,7 +2722,7 @@ mod tests {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2655,7 +2765,7 @@ mod tests {
             )
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2694,7 +2804,7 @@ mod tests {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2733,7 +2843,7 @@ mod tests {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2772,7 +2882,7 @@ mod tests {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2811,7 +2921,7 @@ mod tests {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2850,7 +2960,7 @@ mod tests {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2889,7 +2999,7 @@ mod tests {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2928,7 +3038,7 @@ mod tests {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2971,7 +3081,7 @@ mod tests {
             )
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3119,7 +3229,7 @@ mod tests {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3567,13 +3677,14 @@ mod tests {
             let (release2_tx, release2_rx) = oneshot::channel();
 
             let databases = (
-                BlockingFinalizeDb::new(started1_tx, release1_rx),
-                BlockingFinalizeDb::new(started2_tx, release2_rx),
+                Single::from(BlockingFinalizeDb::new(started1_tx, release1_rx)),
+                Single::from(BlockingFinalizeDb::new(started2_tx, release2_rx)),
             );
 
-            let finalize = <(BlockingFinalizeDb, BlockingFinalizeDb) as DatabaseSet<
-                deterministic::Context,
-            >>::finalize(databases, (TestMerkleized, TestMerkleized));
+            let finalize = DatabaseSet::<deterministic::Context>::finalize(
+                databases,
+                (TestMerkleized, TestMerkleized),
+            );
             pin_mut!(finalize);
             assert!(finalize.as_mut().now_or_never().is_none());
 
@@ -3600,8 +3711,8 @@ mod tests {
     )]
     fn tuple_finalize_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
-            let databases = (TestDb, FailingFinalizeDb);
-            let _ = <(TestDb, FailingFinalizeDb) as DatabaseSet<deterministic::Context>>::finalize(
+            let databases = (Single::from(TestDb), Single::from(FailingFinalizeDb));
+            let _ = DatabaseSet::<deterministic::Context>::finalize(
                 databases,
                 (TestMerkleized, TestMerkleized),
             )
@@ -3615,11 +3726,8 @@ mod tests {
     )]
     fn tuple_snapshot_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
-            let databases = (TestDb, FailingSnapshotDb);
-            let _ = <(TestDb, FailingSnapshotDb) as DatabaseSet<deterministic::Context>>::snapshot(
-                databases,
-            )
-            .await;
+            let databases = (Single::from(TestDb), Single::from(FailingSnapshotDb));
+            let _ = DatabaseSet::<deterministic::Context>::snapshot(databases).await;
         });
     }
 
@@ -3862,7 +3970,7 @@ mod tests {
             drop(tip_tx);
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
-            let final_target = database.as_ref().final_target;
+            let final_target = database.handle().read().await.final_target;
             assert_eq!(
                 final_target, 2,
                 "single-db sync target must never move backward"
@@ -3920,7 +4028,7 @@ mod tests {
             drop(tip_tx);
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
-            assert_eq!(database.as_ref().final_target, 7);
+            assert_eq!(database.handle().read().await.final_target, 7);
             assert_eq!(converged_anchor, anchor(9));
         });
     }
@@ -3960,7 +4068,7 @@ mod tests {
             let _ = tip_tx.send(TipUpdate::new(anchor(2), 2)).await;
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
-            let final_target = database.as_ref().final_target;
+            let final_target = database.handle().read().await.final_target;
             assert_eq!(
                 final_target, 2,
                 "single-db sync must not finish on a stale reached target",
@@ -3985,7 +4093,7 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync")
                 .spawn(move |context| async move {
-                    <(SlowSyncDb, FastSyncDb) as StateSyncSet<
+                    <(Single<SlowSyncDb>, Single<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, Arc<AtomicBool>),
                         sha256::Digest,
@@ -4017,8 +4125,8 @@ mod tests {
             drop(tip_tx);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
-            let slow_target = synced.0.final_target;
-            let fast_target = synced.1.final_target;
+            let slow_target = synced.0.handle().read().await.final_target;
+            let fast_target = synced.1.handle().read().await.final_target;
 
             assert_eq!(
                 slow_target, fast_target,
@@ -4044,7 +4152,7 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <(SlowSyncDb, FastSyncDb) as StateSyncSet<
+                    <(Single<SlowSyncDb>, Single<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, Arc<AtomicBool>),
                         sha256::Digest,
@@ -4078,8 +4186,8 @@ mod tests {
             slow_release.store(true, Ordering::SeqCst);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
-            let slow_target = synced.0.final_target;
-            let fast_target = synced.1.final_target;
+            let slow_target = synced.0.handle().read().await.final_target;
+            let fast_target = synced.1.handle().read().await.final_target;
             assert_eq!(
                 slow_target, 2,
                 "slow database target must never move backward"
@@ -4102,7 +4210,7 @@ mod tests {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let fast_done = Arc::new(AtomicBool::new(false));
 
-            let result = <(MismatchedTargetSyncDb, FastSyncDb) as StateSyncSet<
+            let result = <(Single<MismatchedTargetSyncDb>, Single<FastSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 ((), Arc<AtomicBool>),
                 sha256::Digest,
@@ -4139,26 +4247,27 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
 
-            let result = <(ImmediateStateSyncDb, FailingStateSyncDb) as StateSyncSet<
-                deterministic::Context,
-                ((), ()),
-                sha256::Digest,
-            >>::sync(
-                context,
-                ((), ()),
-                ((), ()),
-                anchor(0),
-                (0, 0),
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
-                },
-            )
-            .await;
+            let result =
+                <(Single<ImmediateStateSyncDb>, Single<FailingStateSyncDb>) as StateSyncSet<
+                    deterministic::Context,
+                    ((), ()),
+                    sha256::Digest,
+                >>::sync(
+                    context,
+                    ((), ()),
+                    ((), ()),
+                    anchor(0),
+                    (0, 0),
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NonZeroUsize::new(1).unwrap(),
+                        max_retained_roots: 0,
+                    },
+                )
+                .await;
 
             let err = match result {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
@@ -4181,7 +4290,7 @@ mod tests {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let release = Arc::new(AtomicBool::new(true));
 
-            let result = <(SlowSyncDb, FailingStateSyncDb) as StateSyncSet<
+            let result = <(Single<SlowSyncDb>, Single<FailingStateSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 (Arc<AtomicBool>, ()),
                 sha256::Digest,
@@ -4222,26 +4331,27 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
 
-            let result = <(FinishClosedSyncDb, FailingStateSyncDb) as StateSyncSet<
-                deterministic::Context,
-                ((), ()),
-                sha256::Digest,
-            >>::sync(
-                context,
-                ((), ()),
-                ((), ()),
-                anchor(0),
-                (0, 0),
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
-                },
-            )
-            .await;
+            let result =
+                <(Single<FinishClosedSyncDb>, Single<FailingStateSyncDb>) as StateSyncSet<
+                    deterministic::Context,
+                    ((), ()),
+                    sha256::Digest,
+                >>::sync(
+                    context,
+                    ((), ()),
+                    ((), ()),
+                    anchor(0),
+                    (0, 0),
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NonZeroUsize::new(1).unwrap(),
+                        max_retained_roots: 0,
+                    },
+                )
+                .await;
 
             let err = match result {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
@@ -4353,8 +4463,8 @@ mod tests {
             let sync = context.child("tuple_state_sync_algorithm").spawn(
                 move |context| async move {
                     <(
-                        ObservedSlowSyncDb,
-                        ObservedFastSyncDb,
+                        Single<ObservedSlowSyncDb>,
+                        Single<ObservedFastSyncDb>,
                     ) as StateSyncSet<
                         deterministic::Context,
                         (SlowSyncController, FastSyncObserver),
@@ -4389,8 +4499,8 @@ mod tests {
             drop(tip_tx);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
-            let slow_target = synced.0.final_target;
-            let fast_target = synced.1.final_target;
+            let slow_target = synced.0.handle().read().await.final_target;
+            let fast_target = synced.1.handle().read().await.final_target;
 
             assert_eq!(
                 slow_target, fast_target,
@@ -4424,7 +4534,7 @@ mod tests {
                     update_count: fast_update_count.clone(),
                 };
                 move |context| async move {
-                    <(SlowSyncDb, ObservedFastSyncDb) as StateSyncSet<
+                    <(Single<SlowSyncDb>, Single<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, FastSyncObserver),
                         sha256::Digest,
@@ -4456,8 +4566,8 @@ mod tests {
             slow_release.store(true, Ordering::SeqCst);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
-            let slow_target = synced.0.final_target;
-            let fast_target = synced.1.final_target;
+            let slow_target = synced.0.handle().read().await.final_target;
+            let fast_target = synced.1.handle().read().await.final_target;
 
             assert_eq!(slow_target, target);
             assert_eq!(fast_target, target);
@@ -4487,7 +4597,7 @@ mod tests {
                         update_count: fast_update_count.clone(),
                     };
                     move |context| async move {
-                        <(SlowSyncDb, DistinctObservedFastSyncDb) as StateSyncSet<
+                        <(Single<SlowSyncDb>, Single<DistinctObservedFastSyncDb>) as StateSyncSet<
                             deterministic::Context,
                             (Arc<AtomicBool>, FastSyncObserver),
                             sha256::Digest,
@@ -4521,8 +4631,8 @@ mod tests {
             drop(tip_tx);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
-            let slow_target = synced.0.final_target;
-            let fast_target = synced.1.final_target;
+            let slow_target = synced.0.handle().read().await.final_target;
+            let fast_target = synced.1.handle().read().await.final_target;
 
             assert_eq!(slow_target, 9);
             assert_eq!(fast_target, 7);

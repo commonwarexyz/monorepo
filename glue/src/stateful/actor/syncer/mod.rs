@@ -413,10 +413,10 @@ where
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
     // if the databases were corrupted or pruned too aggressively.
-    if databases.applied_targets() != processed_targets {
+    if databases.applied_targets().await != processed_targets {
         databases = databases.rewind_to_targets(processed_targets.clone()).await;
         assert!(
-            databases.applied_targets() == processed_targets,
+            databases.applied_targets().await == processed_targets,
             "databases must be consistent with marshal floor after rewind"
         );
     }

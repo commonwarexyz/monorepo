@@ -5,7 +5,7 @@
 //! adapters expose append and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -30,25 +30,30 @@ use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps an unjournaled keyless batch before merkleization.
-pub struct KeylessUnjournaledUnmerkleized<F, V, H, S>
+pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, C, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
+    handle: ReadHandle<CompactDb<F, E, V, H, C, S>>,
 }
 
-impl<F, V, H, S> Deref for KeylessUnjournaledUnmerkleized<F, V, H, S>
+impl<F, E, V, H, C, S> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, C, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Target = CompactUnmerkleizedBatch<F, H, V, S>;
@@ -58,12 +63,14 @@ where
     }
 }
 
-impl<F, V, H, S> KeylessUnjournaledUnmerkleized<F, V, H, S>
+impl<F, E, V, H, C, S> KeylessUnjournaledUnmerkleized<F, E, V, H, C, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     /// Set commit metadata included in the next merkleization.
@@ -86,23 +93,46 @@ where
 }
 
 /// Wraps an unjournaled keyless batch after merkleization.
-pub struct KeylessUnjournaledMerkleized<F, V, H, S>
+pub struct KeylessUnjournaledMerkleized<F, E, V, H, C, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, V, S>>,
+    handle: ReadHandle<CompactDb<F, E, V, H, C, S>>,
 }
 
-impl<F, V, H, S> Deref for KeylessUnjournaledMerkleized<F, V, H, S>
+impl<F, E, V, H, C, S> Clone for KeylessUnjournaledMerkleized<F, E, V, H, C, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<F, E, V, H, C, S> Deref for KeylessUnjournaledMerkleized<F, E, V, H, C, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Target = CompactMerkleizedBatch<F, H::Digest, V, S>;
@@ -112,43 +142,45 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> UnmerkleizedTrait<CompactDb<F, E, V, H, C, S>>
-    for KeylessUnjournaledUnmerkleized<F, V, H, S>
+impl<F, E, V, H, C, S> UnmerkleizedTrait for KeylessUnjournaledUnmerkleized<F, E, V, H, C, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    type Merkleized = KeylessUnjournaledMerkleized<F, V, H, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, E, V, H, C, S>;
     type Error = Error<F>;
 
-    async fn merkleize(
-        self,
-        db: &CompactDb<F, E, V, H, C, S>,
-    ) -> Result<Self::Merkleized, Error<F>> {
-        let merkleized = self
-            .batch
-            .merkleize(db, self.metadata, self.inactivity_floor)
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            inactivity_floor,
+            handle,
+        } = self;
+        let inner = batch
+            .merkleize(&*handle.read().await, metadata, inactivity_floor)
             .await;
-        Ok(KeylessUnjournaledMerkleized { inner: merkleized })
+        Ok(KeylessUnjournaledMerkleized { inner, handle })
     }
 }
 
-impl<F, V, H, S> MerkleizedTrait for KeylessUnjournaledMerkleized<F, V, H, S>
+impl<F, E, V, H, C, S> MerkleizedTrait for KeylessUnjournaledMerkleized<F, E, V, H, C, S>
 where
     F: Family,
+    E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared,
+    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, V, H, S>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, V, H, C, S>;
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -158,6 +190,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
+            handle: self.handle.clone(),
         }
     }
 }
@@ -171,8 +204,8 @@ where
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, FixedEncoding<V>, H, S>;
-    type Merkleized = KeylessUnjournaledMerkleized<F, FixedEncoding<V>, H, S>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, FixedEncoding<V>, H, (), S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, E, FixedEncoding<V>, H, (), S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -189,11 +222,16 @@ where
         }
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         KeylessUnjournaledUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -246,8 +284,8 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, VariableEncoding<V>, H, S>;
-    type Merkleized = KeylessUnjournaledMerkleized<F, VariableEncoding<V>, H, S>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, VariableEncoding<V>, H, C, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, E, VariableEncoding<V>, H, C, S>;
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -264,11 +302,16 @@ where
         }
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         KeylessUnjournaledUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -387,7 +430,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::SyncEngineConfig;
+    use crate::stateful::{
+        db::{SyncEngineConfig, gate},
+        tests::mocks::finalize,
+    };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -530,21 +576,22 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let (mutator, handle) = gate(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+                .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (db, snapshot, durability) = <FixedDb as ManagedDb<_>>::finalize(db, merkleized)
-                .await
-                .unwrap();
+            let (_mutator, snapshot, durability) = finalize(mutator, merkleized).await;
             durability.await.expect("finalize flush failed");
 
+            let db = handle.read().await;
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get_metadata(), Some(U64::new(9)));
 
@@ -565,12 +612,14 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let (_mutator, handle) = gate(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle)
+                .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch, &db)
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
 

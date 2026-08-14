@@ -193,12 +193,11 @@ impl App {
     /// Execute a block: increment "counter" and write `height -> height_val`.
     pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        databases: &SingleDatabaseSet<E>,
         mut batches: UnmerkleizedOf<SingleDatabaseSet<E>, E>,
     ) -> MerkleizedOf<SingleDatabaseSet<E>, E> {
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
-            .get(&counter, databases.as_ref())
+            .get(&counter)
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
@@ -207,7 +206,7 @@ impl App {
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        batches.merkleize(databases.as_ref()).await.unwrap()
+        batches.merkleize().await.unwrap()
     }
 }
 
@@ -227,14 +226,13 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
-        let merkleized = Self::execute(height, databases, batches).await;
+        let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
         let block = Block {
             context: context.1.clone(),
@@ -250,12 +248,11 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> Option<MerkleizedOf<Self::Databases, E>> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
-        let merkleized = Self::execute(tip.height(), databases, batches).await;
+        let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
         if merkleized.root() != tip.state_root
             || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
@@ -269,10 +266,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> MerkleizedOf<Self::Databases, E> {
-        Self::execute(block.height(), databases, batches).await
+        Self::execute(block.height(), batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {

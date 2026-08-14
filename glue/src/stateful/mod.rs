@@ -96,7 +96,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::{DatabaseSet, MerkleizedOf, UnmerkleizedOf};
+use db::{DatabaseSet, HandlesOf, MerkleizedOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -141,10 +141,10 @@ pub struct Input<Upstream, Provider> {
 /// return [`DatabaseSet::Merkleized`] batches after execution. The surrounding
 /// wrapper handles persistence: storing merkleized batches as pending tips on
 /// the block tree and applying changesets to the underlying databases on
-/// finalization. In every execution method, read through `batches` (passing
-/// the borrowed `databases` for fallback). The batch overlays speculative
-/// ancestor state that `databases` alone does not reflect, so reading
-/// `databases` directly returns stale values for any key an ancestor wrote.
+/// finalization. Every execution method reads through `batches`, which is the
+/// only database access an implementor is given: a batch overlays speculative
+/// ancestor state and falls back to applied state for anything it does not
+/// cover, so it is always the complete view for its branch.
 ///
 /// [`Stateful`] may freely clone the application and invoke its methods
 /// concurrently. Any method may run on a fresh clone that is discarded
@@ -229,7 +229,6 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
@@ -248,7 +247,9 @@ where
     /// a special return value.
     ///
     /// Validity is relative to the supplied inputs. Finalizing a competing
-    /// branch later does not retroactively change a completed verdict.
+    /// branch later does not retroactively change a completed verdict. A
+    /// verdict reached after that finalization is reported as invalid instead,
+    /// because its branch is no longer reachable.
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).
@@ -263,21 +264,18 @@ where
     /// ops root and operation range used by replay sync.
     ///
     /// This future is scoped to its caller. Dropping the response cancels only
-    /// this request. Applying a finalized block, pruning, and capturing each
-    /// cancel every verification still running, and any request the finalized
-    /// block does not invalidate is then re-run. Cancellation and retry must not
-    /// violate invariants or lose durable progress.
+    /// this request. The wrapper never cancels it: a batch operation running
+    /// when a finalized block is applied waits for that apply and then
+    /// continues.
     ///
     /// `batches` is a branch-scoped view, not a historical snapshot. Retained
     /// ancestor overlays preserve same-branch state, while unresolved reads fall
-    /// through to the applied state of the `databases` passed alongside it. A
-    /// batch is therefore valid only while applied state advances along its own
-    /// branch.
+    /// through to the batch's own database. A batch is therefore valid only
+    /// while applied state advances along its own branch.
     fn verify(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> impl Future<Output = Option<MerkleizedOf<Self::Databases, E>>> + Send;
 
@@ -293,9 +291,9 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// This future may be cancelled if its originating request is dropped, or
-    /// cancelled and retried before finalization or pruning. Cancellation and
-    /// retry must not violate invariants or lose durable progress.
+    /// This future may be cancelled if its originating request is dropped. The
+    /// wrapper itself never cancels it. Cancellation must not violate
+    /// invariants or lose durable progress.
     ///
     /// # Panics
     ///
@@ -305,7 +303,6 @@ where
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> impl Future<Output = MerkleizedOf<Self::Databases, E>> + Send;
 
@@ -324,12 +321,10 @@ where
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
     ///
-    /// This hook receives read-only access to the database set. On the normal
-    /// finalization path it runs with the set exclusively held, after every
-    /// verification has been cancelled, and the block's marshal acknowledgement
-    /// waits for it. A slow implementation therefore stalls finalization and
-    /// verification alike. Result-affecting mutations must be made through normal
-    /// block execution, not from this observer.
+    /// This hook receives read handles over the set. It runs after the block is
+    /// applied, and the block's marshal acknowledgement waits for it, so a slow
+    /// implementation stalls finalization. Result-affecting mutations must be
+    /// made through normal block execution, not from this observer.
     ///
     /// For blocks that are reported, this is an at-least-once notification inherited from
     /// marshal's reporter stream: a crash after this hook runs but before the block's flush and
@@ -342,7 +337,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _databases: &Self::Databases,
+        _handles: HandlesOf<Self::Databases, E>,
     ) -> impl Future<Output = ()> + Send {
         async {}
     }

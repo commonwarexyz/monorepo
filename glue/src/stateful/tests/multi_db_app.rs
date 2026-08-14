@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, SnapshotsOf, SyncEngineConfig,
+            DatabaseSet, Merkleized as _, MerkleizedOf, Single, SnapshotsOf, SyncEngineConfig,
             Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
@@ -75,7 +75,7 @@ pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
 /// A full and a compact QMDB as a tuple.
-pub(crate) type MultiDatabaseSet<E> = (QmdbA<E>, QmdbB<E>);
+pub(crate) type MultiDatabaseSet<E> = (Single<QmdbA<E>>, Single<QmdbB<E>>);
 
 /// Readers over the set's published snapshots.
 type MultiSnapshot<E> = SnapshotsOf<MultiDatabaseSet<E>, E>;
@@ -245,7 +245,6 @@ impl App {
     /// Execute a block against two databases.
     pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
-        databases: &MultiDatabaseSet<E>,
         batches: UnmerkleizedOf<MultiDatabaseSet<E>, E>,
     ) -> MerkleizedOf<MultiDatabaseSet<E>, E> {
         let (mut batch_a, batch_b) = batches;
@@ -254,7 +253,7 @@ impl App {
         // per-block operation count so its state sync spans the same crash windows.
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch_a
-            .get(&counter, &databases.0)
+            .get(&counter)
             .await
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
@@ -270,8 +269,8 @@ impl App {
             u64_to_digest(height.get()),
         );
 
-        let merkleized_a = batch_a.merkleize(&databases.0).await.unwrap();
-        let merkleized_b = batch_b.merkleize(&databases.1).await.unwrap();
+        let merkleized_a = batch_a.merkleize().await.unwrap();
+        let merkleized_b = batch_b.merkleize().await.unwrap();
         (merkleized_a, merkleized_b)
     }
 }
@@ -292,14 +291,13 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
-        let (merkleized_a, merkleized_b) = Self::execute(height, databases, batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = Block {
@@ -321,12 +319,11 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> Option<MerkleizedOf<Self::Databases, E>> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), databases, batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
@@ -343,10 +340,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        databases: &Self::Databases,
         batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> MerkleizedOf<Self::Databases, E> {
-        Self::execute(block.height(), databases, batches).await
+        Self::execute(block.height(), batches).await
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {

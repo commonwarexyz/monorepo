@@ -1,6 +1,9 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Unmerkleized, UnmerkleizedOf},
+    db::{
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Mutator, ReadHandle, Unmerkleized,
+        UnmerkleizedOf,
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,7 +15,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{convert::Infallible, sync::Arc};
 
@@ -26,11 +29,11 @@ pub(crate) struct TestUnmerkleized;
 #[derive(Clone, Copy)]
 pub(crate) struct TestMerkleized;
 
-impl<D: Sync> Unmerkleized<D> for TestUnmerkleized {
+impl Unmerkleized for TestUnmerkleized {
     type Merkleized = TestMerkleized;
     type Error = Infallible;
 
-    async fn merkleize(self, _db: &D) -> Result<Self::Merkleized, Self::Error> {
+    async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
         Ok(TestMerkleized)
     }
 }
@@ -113,7 +116,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -287,7 +290,6 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
         _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -298,7 +300,6 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _databases: &Self::Databases,
         _batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> Option<MerkleizedOf<Self::Databases, E>> {
         None
@@ -308,7 +309,6 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _databases: &Self::Databases,
         _batches: UnmerkleizedOf<Self::Databases, E>,
     ) -> MerkleizedOf<Self::Databases, E> {
         TestMerkleized
@@ -317,6 +317,25 @@ impl<
 
 pub(crate) fn test_databases() -> TestDatabases {
     TestDb::default().into()
+}
+
+/// Finalize `batch` through the gate, returning the snapshot and flush handle.
+///
+/// Tests that drive [`ManagedDb`] directly gate their database and use this
+/// instead of the set layer.
+pub(crate) async fn finalize<D: ManagedDb<deterministic::Context>>(
+    mutator: Mutator<D>,
+    batch: D::Merkleized,
+) -> (Mutator<D>, D::Snapshot, Handle<()>) {
+    let (mutator, (snapshot, sync)) = mutator
+        .mutate(|db| async move {
+            let (db, snapshot, sync) = D::finalize(db, batch)
+                .await
+                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
+            (db, (snapshot, sync))
+        })
+        .await;
+    (mutator, snapshot, sync)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

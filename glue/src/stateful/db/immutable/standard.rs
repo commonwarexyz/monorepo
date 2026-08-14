@@ -2,12 +2,13 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. Keyed batch reads borrow the database because the
-//! immutable proof snapshot carries no keyed index.
+//! deletions. Keyed batch reads lease the database through the batch's
+//! [`ReadHandle`] because the immutable proof snapshot carries no keyed
+//! index.
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -35,28 +36,38 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
+/// Read handle over the immutable database a wrapper batch reads through.
+type DbHandle<F, E, K, V, C, H, T, S> = ReadHandle<Immutable<F, E, K, V, C, H, T, S>>;
+
 /// Wraps an immutable [`UnmerkleizedBatch`] to implement
 /// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
-pub struct ImmutableUnmerkleized<F, K, V, H, S>
+pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
+    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
+    handle: DbHandle<F, E, K, V, C, H, T, S>,
 }
 
-impl<F, K, V, H, S> Deref for ImmutableUnmerkleized<F, K, V, H, S>
+impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
+    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
@@ -67,12 +78,15 @@ where
     }
 }
 
-impl<F, K, V, H, S> ImmutableUnmerkleized<F, K, V, H, S>
+impl<F, E, K, V, C, H, T, S> ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
+    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
@@ -90,33 +104,15 @@ where
     }
 
     /// Read a value by key, falling back to applied state.
-    pub async fn get<E, C, T>(
-        &self,
-        key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Option<V::Value>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        T: Translator,
-    {
-        self.batch.get(key, db).await
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
+        self.batch.get(key, &*self.handle.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many<E, C, T>(
-        &self,
-        keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        T: Translator,
-    {
-        self.batch.get_many(keys, db).await
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.batch.get_many(keys, &*self.handle.read().await).await
     }
 
     /// Set `key` to `value` in the speculative batch.
@@ -128,76 +124,7 @@ where
 
 /// Wraps an immutable [`MerkleizedBatch`] to implement
 /// [`Merkleized`](crate::stateful::db::Merkleized).
-pub struct ImmutableMerkleized<F, K, V, H, S>
-where
-    F: Family,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, K, V>: EncodeShared,
-{
-    inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-}
-
-impl<F, K, V, H, S> Deref for ImmutableMerkleized<F, K, V, H, S>
-where
-    F: Family,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, K, V>: EncodeShared,
-{
-    type Target = MerkleizedBatch<F, H::Digest, K, V, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<F, K, V, H, S> ImmutableMerkleized<F, K, V, H, S>
-where
-    F: Family,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, K, V>: EncodeShared,
-{
-    /// Read a value by key, falling back to applied state.
-    pub async fn get<E, C, T>(
-        &self,
-        key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Option<V::Value>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        T: Translator,
-    {
-        self.inner.get(key, db).await
-    }
-
-    /// Read multiple values by key, falling back to applied state.
-    ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many<E, C, T>(
-        &self,
-        keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Vec<Option<V::Value>>, Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        T: Translator,
-    {
-        self.inner.get_many(keys, db).await
-    }
-}
-
-impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait<Immutable<F, E, K, V, C, H, T, S>>
-    for ImmutableUnmerkleized<F, K, V, H, S>
+pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -209,32 +136,117 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    type Merkleized = ImmutableMerkleized<F, K, V, H, S>;
-    type Error = Error<F>;
+    inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
+    handle: DbHandle<F, E, K, V, C, H, T, S>,
+}
 
-    async fn merkleize(
-        self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Self::Merkleized, Error<F>> {
-        let merkleized = self
-            .batch
-            .merkleize(db, self.metadata, self.inactivity_floor)
-            .await;
-        Ok(ImmutableMerkleized { inner: merkleized })
+impl<F, E, K, V, C, H, T, S> Clone for ImmutableMerkleized<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, K, V>: EncodeShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            handle: self.handle.clone(),
+        }
     }
 }
 
-impl<F, K, V, H, S> MerkleizedTrait for ImmutableMerkleized<F, K, V, H, S>
+impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, K, V>: EncodeShared,
+{
+    type Target = MerkleizedBatch<F, H::Digest, K, V, S>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> ImmutableMerkleized<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, K, V>: EncodeShared,
+{
+    /// Read a value by key, falling back to applied state.
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
+        self.inner.get(key, &*self.handle.read().await).await
+    }
+
+    /// Read multiple values by key, falling back to applied state.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+        self.inner.get_many(keys, &*self.handle.read().await).await
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, K, V>: EncodeShared,
+{
+    type Merkleized = ImmutableMerkleized<F, E, K, V, C, H, T, S>;
+    type Error = Error<F>;
+
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
+        let Self {
+            batch,
+            metadata,
+            inactivity_floor,
+            handle,
+        } = self;
+        let inner = batch
+            .merkleize(&*handle.read().await, metadata, inactivity_floor)
+            .await;
+        Ok(ImmutableMerkleized { inner, handle })
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> MerkleizedTrait for ImmutableMerkleized<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>>,
+    H: Hasher,
+    T: Translator,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnmerkleized<F, K, V, H, S>;
+    type Unmerkleized = ImmutableUnmerkleized<F, E, K, V, C, H, T, S>;
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
@@ -244,6 +256,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
+            handle: self.handle.clone(),
         }
     }
 }
@@ -258,8 +271,26 @@ where
     T: Translator,
     S: Strategy,
 {
-    type Unmerkleized = ImmutableUnmerkleized<F, K, FixedEncoding<V>, H, S>;
-    type Merkleized = ImmutableMerkleized<F, K, FixedEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableUnmerkleized<
+        F,
+        E,
+        K,
+        FixedEncoding<V>,
+        FixedJournal<E, fixed::Operation<F, K, V>>,
+        H,
+        T,
+        S,
+    >;
+    type Merkleized = ImmutableMerkleized<
+        F,
+        E,
+        K,
+        FixedEncoding<V>,
+        FixedJournal<E, fixed::Operation<F, K, V>>,
+        H,
+        T,
+        S,
+    >;
     type Error = Error<F>;
     type Config = fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -276,11 +307,16 @@ where
         )
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         ImmutableUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
@@ -341,8 +377,26 @@ where
     S: Strategy,
     variable::Operation<F, K, V>: Codec,
 {
-    type Unmerkleized = ImmutableUnmerkleized<F, K, VariableEncoding<V>, H, S>;
-    type Merkleized = ImmutableMerkleized<F, K, VariableEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableUnmerkleized<
+        F,
+        E,
+        K,
+        VariableEncoding<V>,
+        VariableJournal<E, variable::Operation<F, K, V>>,
+        H,
+        T,
+        S,
+    >;
+    type Merkleized = ImmutableMerkleized<
+        F,
+        E,
+        K,
+        VariableEncoding<V>,
+        VariableJournal<E, variable::Operation<F, K, V>>,
+        H,
+        T,
+        S,
+    >;
     type Error = Error<F>;
     type Config = variable::Config<T, <variable::Operation<F, K, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
@@ -359,11 +413,16 @@ where
         )
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
+    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let db = handle.read().await;
+            (db.new_batch(), db.inactivity_floor_loc())
+        };
         ImmutableUnmerkleized {
-            batch: Self::new_batch(self),
+            batch,
             metadata: None,
-            inactivity_floor: self.inactivity_floor_loc(),
+            inactivity_floor,
+            handle,
         }
     }
 
