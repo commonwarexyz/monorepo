@@ -450,6 +450,10 @@ fn test_burst_train_smoke() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "constructs a rayon pool; rayon-core does not run under miri"
+)]
 fn test_matches_rayon_semantics_on_error_priority() {
     // Both strategies must return an error (not panic) when map errors race; the specific
     // error may differ (first-to-close wins), but the operation must not lose it.
@@ -617,4 +621,402 @@ fn test_boundary_lengths_match_sequential() {
             .fold(0..n as u64, || 0u64, |a, i| a + i, |a, b| a + b);
         assert_eq!(sum, (0..n as u64).sum::<u64>(), "n={n}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Increment C: parallel sort_by and join.
+// ---------------------------------------------------------------------------
+
+/// Deterministic splitmix64 stream for sort inputs.
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// `(key, sequence)` pairs: comparing by key only makes stability observable via the
+/// sequence numbers.
+fn keyed_input(len: usize, key_range: u64, seed: u64) -> Vec<(u64, u32)> {
+    let mut state = seed;
+    (0..len)
+        .map(|i| (splitmix(&mut state) % key_range, i as u32))
+        .collect()
+}
+
+fn assert_sorts_like_std(strategy: &impl Strategy, mut input: Vec<(u64, u32)>) {
+    let mut expected = input.clone();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    strategy.sort_by(&mut input, |a, b| a.0.cmp(&b.0));
+    // Full-tuple equality against the standard stable sort: any stability violation
+    // shows up as reordered sequence numbers within an equal-key group.
+    assert_eq!(input, expected);
+}
+
+#[test]
+fn test_sort_by_matches_std_and_is_stable() {
+    // Sizes hit: serial fallback (single run), several runs with a short tail, and an
+    // odd run count whose merge rounds carry an unpaired run through.
+    let sizes = if cfg!(miri) {
+        vec![0, 1, 2, 3, sort::MIN_RUN, 3 * sort::MIN_RUN, 96, 27]
+    } else {
+        vec![
+            0,
+            1,
+            2,
+            3,
+            sort::MIN_RUN,
+            3 * sort::MIN_RUN,
+            40_000,
+            37_531,
+            5_000,
+        ]
+    };
+    let strategy = parked(4).manual();
+    for (i, &len) in sizes.iter().enumerate() {
+        // Heavy ties (small key range) and mostly-distinct keys.
+        assert_sorts_like_std(&strategy, keyed_input(len, 4, 7 + i as u64));
+        assert_sorts_like_std(&strategy, keyed_input(len, u64::MAX, 71 + i as u64));
+        // Presorted and reversed inputs.
+        let mut asc = keyed_input(len, 1 << 40, 137 + i as u64);
+        asc.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_sorts_like_std(&strategy, asc.clone());
+        asc.reverse();
+        assert_sorts_like_std(&strategy, asc);
+    }
+}
+
+#[test]
+fn test_sort_by_all_equal_keys_keeps_order() {
+    let len = if cfg!(miri) { 64 } else { 20_000 };
+    let strategy = parked(4).manual();
+    let mut items: Vec<(u64, u32)> = (0..len).map(|i| (42, i as u32)).collect();
+    strategy.sort_by(&mut items, |a, b| a.0.cmp(&b.0));
+    assert!(items.windows(2).all(|w| w[0].1 < w[1].1));
+}
+
+#[test]
+fn test_sort_by_zst() {
+    let strategy = parked(2).manual();
+    let mut items = vec![(); if cfg!(miri) { 64 } else { 10_000 }];
+    strategy.sort_by(&mut items, |_, _| CmpOrdering::Equal);
+    assert_eq!(items.len(), if cfg!(miri) { 64 } else { 10_000 });
+}
+
+#[test]
+fn test_sort_by_policied_matches_std_across_calls() {
+    // The adaptive policy probes both paths over repeated calls; every call must sort
+    // correctly regardless of which arm it lands on.
+    let strategy = parked(4);
+    let len = if cfg!(miri) { 48 } else { 8_192 };
+    for round in 0..if cfg!(miri) { 4 } else { 30 } {
+        assert_sorts_like_std(&strategy, keyed_input(len, 16, round as u64));
+    }
+}
+
+#[test]
+fn test_sort_by_panic_in_run_phase_preserves_elements() {
+    // An always-panicking comparator dies inside the run-phase in-place sorts; the slice
+    // must come back with every element exactly once.
+    let strategy = parked(4).manual();
+    let counter = StdArc::new(AtomicUsize::new(0));
+    let len = 4 * sort::MIN_RUN;
+    let mut items: Vec<(u64, Tok)> = (0..len as u64).map(|k| (k, Tok::new(&counter))).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strategy.sort_by(&mut items, |_, _| panic!("comparator poison"));
+    }));
+    assert!(result.is_err());
+    assert_eq!(items.len(), len);
+    assert_eq!(
+        counter.load(AtomicOrdering::SeqCst),
+        0,
+        "no element dropped during unwind"
+    );
+    let keys: std::collections::BTreeSet<u64> = items.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys.len(), len, "every element still present exactly once");
+    drop(items);
+    assert_eq!(
+        counter.load(AtomicOrdering::SeqCst),
+        len,
+        "each element dropped exactly once"
+    );
+}
+
+#[test]
+fn test_sort_by_panic_in_merge_phase_preserves_elements() {
+    // Comparator that panics only for one specific cross-run pair: within-run ordering is
+    // clean, so the run phase completes and the poison fires inside the first merge round
+    // (covering the scratch-abandon unwind path).
+    let strategy = parked(2).manual();
+    let run = sort::MIN_RUN;
+    let len = 4 * run;
+    // Run 0 holds the even keys and run 1 the odd keys, both ascending, so their merge
+    // alternates heads all the way down and is forced to compare the two largest keys
+    // (the poison pair) right before the left run exhausts. Runs 2 and 3 are a plain
+    // ascending tail with no poison. Within-run comparisons never mix the pair.
+    let poison_a = 2 * (run as u64) - 2;
+    let poison_b = 2 * (run as u64) - 1;
+    let counter = StdArc::new(AtomicUsize::new(0));
+    let mut keys: Vec<u64> = Vec::with_capacity(len);
+    keys.extend((0..run as u64).map(|i| 2 * i));
+    keys.extend((0..run as u64).map(|i| 2 * i + 1));
+    keys.extend(2 * run as u64..len as u64);
+    let mut items: Vec<(u64, Tok)> = keys.into_iter().map(|k| (k, Tok::new(&counter))).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strategy.sort_by(&mut items, |x, y| {
+            let pair = (x.0.min(y.0), x.0.max(y.0));
+            assert!(pair != (poison_a, poison_b), "merge poison");
+            x.0.cmp(&y.0)
+        });
+    }));
+    assert!(result.is_err());
+    assert_eq!(items.len(), len);
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
+    let keys: std::collections::BTreeSet<u64> = items.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys.len(), len);
+    drop(items);
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), len);
+}
+
+#[test]
+fn test_join_returns_both() {
+    let strategy = parked(2);
+    let (ra, rb) = strategy.join(|| 40 + 2, || "side b".to_string());
+    assert_eq!(ra, 42);
+    assert_eq!(rb, "side b");
+}
+
+#[test]
+fn test_join_serial_at_parallelism_one() {
+    let strategy = parked(1);
+    let caller = std::thread::current().id();
+    let (ta, tb) = strategy.join(
+        || std::thread::current().id(),
+        || std::thread::current().id(),
+    );
+    assert_eq!(ta, caller);
+    assert_eq!(tb, caller);
+}
+
+#[cfg(not(miri))]
+#[test]
+fn test_join_sides_overlap() {
+    // Side a blocks until side b signals: only a genuinely concurrent b lets the join
+    // complete (a fully serialized join would time out the recv and fail the test).
+    let strategy = parked(2);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (ra, rb) = strategy.join(
+        move || rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+        move || tx.send(7usize).unwrap(),
+    );
+    assert_eq!(ra, 7);
+    let () = rb;
+}
+
+#[test]
+fn test_join_nested_overflow_inline() {
+    // Nested joins occupy slots; deeper than SLOTS forces the inline overflow path,
+    // which must still run both sides.
+    fn nest(strategy: &Parked, depth: usize) -> usize {
+        if depth == 0 {
+            return 1;
+        }
+        let (l, r) = strategy.join(|| nest(strategy, depth - 1), || 1usize);
+        l + r
+    }
+    let strategy = parked(2);
+    assert_eq!(nest(&strategy, 6), 7);
+}
+
+#[test]
+fn test_join_panic_propagates_and_drops_other_result() {
+    let strategy = parked(2);
+    let counter = StdArc::new(AtomicUsize::new(0));
+    let token = Tok::new(&counter);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strategy.join(|| panic!("join poison"), move || token)
+    }));
+    assert!(result.is_err());
+    // Side b always runs (rayon parity); its produced token is dropped exactly once by
+    // the unwinding join frame.
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// Sorts `len` drop-counting elements with an arbitrary (possibly inconsistent)
+/// comparator and asserts the memory-safety contract: whatever the order, every element
+/// survives exactly once (std/rayon parity for non-total-order comparators).
+fn assert_sort_multiset_safe<C>(len: usize, compare: C)
+where
+    C: Fn(&(u64, Tok), &(u64, Tok)) -> CmpOrdering + Send + Sync,
+{
+    let strategy = parked(2).manual();
+    let counter = StdArc::new(AtomicUsize::new(0));
+    let mut items: Vec<(u64, Tok)> = (0..len as u64).map(|k| (k, Tok::new(&counter))).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strategy.sort_by(&mut items, &compare);
+    }));
+    // The order (and whether it panicked) is unspecified for a garbage comparator; the
+    // multiset must survive regardless.
+    let _ = result;
+    assert_eq!(items.len(), len);
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
+    let keys: std::collections::BTreeSet<u64> = items.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys.len(), len, "elements lost or duplicated");
+    drop(items);
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), len);
+}
+
+#[test]
+fn test_sort_by_constant_less_comparator_is_memory_safe() {
+    assert_sort_multiset_safe(4 * sort::MIN_RUN, |_, _| CmpOrdering::Less);
+}
+
+#[test]
+fn test_sort_by_constant_greater_comparator_is_memory_safe() {
+    assert_sort_multiset_safe(4 * sort::MIN_RUN, |_, _| CmpOrdering::Greater);
+}
+
+#[test]
+fn test_sort_by_stateful_flip_comparator_is_memory_safe() {
+    let calls = StdArc::new(AtomicUsize::new(0));
+    assert_sort_multiset_safe(4 * sort::MIN_RUN, move |x, y| {
+        // Consistent early (the run phase sees a plausible order), then adversarial:
+        // every third call inverts, breaking antisymmetry across unit boundaries.
+        let n = calls.fetch_add(1, AtomicOrdering::Relaxed);
+        if n % 3 == 0 {
+            y.0.cmp(&x.0)
+        } else {
+            x.0.cmp(&y.0)
+        }
+    });
+}
+
+#[test]
+fn test_sort_by_panic_in_slice_destination_round_restores_elements() {
+    // Forces the poison into the SECOND merge round, whose destination is the slice
+    // (round 0 writes scratch, then the buffers swap): exercises the restore branch that
+    // copies the complete scratch image back before resuming. Construction: runs 0 and 1
+    // hold the evens (interleaved mod 4), runs 2 and 3 the odds, so round 0 merges
+    // parity-pure pairs and only round 1's evens-vs-odds merge can compare the poison
+    // pair (the two global maxima), right at the tail of its final segment.
+    let strategy = parked(2).manual();
+    let run = sort::MIN_RUN;
+    let len = 4 * run;
+    let poison_a = 4 * (run as u64) - 2;
+    let poison_b = 4 * (run as u64) - 1;
+    let counter = StdArc::new(AtomicUsize::new(0));
+    let mut keys: Vec<u64> = Vec::with_capacity(len);
+    keys.extend((0..run as u64).map(|i| 4 * i));
+    keys.extend((0..run as u64).map(|i| 4 * i + 2));
+    keys.extend((0..run as u64).map(|i| 4 * i + 1));
+    keys.extend((0..run as u64).map(|i| 4 * i + 3));
+    let mut items: Vec<(u64, Tok)> = keys.into_iter().map(|k| (k, Tok::new(&counter))).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strategy.sort_by(&mut items, |x, y| {
+            let pair = (x.0.min(y.0), x.0.max(y.0));
+            assert!(pair != (poison_a, poison_b), "round-1 poison");
+            x.0.cmp(&y.0)
+        });
+    }));
+    assert!(result.is_err());
+    assert_eq!(items.len(), len);
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
+    let keys: std::collections::BTreeSet<u64> = items.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys.len(), len);
+    drop(items);
+    assert_eq!(counter.load(AtomicOrdering::SeqCst), len);
+}
+
+#[test]
+fn test_join_both_panic_side_a_wins() {
+    // Rayon parity: when both sides panic, side a's payload is the one propagated. Side b
+    // waits for a's start signal so both sides genuinely run when a worker is available;
+    // if b is never claimed (degenerate scheduling), a's payload still wins trivially.
+    let strategy = parked(2);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strategy.join(
+            move || {
+                tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                panic!("boom-a")
+            },
+            move || {
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+                panic!("boom-b")
+            },
+        )
+    }));
+    let payload = result.unwrap_err();
+    assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "boom-a");
+}
+
+#[test]
+fn test_join_runs_b_even_when_a_panics() {
+    // Rayon parity: both closures always execute; a's panic is propagated only after b
+    // has run (or been waited out). Checked on the pooled path and the parallelism-1
+    // inline path.
+    for workers in [2usize, 1] {
+        let strategy = parked(workers);
+        let b_ran = StdArc::new(AtomicUsize::new(0));
+        let b_flag = StdArc::clone(&b_ran);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            strategy.join(
+                || panic!("boom-a"),
+                move || {
+                    b_flag.fetch_add(1, AtomicOrdering::SeqCst);
+                },
+            )
+        }));
+        let payload = result.unwrap_err();
+        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "boom-a");
+        assert_eq!(
+            b_ran.load(AtomicOrdering::SeqCst),
+            1,
+            "side b must execute despite a's panic (workers={workers})"
+        );
+    }
+}
+
+#[test]
+fn test_with_parallelism_huge_is_safe() {
+    // Absurd planning parallelism must degrade gracefully (saturating chunk math), not
+    // panic mid-claim after a job is published: a panic there would tear down the run's
+    // stack frame behind a still-published slot.
+    let strategy = parked(2).with_parallelism(NonZeroUsize::new(usize::MAX).unwrap());
+    let (a, b) = strategy.join(|| 1u8, || 2u8);
+    assert_eq!((a, b), (1, 2));
+    let out = strategy.manual().map_collect_vec(0..N as u64, |i| i * 3);
+    assert_eq!(out, (0..N as u64).map(|i| i * 3).collect::<Vec<_>>());
+    let mut items: Vec<u64> = (0..(4 * sort::MIN_RUN) as u64).rev().collect();
+    strategy.manual().sort_by(&mut items, |a, b| a.cmp(b));
+    assert!(items.windows(2).all(|w| w[0] < w[1]));
+}
+
+#[test]
+fn test_sort_by_presorted_shapes_match_std() {
+    // The presorted early-exit and the ordered-pair fast path must produce exactly the
+    // std stable result on sorted, nearly-sorted, descending, and sawtooth inputs (with
+    // ties, so stability stays observable).
+    let strategy = parked(4).manual();
+    let len = 8 * sort::MIN_RUN;
+    // Fully sorted with duplicate keys.
+    let sorted: Vec<(u64, u32)> = (0..len).map(|i| ((i / 3) as u64, i as u32)).collect();
+    assert_sorts_like_std(&strategy, sorted.clone());
+    // Nearly sorted: one displaced element defeats the whole-slice exit but leaves most
+    // pairs on the ordered-concatenation path.
+    let mut nearly = sorted.clone();
+    nearly.swap(1, len - 2);
+    assert_sorts_like_std(&strategy, nearly);
+    // Strictly descending.
+    let mut desc = sorted.clone();
+    desc.reverse();
+    assert_sorts_like_std(&strategy, desc);
+    // Sawtooth: ascending runs of exactly MIN_RUN, so run boundaries alternate ordered
+    // and disordered.
+    let saw: Vec<(u64, u32)> = (0..len)
+        .map(|i| ((i % sort::MIN_RUN) as u64, i as u32))
+        .collect();
+    assert_sorts_like_std(&strategy, saw);
 }

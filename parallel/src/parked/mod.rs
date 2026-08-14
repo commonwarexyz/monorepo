@@ -6,8 +6,9 @@
 //! core ([`scoped`]) in which the submitting caller participates. `spawn` hands one-shots to
 //! an unbounded queue eagerly (a dropped future still runs its job) with a member-poller
 //! help path (a pool worker polling a spawn future of its own pool runs pending work
-//! instead of parking the only capable worker). `join` and `sort_by` currently execute
-//! serially on the caller.
+//! instead of parking the only capable worker). `sort_by` is a parallel stable merge sort
+//! over the same scoped core ([`sort`]); `join` runs its two sides as a two-index scoped
+//! job (the caller takes one, a woken worker the other).
 //!
 //! Pools with more than one worker always hand `spawn` jobs off to a worker; single-worker
 //! pools execute them inline at submission (matching `Rayon` at one thread), so jobs that
@@ -15,6 +16,7 @@
 
 mod pool;
 mod scoped;
+mod sort;
 mod sync;
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -211,6 +213,17 @@ fn record_first<E>(slot: &Mutex<Option<E>>, e: E) {
     }
 }
 
+/// Drops a superseded panic payload without letting a panicking `Drop` unwind further
+/// (the payload that survives it is about to be resumed); a double-panicking payload is
+/// leaked instead.
+fn discard_payload(payload: Option<scoped::Payload>) {
+    if let Some(p) = payload {
+        if let Err(second) = panic::catch_unwind(panic::AssertUnwindSafe(move || drop(p))) {
+            core::mem::forget(second);
+        }
+    }
+}
+
 /// Resolves a failed scoped run after cleanup ran under `catch_unwind`: the first chunk
 /// panic wins, then a cleanup panic, then the recorded error. Superseded payloads and
 /// errors are leaked rather than dropped mid-unwind (a panicking `Drop` would abort).
@@ -324,7 +337,16 @@ where
         }
     };
 
-    let outcome = scoped::run(shared, n, parallelism, &body);
+    // Length-aware claim granularity: identical to the fixed MIN_CHUNK floor for large
+    // inputs, but per-item claims when there are only about as many items as executors.
+    // Callers that reach the parallel arm with so few items have coarse per-item work by
+    // construction (the policy priced it, or a manual caller pre-sharded deliberately,
+    // e.g. a map over probe shards); a MIN_CHUNK floor would hand every item to the
+    // caller in one chunk and wake nobody.
+    let min_chunk = n
+        .div_ceil(parallelism.max(1).saturating_mul(2))
+        .clamp(1, scoped::MIN_CHUNK);
+    let outcome = scoped::run(shared, n, parallelism, min_chunk, &body);
 
     // Quiescent: no executor can touch the buffers anymore.
     let error = error.into_inner().unwrap();
@@ -416,7 +438,16 @@ where
         }
     };
 
-    let outcome = scoped::run(shared, n, parallelism, &body);
+    // Length-aware claim granularity: identical to the fixed MIN_CHUNK floor for large
+    // inputs, but per-item claims when there are only about as many items as executors.
+    // Callers that reach the parallel arm with so few items have coarse per-item work by
+    // construction (the policy priced it, or a manual caller pre-sharded deliberately,
+    // e.g. a map over probe shards); a MIN_CHUNK floor would hand every item to the
+    // caller in one chunk and wake nobody.
+    let min_chunk = n
+        .div_ceil(parallelism.max(1).saturating_mul(2))
+        .clamp(1, scoped::MIN_CHUNK);
+    let outcome = scoped::run(shared, n, parallelism, min_chunk, &body);
 
     let error = error.into_inner().unwrap();
     if outcome.panic.is_some() || error.is_some() {
@@ -694,9 +725,82 @@ impl Strategy for Parked {
         RA: Send,
         RB: Send,
     {
-        // Serial for now; kept off the adaptive policy so serial timings cannot pollute
-        // its estimates when a parallel implementation lands.
-        (a(), b())
+        // Not routed through the adaptive policy (mirroring `Rayon::join`): both closures
+        // always run exactly once, so there is no serial-vs-parallel outcome to tune, only
+        // where `b` executes. Intended for coarse work; a tiny `b` pays one publish/wake.
+        //
+        // Rayon parity on panics: BOTH sides always execute even when one panics (rayon
+        // runs or waits out `b` before propagating `a`'s panic), and when both panic,
+        // side a's payload is the one propagated.
+        if self.parallelism.get() <= 1 {
+            let ra = panic::catch_unwind(panic::AssertUnwindSafe(a));
+            let rb = panic::catch_unwind(panic::AssertUnwindSafe(b));
+            match (ra, rb) {
+                (Ok(ra), Ok(rb)) => return (ra, rb),
+                (Err(pa), rb) => {
+                    discard_payload(rb.err());
+                    panic::resume_unwind(pa);
+                }
+                (Ok(_ra), Err(pb)) => panic::resume_unwind(pb),
+            }
+        }
+
+        let mut a = Some(a);
+        let mut b = Some(b);
+        let mut ra: Option<RA> = None;
+        let mut rb: Option<RB> = None;
+        let mut pa: Option<scoped::Payload> = None;
+        let mut pb: Option<scoped::Payload> = None;
+        let a_slot = Ptr(&raw mut a);
+        let b_slot = Ptr(&raw mut b);
+        let ra_slot = Ptr(&raw mut ra);
+        let rb_slot = Ptr(&raw mut rb);
+        let pa_slot = Ptr(&raw mut pa);
+        let pb_slot = Ptr(&raw mut pb);
+        let body = |range: Range<usize>, _ctl: &Ctl<'_>| {
+            for i in range {
+                // SAFETY (all accesses below): each index is claimed exactly once (claim
+                // protocol), so each slot is taken and written by exactly one executor;
+                // the locals outlive the scoped run (this frame owns them).
+                //
+                // A side's panic is captured into its slot and the body returns normally:
+                // the job is NOT closed, so the other side still executes (rayon parity).
+                if i == 0 {
+                    let task = unsafe { (*a_slot.get()).take() }.expect("join side a reclaimed");
+                    match panic::catch_unwind(panic::AssertUnwindSafe(task)) {
+                        Ok(out) => unsafe { *ra_slot.get() = Some(out) },
+                        Err(payload) => unsafe { *pa_slot.get() = Some(payload) },
+                    }
+                } else {
+                    let task = unsafe { (*b_slot.get()).take() }.expect("join side b reclaimed");
+                    match panic::catch_unwind(panic::AssertUnwindSafe(task)) {
+                        Ok(out) => unsafe { *rb_slot.get() = Some(out) },
+                        Err(payload) => unsafe { *pb_slot.get() = Some(payload) },
+                    }
+                }
+            }
+        };
+        let outcome = scoped::run(&self.shared, 2, self.parallelism.get(), 1, &body);
+        // Side a's panic takes priority over side b's (rayon parity). Untaken tasks and
+        // produced results drop here exactly once on every path.
+        if let Some(payload) = pa {
+            discard_payload(pb);
+            discard_payload(outcome.panic);
+            panic::resume_unwind(payload);
+        }
+        if let Some(payload) = pb {
+            discard_payload(outcome.panic);
+            panic::resume_unwind(payload);
+        }
+        if let Some(payload) = outcome.panic {
+            // Not from a side closure (those capture into their slots): a panic from the
+            // claim machinery itself.
+            panic::resume_unwind(payload);
+        }
+        match (ra, rb) {
+            (Some(ra), Some(rb)) => (ra, rb),
+            _ => unreachable!("join completed without both results"),
+        }
     }
 
     #[track_caller]
@@ -705,8 +809,11 @@ impl Strategy for Parked {
         T: Send,
         C: Fn(&T, &T) -> CmpOrdering + Send + Sync,
     {
-        // Serial stable sort for now; kept off the adaptive policy so serial timings
-        // cannot pollute its estimates when a parallel implementation lands.
-        items.sort_by(compare);
+        self.execute(items.len(), 1, |execution| match execution {
+            policy::Execution::Serial => Sequential.sort_by(items, compare),
+            policy::Execution::Parallel => {
+                sort::sort_by(&self.shared, self.parallelism.get(), items, &compare)
+            }
+        })
     }
 }

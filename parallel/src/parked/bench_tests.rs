@@ -248,3 +248,140 @@ fn gate_burst_train() {
         t / COMMITS as u32
     );
 }
+
+#[test]
+#[ignore = "gate bench: run manually with --ignored --nocapture in release"]
+fn gate_sort() {
+    // The constantinople-shaped cell: qmdb's apply path sorts ~32k-element diffs every
+    // commit through `Strategy::sort_by`, and rayon's parallel sort is its entire
+    // right-end win there. Compare raw parallel sorts (policy off) and the serial
+    // baseline on identical data.
+    const ITERS: usize = 21;
+
+    let parked = Parked::new(NonZeroUsize::new(WORKERS).unwrap()).manual();
+    let rayon = Rayon::new(NonZeroUsize::new(WORKERS).unwrap())
+        .unwrap()
+        .manual();
+
+    for (n, presorted) in [(32_768usize, false), (262_144, false), (262_144, true)] {
+        let mut seed = 0x5EEDu64;
+        let mut next = move || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z ^ (z >> 31)
+        };
+        let mut input: Vec<(u64, u64)> = (0..n as u64).map(|i| (next(), i)).collect();
+        if presorted {
+            input.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+
+        let mut report = Vec::new();
+        for (name, sorter) in [
+            (
+                "parked",
+                Box::new(|items: &mut [(u64, u64)]| parked.sort_by(items, |a, b| a.0.cmp(&b.0)))
+                    as Box<dyn Fn(&mut [(u64, u64)])>,
+            ),
+            (
+                "rayon",
+                Box::new(|items: &mut [(u64, u64)]| rayon.sort_by(items, |a, b| a.0.cmp(&b.0))),
+            ),
+            (
+                "serial",
+                Box::new(|items: &mut [(u64, u64)]| items.sort_by(|a, b| a.0.cmp(&b.0))),
+            ),
+        ] {
+            let mut samples = Vec::with_capacity(ITERS);
+            for _ in 0..ITERS {
+                let mut items = input.clone();
+                let (elapsed, ()) = time(|| sorter(black_box(&mut items)));
+                samples.push(elapsed);
+                black_box(items);
+            }
+            report.push((name, median(samples)));
+        }
+        println!("gate_sort n={n} presorted={presorted}:");
+        for (name, med) in report {
+            println!("  {name:>7}: {med:?} median");
+        }
+    }
+}
+
+#[test]
+#[ignore = "gate bench: run manually with --ignored --nocapture in release"]
+fn gate_gapped_train() {
+    // The constantinople shape the other gates miss: sub-millisecond parallel phases
+    // separated by SERIAL gaps longer than the fixed search window, so an unadaptive
+    // parked pool parks between phases and pays a wake round-trip per phase per worker.
+    // Sweeps the gap: the adaptive linger should track rayon at every gap at or under
+    // LINGER_CAP, and decay back to parking (keeping the parked win) far above it.
+    const ITERS: usize = 15;
+    const WARMUP: usize = 5;
+    const LEVELS: [usize; 6] = [32_768, 16_384, 8_192, 4_096, 2_048, 1_024];
+    const ROUNDS: u32 = 40;
+
+    fn busy_wait(gap: Duration) {
+        let start = Instant::now();
+        let mut x = 1u64;
+        while start.elapsed() < gap {
+            x = work(x, 8);
+        }
+        black_box(x);
+    }
+
+    let parked = Parked::new(NonZeroUsize::new(WORKERS).unwrap()).manual();
+    let rayon = Rayon::new(NonZeroUsize::new(WORKERS).unwrap())
+        .unwrap()
+        .manual();
+
+    for gap_us in [0u64, 100, 300, 600, 1_000, 5_000] {
+        let gap = Duration::from_micros(gap_us);
+        let mut report = Vec::new();
+        for (name, run_iter) in [
+            (
+                "parked",
+                Box::new(|| {
+                    for level in LEVELS {
+                        black_box(parked.map_collect_vec(0..level as u64, |i| work(i, ROUNDS)));
+                        busy_wait(gap);
+                    }
+                }) as Box<dyn Fn()>,
+            ),
+            (
+                "rayon",
+                Box::new(|| {
+                    for level in LEVELS {
+                        black_box(rayon.map_collect_vec(0..level as u64, |i| work(i, ROUNDS)));
+                        busy_wait(gap);
+                    }
+                }),
+            ),
+            (
+                "serial",
+                Box::new(|| {
+                    for level in LEVELS {
+                        black_box(
+                            crate::Sequential.map_collect_vec(0..level as u64, |i| work(i, ROUNDS)),
+                        );
+                        busy_wait(gap);
+                    }
+                }),
+            ),
+        ] {
+            for _ in 0..WARMUP {
+                run_iter();
+            }
+            let mut samples = Vec::with_capacity(ITERS);
+            for _ in 0..ITERS {
+                let (elapsed, ()) = time(&run_iter);
+                samples.push(elapsed);
+            }
+            report.push((name, median(samples)));
+        }
+        println!("gate_gapped_train gap={gap_us}us:");
+        for (name, med) in report {
+            println!("  {name:>7}: {med:?} median/iter");
+        }
+    }
+}

@@ -22,10 +22,12 @@
 //! fence form makes the required ordering visible by construction; loom is the safety
 //! oracle for this module, so the fenced form is the shipped form.
 //!
-//! The caller participates in its own job while claimable work remains, then blocks on a
-//! completion latch (never spinning on counters). Panics in chunks are caught where they
-//! happen: workers store the first payload, close the job, and return to their loop; only
-//! the caller resumes the payload, after every executor has finished touching the frame.
+//! The caller participates in its own job while claimable work remains, spins a bounded
+//! window on the completion predicate (straggler chunks usually land within microseconds,
+//! and the window saves a futex round-trip per run), then blocks on a completion latch.
+//! Panics in chunks are caught where they happen: workers store the first payload, close
+//! the job, and return to their loop; only the caller resumes the payload, after every
+//! executor has finished touching the frame.
 
 use super::sync::{
     AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Condvar, Mutex, Ordering, fence, spin,
@@ -42,6 +44,11 @@ use std::panic::{self, AssertUnwindSafe};
 pub(super) const MIN_CHUNK: usize = 32;
 #[cfg(feature = "loom")]
 pub(super) const MIN_CHUNK: usize = 1;
+
+/// Rounds the caller spins on the completion predicate before blocking on the latch (see
+/// [`Job::wait_done`]). Set by the gate benches alongside `SEARCH_ROUNDS`.
+#[cfg(not(any(feature = "loom", miri)))]
+const DONE_SPIN_ROUNDS: usize = 64;
 
 /// Payload of a caught chunk panic.
 pub(super) type Payload = Box<dyn core::any::Any + Send + 'static>;
@@ -83,6 +90,10 @@ pub(super) struct Job {
     /// Maximum concurrent executors for this job (the strategy's parallelism): the
     /// participant cap, and the divisor for guided chunk sizing.
     max_executors: usize,
+    /// Claim granularity floor for this job. [`MIN_CHUNK`] for per-item bodies; callers
+    /// whose items are themselves coarse work units (a run to sort, a pair of runs to
+    /// merge, one side of a join) pass 1 so single items can be claimed and fanned out.
+    min_chunk: usize,
     /// Claim cursor: the next unclaimed index. Monotonic; claims are `[start, start + c)`.
     next: AtomicUsize,
     /// Executors currently inside [`drive`] for this job. Capped at `executors` so a single
@@ -111,6 +122,7 @@ impl Job {
         body: &F,
         len: usize,
         max_executors: usize,
+        min_chunk: usize,
     ) -> Self {
         Self {
             // The one lifetime erasure: sound per the module safety model, because `run`
@@ -119,6 +131,7 @@ impl Job {
             call: call_shim::<F>,
             len,
             max_executors: max_executors.max(1),
+            min_chunk: min_chunk.max(1),
             next: AtomicUsize::new(0),
             participants: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
@@ -183,7 +196,21 @@ impl Job {
     }
 
     /// Blocks until the completion predicate holds.
+    ///
+    /// Spins a bounded window on the predicate first: the guided chunking shrinks tail
+    /// chunks toward the claim floor, so a straggler usually finishes within microseconds
+    /// of the caller exhausting claims, and the spin saves a futex round-trip (sleep and
+    /// wake) on the tail of most scoped runs. Bounded, so a long straggler still parks
+    /// the caller; disabled under loom (the modeled protocol needs no schedule hint) and
+    /// miri (spinning wastes interpreter time).
     fn wait_done(&self) {
+        #[cfg(not(any(feature = "loom", miri)))]
+        for _ in 0..DONE_SPIN_ROUNDS {
+            if self.done() {
+                return;
+            }
+            super::sync::spin();
+        }
         loop {
             if self.done() {
                 return;
@@ -206,9 +233,10 @@ impl Job {
     /// The chunk size for a claim when `remaining` items are unclaimed: large early for low
     /// contention, shrinking toward the tail so straggler chunks rebalance. The floor keeps
     /// tiny jobs from being shredded into per-item claims, where the SeqCst claim/handshake
-    /// traffic would dwarf the work itself.
+    /// traffic would dwarf the work itself. Saturating: an absurd planning parallelism must
+    /// degrade to floor-sized chunks, not panic mid-claim.
     fn chunk(&self, remaining: usize) -> usize {
-        (remaining / (2 * self.max_executors)).max(MIN_CHUNK)
+        (remaining / self.max_executors.saturating_mul(2)).max(self.min_chunk)
     }
 }
 
@@ -219,6 +247,17 @@ fn finish_executing(job: &Job) {
         || (job.closed.load(Ordering::SeqCst) && was_last)
     {
         job.wake_waiter();
+    }
+}
+
+/// Leaves the executing set on drop, so the executing count balances even if the claim
+/// path unwinds outside the body's `catch_unwind` (the completion latch would otherwise
+/// wait forever on a count that can no longer reach zero).
+struct ExecutingGuard<'a>(&'a Job);
+
+impl Drop for ExecutingGuard<'_> {
+    fn drop(&mut self) {
+        finish_executing(self.0);
     }
 }
 
@@ -242,23 +281,25 @@ pub(super) fn drive(job: &Job) -> bool {
         // `closed` here and back out, so no chunk can start after the completion latch
         // releases. That is what makes `Ctl::close`'s "no further ranges will be claimed"
         // and unpublish's "residual pins run no user code" contracts hold.
+        //
+        // The guard leaves the executing set on every exit from this iteration, including
+        // an unwind from the claim path itself: the completion latch must never wait on a
+        // count that cannot drain.
         job.executing.fetch_add(1, Ordering::SeqCst);
+        let executing = ExecutingGuard(job);
         // Executing-vs-close handshake: order our entry before the closed check against
         // the closer's closed-store-then-executing-check (via done()).
         fence(Ordering::SeqCst);
         if job.closed.load(Ordering::SeqCst) {
-            finish_executing(job);
             break;
         }
         let claimed = job.next.load(Ordering::Relaxed);
         if claimed >= job.len {
-            finish_executing(job);
             break;
         }
         let c = job.chunk(job.len - claimed);
         let start = job.next.fetch_add(c, Ordering::AcqRel);
         if start >= job.len {
-            finish_executing(job);
             break;
         }
         let end = (start + c).min(job.len);
@@ -279,7 +320,7 @@ pub(super) fn drive(job: &Job) -> bool {
                 job.poison(payload);
             }
         }
-        finish_executing(job);
+        drop(executing);
     }
     job.participants.fetch_sub(1, Ordering::SeqCst);
     any
@@ -317,17 +358,26 @@ impl Slot {
     }
 
     /// Pins the slot and, if it holds a published job, calls `f` on it; `None` when the
-    /// slot is not published. `f` must not unwind: an unwind would leak the pin and hang
-    /// `unpublish` forever.
+    /// slot is not published. The pin is released even if `f` unwinds, so an unwinding
+    /// callback cannot strand the unpublisher's pins wait.
     fn with_pinned<R>(&self, f: impl FnOnce(&Job) -> R) -> Option<R> {
+        /// Releases the pin on every exit path, including unwinds.
+        struct PinGuard<'a>(&'a Slot);
+        impl Drop for PinGuard<'_> {
+            fn drop(&mut self) {
+                self.0.pins.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
         // Pin FIRST, then validate: the unpublisher stores DRAINING before waiting on
         // `pins`, so a pin taken after the store observes non-PUBLISHED and unpins without
         // touching the pointer, and a pin taken before the store is waited out.
         self.pins.fetch_add(1, Ordering::SeqCst);
+        let _pin = PinGuard(self);
         // Pin-vs-unpublish handshake: order our pin before the state check against the
         // unpublisher's DRAINING-store-then-pins-check.
         fence(Ordering::SeqCst);
-        let out = if self.state.load(Ordering::SeqCst) == PUBLISHED {
+        if self.state.load(Ordering::SeqCst) == PUBLISHED {
             let ptr = self.job.load(Ordering::SeqCst);
             debug_assert!(!ptr.is_null(), "PUBLISHED slot with null job");
             // SAFETY: PUBLISHED observed while pinned. Unpublishing stores DRAINING and
@@ -337,9 +387,7 @@ impl Slot {
             Some(f(unsafe { &*ptr }))
         } else {
             None
-        };
-        self.pins.fetch_sub(1, Ordering::SeqCst);
-        out
+        }
     }
 
     /// Whether this slot holds work a new executor could actually claim (racy by design).
@@ -414,12 +462,16 @@ pub(super) struct Outcome {
 /// The single scoped primitive: runs `body` over `0..len` with the caller participating and
 /// up to `workers - 1` woken helpers assisting via the slot table.
 ///
+/// `min_chunk` is the claim granularity floor: [`MIN_CHUNK`] for per-item bodies, 1 for
+/// bodies whose items are themselves coarse work units (sort runs, merge pairs, join sides).
+///
 /// Returns only after every executor has stopped touching `body`'s frame; the borrowed body
 /// and everything it captures are safe to drop after this returns, on every path.
 pub(super) fn run<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(
     pool: &super::pool::Shared,
     len: usize,
     parallelism: usize,
+    min_chunk: usize,
     body: &F,
 ) -> Outcome {
     if len == 0 {
@@ -433,28 +485,64 @@ pub(super) fn run<F: Fn(Range<usize>, &Ctl<'_>) + Sync>(
     // may differ from the pool's worker count; a single job never runs on more executors
     // than the strategy plans for.
     let cap = parallelism.max(1);
-    let job = Job::new(body, len, cap);
+    let job = Job::new(body, len, cap, min_chunk);
+
+    /// Tears the job down if `run` unwinds after publication: closes it against further
+    /// claims, waits out in-flight executors, and unpublishes the slot, so the lifetime
+    /// invariant (no executor can reach the job after `run` returns or unwinds) holds even
+    /// if something on the claim path panics -- without it, an internal unwind would
+    /// destroy the stack Job behind a still-PUBLISHED slot.
+    ///
+    /// `Drop` is the UNWIND path only; normal completion goes through [`RunGuard::finish`],
+    /// which must NOT close: the caller can be rejected by the participant cap when enough
+    /// lingering workers beat it into the job, and closing then would abandon unclaimed
+    /// chunks of a job that completed no-panic in the workers' hands (observed as silent
+    /// partial sort rounds).
+    struct RunGuard<'a> {
+        job: &'a Job,
+        slot: Option<&'a Slot>,
+    }
+    impl RunGuard<'_> {
+        /// Normal completion: wait for the job, unpublish, and disarm the drop.
+        fn finish(self) {
+            self.job.wait_done();
+            if let Some(slot) = self.slot {
+                slot.unpublish();
+            }
+            core::mem::forget(self);
+        }
+    }
+    impl Drop for RunGuard<'_> {
+        fn drop(&mut self) {
+            self.job.close();
+            self.job.wait_done();
+            if let Some(slot) = self.slot {
+                slot.unpublish();
+            }
+        }
+    }
+
     // Publish before waking so woken workers find the job. Overflow (no empty slot) means
     // the caller executes the whole job inline: submission never blocks on capacity.
     let slot = pool.try_install(&job);
+    let guard = RunGuard {
+        job: &job,
+        slot: slot.map(|idx| pool.slot(idx)),
+    };
     if slot.is_some() {
         // Wake only as many helpers as can actually claim a chunk: the caller is one
-        // executor, chunks are at least MIN_CHUNK items, and helpers beyond the pool's
+        // executor, chunks are at least `min_chunk` items, and helpers beyond the pool's
         // worker count do not exist. Waking more would unpark workers into an immediate
         // bounce (scan, fail to claim, search window, re-park) -- the idle tax itself.
-        let usable = len.div_ceil(MIN_CHUNK).min(cap);
+        let usable = len.div_ceil(min_chunk.max(1)).min(cap);
         let budget = usable.saturating_sub(1).min(pool.workers());
         pool.wake(budget);
     }
 
-    // Participate while claimable work remains, then block on the completion latch.
+    // Participate while claimable work remains, then block on the completion latch and
+    // unpublish before the job and the body's frame may die.
     drive(&job);
-    job.wait_done();
-
-    // Unpublish and drain pins before the job (and the body's frame) may die.
-    if let Some(idx) = slot {
-        pool.slot(idx).unpublish();
-    }
+    guard.finish();
 
     let claimed = job.next.load(Ordering::Acquire).min(job.len);
     let panic = job.panic.lock().unwrap().take();

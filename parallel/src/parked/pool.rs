@@ -44,6 +44,19 @@ pub(super) const SEARCH_ROUNDS: usize = 64;
 #[cfg(feature = "loom")]
 pub(super) const SEARCH_ROUNDS: usize = 0;
 
+/// Upper bound on a worker's adaptive linger: the longest it will spin waiting for the
+/// next job before parking. Chosen to cover the inter-phase serial gaps of bulk-synchronous
+/// commit workloads (hundreds of microseconds between sub-millisecond parallel phases),
+/// where parking between phases costs a wake round-trip per phase per worker; set by
+/// measurement via the gapped-train gate bench.
+#[cfg(not(any(feature = "loom", miri)))]
+const LINGER_CAP: core::time::Duration = core::time::Duration::from_millis(1);
+
+/// Scan rounds between clock checks inside the linger window, keeping `Instant::now` off
+/// the per-round path.
+#[cfg(not(any(feature = "loom", miri)))]
+const LINGER_CHECK_ROUNDS: usize = 8;
+
 /// Idle-entry states.
 const ACTIVE: u8 = 0;
 const REGISTERED: u8 = 1;
@@ -205,6 +218,13 @@ impl Shared {
 pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
     WORKER_OF.with(|w| w.set(Some((shared.identity(), id))));
     let mut rotation = id;
+    // Adaptive linger: how long this worker spins for the next job before parking, learned
+    // from its own park durations (see the adaptation step after `park`). Zero for workloads
+    // whose gaps parking handles well; grows toward `LINGER_CAP` when jobs keep arriving
+    // just after parking (bulk-synchronous phases separated by short serial gaps), which
+    // removes the per-phase wake round-trip exactly where a spinning pool would win.
+    #[cfg(not(any(feature = "loom", miri)))]
+    let mut linger = core::time::Duration::ZERO;
     'outer: loop {
         if shared.shutdown.load(Ordering::SeqCst) {
             // Defensive drain. In practice the queue is empty here by construction: every
@@ -219,10 +239,13 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
         }
 
         // One-shots first: they are latency-sensitive hand-offs (and Manual::spawn's
-        // contract), while scoped jobs always have their caller participating.
-        if let Some(job) = shared.pop_oneshot() {
-            job();
-            continue;
+        // contract), while scoped jobs always have their caller participating. The atomic
+        // length probe keeps the queue mutex off the scan path when no one-shots exist.
+        if shared.has_oneshots() {
+            if let Some(job) = shared.pop_oneshot() {
+                job();
+                continue;
+            }
         }
 
         // Work phase: drive every published slot, starting at a rotating origin so one
@@ -248,6 +271,28 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
                 continue 'outer;
             }
             spin();
+        }
+
+        // Adaptive linger window: extend the fixed search window by this worker's learned
+        // linger before paying a park/wake round-trip. The clock is consulted once per
+        // LINGER_CHECK_ROUNDS scan rounds.
+        #[cfg(not(any(feature = "loom", miri)))]
+        if !linger.is_zero() {
+            let start = std::time::Instant::now();
+            'linger: loop {
+                for _ in 0..LINGER_CHECK_ROUNDS {
+                    if shared.shutdown.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if shared.any_claimable() || shared.has_oneshots() {
+                        continue 'outer;
+                    }
+                    spin();
+                }
+                if start.elapsed() >= linger {
+                    break 'linger;
+                }
+            }
         }
 
         // Register idle, then re-check for work published between our last scan and the
@@ -278,12 +323,28 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
             continue;
         }
 
+        #[cfg(not(any(feature = "loom", miri)))]
+        let parked_at = std::time::Instant::now();
         me.parker.park();
 
         // Woken: by a claimant (CLAIMED; count already adjusted), by shutdown, or by a
         // stale token (still REGISTERED); deregister ourselves in the latter cases.
         if me.state.swap(ACTIVE, Ordering::SeqCst) == REGISTERED {
             shared.idle_count.fetch_sub(1, Ordering::SeqCst);
+        } else {
+            // A claimant spent wake budget on us: work arrived `park` after we gave up
+            // lingering. Adapt so the next same-shaped gap is absorbed without parking:
+            // extend the linger by this gap (the exact total wait that would have caught
+            // it), capped; a gap the cap cannot cover means parking was right, so decay.
+            #[cfg(not(any(feature = "loom", miri)))]
+            {
+                let park = parked_at.elapsed();
+                if park < LINGER_CAP {
+                    linger = (linger + park).min(LINGER_CAP);
+                } else {
+                    linger /= 2;
+                }
+            }
         }
     }
 }
