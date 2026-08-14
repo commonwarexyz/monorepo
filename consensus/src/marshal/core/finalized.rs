@@ -351,7 +351,6 @@ where
         ..
     } = request;
 
-    // The requester may have moved on while this request waited.
     if response_tx.is_closed() {
         metrics.abandoned.inc();
         return;
