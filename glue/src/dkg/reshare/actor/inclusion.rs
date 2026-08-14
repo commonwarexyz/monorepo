@@ -126,18 +126,23 @@ where
         None
     }
 
-    /// Drains the phase-ending queue and returns live canonical responses.
+    /// Rejects live noncanonical requests and returns live canonical responses.
     fn drain_canonical(
         &mut self,
         parent: &B::Digest,
     ) -> Vec<oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>> {
-        self.inner
-            .drain(..)
-            .filter_map(|request| {
-                (request.parent == *parent && !request.response.is_closed())
-                    .then_some(request.response)
-            })
-            .collect()
+        let mut responses = Vec::new();
+        for request in self.inner.drain(..) {
+            if request.response.is_closed() {
+                continue;
+            }
+            if request.parent == *parent {
+                responses.push(request.response);
+            } else {
+                let _ = request.response.send_lossy(EpochInfoResponse::Unavailable);
+            }
+        }
+        responses
     }
 }
 
@@ -2028,5 +2033,23 @@ mod tests {
         requests.push(later, Span::none(), empty_ancestry(), later_tx);
 
         assert_eq!(requests.pop().map(|request| request.parent), Some(earlier));
+    }
+
+    #[test]
+    fn draining_canonical_responds_to_noncanonical_request() {
+        let genesis = mocks::genesis_block(signers()[0].public_key());
+        let canonical = genesis.digest();
+        let noncanonical =
+            TestBlock::new::<Sha256>(genesis.context().clone(), canonical, Height::new(1), 1)
+                .digest();
+        let (response_tx, response_rx) = oneshot::channel::<TestResponse>();
+        let mut requests = TestRequests::default();
+        requests.push(noncanonical, Span::none(), empty_ancestry(), response_tx);
+
+        assert!(requests.drain_canonical(&canonical).is_empty());
+        assert!(matches!(
+            response_rx.now_or_never(),
+            Some(Ok(EpochInfoResponse::Unavailable))
+        ));
     }
 }

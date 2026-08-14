@@ -421,7 +421,7 @@ where
                 recovered_epoch,
             )
             .await;
-        let state_sync = if let Some(state_sync) = state_sync {
+        let mut state_sync = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
             let floor = self
@@ -446,7 +446,6 @@ where
         }
 
         let mut current_epoch = state_sync.as_ref().map(|start| start.info.epoch);
-        let mut state_sync = state_sync;
         loop {
             let Some(prepared) = self
                 .setup(&mut store, current_epoch.take(), state_sync.take())
