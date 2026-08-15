@@ -25,3 +25,15 @@ name = "blob_integrity"
 path = "fuzz_targets/blob_integrity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "atomic_migration"
+path = "fuzz_targets/atomic_migration.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "atomic_storage_operations"
+path = "fuzz_targets/atomic_storage_operations.rs"
+test = false
+doc = false
