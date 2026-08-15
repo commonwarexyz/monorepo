@@ -215,11 +215,22 @@ cfg_if::cfg_if! {
                 // concurrent pinned jobs can never crowd it (nor evict the caller). Past the
                 // cap the job runs unpinned.
                 let cap = topology.pin_cap(domain);
-                topology.pins[domain]
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
-                        (live < cap).then_some(live + 1)
-                    })
-                    .ok()?;
+                let pins = &topology.pins[domain];
+                let mut live = pins.load(Ordering::Acquire);
+                loop {
+                    if live >= cap {
+                        return None;
+                    }
+                    match pins.compare_exchange_weak(
+                        live,
+                        live + 1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break,
+                        Err(current) => live = current,
+                    }
+                }
                 let slot = PinSlot { domain };
 
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
