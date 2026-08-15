@@ -521,15 +521,16 @@ impl Freelist {
 
     /// Deallocates every buffer currently parked in this freelist.
     ///
-    /// Each stripe receives a preallocated empty vector while locked. Detached
-    /// buffers are deallocated after unlocking. Creation permits remain
-    /// consumed, so a later return can reuse the reserved room but draining
-    /// never permits a second allocation for an existing slot.
+    /// Buffers still checked out or held in a thread-local cache may return during
+    /// or after this call. Each stripe is therefore replaced under lock with an
+    /// empty vector reserved to its original limit, so a return never grows the
+    /// vector while holding the stripe lock. Detached buffers are deallocated
+    /// after the lock is released.
+    ///
+    /// Draining does not restore creation permits, so deallocated buffers cannot
+    /// be recreated through this freelist.
     pub fn drain(&self) -> usize {
         let mut drained = 0;
-
-        // Visit stripes directly so Drop can run during thread-local cache
-        // teardown without consulting this thread's routing state.
         for stripe in &self.stripes {
             // Allocate before locking so late returns never wait for allocator
             // work that is independent of the protected vector swap.
@@ -541,16 +542,21 @@ impl Freelist {
                 detached
             };
 
-            for slot in detached {
-                let buffer = self.claim(slot);
-                // SAFETY: this freelist created the detached buffer with this
-                // exact layout and removed its slot under lock.
-                unsafe { buffer.deallocate(self.layout) };
-                drained += 1;
-            }
+            drained += self.deallocate_detached(detached);
         }
 
         drained
+    }
+
+    /// Deallocates buffers whose slots are no longer owned by a stripe.
+    fn deallocate_detached(&self, detached: Vec<u32>) -> usize {
+        let count = detached.len();
+        for slot in detached {
+            // SAFETY: detachment gives this method unique ownership of the buffer,
+            // which this freelist allocated with `self.layout`.
+            unsafe { self.claim(slot).deallocate(self.layout) };
+        }
+        count
     }
 
     /// Returns the stable owner pointer for one slot id.
@@ -601,9 +607,22 @@ impl Freelist {
 
 impl Drop for Freelist {
     fn drop(&mut self) {
-        // Outstanding slots keep the size class alive, so only globally parked
-        // buffers can remain when the final freelist reference is dropped.
-        self.drain();
+        // Every checked-out or TLS-cached slot keeps the size class alive until it
+        // returns. Final destruction therefore owns every live allocation and
+        // needs no replacement capacity for a later return.
+        for index in 0..self.stripes.len() {
+            #[cfg(feature = "loom")]
+            let detached = std::mem::take(
+                self.stripes[index]
+                    .free
+                    .get_mut()
+                    .expect("freelist mutex must not be poisoned"),
+            );
+            #[cfg(not(feature = "loom"))]
+            let detached = std::mem::take(self.stripes[index].free.get_mut());
+
+            self.deallocate_detached(detached);
+        }
     }
 }
 
@@ -660,9 +679,7 @@ pub(super) mod tests {
         sync::{
             Arc, Barrier,
             atomic::{AtomicBool as StdAtomicBool, Ordering as StdOrdering},
-            mpsc,
         },
-        time::Duration,
     };
 
     /// Allocation layout shared by native freelist tests.
@@ -719,15 +736,6 @@ pub(super) mod tests {
                 return buffers;
             }
         }
-    }
-
-    /// Parks one test buffer in a chosen stripe without exercising routing.
-    fn park_in_stripe(freelist: &Freelist, stripe: usize, buffer: PooledBuffer) {
-        let stripe = &freelist.stripes[stripe];
-        let mut free = stripe.lock();
-        assert!(free.len() < stripe.limit);
-        free.push(buffer.into_slot());
-        stripe.available.store(true, Ordering::Release);
     }
 
     /// Verifies lazy creation, prefill, fixed permits, and explicit draining.
@@ -808,74 +816,6 @@ pub(super) mod tests {
         assert_eq!(set.drain(), count);
     }
 
-    /// Verifies that `put` waits for its locked full home before scanning on.
-    #[test]
-    fn test_put_waits_for_locked_full_home() {
-        let set = Arc::new(lazy(2, 2));
-        let first = set.try_create(false).expect("first creation permit");
-        let second = set.try_create(false).expect("second creation permit");
-        let (home_tx, home_rx) = mpsc::channel();
-        let (go_tx, go_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = {
-            let set = Arc::clone(&set);
-            std::thread::spawn(move || {
-                home_tx.send(set.home_stripe()).expect("send worker home");
-                go_rx.recv().expect("start return");
-                set.put(second);
-                done_tx.send(()).expect("signal completion");
-            })
-        };
-
-        let home = home_rx.recv().expect("receive worker home");
-        park_in_stripe(&set, home, first);
-        let guard = set.stripes[home].lock();
-        go_tx.send(()).expect("start worker");
-        assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
-        drop(guard);
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("return must finish after home unlocks");
-        worker.join().expect("worker must not panic");
-        assert_eq!(len(&set), 2);
-    }
-
-    /// Verifies that `put_batch` waits for its full locked home, then spills.
-    #[test]
-    fn test_put_batch_waits_for_locked_full_home() {
-        let set = Arc::new(lazy(4, 4));
-        let mut buffers = (0..4).map(|_| set.try_create(false).expect("creation permit"));
-        let first = buffers.next().expect("first buffer");
-        let second = buffers.next().expect("second buffer");
-        let third = buffers.next().expect("third buffer");
-        let fourth = buffers.next().expect("fourth buffer");
-        let (home_tx, home_rx) = mpsc::channel();
-        let (go_tx, go_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = {
-            let set = Arc::clone(&set);
-            std::thread::spawn(move || {
-                home_tx.send(set.home_stripe()).expect("send worker home");
-                go_rx.recv().expect("start batch return");
-                set.put_batch([second, third, fourth]);
-                done_tx.send(()).expect("signal completion");
-            })
-        };
-
-        let home = home_rx.recv().expect("receive worker home");
-        park_in_stripe(&set, home, first);
-        let guard = set.stripes[home].lock();
-        go_tx.send(()).expect("start worker");
-        assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
-        drop(guard);
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("batch return must finish after home unlocks");
-        worker.join().expect("worker must not panic");
-        assert_eq!(set.stripes[home].lock().len(), 1);
-        assert_eq!(len(&set), 4);
-    }
-
     /// Verifies that one thread keeps a stable, in-range home stripe.
     #[test]
     fn test_thread_home_is_stable_and_bounded() {
@@ -910,71 +850,6 @@ pub(super) mod tests {
         let mut taken = None;
         assert_eq!(set.take_batch(1, |buffer| taken = Some(buffer)), 1);
         set.put(taken.expect("singleton callback receives the buffer"));
-    }
-
-    /// Verifies that `take` waits for its positive home before later stripes.
-    #[test]
-    fn test_take_waits_for_home_before_later_stripe() {
-        let set = Arc::new(prefilled(2, 2));
-        let (home_tx, home_rx) = mpsc::channel();
-        let (go_tx, go_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = {
-            let set = Arc::clone(&set);
-            std::thread::spawn(move || {
-                home_tx.send(set.home_stripe()).expect("send worker home");
-                go_rx.recv().expect("start take");
-                done_tx.send(set.take()).expect("send take result");
-            })
-        };
-
-        let home = home_rx.recv().expect("receive worker home");
-        let first_guard = set.stripes[home].lock();
-        go_tx.send(()).expect("start worker");
-        assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
-        drop(first_guard);
-        let result = done_rx.recv_timeout(Duration::from_secs(1));
-        worker.join().expect("worker must not panic");
-
-        let buffer = result
-            .expect("take must finish after the home stripe unlocks")
-            .expect("home stripe must remain productive");
-        assert_eq!(buffer.slot(), home as u32);
-        set.put(buffer);
-    }
-
-    /// Verifies that `take_batch` waits for its home before scanning onward.
-    #[test]
-    fn test_take_batch_waits_for_home_before_later_stripe() {
-        let set = Arc::new(prefilled(2, 2));
-        let (home_tx, home_rx) = mpsc::channel();
-        let (go_tx, go_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = {
-            let set = Arc::clone(&set);
-            std::thread::spawn(move || {
-                home_tx.send(set.home_stripe()).expect("send worker home");
-                go_rx.recv().expect("start batch take");
-                let mut buffers = Vec::new();
-                let count = set.take_batch(2, |buffer| buffers.push(buffer));
-                done_tx.send((count, buffers)).expect("send batch result");
-            })
-        };
-
-        let home = home_rx.recv().expect("receive worker home");
-        let first_guard = set.stripes[home].lock();
-        go_tx.send(()).expect("start worker");
-        assert!(done_rx.recv_timeout(Duration::from_millis(10)).is_err());
-        drop(first_guard);
-        let result = done_rx.recv_timeout(Duration::from_secs(1));
-        worker.join().expect("worker must not panic");
-
-        let (count, mut buffers) = result.expect("batch take must finish after home unlocks");
-        assert_eq!(count, 2);
-        buffers.sort_by_key(PooledBuffer::slot);
-        assert_eq!(buffers[0].slot(), 0);
-        assert_eq!(buffers[1].slot(), 1);
-        set.put_batch(buffers);
     }
 
     /// Verifies unique ownership across contended scalar take and put cycles.
@@ -1178,6 +1053,18 @@ pub(super) mod tests {
         (result, calls)
     }
 
+    /// Verifies populated final destruction does not reserve replacement capacity.
+    #[test]
+    fn test_populated_final_drop_is_allocation_free() {
+        let set = prefilled(19, 8);
+
+        let ((), allocation_calls) = allocation_calls_during(|| drop(set));
+        assert_eq!(
+            allocation_calls, 0,
+            "final destruction must not allocate replacement capacity"
+        );
+    }
+
     /// Verifies an exhausted TLS batch probe does not allocate result scratch.
     #[test]
     fn test_exhausted_batched_tls_miss_is_allocation_free() {
@@ -1229,16 +1116,46 @@ mod loom_tests {
         Err(_) => panic!("valid test layout"),
     };
 
+    const OPERATION_STARTED: usize = 1;
+    const OPERATION_FINISHED: usize = 2;
+
+    /// Creates an empty freelist for one Loom model.
+    fn empty(capacity: u32) -> Freelist {
+        Freelist::new(NZU32!(capacity), NZUsize!(1), TEST_LAYOUT, false)
+    }
+
     /// Creates a fully available freelist for one Loom model.
     fn prefilled(capacity: u32) -> Freelist {
         Freelist::new(NZU32!(capacity), NZUsize!(1), TEST_LAYOUT, true)
+    }
+
+    /// Parks one test buffer in a chosen stripe without exercising routing.
+    fn park_in_stripe(set: &Freelist, index: usize, buffer: PooledBuffer) {
+        let stripe = &set.stripes[index];
+        let mut free = stripe.lock();
+        assert!(free.len() < stripe.limit);
+        free.push(buffer.into_slot());
+        stripe.available.store(true, Ordering::Release);
+    }
+
+    /// Requires a modeled operation to remain incomplete while its home guard is held.
+    fn assert_waiting(phase: &AtomicUsize) {
+        while phase.load(Ordering::Acquire) == 0 {
+            thread::yield_now();
+        }
+        thread::yield_now();
+        assert_eq!(
+            phase.load(Ordering::Acquire),
+            OPERATION_STARTED,
+            "operation skipped its locked home stripe"
+        );
     }
 
     /// Verifies that a completed return is discoverable by a later take.
     #[test]
     fn completed_put_is_discoverable() {
         loom::model(|| {
-            let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
+            let set = Arc::new(empty(1));
             let buffer = set.try_create(false).expect("creation permit");
             let returned = Arc::new(AtomicBool::new(false));
 
@@ -1287,7 +1204,7 @@ mod loom_tests {
     #[test]
     fn concurrent_puts_preserve_both_slots() {
         loom::model(|| {
-            let set = Arc::new(Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false));
+            let set = Arc::new(empty(2));
             let first = set.try_create(false).expect("first permit");
             let second = set.try_create(false).expect("second permit");
 
@@ -1309,45 +1226,132 @@ mod loom_tests {
         });
     }
 
-    /// Verifies that a positive locked stripe is waited on, not skipped.
+    /// Verifies that a take waits for its positive home before a later stripe.
     #[test]
-    fn locked_stripe_is_not_reported_empty() {
+    fn take_waits_for_home_before_later_stripe() {
         loom::model(|| {
-            let set = Arc::new(prefilled(1));
+            let set = Arc::new(prefilled(2));
+            let phase = Arc::new(AtomicUsize::new(0));
             let guard = set.stripes[0].lock();
             let taker = {
                 let set = Arc::clone(&set);
-                thread::spawn(move || set.take())
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    let buffer = set.take();
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                    buffer
+                })
             };
-            thread::yield_now();
+
+            assert_waiting(&phase);
             drop(guard);
 
             let buffer = taker
                 .join()
                 .expect("taker must not panic")
-                .expect("locked stripe must not be missed");
+                .expect("home stripe must remain productive");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            assert_eq!(buffer.slot(), 0);
             set.put(buffer);
         });
     }
 
-    /// Verifies that a return waits for the only stripe's lock.
+    /// Verifies that a return waits for its full home before a later stripe.
     #[test]
-    fn return_waits_for_locked_stripe() {
+    fn put_waits_for_full_home_before_later_stripe() {
         loom::model(|| {
-            let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
-            let buffer = set.try_create(false).expect("creation permit");
+            let set = Arc::new(empty(2));
+            let parked = set.try_create(false).expect("first creation permit");
+            let returning = set.try_create(false).expect("second creation permit");
+            park_in_stripe(&set, 0, parked);
 
+            let phase = Arc::new(AtomicUsize::new(0));
             let guard = set.stripes[0].lock();
             let returner = {
                 let set = Arc::clone(&set);
-                thread::spawn(move || set.put(buffer))
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    set.put(returning);
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                })
             };
-            thread::yield_now();
+
+            assert_waiting(&phase);
             drop(guard);
             returner.join().expect("returner must not panic");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            assert_eq!(set.stripes[0].lock().len(), 1);
+            assert_eq!(set.stripes[1].lock().len(), 1);
+        });
+    }
 
-            let buffer = set.take().expect("returned buffer");
-            set.put(buffer);
+    /// Verifies that a batch return waits for its full home before spilling.
+    #[test]
+    fn put_batch_waits_for_full_home_before_later_stripes() {
+        loom::model(|| {
+            let set = Arc::new(empty(4));
+            let first = set.try_create(false).expect("first creation permit");
+            let second = set.try_create(false).expect("second creation permit");
+            let third = set.try_create(false).expect("third creation permit");
+            let fourth = set.try_create(false).expect("fourth creation permit");
+            park_in_stripe(&set, 0, first);
+
+            let phase = Arc::new(AtomicUsize::new(0));
+            let guard = set.stripes[0].lock();
+            let returner = {
+                let set = Arc::clone(&set);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    set.put_batch([second, third, fourth]);
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                })
+            };
+
+            assert_waiting(&phase);
+            drop(guard);
+            returner.join().expect("returner must not panic");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            for stripe in &set.stripes {
+                assert_eq!(stripe.lock().len(), 1);
+            }
+        });
+    }
+
+    /// Verifies that a batch take waits for its home before scanning onward.
+    #[test]
+    fn take_batch_waits_for_home_before_later_stripe() {
+        loom::model(|| {
+            let set = Arc::new(prefilled(2));
+            let phase = Arc::new(AtomicUsize::new(0));
+            let guard = set.stripes[0].lock();
+            let taker = {
+                let set = Arc::clone(&set);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    let mut buffers = Vec::new();
+                    let count = set.take_batch(2, |buffer| buffers.push(buffer));
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                    (count, buffers)
+                })
+            };
+
+            assert_waiting(&phase);
+            drop(guard);
+            let (count, mut buffers) = taker.join().expect("taker must not panic");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            assert_eq!(count, 2);
+            buffers.sort_by_key(PooledBuffer::slot);
+            assert_eq!(buffers[0].slot(), 0);
+            assert_eq!(buffers[1].slot(), 1);
+            set.put_batch(buffers);
         });
     }
 
