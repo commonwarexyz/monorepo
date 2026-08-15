@@ -527,7 +527,10 @@ pub mod fuzz {
 mod tests {
     use super::{
         ExchangePublicKey, Signature, VerifyingKey,
-        vectors::{RFC7748_X25519, RFC7748_X25519_DIFFIE_HELLMAN, RFC8032_ED25519, ZIP215_POINTS},
+        vectors::{
+            RFC7748_X25519, RFC7748_X25519_DIFFIE_HELLMAN, RFC8032_ED25519, WYCHEPROOF_ED25519,
+            WYCHEPROOF_X25519, ZIP215_POINTS,
+        },
     };
     use crate::{key_exchange::SecretKey, signing::SigningKey};
     use commonware_codec::DecodeExt as _;
@@ -547,6 +550,20 @@ mod tests {
                 vector.signature,
                 "RFC 8032 test {} signature",
                 vector.name,
+            );
+        }
+    }
+
+    #[test]
+    fn wycheproof_ed25519_vectors() {
+        for vector in WYCHEPROOF_ED25519 {
+            let verifying_key = VerifyingKey::decode(vector.public_key.as_slice()).unwrap();
+            let valid = Signature::decode(vector.signature)
+                .is_ok_and(|signature| verifying_key.verify_raw(vector.message, &signature));
+            assert_eq!(
+                valid, vector.valid_zip215,
+                "Wycheproof Ed25519 test {}",
+                vector.tc_id,
             );
         }
     }
@@ -580,6 +597,21 @@ mod tests {
             .expect("RFC 7748 Alice public key is contributory");
         assert_eq!(alice_shared.as_bytes(), &vector.shared_secret);
         assert_eq!(bob_shared.as_bytes(), &vector.shared_secret);
+    }
+
+    #[test]
+    fn wycheproof_x25519_vectors() {
+        for vector in WYCHEPROOF_X25519 {
+            let public_key = ExchangePublicKey::decode(vector.public_key.as_slice()).unwrap();
+            let shared_secret = SecretKey::from_raw(vector.private_key)
+                .exchange(&public_key)
+                .map(|shared_secret| *shared_secret.as_bytes());
+            assert_eq!(
+                shared_secret, vector.shared_secret,
+                "Wycheproof X25519 test {}",
+                vector.tc_id,
+            );
+        }
     }
 
     #[test]

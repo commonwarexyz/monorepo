@@ -285,12 +285,8 @@ impl arbitrary::Arbitrary<'_> for VerifyingKey {
     }
 }
 
-// Public methods.
 impl VerifyingKey {
-    /// Verifies `sig` over the namespaced message, per the [module's validation
-    /// criteria](self).
-    #[must_use]
-    pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+    fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
         let r_bytes: [u8; 32] = sig.bytes[..32].try_into().expect("signature is 64 bytes");
         let s_bytes: [u8; 32] = sig.bytes[32..].try_into().expect("signature is 64 bytes");
         let Some(s) = Scalar::from_canonical_bytes(&s_bytes) else {
@@ -309,11 +305,10 @@ impl VerifyingKey {
             }
         };
 
-        let msg = union_unique(namespace, msg);
         let digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
             .chain(self.bytes)
-            .chain(&msg)
+            .chain(msg)
             .finalize_fixed()
             .into();
         let k = Scalar::from_bytes_mod_order_wide(&digest);
@@ -323,6 +318,23 @@ impl VerifyingKey {
         sb.add(ka.add_mixed(r).negate())
             .mul_by_cofactor()
             .is_identity()
+    }
+}
+
+// Public methods.
+impl VerifyingKey {
+    /// Verifies `sig` over the namespaced message, per the [module's validation
+    /// criteria](self).
+    #[must_use]
+    pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+        let msg = union_unique(namespace, msg);
+        self.verify_message(&msg, sig)
+    }
+
+    /// Verifies an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn verify_raw(&self, msg: &[u8], sig: &Signature) -> bool {
+        self.verify_message(msg, sig)
     }
 }
 

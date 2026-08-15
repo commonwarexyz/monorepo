@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import json
 import re
 import sys
 import urllib.request
@@ -39,6 +40,24 @@ ZIP215 = Source(
     ),
     sha256="cd6ece09eb33e878da251103c5ca754e1b1b261402b9987cdc102d30942aba08",
 )
+WYCHEPROOF_ED25519 = Source(
+    name="Project Wycheproof Ed25519 test vectors",
+    url=(
+        "https://raw.githubusercontent.com/C2SP/wycheproof/"
+        "5722833ca004983abd1a91bcb6c24596d50ac0f9/"
+        "testvectors_v1/ed25519_test.json"
+    ),
+    sha256="752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536",
+)
+WYCHEPROOF_X25519 = Source(
+    name="Project Wycheproof X25519 test vectors",
+    url=(
+        "https://raw.githubusercontent.com/C2SP/wycheproof/"
+        "5722833ca004983abd1a91bcb6c24596d50ac0f9/"
+        "testvectors_v1/x25519_test.json"
+    ),
+    sha256="35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d",
+)
 
 OUTPUT = Path(__file__).resolve().parent / "src" / "test" / "vectors.rs"
 HEX_LINE = re.compile(r"[0-9a-f]+")
@@ -68,6 +87,23 @@ class X25519DiffieHellmanVector:
     bob_secret: str
     bob_public: str
     shared_secret: str
+
+
+@dataclass(frozen=True)
+class WycheproofEd25519Vector:
+    tc_id: int
+    public_key: str
+    message: str
+    signature: str
+    valid_zip215: bool
+
+
+@dataclass(frozen=True)
+class WycheproofX25519Vector:
+    tc_id: int
+    private_key: str
+    public_key: str
+    shared_secret: str | None
 
 
 def fetch(source: Source) -> str:
@@ -210,6 +246,127 @@ def parse_zip215_points(text: str) -> list[str]:
     return public_keys
 
 
+def parse_wycheproof_ed25519(text: str) -> list[WycheproofEd25519Vector]:
+    data = json.loads(text)
+    if data["algorithm"] != "EDDSA" or data["schema"] != "eddsa_verify_schema_v1.json":
+        raise ValueError("unexpected Wycheproof Ed25519 metadata")
+
+    vectors = []
+    strict_valid = 0
+    strict_invalid = 0
+    for group in data["testGroups"]:
+        public_key = group["publicKey"]
+        if (
+            group["type"] != "EddsaVerify"
+            or public_key["type"] != "EDDSAPublicKey"
+            or public_key["curve"] != "edwards25519"
+            or len(public_key["pk"]) != 64
+        ):
+            raise ValueError("unexpected Wycheproof Ed25519 test group")
+        bytes.fromhex(public_key["pk"])
+
+        for test in group["tests"]:
+            result = test["result"]
+            if result == "valid":
+                strict_valid += 1
+            elif result == "invalid":
+                strict_invalid += 1
+            else:
+                raise ValueError(f"unexpected Wycheproof Ed25519 result {result}")
+
+            signature = test["sig"]
+            message = test["msg"]
+            bytes.fromhex(signature)
+            bytes.fromhex(message)
+
+            # Wycheproof applies RFC 8032's stricter point-decoding rule to test 151.
+            # ZIP 215 accepts its non-canonical encoding of the identity point.
+            zip215_exception = test["tcId"] == 151
+            if zip215_exception and not (
+                result == "invalid"
+                and test["flags"] == ["InvalidEncoding"]
+                and signature[:64] == "01" + "00" * 30 + "80"
+            ):
+                raise ValueError("Wycheproof Ed25519 test 151 changed unexpectedly")
+
+            vectors.append(
+                WycheproofEd25519Vector(
+                    tc_id=test["tcId"],
+                    public_key=public_key["pk"],
+                    message=message,
+                    signature=signature,
+                    valid_zip215=result == "valid" or zip215_exception,
+                )
+            )
+
+    if data["numberOfTests"] != 151 or len(vectors) != 151:
+        raise ValueError(f"expected 151 Wycheproof Ed25519 vectors, got {len(vectors)}")
+    if [vector.tc_id for vector in vectors] != list(range(1, 152)):
+        raise ValueError("Wycheproof Ed25519 test IDs are not contiguous")
+    if (strict_valid, strict_invalid) != (88, 63):
+        raise ValueError("unexpected Wycheproof Ed25519 result counts")
+    if sum(vector.valid_zip215 for vector in vectors) != 89:
+        raise ValueError("unexpected ZIP 215-compatible Wycheproof Ed25519 result count")
+    return vectors
+
+
+def parse_wycheproof_x25519(text: str) -> list[WycheproofX25519Vector]:
+    data = json.loads(text)
+    if data["algorithm"] != "XDH" or data["schema"] != "xdh_comp_schema_v1.json":
+        raise ValueError("unexpected Wycheproof X25519 metadata")
+    if len(data["testGroups"]) != 1:
+        raise ValueError("expected one Wycheproof X25519 test group")
+
+    group = data["testGroups"][0]
+    if group["type"] != "XdhComp" or group["curve"] != "curve25519":
+        raise ValueError("unexpected Wycheproof X25519 test group")
+
+    vectors = []
+    valid = 0
+    acceptable = 0
+    for test in group["tests"]:
+        result = test["result"]
+        if result == "valid":
+            valid += 1
+        elif result == "acceptable":
+            acceptable += 1
+        else:
+            raise ValueError(f"unexpected Wycheproof X25519 result {result}")
+
+        private_key = test["private"]
+        public_key = test["public"]
+        shared_secret = test["shared"]
+        if any(len(value) != 64 for value in (private_key, public_key, shared_secret)):
+            raise ValueError(f"invalid field width in Wycheproof X25519 test {test['tcId']}")
+        for value in (private_key, public_key, shared_secret):
+            bytes.fromhex(value)
+        non_contributory = shared_secret == "00" * 32
+        if non_contributory and not (
+            result == "acceptable" and "ZeroSharedSecret" in test["flags"]
+        ):
+            raise ValueError(
+                f"unexpected zero shared secret in Wycheproof X25519 test {test['tcId']}"
+            )
+        vectors.append(
+            WycheproofX25519Vector(
+                tc_id=test["tcId"],
+                private_key=private_key,
+                public_key=public_key,
+                shared_secret=None if non_contributory else shared_secret,
+            )
+        )
+
+    if data["numberOfTests"] != 518 or len(vectors) != 518:
+        raise ValueError(f"expected 518 Wycheproof X25519 vectors, got {len(vectors)}")
+    if [vector.tc_id for vector in vectors] != list(range(1, 519)):
+        raise ValueError("Wycheproof X25519 test IDs are not contiguous")
+    if (valid, acceptable) != (264, 254):
+        raise ValueError("unexpected Wycheproof X25519 result counts")
+    if sum(vector.shared_secret is None for vector in vectors) != 31:
+        raise ValueError("expected 31 non-contributory Wycheproof X25519 vectors")
+    return vectors
+
+
 def hex_expr(value: str, indent: str) -> str:
     if not value:
         return "commonware_formatting::hex!()"
@@ -234,6 +391,8 @@ def render(
     x25519: list[X25519Vector],
     diffie_hellman: X25519DiffieHellmanVector,
     zip215_points: list[str],
+    wycheproof_ed25519: list[WycheproofEd25519Vector],
+    wycheproof_x25519: list[WycheproofX25519Vector],
 ) -> str:
     lines = [
         "// Generated by cryptography/curve25519/generate_test_vectors.py.",
@@ -243,6 +402,8 @@ def render(
         f"// {RFC7748.name}: {RFC7748.url}",
         f"// ZIP 215 specification: {ZIP215_SPEC_URL}",
         f"// {ZIP215.name}: {ZIP215.url}",
+        f"// {WYCHEPROOF_ED25519.name}: {WYCHEPROOF_ED25519.url}",
+        f"// {WYCHEPROOF_X25519.name}: {WYCHEPROOF_X25519.url}",
         "",
         "pub(super) struct Ed25519Vector {",
         "    pub(super) name: &'static str,",
@@ -263,6 +424,34 @@ def render(
                 hex_field("public_key", vector.public_key, "        "),
                 hex_field("message", vector.message, "        ", reference=True),
                 hex_field("signature", vector.signature, "        "),
+                "    },",
+            ]
+        )
+    lines.extend(
+        [
+            "];",
+            "",
+            "pub(super) struct WycheproofEd25519Vector {",
+            "    pub(super) tc_id: u16,",
+            "    pub(super) public_key: [u8; 32],",
+            "    pub(super) message: &'static [u8],",
+            "    pub(super) signature: &'static [u8],",
+            "    pub(super) valid_zip215: bool,",
+            "}",
+            "",
+            "#[rustfmt::skip]",
+            "pub(super) const WYCHEPROOF_ED25519: &[WycheproofEd25519Vector] = &[",
+        ]
+    )
+    for vector in wycheproof_ed25519:
+        lines.extend(
+            [
+                "    WycheproofEd25519Vector {",
+                f"        tc_id: {vector.tc_id},",
+                hex_field("public_key", vector.public_key, "        "),
+                hex_field("message", vector.message, "        ", reference=True),
+                hex_field("signature", vector.signature, "        ", reference=True),
+                f"        valid_zip215: {str(vector.valid_zip215).lower()},",
                 "    },",
             ]
         )
@@ -310,6 +499,38 @@ def render(
             hex_field("shared_secret", diffie_hellman.shared_secret, "        "),
             "    };",
             "",
+            "pub(super) struct WycheproofX25519Vector {",
+            "    pub(super) tc_id: u16,",
+            "    pub(super) private_key: [u8; 32],",
+            "    pub(super) public_key: [u8; 32],",
+            "    pub(super) shared_secret: Option<[u8; 32]>,",
+            "}",
+            "",
+            "#[rustfmt::skip]",
+            "pub(super) const WYCHEPROOF_X25519: &[WycheproofX25519Vector] = &[",
+        ]
+    )
+    for vector in wycheproof_x25519:
+        lines.extend(
+            [
+                "    WycheproofX25519Vector {",
+                f"        tc_id: {vector.tc_id},",
+                hex_field("private_key", vector.private_key, "        "),
+                hex_field("public_key", vector.public_key, "        "),
+            ]
+        )
+        if vector.shared_secret is None:
+            lines.append("        shared_secret: None,")
+        else:
+            lines.append(
+                "        shared_secret: Some("
+                f"{hex_expr(vector.shared_secret, '            ')}),"
+            )
+        lines.append("    },")
+    lines.extend(
+        [
+            "];",
+            "",
             f"pub(super) const ZIP215_POINTS: [[u8; 32]; {len(zip215_points)}] = [",
         ]
     )
@@ -323,7 +544,16 @@ def generate() -> str:
     ed25519 = parse_ed25519(fetch(RFC8032))
     x25519, diffie_hellman = parse_x25519(fetch(RFC7748))
     zip215_points = parse_zip215_points(fetch(ZIP215))
-    return render(ed25519, x25519, diffie_hellman, zip215_points)
+    wycheproof_ed25519 = parse_wycheproof_ed25519(fetch(WYCHEPROOF_ED25519))
+    wycheproof_x25519 = parse_wycheproof_x25519(fetch(WYCHEPROOF_X25519))
+    return render(
+        ed25519,
+        x25519,
+        diffie_hellman,
+        zip215_points,
+        wycheproof_ed25519,
+        wycheproof_x25519,
+    )
 
 
 def main() -> int:
