@@ -44,12 +44,12 @@
 //!
 //! # Availability hints and locking
 //!
-//! Each stripe has an [`AtomicBool`] that avoids locking a stripe known to be
-//! empty. The vector remains authoritative. The first put
-//! into an empty vector publishes `true`, and the take that removes the final
-//! slot publishes `false`. Both transitions happen while the stripe is locked.
-//! A concurrent operation may observe a transition in progress, but once an
-//! operation completes the hint reflects its result.
+//! Each stripe has an [`AtomicBool`] that avoids locking a stripe observed to
+//! be empty. The vector remains authoritative. The first put into an empty
+//! vector publishes `true`, and the take that removes the final slot publishes
+//! `false`. Both transitions happen while the stripe is locked. A taker may
+//! observe a stale `false` and skip that stripe unless it has synchronized with
+//! the thread that completed the put.
 //!
 //! Stripe locks are blocking. A take that observes a positive hint waits for
 //! that stripe even if a later stripe could satisfy it. A failed scan is one
@@ -115,11 +115,11 @@ const MAX_STRIPES: usize = 4_096;
 
 /// One cache-isolated collection of globally free slots with a fixed slot limit.
 struct Stripe {
-    /// Completion-accurate nonempty hint used to skip empty stripe locks.
+    /// Advisory nonempty hint used to skip stripe locks.
     ///
-    /// The value changes only while `free` is locked. `false` lets a taker skip
-    /// the mutex. `true` means the taker must lock and inspect `free`, which is
-    /// authoritative if another taker emptied the stripe in the meantime.
+    /// The value changes only while `free` is locked. `true` requires locking
+    /// and inspecting authoritative `free`. A taker may observe a stale `false`
+    /// unless it has synchronized with the thread that completed the insertion.
     available: AtomicBool,
     /// Slot ids currently owned by the global freelist in this stripe.
     free: Mutex<Vec<u32>>,
@@ -1151,9 +1151,10 @@ mod loom_tests {
         );
     }
 
-    /// Verifies that a completed return is discoverable by a later take.
+    /// Verifies that a release/acquire handoff makes a completed return
+    /// discoverable.
     #[test]
-    fn completed_put_is_discoverable() {
+    fn completed_put_is_discoverable_after_handoff() {
         loom::model(|| {
             let set = Arc::new(empty(1));
             let buffer = set.try_create(false).expect("creation permit");
@@ -1168,8 +1169,8 @@ mod loom_tests {
                 })
             };
 
-            // This flag orders the take after the put completes, so a miss
-            // would violate completed-operation discoverability.
+            // The release/acquire handoff orders the hint publication before
+            // the scan.
             while !returned.load(Ordering::Acquire) {
                 thread::yield_now();
             }
