@@ -20,7 +20,7 @@ futures = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = { workspace = true }
+libc.workspace = true
 
 [dev-dependencies]
 dashmap.workspace = true

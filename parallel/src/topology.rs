@@ -9,10 +9,14 @@
 //! microseconds, against per-line fabric traffic for the job's lifetime otherwise), and a no-op
 //! afterwards because the restored-wide executor tends to stay where it ran.
 //!
-//! Domains come from the kernel's cache topology (never from vendor core-layout assumptions, which
-//! lie: this was built on a machine whose spec sheet implied 8-core L3 groups while the kernel
-//! reported 4-core ones). On non-Linux platforms the stub below reports a single domain and pinning
-//! is a no-op; the same stub serves miri (the affinity syscalls are unshimmed).
+//! Domains come from the kernel's cache topology: for each CPU, the highest-level Data or Unified
+//! leaf under `cache/index*` in sysfs is its last-level cache (the leaf index varies by
+//! architecture, so it is discovered rather than assumed; vendor core-layout assumptions also lie,
+//! as this was built on a machine whose spec sheet implied 8-core L3 groups while the kernel
+//! reported 4-core ones). Pinning is skipped whenever the picture is incomplete: a single or
+//! undetectable domain, a CPU the snapshot does not cover, or a failed CPU query. On non-Linux
+//! platforms the stub below reports no domains and pinning is a no-op; the same stub serves miri
+//! (the affinity syscalls are unshimmed).
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
@@ -26,9 +30,11 @@ cfg_if::cfg_if! {
 
         /// Map from CPU id to last-level-cache domain id, plus each domain's CPU set.
         pub(crate) struct Topology {
-            /// `cpu_to_domain[cpu]` is the domain of `cpu`; CPUs beyond the table
-            /// (offline or hot-added) map to domain 0.
-            cpu_to_domain: Box<[u16]>,
+            /// `cpu_to_domain[cpu]` is the domain of `cpu`; `None` beyond the table or for CPUs
+            /// whose cache topology was unreadable at detection time. Unknown CPUs skip pinning
+            /// rather than guess: domain numbering is an artifact of iteration order, so a guess
+            /// could deliberately migrate a job somewhere unrelated.
+            cpu_to_domain: Box<[Option<u16>]>,
             /// The CPUs of each domain, as ready-to-use affinity sets.
             domain_sets: Box<[libc::cpu_set_t]>,
         }
@@ -47,26 +53,58 @@ cfg_if::cfg_if! {
                 self.domain_sets.len()
             }
 
-            /// The domain of `cpu`.
-            fn domain_of(&self, cpu: usize) -> u16 {
-                self.cpu_to_domain.get(cpu).copied().unwrap_or(0)
+            /// The domain of `cpu`, or `None` when the snapshot does not cover it.
+            fn domain_of(&self, cpu: usize) -> Option<u16> {
+                self.cpu_to_domain.get(cpu).copied().flatten()
             }
 
-            /// The domain of the CPU the calling thread is currently running on.
-            /// Advisory: the thread may migrate immediately after.
-            pub(crate) fn current_domain(&self) -> u16 {
-                // SAFETY: sched_getcpu takes no arguments and only returns a value; -1
-                // on error (mapped to domain 0 by the table fallback).
+            /// The domain of the CPU the calling thread is currently running on, or `None` when
+            /// the query fails or the snapshot does not cover the CPU. Advisory: the thread may
+            /// migrate immediately after.
+            pub(crate) fn current_domain(&self) -> Option<u16> {
+                // SAFETY: sched_getcpu takes no arguments and only returns a value; -1 on error.
                 let cpu = unsafe { libc::sched_getcpu() };
-                if cpu >= 0 {
-                    return self.domain_of(cpu as usize);
+                if cpu < 0 {
+                    return None;
                 }
-                0
+                self.domain_of(cpu as usize)
             }
 
-            /// Builds the table from
-            /// `/sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list`. Returns
-            /// `None` if nothing was readable or only one domain exists.
+            /// The `shared_cpu_list` of `cpu`'s last-level cache: the highest-level Data or
+            /// Unified leaf under its `cache/index*` directory. The leaf index varies by
+            /// architecture and cache layout, so every leaf is inspected.
+            fn llc_list(cpu_dir: &std::path::Path) -> Option<String> {
+                let mut best: Option<(u32, String)> = None;
+                for entry in std::fs::read_dir(cpu_dir.join("cache")).ok()?.flatten() {
+                    if !entry.file_name().to_string_lossy().starts_with("index") {
+                        continue;
+                    }
+                    let leaf = entry.path();
+                    let Ok(kind) = std::fs::read_to_string(leaf.join("type")) else {
+                        continue;
+                    };
+                    let kind = kind.trim();
+                    if kind != "Data" && kind != "Unified" {
+                        continue;
+                    }
+                    let Some(level) = std::fs::read_to_string(leaf.join("level"))
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                    else {
+                        continue;
+                    };
+                    let Ok(list) = std::fs::read_to_string(leaf.join("shared_cpu_list")) else {
+                        continue;
+                    };
+                    if best.as_ref().is_none_or(|(l, _)| level > *l) {
+                        best = Some((level, list.trim().to_string()));
+                    }
+                }
+                best.map(|(_, list)| list)
+            }
+
+            /// Builds the tables from each CPU's discovered LLC sharing list. Returns `None` if
+            /// nothing was readable or only one domain exists.
             fn from_sysfs() -> Option<Self> {
                 let mut lists: Vec<(usize, String)> = Vec::new();
                 let entries = std::fs::read_dir("/sys/devices/system/cpu").ok()?;
@@ -79,9 +117,8 @@ cfg_if::cfg_if! {
                     else {
                         continue;
                     };
-                    let path = entry.path().join("cache/index3/shared_cpu_list");
-                    if let Ok(list) = std::fs::read_to_string(path) {
-                        lists.push((id, list.trim().to_string()));
+                    if let Some(list) = Self::llc_list(&entry.path()) {
+                        lists.push((id, list));
                     }
                 }
                 Self::from_lists(&lists)
@@ -94,7 +131,7 @@ cfg_if::cfg_if! {
                     return None;
                 }
                 let max_cpu = lists.iter().map(|(cpu, _)| *cpu).max()?;
-                let mut table = vec![0u16; max_cpu + 1];
+                let mut table: Vec<Option<u16>> = vec![None; max_cpu + 1];
                 let mut domains: Vec<&str> = Vec::new();
 
                 // SAFETY: an all-zero cpu_set_t is the valid empty set.
@@ -102,15 +139,12 @@ cfg_if::cfg_if! {
                 let mut sets: Vec<libc::cpu_set_t> = Vec::new();
                 for (cpu, list) in lists {
                     let list = list.as_str();
-                    let domain = match domains.iter().position(|&d| d == list) {
-                        Some(i) => i,
-                        None => {
-                            domains.push(list);
-                            sets.push(empty);
-                            domains.len() - 1
-                        }
-                    };
-                    table[*cpu] = u16::try_from(domain).ok()?;
+                    let domain = domains.iter().position(|&d| d == list).unwrap_or_else(|| {
+                        domains.push(list);
+                        sets.push(empty);
+                        domains.len() - 1
+                    });
+                    table[*cpu] = Some(u16::try_from(domain).ok()?);
                     if *cpu < libc::CPU_SETSIZE as usize {
                         // SAFETY: cpu is within CPU_SETSIZE and the set is initialized.
                         unsafe { libc::CPU_SET(*cpu, &mut sets[domain]) };
@@ -128,14 +162,17 @@ cfg_if::cfg_if! {
 
         /// The submitting caller's current LLC domain, captured at spawn time and consumed by
         /// [`AffinityGuard::pin`] on whichever thread executes the job. `None` when the topology
-        /// has fewer than two domains.
+        /// has fewer than two domains or the caller's position is unknown.
         #[derive(Clone, Copy)]
         pub(crate) struct SpawnDomain(u16);
 
         /// Captures the calling thread's current domain (`None` disables pinning).
         pub(crate) fn spawn_domain() -> Option<SpawnDomain> {
             let topology = topology();
-            (topology.domains() > 1).then(|| SpawnDomain(topology.current_domain()))
+            if topology.domains() <= 1 {
+                return None;
+            }
+            topology.current_domain().map(SpawnDomain)
         }
 
         /// Pins the calling thread to a domain's CPU set for its lifetime, restoring the previous
@@ -149,8 +186,7 @@ cfg_if::cfg_if! {
             /// already allows, so the pin narrows placement and never widens it past an operator's
             /// restrictions (taskset, numactl, isolated cores). Returns `None` (no pin) if the mask
             /// cannot be read or applied, or if the allowed intersection is empty; the job then
-            /// simply runs
-            /// wherever it was.
+            /// simply runs wherever it was.
             pub(crate) fn pin(domain: Option<SpawnDomain>) -> Option<Self> {
                 let domain = domain?;
                 let topology = topology();
@@ -218,7 +254,7 @@ cfg_if::cfg_if! {
                 let topology = Topology::from_lists(&lists).unwrap();
                 assert_eq!(topology.domains(), 2);
                 assert_ne!(topology.domain_of(0), topology.domain_of(4));
-                let d0 = topology.domain_of(0) as usize;
+                let d0 = topology.domain_of(0).unwrap() as usize;
                 for cpu in 0..4 {
                     // SAFETY: cpu < CPU_SETSIZE; the set was built by from_lists.
                     assert!(unsafe { libc::CPU_ISSET(cpu, &topology.domain_sets[d0]) });
@@ -226,6 +262,35 @@ cfg_if::cfg_if! {
 
                 // SAFETY: as above.
                 assert!(!unsafe { libc::CPU_ISSET(4, &topology.domain_sets[d0]) });
+            }
+
+            #[test]
+            fn unknown_cpus_have_no_domain() {
+                // CPU 5 is missing from the snapshot; CPUs beyond the table are unknown too.
+                let lists: Vec<(usize, String)> = [0, 1, 2, 3, 4, 6, 7]
+                    .into_iter()
+                    .map(|cpu| {
+                        let list = if cpu < 4 { "0-3" } else { "4-7" };
+                        (cpu, list.to_string())
+                    })
+                    .collect();
+                let topology = Topology::from_lists(&lists).unwrap();
+                assert_eq!(topology.domain_of(5), None);
+                assert_eq!(topology.domain_of(64), None);
+                assert!(topology.domain_of(6).is_some());
+            }
+
+            #[test]
+            fn llc_discovery_reads_a_real_cpu() {
+                // On any Linux machine with a readable cache topology, discovery must return a
+                // non-empty sharing list for cpu0 (or nothing at all, never a panic).
+                let dir = std::path::Path::new("/sys/devices/system/cpu/cpu0");
+                if !dir.exists() {
+                    return;
+                }
+                if let Some(list) = Topology::llc_list(dir) {
+                    assert!(!list.is_empty());
+                }
             }
 
             #[test]
@@ -296,7 +361,7 @@ cfg_if::cfg_if! {
         pub(crate) struct SpawnDomain;
 
         /// Always `None`: no multi-domain topology to pin within.
-        pub(crate) fn spawn_domain() -> Option<SpawnDomain> {
+        pub(crate) const fn spawn_domain() -> Option<SpawnDomain> {
             None
         }
 
@@ -305,7 +370,7 @@ cfg_if::cfg_if! {
 
         impl AffinityGuard {
             /// Never pins.
-            pub(crate) fn pin(_domain: Option<SpawnDomain>) -> Option<Self> {
+            pub(crate) const fn pin(_domain: Option<SpawnDomain>) -> Option<Self> {
                 None
             }
         }
