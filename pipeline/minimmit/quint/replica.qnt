@@ -134,12 +134,15 @@ module replica {
         r.notarized.get(r.view) != None
     }
 
-    def has_notarized_view(id: ReplicaId, view:ViewNumber, votes: Set[Vote]): bool = {
-        votes.exists(v => and {
-            vote_view(v) == view,
-            vote_kind(v) == NotarizeKind,
-            vote_sig(v) == sig_of(id),
-        })
+    // Did replica `id` itself broadcast a notarize in `view`? This reads the replica's own
+    // per-actor record of the votes it sent (`ghost_sent_votes`), so it identifies the actor
+    // precisely even when several actors share one signing key. Matching a signature in the
+    // global vote pool would conflate same-key actors (a twin's notarize carries the same
+    // `sig_of(id)`), whereas a replica's `ghost_sent_votes` entry belongs to that replica alone.
+    // A `Some(_)` in the sequence marks a notarize; a `None` marks a nullify.
+    def has_notarized_view(id: ReplicaId, view: ViewNumber): bool = {
+        val sent = replica_state.get(id).ghost_sent_votes.get(view)
+        sent.indices().exists(i => sent[i] != None)
     }
 
     // Does a set of certificates have a notarization certificate for a view?
@@ -1116,7 +1119,7 @@ module replica {
 
     val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
-        VIEWS.forall(v => self.notarized.get(v) != None iff has_notarized_view(id, v, sent_vote))
+        VIEWS.forall(v => self.notarized.get(v) != None iff has_notarized_view(id, v))
     })
 
     // Suppose that a proposal is finalized for some view v, then no other proposal for view v
