@@ -30,6 +30,429 @@ mod network;
 mod process;
 mod storage;
 
+stability_scope!(BETA {
+    mod atomic;
+
+    /// Number of application-owned bytes published with an atomic blob's length.
+    pub const ATOMIC_BLOB_TAG_LEN: usize = 64;
+
+    /// How an integrity-aware append closes checksum units.
+    ///
+    /// Unit boundaries are independent of write calls. A page cache can keep one unit open across
+    /// many small writes and close it at a page boundary, while a record store can complete one
+    /// unit after writing an entire value.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum IntegrityBoundary {
+        /// Leave the current unit open after appending the supplied bytes.
+        Continue,
+        /// Complete the current unit after appending the supplied bytes.
+        Complete,
+        /// Complete units whenever their payload reaches this many bytes.
+        ///
+        /// A final shorter unit remains open. The selected root carries its rolling checksum, so a
+        /// sync does not force a short unit to be closed.
+        Chunked(std::num::NonZeroU32),
+    }
+
+    /// Checksum-unit layout bound to an atomic blob's immediately visible state.
+    ///
+    /// A blob binds itself when a [`IntegrityBoundary::Complete`] or
+    /// [`IntegrityBoundary::Chunked`] operation first chooses a layout. A `Continue` append may
+    /// leave an unbound blob open. Reopening with a different fixed unit width is rejected before
+    /// any offsets are interpreted.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum IntegrityScheme {
+        /// No integrity-unit layout has been chosen yet.
+        Unbound,
+        /// Units end at explicit caller-selected boundaries.
+        Variable,
+        /// Units close automatically after a fixed number of data bytes.
+        Chunked(std::num::NonZeroU32),
+    }
+
+    impl IntegrityScheme {
+        pub(crate) fn validate_completed_unit(self, unit: IntegrityUnit) -> Result<(), Error> {
+            if unit.len == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "integrity units must contain data",
+                )
+                .into());
+            }
+            match self {
+                Self::Unbound => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "atomic blob has no completed integrity-unit layout",
+                )
+                .into()),
+                Self::Variable => Ok(()),
+                Self::Chunked(size) => {
+                    let data_len = u64::from(size.get());
+                    let encoded_len = data_len + std::mem::size_of::<u32>() as u64;
+                    if unit.len != data_len || !unit.offset.is_multiple_of(encoded_len) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "fixed integrity unit does not match the blob's bound geometry",
+                        )
+                        .into());
+                    }
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// One completed or in-progress integrity unit in the encoded atomic payload.
+    ///
+    /// `offset` addresses the first data byte and `len` excludes the four-byte checksum footer of
+    /// a completed unit. The footer immediately follows the data. An in-progress unit has no
+    /// footer; its checksum is carried by the selected root instead.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct IntegrityUnit {
+        /// Encoded payload offset of the first data byte.
+        pub offset: u64,
+        /// Number of data bytes in the unit, excluding its checksum footer.
+        pub len: u64,
+    }
+
+    /// Opaque version of one atomic blob's immediately visible integrity state.
+    ///
+    /// Integrity-aware mutations compare this token while holding the blob's mutation lock. A
+    /// stale token is rejected before payload I/O, preventing two cached writers from interpreting
+    /// the same bytes with different unit boundaries or lengths.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct IntegrityToken {
+        pub(crate) epoch: [u8; 16],
+        pub(crate) revision: u64,
+    }
+
+    /// One coherent view of an atomic blob's integrity metadata and unfinished unit.
+    pub struct IntegritySnapshot {
+        /// Encoded payload length, including completed-unit checksum footers.
+        pub encoded_len: u64,
+        /// Integrity-unit layout in this immediately visible snapshot.
+        pub scheme: IntegrityScheme,
+        /// Complete application-owned root tag.
+        pub tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        /// Validated unfinished unit and its bytes, if one exists.
+        pub tail: Option<(IntegrityUnit, IoBufs)>,
+        /// Compare token for the next integrity-aware mutation.
+        pub token: IntegrityToken,
+    }
+
+    /// Result of one integrity-aware append.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct IntegrityAppend {
+        /// Encoded offset of the first newly supplied data byte.
+        pub offset: u64,
+        /// Compare token for the next integrity-aware mutation.
+        pub token: IntegrityToken,
+    }
+
+    /// One mutation in an atomic multi-blob publication.
+    ///
+    /// Every distinct dirty blob named by a batch becomes one participant in a canonical closed
+    /// ring. Identical operations may be repeated, but different operations for the same blob are
+    /// rejected before the batch is admitted.
+    #[derive(Clone, Debug)]
+    pub enum BatchOperation<B> {
+        /// Publish the blob's pending append, rewind, and tag state.
+        Publish(B),
+        /// Publish `len` as the blob's new length.
+        Rewind {
+            /// Blob to rewind.
+            blob: B,
+            /// New encoded length, which cannot exceed the blob's immediately visible length or
+            /// cut through protocol-owned integrity state.
+            len: u64,
+        },
+        /// Durably publish logical absence for the blob's current incarnation.
+        ///
+        /// Physical namespace reclamation is deferred until recovery, an atomic scan, or a later
+        /// same-name atomic open.
+        Remove(B),
+    }
+
+    /// Opt-in interface for opening append-only blobs with crash-atomic publication.
+    ///
+    /// Atomic blobs are stored inside ordinary default-version blobs, but expose a narrower
+    /// mutation interface. The backend owns the ordinary container layout; the atomic identity and
+    /// roots live in the blob's logical contents. A name belongs exclusively to either this
+    /// interface or ordinary [`Storage`]: it must not be populated or mutated through both.
+    /// Existing names require a complete atomic identity and are never implicitly converted. At
+    /// most one independently opened handle for a name may be live: drop that handle and all of
+    /// its clones before reopening the name. Use clones of one returned handle for coordinated
+    /// concurrent access. Atomic namespace
+    /// and recovery work is serialized across one storage value and its clones. Live operations on
+    /// disjoint handles and carried-debt groups may proceed concurrently; operations sharing either
+    /// are serialized. If a canceled observer leaves backing work in flight, including when the
+    /// runtime polling that observer is torn down, a later conflicting operation waits for that
+    /// work before examining any affected peer. Publication rings may span partitions, so recovery
+    /// started from one member may read, synchronize, finalize, or unlink peers in other
+    /// partitions. Observer-independent work may retain the lineage after every caller-held clone
+    /// is dropped. To transfer a filesystem directory to a new lineage in the same process, retain
+    /// a storage clone and establish quiescence through a known completion or a later conflicting
+    /// operation; dropping the last caller-held clone is not a quiescence barrier.
+    /// Filesystem-backed storage directories must be owned by exactly one independently constructed
+    /// storage lineage for that lineage's full lifetime. Clones are part of the same lineage;
+    /// another process, storage instance, path alias, or direct filesystem mutation must not access
+    /// the directory concurrently.
+    pub trait AtomicStorage: Storage {
+        /// Blob type returned by atomic opens.
+        type AtomicBlob: AtomicBlob;
+
+        /// Open an existing atomic blob or create a new one.
+        ///
+        /// The returned length addresses the encoded payload, including completed integrity-unit
+        /// checksum footers. The backing blob's fixed root region is hidden. The name must be
+        /// reserved for atomic use before its first open. The UTF-8 partition bytes and raw name
+        /// bytes must total at most 1,640 bytes so the location fits in the fixed-size witness. This
+        /// is the protocol limit; a storage backend may impose a smaller namespace limit. Crash
+        /// recovery requires a complete atomic identity page. If a machine crash preserves that
+        /// page but not the rest of the fixed root region, recovery completes and synchronizes the
+        /// region. A torn or invalid identity is rejected rather than overwritten on restart.
+        ///
+        /// Dropping this future after backing I/O begins does not expose a peer while admitted
+        /// initialization or recovery work remains in flight. A later atomic operation waits for
+        /// that work and then recovers from its durable result. Recovery may follow a publication
+        /// ring into other partitions, mutate those peers, and return an error from their backing
+        /// or namespace operations.
+        fn open_atomic(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl std::future::Future<Output = Result<(Self::AtomicBlob, u64), Error>> + Send;
+
+        /// Return every logically present atomic blob in a partition.
+        ///
+        /// Unlike [`Storage::scan`], this resolves interrupted atomic publications and omits and
+        /// reclaims durable tombstones before returning. A partition reserved for atomic names
+        /// must be enumerated through this method. Before scanning, callers must finish all
+        /// operations and drop every atomic handle and clone opened from the partition. No create,
+        /// remove, open, or publication may mutate the partition concurrently with the scan. The
+        /// returned names are limited to `partition`, but recovery may read, finalize, synchronize,
+        /// or unlink publication peers in other partitions and may surface their errors.
+        fn scan_atomic(
+            &self,
+            partition: &str,
+        ) -> impl std::future::Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+
+        /// Start one atomic multi-blob publication.
+        ///
+        /// Every selected handle must have been opened from this storage lineage.
+        ///
+        /// Implementations store a framed local witness beside every prepared participant
+        /// root, and each root binds its exact witness. The witnesses form a closed successor ring,
+        /// allowing recovery that starts from any surviving participant to discover the whole
+        /// group without a coordinator record. A group is durable after every participant's
+        /// preparation has completed its durability operation; those operations may run
+        /// concurrently. All files needed by the new decision and any carried predecessor are
+        /// launched as one concurrent set, without fixed-size waves or a second final-root
+        /// durability round.
+        ///
+        /// When at least one operation participates, returning `Ok` proves the complete group is
+        /// durable. Empty and all-clean batches perform no publication. Awaiting the returned
+        /// handle waits for in-memory activation, ordinary final-root writes, and required
+        /// truncation. Final-root durability and physical removal are cleanup debt: a later
+        /// publication folds that debt into its single durability layer, while recovery initiated
+        /// by an atomic open or scan from any surviving member can pay it explicitly, including
+        /// across partitions. Dropping the handle stops waiting but does not revoke the committed
+        /// decision.
+        ///
+        /// A validation error before physical admission leaves every selected state unchanged.
+        /// Any other error or cancellation may have admitted the group; none of the selected
+        /// handles may be reused, and callers must reopen after outstanding backing work is
+        /// quiescent. Recovery returns either the complete preceding vector or the complete
+        /// candidate vector. Payload has no protocol batch cap: completed invisible preflushes keep
+        /// the aggregate suffix described by one group within the implementation's bounded-recovery
+        /// budget.
+        fn start_apply(
+            &self,
+            operations: Vec<BatchOperation<Self::AtomicBlob>>,
+        ) -> impl std::future::Future<Output = Result<Handle<()>, Error>> + Send;
+
+        /// Publish a multi-blob group and wait for its activation writes to finish.
+        fn apply(
+            &self,
+            operations: Vec<BatchOperation<Self::AtomicBlob>>,
+        ) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+            async move { self.start_apply(operations).await?.await }
+        }
+    }
+
+    /// Append-only blob mutations with crash-atomic publication.
+    ///
+    /// Appends and rewinds are immediately visible through this handle and its clones.
+    /// [`Self::sync`] atomically publishes their encoded length, integrity state, and tag. The trait
+    /// deliberately does not extend [`Blob`], so positional writes and arbitrary resizes are not
+    /// available on an atomic handle.
+    ///
+    /// Integrity-aware appends extend a rolling CRC32C for the current unit. Completing a unit
+    /// appends one four-byte footer; publication stores the start and checksum of an unfinished
+    /// unit in the selected root. Callers choose only when units close and never calculate or
+    /// encode checksums. Raw offsets address the encoded stream, including completed-unit footers;
+    /// use [`Self::read_integrity`] to read and validate a complete unit.
+    ///
+    /// After a mutation or sync future has begun issuing backing I/O, dropping its completion
+    /// observer cannot release conflicting-operation exclusion early. Filesystem backends continue
+    /// accepted work independently; cancellation-synchronous backends poison the open handle and
+    /// clones when cancellation interrupts the operation. An error after mutable backing I/O has
+    /// been admitted also poisons the handle and every clone; validation errors before admission do
+    /// not. A caller that did not observe completion or receives an admitted mutable error must
+    /// stop using the handle and reopen after the backing work is quiescent.
+    pub trait AtomicBlob: Clone + Send + Sync + 'static {
+        /// Read exactly `len` encoded payload bytes at `offset`.
+        fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+        ) -> impl std::future::Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Return the application-owned tag in the immediately visible state.
+        fn tag(
+            &self,
+        ) -> impl std::future::Future<Output = Result<[u8; ATOMIC_BLOB_TAG_LEN], Error>> + Send;
+
+        /// Stage an application-owned tag for the next publication.
+        fn set_tag(
+            &self,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
+        /// Return the integrity-unit layout in this blob's immediately visible state.
+        fn integrity_scheme(
+            &self,
+        ) -> impl std::future::Future<Output = Result<IntegrityScheme, Error>> + Send;
+
+        /// Return length, scheme, tag, and validated unfinished bytes from one coherent state.
+        ///
+        /// This reads, retains, and validates the complete unfinished unit before returning.
+        /// Unbound and variable-width units can span the entire encoded payload and are not limited
+        /// by the publication-recovery suffix budget. Operations requiring the same coherent state
+        /// wait for this validation. Close units or use an appropriately bounded chunk width when
+        /// snapshot cost must be bounded.
+        fn integrity_snapshot(
+            &self,
+        ) -> impl std::future::Future<Output = Result<IntegritySnapshot, Error>> + Send;
+
+        /// Stage a tag only if `expected` still names the current immediately visible state.
+        fn compare_set_tag(
+            &self,
+            expected: IntegrityToken,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl std::future::Future<Output = Result<IntegrityToken, Error>> + Send;
+
+        /// Append `data` and return its starting encoded payload offset.
+        ///
+        /// This continues the current integrity unit. On a blob already bound to a chunked scheme,
+        /// automatic unit boundaries can insert four-byte checksum footers between bytes from one
+        /// `data` argument. The returned offset names the first supplied byte, not necessarily a
+        /// contiguous `data.len()` range in the encoded stream.
+        ///
+        /// Empty appends succeed without changing the blob. After rewinding published bytes,
+        /// appends are rejected until the rewind is synchronized. Large epochs can start a
+        /// coalesced invisible payload preflush; filesystem append returns after that work is
+        /// admitted and publication waits for it before staging a root.
+        fn append(
+            &self,
+            data: impl Into<IoBufs> + Send,
+        ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
+
+        /// Append `data` and stage `tag` as one in-memory mutation.
+        ///
+        /// The append has the same encoded-offset and integrity-unit behavior as [`Self::append`].
+        ///
+        /// The operation is linearized across this handle and its clones: a concurrent sync
+        /// observes both changes or neither change. A separate [`Self::set_tag`] and append does
+        /// not provide that compound guarantee.
+        fn append_tagged(
+            &self,
+            data: impl Into<IoBufs> + Send,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
+
+        /// Append bytes while maintaining protocol-owned integrity units.
+        ///
+        /// The returned offset addresses the first newly supplied byte in the encoded payload. The
+        /// protocol may insert four-byte checksum footers before later supplied bytes when
+        /// `boundary` closes one or more units. `tag`, when present, is staged atomically with the
+        /// append and integrity state. Empty data can still complete an existing non-empty unit. A
+        /// stale `expected` token is rejected before payload I/O. The returned token must name the
+        /// next coherent integrity or tag mutation.
+        fn append_integrity(
+            &self,
+            expected: IntegrityToken,
+            data: impl Into<IoBufs> + Send,
+            boundary: IntegrityBoundary,
+            tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+        ) -> impl std::future::Future<Output = Result<IntegrityAppend, Error>> + Send;
+
+        /// Read and validate one complete integrity unit.
+        ///
+        /// The unit's checksum footer is consumed by the protocol and is not included in the
+        /// returned buffers.
+        fn read_integrity(
+            &self,
+            unit: IntegrityUnit,
+        ) -> impl std::future::Future<Output = Result<IoBufs, Error>> + Send;
+
+        /// Rewind to encoded payload length `len`, which cannot exceed the immediately visible
+        /// length or cut through protocol-owned integrity state. Use [`Self::rewind_integrity`]
+        /// when rewinding into an integrity unit requires a proof of its retained prefix.
+        fn rewind(
+            &self,
+            len: u64,
+        ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
+        /// Rewind to `len` and stage `tag` as one in-memory mutation.
+        ///
+        /// The operation is linearized across this handle and its clones: a concurrent sync
+        /// observes both changes or neither change. A separate [`Self::set_tag`] and rewind does
+        /// not provide that compound guarantee. The same integrity-boundary requirements as
+        /// [`Self::rewind`] apply.
+        fn rewind_tagged(
+            &self,
+            len: u64,
+            tag: [u8; ATOMIC_BLOB_TAG_LEN],
+        ) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
+        /// Rewind the encoded payload while preserving protocol-owned integrity state.
+        ///
+        /// When `unit` is `Some`, it identifies the complete or current unit containing the new
+        /// end; the protocol validates that unit and stores the checksum of the retained prefix as
+        /// the new unfinished unit. Pass `None` only when `len` is already a completed-unit
+        /// boundary. `tag`, when present, is staged atomically with the rewind and rebuilt integrity
+        /// state. A stale `expected` token is rejected before payload I/O. The returned token must
+        /// name the next coherent integrity or tag mutation.
+        fn rewind_integrity(
+            &self,
+            expected: IntegrityToken,
+            len: u64,
+            unit: Option<IntegrityUnit>,
+            tag: Option<[u8; ATOMIC_BLOB_TAG_LEN]>,
+        ) -> impl std::future::Future<Output = Result<IntegrityToken, Error>> + Send;
+
+        /// Request atomic publication and durable persistence of all pending mutations.
+        ///
+        /// Awaiting this future waits until the task has acquired shared lineage and handle
+        /// ownership, drained this blob's payload preflush, and locked its state to freeze the
+        /// publication snapshot, or until the task has already completed. Mutations started after
+        /// this handoff are excluded from the snapshot. Awaiting the returned [`Handle`] waits for
+        /// the same durability guarantee as [`Self::sync`].
+        fn start_sync(&self) -> impl std::future::Future<Output = Handle<()>> + Send;
+
+        /// Atomically publish and durably persist all pending mutations.
+        ///
+        /// A pending suffix within the recovery bound uses one full-file durability operation; the
+        /// self-linked decision's independent final spelling is not synchronized separately.
+        /// Arbitrarily large append epochs establish earlier invisible durable prefixes, leaving
+        /// only a bounded suffix for publication recovery.
+        fn sync(&self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+            async move { self.start_sync().await.await }
+        }
+    }
+});
+
 stability_scope!(ALPHA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;

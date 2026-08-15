@@ -1,7 +1,9 @@
 use super::Header;
 use crate::{BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
+use commonware_utils::sync::AsyncRwLock;
 use std::{
+    io::ErrorKind,
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::Arc,
@@ -34,9 +36,18 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
+/// Configuration for a [`Storage`].
+///
+/// `storage_directory` must be owned by exactly one independently constructed [`Storage`] lineage
+/// for its full lifetime. Clones belong to that lineage. Another process, storage instance, path
+/// alias, or direct filesystem mutation must not access the directory concurrently.
+/// Partition names and hex-encoded blob names each occupy one filesystem path component and must
+/// fit the filesystem's component-length limit.
 #[derive(Clone)]
 pub struct Config {
+    /// Directory exclusively owned by the resulting storage lineage.
     pub storage_directory: PathBuf,
+    /// Maximum buffered bytes for each blob.
     pub maximum_buffer_size: usize,
 }
 
@@ -51,7 +62,7 @@ impl Config {
 
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<Mutex<()>>,
+    atomic_resources: crate::atomic::AtomicResources,
     cfg: Config,
     pool: BufferPool,
 }
@@ -72,9 +83,21 @@ async fn resolve_header(
 }
 
 impl Storage {
+    /// Create storage with exclusive authority over `cfg.storage_directory`.
+    ///
+    /// Cloning the returned value preserves the same authority. Independently constructing another
+    /// storage value for this directory, including through a path alias or another process, is not
+    /// supported while this lineage remains live. Before replacing an old lineage, callers must
+    /// establish quiescence through that lineage; dropping its last caller-held clone is not a
+    /// barrier for unobserved admitted atomic work.
     pub fn new(cfg: Config, pool: BufferPool) -> Self {
         Self {
-            lock: Arc::new(Mutex::new(())),
+            atomic_resources: crate::atomic::AtomicResources {
+                driver: crate::atomic::Driver::background(),
+                exclusion: Arc::new(AsyncRwLock::new(())),
+                namespace: Arc::new(Mutex::new(())),
+                payload_budget: Arc::new(crate::atomic::PayloadBudget::default()),
+            },
             cfg,
             pool,
         }
@@ -94,7 +117,7 @@ impl crate::Storage for Storage {
 
         // Acquire the filesystem lock. The guard is owned so the creation path can move it
         // into a task that outlives a dropped open future.
-        let guard = self.lock.clone().lock_owned().await;
+        let guard = self.atomic_resources.namespace.clone().lock_owned().await;
 
         // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
@@ -185,15 +208,19 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _guard = self.atomic_resources.namespace.lock().await;
 
         // Remove all related files
         let path = self.cfg.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .await
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            match fs::remove_file(blob_path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    return Err(Error::BlobMissing(partition.into(), hex(name)));
+                }
+                Err(error) => return Err(Error::Io(error.into())),
+            }
 
             // Sync the partition directory to ensure the removal is durable.
             sync_dir(&path).await?;
@@ -212,11 +239,11 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
+        let _guard = self.atomic_resources.namespace.lock().await;
 
         // Scan the partition directory
         let path = self.cfg.storage_directory.join(partition);
-        let mut entries = fs::read_dir(path)
+        let mut entries = fs::read_dir(&path)
             .await
             .map_err(|_| Error::PartitionMissing(partition.into()))?;
         let mut blobs = Vec::new();
@@ -225,7 +252,8 @@ impl crate::Storage for Storage {
             if !file_type.is_file() {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
-            if let Some(name) = entry.file_name().to_str() {
+            let file_name = entry.file_name();
+            if let Some(name) = file_name.to_str() {
                 // Reject anything that isn't canonical lowercase hex (no `0x`
                 // prefix, no whitespace) since `from_hex` is lenient and
                 // storage only ever writes the canonical form via `hex()`.
@@ -241,17 +269,77 @@ impl crate::Storage for Storage {
     }
 }
 
+impl crate::atomic::Backend for Storage {
+    type Worker = Self;
+
+    fn atomic_worker(&self) -> Self {
+        self.clone()
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        self.atomic_resources.clone()
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, Error> {
+        super::validate_partition_name(partition)?;
+        let guard = self.atomic_resources.namespace.clone().lock_owned().await;
+        let path = self.cfg.storage_directory.join(partition).join(hex(name));
+        let mut file = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::BlobOpenFailed(
+                    partition.into(),
+                    hex(name),
+                    error.into(),
+                ));
+            }
+        };
+
+        let raw_len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+        file.set_max_buf_size(self.cfg.maximum_buffer_size);
+        let versions = crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION;
+        let Some((logical_len, _, data_offset)) =
+            resolve_header(&mut file, raw_len, &versions, partition, name).await?
+        else {
+            return Ok(None);
+        };
+        super::header::require_atomic_layout(data_offset, partition, name)?;
+        let file = file.into_std().await;
+        let opened = Some((
+            blob::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset),
+            logical_len,
+        ));
+        drop(guard);
+        Ok(opened)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _, WriteOptions,
+        AtomicStorage as _, Blob, BufferPoolConfig, Storage as _, WriteOptions,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
     use rand::RngExt as _;
-    use std::env;
+    use std::{
+        env,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_ATOMIC_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -263,6 +351,14 @@ mod tests {
         rng.random()
     }
 
+    fn atomic_test_directory(label: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "{label}_{}_{}",
+            std::process::id(),
+            NEXT_ATOMIC_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     #[tokio::test]
     async fn test_storage() {
         let mut rng = sys_rng();
@@ -271,6 +367,141 @@ mod tests {
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
         let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_propagates_non_missing_file_errors() {
+        let storage_directory = atomic_test_directory("storage_tokio_remove_error");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let blob_path = storage_directory.join("partition").join(hex(b"directory"));
+        std::fs::create_dir_all(&blob_path).unwrap();
+
+        let error = storage
+            .remove("partition", Some(b"directory"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Io(_)));
+        assert!(blob_path.is_dir());
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_backend_existing_and_direct_open() {
+        let storage_directory = atomic_test_directory("storage_tokio_atomic");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+
+        let missing = crate::atomic::Backend::open_atomic_existing(&storage, "partition", b"blob")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+        assert!(!storage_directory.exists());
+
+        let (blob, len) = Box::pin(storage.open_atomic("partition", b"blob"))
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        drop(blob);
+        let (blob, len) = Box::pin(storage.open_atomic("partition", b"blob"))
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        drop(blob);
+        let (_, backing_len) =
+            crate::atomic::Backend::open_atomic_existing(&storage, "partition", b"blob")
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(backing_len >= crate::atomic::IDENTITY_PAGE_LEN);
+        let (direct, direct_len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(direct_len, backing_len);
+        drop(direct);
+
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_rejects_v0_ordinary_lookalikes_without_mutation() {
+        let storage_directory = atomic_test_directory("storage_tokio_atomic_v0_lookalike");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let original = crate::storage::header::tests::v0_atomic_lookalike_bytes();
+        for (partition, name) in [("v0_atomic_open", b"open"), ("v0_atomic_scan", b"scan")] {
+            let partition_path = storage_directory.join(partition);
+            std::fs::create_dir_all(&partition_path).unwrap();
+            std::fs::write(partition_path.join(hex(name)), &original).unwrap();
+        }
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+
+        let rejected_open = storage.open_atomic("v0_atomic_open", b"open").await;
+        let rejected_scan = storage.scan_atomic("v0_atomic_scan").await;
+        assert!(
+            std::fs::read(storage_directory.join("v0_atomic_open").join(hex(b"open"))).unwrap()
+                == original,
+            "atomic open mutated a legacy ordinary blob"
+        );
+        assert!(
+            std::fs::read(storage_directory.join("v0_atomic_scan").join(hex(b"scan"))).unwrap()
+                == original,
+            "atomic scan mutated a legacy ordinary blob"
+        );
+        assert!(matches!(
+            rejected_open,
+            Err(crate::Error::BlobCorrupt(_, _, reason)) if reason == "expected V1 header layout"
+        ));
+        assert!(matches!(
+            rejected_scan,
+            Err(crate::Error::BlobCorrupt(_, _, reason)) if reason == "expected V1 header layout"
+        ));
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_exact_open_leaves_container_recovery_to_ordinary_open() {
+        let storage_directory = atomic_test_directory("storage_tokio_atomic_container_recovery");
+        let _ = std::fs::remove_dir_all(&storage_directory);
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), 2 * 1024 * 1024),
+            test_pool(),
+        );
+        let path = partition_path.join(hex(b"blob"));
+        let interrupted =
+            Header::create(&(crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION)).0
+                [..Header::PRELUDE_SIZE]
+                .to_vec();
+        std::fs::write(&path, &interrupted).unwrap();
+        std::fs::File::open(&path).unwrap().sync_all().unwrap();
+        std::fs::File::open(&partition_path)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+
+        assert!(
+            crate::atomic::Backend::open_atomic_existing(&storage, "partition", b"blob")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), interrupted);
+
+        let (_, len) = storage.open_atomic("partition", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     /// Dropping the `start_sync` receiver must not break the blob: the handle stays

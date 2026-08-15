@@ -13,6 +13,40 @@ use std::{
 };
 use tokio::task;
 
+#[cfg(test)]
+struct WritePause {
+    partition: String,
+    name: Vec<u8>,
+    entered: oneshot::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+    completed: oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+struct WriteCompletion(Option<oneshot::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for WriteCompletion {
+    fn drop(&mut self) {
+        if let Some(completed) = self.0.take() {
+            let _ = completed.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+static WRITE_PAUSE: commonware_utils::sync::Mutex<Option<WritePause>> =
+    commonware_utils::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn take_write_pause(partition: &str, name: &[u8]) -> Option<WritePause> {
+    let mut pause = WRITE_PAUSE.lock();
+    let matches = pause
+        .as_ref()
+        .is_some_and(|pause| pause.partition == partition && pause.name == name);
+    matches.then(|| pause.take().unwrap())
+}
+
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
@@ -240,9 +274,22 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
+        #[cfg(test)]
+        let pause_partition = self.partition.clone();
+        #[cfg(test)]
+        let pause_name = self.name.clone();
         let partition = sync.then(|| self.partition.clone());
         let name = sync.then(|| self.name.clone());
         task::spawn_blocking(move || {
+            #[cfg(test)]
+            let _completion = if let Some(pause) = take_write_pause(&pause_partition, &pause_name) {
+                let _ = pause.entered.send(());
+                let _ = pause.resume.recv();
+                Some(WriteCompletion(Some(pause.completed)))
+            } else {
+                None
+            };
+
             // Preserve the single-buffer fast path when no option requires per-write flags.
             let bufs = if !sync && !cache.is_disabled() {
                 match bufs.try_into_single() {
