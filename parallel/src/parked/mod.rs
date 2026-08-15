@@ -18,7 +18,6 @@ mod pool;
 mod scoped;
 mod sort;
 mod sync;
-mod topology;
 
 #[cfg(all(test, not(feature = "loom")))]
 mod bench_tests;
@@ -532,12 +531,17 @@ impl Strategy for Parked {
         // Offload: the worker times the job's own wall (to estimate the inline cost); the
         // returned future times the residual wait once joined.
         let setup_start = measure.then(std::time::Instant::now);
+        // See Rayon::spawn: the executor pins itself to the submitter's LLC domain for
+        // the job's duration. With the affinity-aware wake below, the woken worker is
+        // usually already there and the pin moves nothing.
+        let domain = crate::topology::spawn_domain();
         let (tx, mut rx) = oneshot::channel();
         let s = self.clone();
         let shared = Arc::clone(&self.shared);
         // Eager submission: the job is queued before the future is returned, so a caller
         // that drops the future (detached spawn) still gets its job executed.
         self.shared.enqueue(Box::new(move || {
+            let _affinity = crate::topology::AffinityGuard::pin(domain);
             let job_start = measure.then(std::time::Instant::now);
             // Catch the panic so a panicking job propagates to the awaiting task rather
             // than killing a pool worker.

@@ -9,8 +9,8 @@
 use super::{
     scoped::{Job, Slot},
     sync::{Arc, AtomicBool, AtomicU8, AtomicUsize, Mutex, Ordering, Parker, fence, spin},
-    topology::Topology,
 };
+use crate::topology;
 use std::collections::VecDeque;
 
 /// A queued one-shot job (a `spawn` closure, boxed: spawn bodies are `'static`).
@@ -85,8 +85,6 @@ pub(super) struct Shared {
     /// recheck) never touch the queue mutex.
     oneshot_len: AtomicUsize,
     idle: Box<[IdleEntry]>,
-    /// LLC topology for affinity-aware wake ordering (single-domain when undetectable).
-    topology: Topology,
     /// Approximate count of REGISTERED entries, maintained by registrants and claimants.
     /// Used only to short-circuit wake scans; correctness never depends on it.
     idle_count: AtomicUsize,
@@ -107,7 +105,6 @@ impl Shared {
                     domain: AtomicUsize::new(0),
                 })
                 .collect(),
-            topology: Topology::detect(),
             idle_count: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             workers,
@@ -203,8 +200,8 @@ impl Shared {
         if budget == 0 {
             return;
         }
-        let near = if self.topology.domains() > 1 {
-            self.topology.current_domain() as usize
+        let near = if topology::domain_count() > 1 {
+            topology::current_domain_index()
         } else {
             0
         };
@@ -230,7 +227,7 @@ impl Shared {
                     woken += 1;
                 }
             }
-            if self.topology.domains() <= 1 {
+            if topology::domain_count() <= 1 {
                 return;
             }
         }
@@ -333,7 +330,7 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
         // Record where this worker currently sits so submitters can prefer waking a
         // worker in their own LLC domain. Relaxed: purely advisory ordering data.
         me.domain
-            .store(shared.topology.current_domain() as usize, Ordering::Relaxed);
+            .store(topology::current_domain_index(), Ordering::Relaxed);
         // Count first, then become claimable: the count over-approximates registered
         // workers, so a claimant's decrement (which follows a successful CAS on `state`,
         // which follows this store) can never underflow it.
