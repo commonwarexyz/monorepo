@@ -15,9 +15,11 @@
 //! as this was built on a machine whose spec sheet implied 8-core L3 groups while the kernel
 //! reported 4-core ones). Pinning is skipped whenever it cannot be done safely and profitably: a
 //! single or undetectable domain, a CPU the snapshot does not cover, a failed CPU query, an
-//! operator restriction (taskset, numactl, isolated cores) leaving no allowed CPU in the domain,
-//! or a domain already at its pin cap. On non-Linux platforms the stub below reports no domains
-//! and pinning is a no-op; the same stub serves miri (the affinity syscalls are unshimmed).
+//! operator restriction (taskset, numactl, isolated cores) leaving fewer than two allowed CPUs in
+//! the domain (the caller needs one and the job another), or a domain already holding its cap of
+//! live pins (the allowed CPUs minus one, reserving one for the caller). On non-Linux platforms
+//! the stub below reports no domains and pinning is a no-op; the same stub serves miri (the
+//! affinity syscalls are unshimmed).
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
@@ -41,8 +43,10 @@ cfg_if::cfg_if! {
             cpu_to_domain: Box<[Option<u16>]>,
             /// The CPUs of each domain, as ready-to-use affinity sets.
             domain_sets: Box<[libc::cpu_set_t]>,
-            /// Live pins per domain. Capped so pinned jobs can never crowd a domain: past the
-            /// cap, a job simply runs unpinned wherever the scheduler likes.
+            /// Live pins per domain. Each pin reserves a slot against the domain's effective
+            /// width (its CPUs the pinning thread may use) minus one, so pinned jobs can never
+            /// crowd a domain or the caller working in it: past the cap, a job simply runs
+            /// unpinned wherever the scheduler likes.
             pins: Box<[AtomicUsize]>,
         }
 
@@ -54,15 +58,6 @@ cfg_if::cfg_if! {
                     domain_sets: Box::new([]),
                     pins: Box::new([]),
                 })
-            }
-
-            /// The most live pins a domain accepts: its width minus one, reserving a core for
-            /// the submitting caller (who is usually in the domain and working).
-            fn pin_cap(&self, domain: usize) -> usize {
-                let set = &self.domain_sets[domain];
-                // SAFETY: `set` is a valid cpu_set_t built at detection time.
-                let width = unsafe { libc::CPU_COUNT(set) } as usize;
-                width.saturating_sub(1).max(1)
             }
 
             /// Number of distinct domains (0 or 1 disables the preference and pinning).
@@ -212,28 +207,6 @@ cfg_if::cfg_if! {
                 let topology = topology();
                 let target = topology.domain_sets.get(domain)?;
 
-                // Take a pin slot: a domain accepts at most width minus one live pins, so
-                // concurrent pinned jobs can never crowd it (nor evict the caller). Past the
-                // cap the job runs unpinned.
-                let cap = topology.pin_cap(domain);
-                let pins = &topology.pins[domain];
-                let mut live = pins.load(Ordering::Acquire);
-                loop {
-                    if live >= cap {
-                        return None;
-                    }
-                    match pins.compare_exchange_weak(
-                        live,
-                        live + 1,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => break,
-                        Err(current) => live = current,
-                    }
-                }
-                let slot = PinSlot { domain };
-
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
                 // below.
                 let mut saved: libc::cpu_set_t = unsafe { std::mem::zeroed() };
@@ -258,9 +231,35 @@ cfg_if::cfg_if! {
                         }
                     }
                 }
-                if allowed == 0 {
+
+                // A one-CPU effective set would co-locate the job on the caller's only core
+                // with zero placement freedom; require room for the caller plus this job.
+                if allowed <= 1 {
                     return None;
                 }
+
+                // Take a pin slot against the effective width (not the sysfs domain width,
+                // which operator restrictions may shrink): at most `allowed - 1` live pins,
+                // reserving a CPU for the submitting caller. Past the cap the job runs
+                // unpinned.
+                let cap = allowed - 1;
+                let pins = &topology.pins[domain];
+                let mut live = pins.load(Ordering::Acquire);
+                loop {
+                    if live >= cap {
+                        return None;
+                    }
+                    match pins.compare_exchange_weak(
+                        live,
+                        live + 1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break,
+                        Err(current) => live = current,
+                    }
+                }
+                let slot = PinSlot { domain };
 
                 // SAFETY: pid 0 is the calling thread; `effective` is a valid set of `size`.
                 if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
@@ -286,13 +285,18 @@ cfg_if::cfg_if! {
 
         impl Drop for AffinityGuard {
             fn drop(&mut self) {
-                topology().pins[self.domain].fetch_sub(1, Ordering::AcqRel);
                 let size = std::mem::size_of::<libc::cpu_set_t>();
 
-                // SAFETY: pid 0 is the calling thread; `saved` is the mask read at pin time.
-                // Restoring wide does not migrate the thread, so a worker that served a caller
-                // tends to stay in that caller's domain: repeat spawns pin without moving anyone.
-                unsafe { libc::sched_setaffinity(0, size, &self.saved) };
+                // Restore before releasing the slot, so the counter never advertises capacity
+                // while this worker is still pinned. SAFETY: pid 0 is the calling thread;
+                // `saved` is the mask read at pin time. Restoring wide does not migrate the
+                // thread, so a worker that served a caller tends to stay in that caller's
+                // domain: repeat spawns pin without moving anyone.
+                if unsafe { libc::sched_setaffinity(0, size, &self.saved) } == 0 {
+                    topology().pins[self.domain].fetch_sub(1, Ordering::AcqRel);
+                }
+                // A failed restore leaves the worker pinned; its slot stays occupied so the
+                // domain's cap keeps reflecting reality.
             }
         }
 
@@ -375,7 +379,10 @@ cfg_if::cfg_if! {
                     // SAFETY: pid 0 = this thread, valid set.
                     assert_eq!(unsafe { libc::sched_setaffinity(0, size, &only) }, 0);
 
-                    let _guard = AffinityGuard::pin(spawn_domain());
+                    // A one-CPU allowance leaves no room for the caller plus a job, so the
+                    // pin must be skipped outright.
+                    let guard = AffinityGuard::pin(spawn_domain());
+                    assert!(guard.is_none());
 
                     // SAFETY: an all-zero cpu_set_t is the valid empty set.
                     let mut now: libc::cpu_set_t = unsafe { std::mem::zeroed() };
