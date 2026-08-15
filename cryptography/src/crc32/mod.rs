@@ -403,6 +403,8 @@ mod tests {
         assert_eq!(hash.as_u32(), expected);
     }
 
+    /// Verify a resumed hasher continues the original stream and that finalize returns
+    /// a hasher reset to the default state, not the resumed state.
     #[test]
     fn resumed_hasher_resets_after_finalize() {
         let prefix = b"durable prefix";
