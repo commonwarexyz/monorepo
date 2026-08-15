@@ -47,7 +47,7 @@ const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
 /// CRC32C hasher.
 ///
 /// Uses the iSCSI polynomial (0x1EDC6F41) as specified in RFC 3720.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Crc32 {
     inner: crc_fast::Digest,
 }
