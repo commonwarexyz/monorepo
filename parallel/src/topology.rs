@@ -320,8 +320,9 @@ cfg_if::cfg_if! {
 
                     let _guard = AffinityGuard::pin(spawn_domain());
 
-                    // SAFETY: as above.
+                    // SAFETY: an all-zero cpu_set_t is the valid empty set.
                     let mut now: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                    // SAFETY: pid 0 = this thread; `now` is a valid set of `size`.
                     assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut now) }, 0);
                     for c in 0..(libc::CPU_SETSIZE as usize) {
                         // SAFETY: c < CPU_SETSIZE, valid sets.
@@ -345,8 +346,9 @@ cfg_if::cfg_if! {
                     let _guard = AffinityGuard::pin(spawn_domain());
                 }
 
-                // SAFETY: as above.
+                // SAFETY: an all-zero cpu_set_t is the valid empty set.
                 let mut after: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                // SAFETY: pid 0 = calling thread; `after` is a valid set of `size`.
                 assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut after) }, 0);
                 for cpu in 0..(libc::CPU_SETSIZE as usize) {
                     // SAFETY: cpu < CPU_SETSIZE, valid sets.
