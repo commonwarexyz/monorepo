@@ -18,6 +18,7 @@ mod pool;
 mod scoped;
 mod sort;
 mod sync;
+mod topology;
 
 #[cfg(all(test, not(feature = "loom")))]
 mod bench_tests;

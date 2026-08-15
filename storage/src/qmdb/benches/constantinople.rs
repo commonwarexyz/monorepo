@@ -286,6 +286,11 @@ macro_rules! run_pipeline {
     }};
 }
 
+// Concurrency benches use mimalloc: glibc's per-thread arena assignment is a
+// per-process lottery that makes concurrent-path results sticky-bimodal.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let raw: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();
     // Run only when explicitly given a db argument. Blanket harness invocations (no positional
