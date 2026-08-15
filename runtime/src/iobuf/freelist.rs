@@ -521,11 +521,14 @@ impl Freelist {
 
     /// Deallocates every buffer currently parked in this freelist.
     ///
-    /// Checked-out and TLS-cached buffers keep this size class alive and may
-    /// return after a drain. Each stripe therefore receives a preallocated
-    /// empty vector while locked. Detached buffers are deallocated after
-    /// unlocking. Creation permits remain consumed, so draining never permits
-    /// a second allocation for an existing slot.
+    /// Buffers still checked out or held in a thread-local cache may return during
+    /// or after this call. Each stripe is therefore replaced under lock with an
+    /// empty vector reserved to its original limit, so a return never grows the
+    /// vector while holding the stripe lock. Detached buffers are deallocated
+    /// after the lock is released.
+    ///
+    /// Draining does not restore creation permits, so deallocated buffers cannot
+    /// be recreated through this freelist.
     pub fn drain(&self) -> usize {
         let mut drained = 0;
         for stripe in &self.stripes {
