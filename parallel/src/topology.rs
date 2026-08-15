@@ -172,8 +172,26 @@ cfg_if::cfg_if! {
                 if unsafe { libc::sched_getaffinity(0, size, &mut saved) } != 0 {
                     return None;
                 }
-                // SAFETY: pid 0 is the calling thread; `target` is a valid set of `size`.
-                if unsafe { libc::sched_setaffinity(0, size, target) } != 0 {
+                // Intersect the domain with the thread's current allowance so the pin
+                // narrows placement and never widens it past operator restrictions.
+                // SAFETY: an all-zero cpu_set_t is the valid empty set.
+                let mut effective: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                let mut allowed = 0usize;
+                for cpu in 0..(libc::CPU_SETSIZE as usize) {
+                    // SAFETY: cpu is within CPU_SETSIZE; all three sets are valid.
+                    unsafe {
+                        if libc::CPU_ISSET(cpu, target) && libc::CPU_ISSET(cpu, &saved) {
+                            libc::CPU_SET(cpu, &mut effective);
+                            allowed += 1;
+                        }
+                    }
+                }
+                if allowed == 0 {
+                    return None;
+                }
+                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of
+                // `size`.
+                if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
                     return None;
                 }
                 Some(Self { saved })
