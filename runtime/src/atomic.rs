@@ -294,6 +294,10 @@ use std::{
 };
 
 mod batch;
+#[cfg(test)]
+mod model_tests;
+#[cfg(test)]
+mod scheduled_tests;
 
 const ROOT_MAGIC: &[u8; 7] = b"CWUNO15";
 const ROOT_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_LOG_ROOT";
