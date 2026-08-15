@@ -13,13 +13,16 @@
 //! leaf under `cache/index*` in sysfs is its last-level cache (the leaf index varies by
 //! architecture, so it is discovered rather than assumed; vendor core-layout assumptions also lie,
 //! as this was built on a machine whose spec sheet implied 8-core L3 groups while the kernel
-//! reported 4-core ones). Pinning is skipped whenever it cannot be done safely and profitably: a
-//! single or undetectable domain, a CPU the snapshot does not cover, a failed CPU query, an
-//! operator restriction (taskset, numactl, isolated cores) leaving fewer than two allowed CPUs in
-//! the domain (the caller needs one and the job another), or a domain already holding its cap of
-//! live pins (the allowed CPUs minus one, reserving one for the caller). On non-Linux platforms
-//! the stub below reports no domains and pinning is a no-op; the same stub serves miri (the
-//! affinity syscalls are unshimmed).
+//! reported 4-core ones). Machines whose possible-CPU count exceeds `cpu_set_t`'s capacity report
+//! no domains, since the affinity syscalls could never engage there. Pinning is skipped whenever
+//! it cannot be done safely and profitably: a single or undetectable domain, a CPU the snapshot
+//! does not cover, a failed CPU query, an operator restriction (taskset, numactl, isolated cores)
+//! leaving fewer than two allowed CPUs in the domain (the caller needs one and the job another),
+//! a domain already holding its cap of live pins (the allowed CPUs minus one, reserving one for
+//! the caller), or a thread already pinned by an enclosing job. A mask rewritten mid-job to CPUs
+//! outside the pin is left in place at unpin: the newer placement wins over the pin-time
+//! snapshot. On non-Linux platforms the stub below reports no domains and pinning is a no-op; the
+//! same stub serves miri (the affinity syscalls are unshimmed).
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
@@ -51,13 +54,31 @@ cfg_if::cfg_if! {
         }
 
         impl Topology {
-            /// Detects the LLC topology; `None` when unreadable or single-domain.
+            /// Detects the LLC topology; empty when unreadable, single-domain, or unpinnable.
             fn detect() -> Self {
-                Self::from_sysfs().unwrap_or(Self {
+                // One probe before reading sysfs: when the kernel's possible-CPU count
+                // exceeds cpu_set_t's capacity, sched_getaffinity fails outright (even if
+                // every CPU id visible in sysfs is small), so pinning could never engage.
+                // Report no domains rather than charge every spawn for a doomed syscall
+                // sequence.
+                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
+                let mut probe: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                let size = std::mem::size_of::<libc::cpu_set_t>();
+
+                // SAFETY: pid 0 is the calling thread; `probe` is a valid set of `size`.
+                if unsafe { libc::sched_getaffinity(0, size, &mut probe) } != 0 {
+                    return Self::empty();
+                }
+                Self::from_sysfs().unwrap_or_else(Self::empty)
+            }
+
+            /// A topology with no domains: the preference and pinning are disabled.
+            fn empty() -> Self {
+                Self {
                     cpu_to_domain: Box::new([]),
                     domain_sets: Box::new([]),
                     pins: Box::new([]),
-                })
+                }
             }
 
             /// Number of distinct domains (0 or 1 disables the preference and pinning).
@@ -142,6 +163,15 @@ cfg_if::cfg_if! {
                 if lists.is_empty() {
                     return None;
                 }
+
+                // cpu_set_t cannot represent CPUs past CPU_SETSIZE, so a topology containing
+                // one could never be pinned within faithfully: report none.
+                if lists
+                    .iter()
+                    .any(|(cpu, _)| *cpu >= libc::CPU_SETSIZE as usize)
+                {
+                    return None;
+                }
                 let max_cpu = lists.iter().map(|(cpu, _)| *cpu).max()?;
                 let mut table: Vec<Option<u16>> = vec![None; max_cpu + 1];
                 let mut domains: Vec<&str> = Vec::new();
@@ -157,10 +187,10 @@ cfg_if::cfg_if! {
                         domains.len() - 1
                     });
                     table[*cpu] = Some(u16::try_from(domain).ok()?);
-                    if *cpu < libc::CPU_SETSIZE as usize {
-                        // SAFETY: cpu is within CPU_SETSIZE and the set is initialized.
-                        unsafe { libc::CPU_SET(*cpu, &mut sets[domain]) };
-                    }
+
+                    // SAFETY: cpu is within CPU_SETSIZE (checked above) and the set is
+                    // initialized.
+                    unsafe { libc::CPU_SET(*cpu, &mut sets[domain]) };
                 }
                 if domains.len() <= 1 {
                     return None;
@@ -189,22 +219,43 @@ cfg_if::cfg_if! {
             topology.current_domain().map(SpawnDomain)
         }
 
+        std::thread_local! {
+            /// Whether this thread currently holds a live [`AffinityGuard`]. A worker that
+            /// picks up nested jobs while pinned must not pin again: the thread occupies one
+            /// CPU no matter how deep its stack of jobs, so a second guard would burn a
+            /// second cap slot and cap-reject a genuinely distinct worker.
+            static PINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+
         /// Pins the calling thread to a domain's CPU set for its lifetime, restoring the previous
-        /// affinity mask on drop (including unwinds).
+        /// affinity mask on drop (including unwinds) unless the thread's mask was rewritten
+        /// mid-job to CPUs outside the pin, in which case that newer placement is left in place.
         pub(crate) struct AffinityGuard {
             saved: libc::cpu_set_t,
+            effective: libc::cpu_set_t,
+            topology: &'static Topology,
             domain: usize,
         }
 
         impl AffinityGuard {
             /// Pins the calling thread to the CPUs of `domain` that its current affinity mask
             /// already allows, so the pin narrows placement and never widens it past an operator's
-            /// restrictions (taskset, numactl, isolated cores). Returns `None` (no pin) if the mask
-            /// cannot be read or applied, if the allowed intersection is empty, or if the domain is
-            /// already at its pin cap; the job then simply runs wherever it was.
+            /// restrictions (taskset, numactl, isolated cores). Returns `None` (no pin) if the
+            /// thread already holds a pin (nested jobs stay within the outer confinement), if the
+            /// mask cannot be read or applied, if the allowed intersection has fewer than two
+            /// CPUs, or if the domain is already at its pin cap; the job then simply runs
+            /// wherever it was.
             pub(crate) fn pin(domain: Option<SpawnDomain>) -> Option<Self> {
-                let domain = domain?.0 as usize;
-                let topology = topology();
+                Self::pin_in(topology(), domain?.0 as usize)
+            }
+
+            /// [`Self::pin`] against an explicit topology, letting tests drive the full pin
+            /// protocol (intersection, cap accounting, apply and restore) on synthetic
+            /// domains.
+            fn pin_in(topology: &'static Topology, domain: usize) -> Option<Self> {
+                if PINNED.get() {
+                    return None;
+                }
                 let target = topology.domain_sets.get(domain)?;
 
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
@@ -259,7 +310,7 @@ cfg_if::cfg_if! {
                         Err(current) => live = current,
                     }
                 }
-                let slot = PinSlot { domain };
+                let slot = PinSlot { topology, domain };
 
                 // SAFETY: pid 0 is the calling thread; `effective` is a valid set of `size`.
                 if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
@@ -268,18 +319,25 @@ cfg_if::cfg_if! {
 
                 // The mask is applied: the guard now owns both the restore and the slot.
                 core::mem::forget(slot);
-                Some(Self { saved, domain })
+                PINNED.set(true);
+                Some(Self {
+                    saved,
+                    effective,
+                    topology,
+                    domain,
+                })
             }
         }
 
         /// Releases a reserved pin slot if `pin` bails before the mask is applied.
         struct PinSlot {
+            topology: &'static Topology,
             domain: usize,
         }
 
         impl Drop for PinSlot {
             fn drop(&mut self) {
-                topology().pins[self.domain].fetch_sub(1, Ordering::AcqRel);
+                self.topology.pins[self.domain].fetch_sub(1, Ordering::AcqRel);
             }
         }
 
@@ -287,16 +345,47 @@ cfg_if::cfg_if! {
             fn drop(&mut self) {
                 let size = std::mem::size_of::<libc::cpu_set_t>();
 
-                // Restore before releasing the slot, so the counter never advertises capacity
-                // while this worker is still pinned. SAFETY: pid 0 is the calling thread;
-                // `saved` is the mask read at pin time. Restoring wide does not migrate the
-                // thread, so a worker that served a caller tends to stay in that caller's
-                // domain: repeat spawns pin without moving anyone.
-                if unsafe { libc::sched_setaffinity(0, size, &self.saved) } == 0 {
-                    topology().pins[self.domain].fetch_sub(1, Ordering::AcqRel);
+                // Restore only if the thread's mask is still within the one this pin applied:
+                // equal in the common case, or clamped to a subset by the kernel while a CPU
+                // is offline (sched_getaffinity reports only online CPUs, and an offline CPU
+                // does not rewrite the stored mask). A mask straying outside the pin means an
+                // operator or the kernel rewrote it mid-job (taskset -pa, a cgroup cpuset
+                // migration), and that newer placement wins: writing the pin-time snapshot
+                // back would resurrect an allowance the operator may have just revoked. (A
+                // rewrite landing within the pin's own CPUs is indistinguishable from the pin
+                // and gets restored over.)
+                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
+                let mut current: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+
+                // SAFETY: pid 0 is the calling thread; `current` is a valid set of `size`.
+                let mut ours = unsafe { libc::sched_getaffinity(0, size, &mut current) } == 0;
+                if ours {
+                    for cpu in 0..(libc::CPU_SETSIZE as usize) {
+                        // SAFETY: cpu is within CPU_SETSIZE; both sets are valid.
+                        let strayed = unsafe {
+                            libc::CPU_ISSET(cpu, &current)
+                                && !libc::CPU_ISSET(cpu, &self.effective)
+                        };
+                        if strayed {
+                            ours = false;
+                            break;
+                        }
+                    }
                 }
-                // A failed restore leaves the worker pinned; its slot stays occupied so the
-                // domain's cap keeps reflecting reality.
+                if ours {
+                    // SAFETY: pid 0 is the calling thread; `saved` is the mask read at pin
+                    // time. Restoring wide does not migrate the thread, so a worker that
+                    // served a caller tends to stay in that caller's domain: repeat spawns
+                    // pin without moving anyone.
+                    unsafe { libc::sched_setaffinity(0, size, &self.saved) };
+                }
+
+                // Release the thread's pin and the domain slot unconditionally. Both
+                // syscalls above proved viable at pin time with the same arguments, so a
+                // failure here can only come from a concurrent external rewrite, which
+                // means the pin's confinement is already gone.
+                PINNED.set(false);
+                self.topology.pins[self.domain].fetch_sub(1, Ordering::AcqRel);
             }
         }
 
@@ -362,6 +451,17 @@ cfg_if::cfg_if! {
             }
 
             #[test]
+            fn from_lists_rejects_cpus_past_setsize() {
+                // cpu_set_t cannot represent such CPUs, so the machine must report no
+                // topology instead of pinning within a truncated view of it.
+                let lists = vec![
+                    (0, "a".to_string()),
+                    (libc::CPU_SETSIZE as usize, "b".to_string()),
+                ];
+                assert!(Topology::from_lists(&lists).is_none());
+            }
+
+            #[test]
             fn pin_never_widens_a_restricted_mask() {
                 std::thread::spawn(|| {
                     // Restrict this thread to its current CPU only.
@@ -372,7 +472,14 @@ cfg_if::cfg_if! {
                     let cpu = unsafe { libc::sched_getcpu() };
                     assert!(cpu >= 0);
 
-                    // SAFETY: cpu < CPU_SETSIZE (kernel CPU ids are small), valid set.
+                    // The libc crate's CPU_SET is unguarded past CPU_SETSIZE; such ids also
+                    // mean the machine cannot pin at all (see from_lists), so there is
+                    // nothing to test.
+                    if cpu as usize >= libc::CPU_SETSIZE as usize {
+                        return;
+                    }
+
+                    // SAFETY: cpu was bounds-checked against CPU_SETSIZE above; valid set.
                     unsafe { libc::CPU_SET(cpu as usize, &mut only) };
                     let size = std::mem::size_of::<libc::cpu_set_t>();
 
@@ -416,6 +523,27 @@ cfg_if::cfg_if! {
                     drop(AffinityGuard::pin(Some(domain)));
                 }
                 assert!(AffinityGuard::pin(Some(domain)).is_some());
+            }
+
+            #[test]
+            fn nested_pin_is_refused() {
+                // Success-side assertions live in the synthetic-topology tests below: on the
+                // process-global topology, concurrently running tests contend for the same
+                // pin slots, so only a refusal can be asserted deterministically here.
+                std::thread::spawn(|| {
+                    let Some(domain) = spawn_domain() else {
+                        return;
+                    };
+                    let Some(_outer) = AffinityGuard::pin(Some(domain)) else {
+                        return;
+                    };
+
+                    // A pinned thread occupies one CPU regardless of nesting depth; a nested
+                    // pin must be refused rather than burn a second cap slot.
+                    assert!(AffinityGuard::pin(Some(domain)).is_none());
+                })
+                .join()
+                .unwrap();
             }
 
             #[test]
