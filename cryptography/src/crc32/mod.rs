@@ -72,7 +72,7 @@ impl Crc32 {
     /// Resume a CRC32C stream from a previously finalized checksum.
     pub fn resume(checksum: u32) -> Self {
         // CRC32C finalization XORs the running state with all ones. Undo that transform before
-        // asking crc-fast to continue from the recovered state.
+        // resuming the checksum stream.
         Self {
             inner: crc_fast::Digest::new_with_init_state(ALGORITHM, u64::from(checksum ^ u32::MAX)),
         }
