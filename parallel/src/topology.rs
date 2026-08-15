@@ -204,8 +204,8 @@ cfg_if::cfg_if! {
             /// Pins the calling thread to the CPUs of `domain` that its current affinity mask
             /// already allows, so the pin narrows placement and never widens it past an operator's
             /// restrictions (taskset, numactl, isolated cores). Returns `None` (no pin) if the mask
-            /// cannot be read or applied, or if the allowed intersection is empty; the job then
-            /// simply runs wherever it was.
+            /// cannot be read or applied, if the allowed intersection is empty, or if the domain is
+            /// already at its pin cap; the job then simply runs wherever it was.
             pub(crate) fn pin(domain: Option<SpawnDomain>) -> Option<Self> {
                 let domain = domain?.0 as usize;
                 let topology = topology();
