@@ -146,9 +146,12 @@ cfg_if::cfg_if! {
         }
 
         impl AffinityGuard {
-            /// Pins the calling thread to `domain`'s CPUs. Returns `None` (no pin) if
-            /// the previous mask cannot be read or the new one cannot be applied; the
-            /// job then simply runs wherever it was.
+            /// Pins the calling thread to the CPUs of `domain` that its current
+            /// affinity mask already allows, so the pin narrows placement and never
+            /// widens it past an operator's restrictions (taskset, numactl, isolated
+            /// cores). Returns `None` (no pin) if the mask cannot be read or applied,
+            /// or if the allowed intersection is empty; the job then simply runs
+            /// wherever it was.
             pub(crate) fn pin(domain: Option<SpawnDomain>) -> Option<Self> {
                 let domain = domain?;
                 let topology = topology();
@@ -161,8 +164,25 @@ cfg_if::cfg_if! {
                 if unsafe { libc::sched_getaffinity(0, size, &mut saved) } != 0 {
                     return None;
                 }
-                // SAFETY: pid 0 is the calling thread; `target` is a valid set of `size`.
-                if unsafe { libc::sched_setaffinity(0, size, target) } != 0 {
+                // Intersect the domain with the thread's current allowance.
+                // SAFETY: an all-zero cpu_set_t is the valid empty set.
+                let mut effective: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                let mut allowed = 0usize;
+                for cpu in 0..(libc::CPU_SETSIZE as usize) {
+                    // SAFETY: cpu is within CPU_SETSIZE; all three sets are valid.
+                    unsafe {
+                        if libc::CPU_ISSET(cpu, target) && libc::CPU_ISSET(cpu, &saved) {
+                            libc::CPU_SET(cpu, &mut effective);
+                            allowed += 1;
+                        }
+                    }
+                }
+                if allowed == 0 {
+                    return None;
+                }
+                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of
+                // `size`.
+                if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
                     return None;
                 }
                 Some(Self { saved })
@@ -209,6 +229,36 @@ cfg_if::cfg_if! {
                 let lists: Vec<(usize, String)> =
                     (0..4).map(|cpu| (cpu, "0-3".to_string())).collect();
                 assert!(Topology::from_lists(&lists).is_none());
+            }
+
+            #[test]
+            fn pin_never_widens_a_restricted_mask() {
+                std::thread::spawn(|| {
+                    // Restrict this thread to its current CPU only.
+                    // SAFETY: valid empty set, filled below.
+                    let mut only: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                    // SAFETY: no arguments; returns a value.
+                    let cpu = unsafe { libc::sched_getcpu() };
+                    assert!(cpu >= 0);
+                    // SAFETY: cpu < CPU_SETSIZE (kernel CPU ids are small), valid set.
+                    unsafe { libc::CPU_SET(cpu as usize, &mut only) };
+                    let size = std::mem::size_of::<libc::cpu_set_t>();
+                    // SAFETY: pid 0 = this thread, valid set.
+                    assert_eq!(unsafe { libc::sched_setaffinity(0, size, &only) }, 0);
+
+                    let _guard = AffinityGuard::pin(spawn_domain());
+
+                    // SAFETY: as above.
+                    let mut now: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                    assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut now) }, 0);
+                    for c in 0..(libc::CPU_SETSIZE as usize) {
+                        // SAFETY: c < CPU_SETSIZE, valid sets.
+                        let (n, o) = unsafe { (libc::CPU_ISSET(c, &now), libc::CPU_ISSET(c, &only)) };
+                        assert!(!n || o, "pin widened the mask at cpu {c}");
+                    }
+                })
+                .join()
+                .unwrap();
             }
 
             #[test]
