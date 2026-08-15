@@ -912,6 +912,26 @@ impl crate::Storage for Context {
     }
 }
 
+impl crate::atomic::Backend for Context {
+    type Worker = Storage;
+
+    fn atomic_worker(&self) -> Self::Worker {
+        self.storage.clone()
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        crate::atomic::Backend::atomic_resources(&self.storage)
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, Error> {
+        crate::atomic::Backend::open_atomic_existing(&self.storage, partition, name).await
+    }
+}
+
 impl crate::BufferPooler for Context {
     fn network_buffer_pool(&self) -> &BufferPool {
         &self.network_buffer_pool
@@ -926,8 +946,8 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        AtomicBlob as _, AtomicStorage as _, BatchOperation, Metrics, Network, Resolver,
+        Runner as _, Sink, Stream, telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
     use std::{
@@ -1136,6 +1156,40 @@ mod tests {
             !returned_early,
             "a returned Context kept the Tokio runtime alive after Runner::start"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_open_and_remove_run_through_tokio_context() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            let (blob, len) = context
+                .open_atomic("atomic_context", b"blob")
+                .await
+                .unwrap();
+            assert_eq!(len, 0);
+            blob.append(b"value").await.unwrap();
+            blob.sync().await.unwrap();
+            context
+                .apply(vec![BatchOperation::Remove(blob)])
+                .await
+                .unwrap();
+            assert!(
+                context
+                    .scan_atomic("atomic_context")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let (_, len) = context
+                .open_atomic("atomic_context", b"blob")
+                .await
+                .unwrap();
+            assert_eq!(len, 0);
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[test]

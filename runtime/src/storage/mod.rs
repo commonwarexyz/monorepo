@@ -80,8 +80,103 @@ stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage, WriteOptions};
+    use crate::{Blob, Buf, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut, Storage, WriteOptions};
+    use commonware_utils::sync::Mutex;
     use futures::FutureExt;
+    use std::{
+        ops::RangeInclusive,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    #[derive(Default)]
+    struct AtomicBackendCalls {
+        workers: AtomicUsize,
+        identifiers: AtomicUsize,
+        identifier_tags: Mutex<Vec<u8>>,
+    }
+
+    /// Backend with an observable worker identity for wrapper contract tests.
+    #[derive(Clone)]
+    pub(crate) struct RecordingAtomicBackend {
+        inner: super::memory::Storage,
+        calls: Arc<AtomicBackendCalls>,
+        tag: u8,
+    }
+
+    impl RecordingAtomicBackend {
+        pub(crate) fn new(inner: super::memory::Storage) -> Self {
+            Self {
+                inner,
+                calls: Arc::new(AtomicBackendCalls::default()),
+                tag: 1,
+            }
+        }
+
+        pub(crate) fn worker_calls(&self) -> usize {
+            self.calls.workers.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn identifier_tags(&self) -> Vec<u8> {
+            self.calls.identifier_tags.lock().clone()
+        }
+    }
+
+    impl Storage for RecordingAtomicBackend {
+        type Blob = <super::memory::Storage as Storage>::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), Error> {
+            self.inner.open_versioned(partition, name, versions).await
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+            self.inner.scan(partition).await
+        }
+    }
+
+    impl crate::atomic::Backend for RecordingAtomicBackend {
+        type Worker = Self;
+
+        fn atomic_worker(&self) -> Self {
+            self.calls.workers.fetch_add(1, Ordering::Relaxed);
+            Self {
+                inner: crate::atomic::Backend::atomic_worker(&self.inner),
+                calls: self.calls.clone(),
+                tag: self.tag + 1,
+            }
+        }
+
+        fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+            crate::atomic::Backend::atomic_resources(&self.inner)
+        }
+
+        fn new_atomic_identifier(&self) -> [u8; 16] {
+            self.calls.identifier_tags.lock().push(self.tag);
+            let ordinal = self.calls.identifiers.fetch_add(1, Ordering::Relaxed) as u64;
+            let mut identifier = [self.tag; 16];
+            identifier[8..].copy_from_slice(&ordinal.to_be_bytes());
+            identifier
+        }
+
+        async fn open_atomic_existing(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> Result<Option<(Self::Blob, u64)>, Error> {
+            crate::atomic::Backend::open_atomic_existing(&self.inner, partition, name).await
+        }
+    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)

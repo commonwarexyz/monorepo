@@ -116,6 +116,47 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 }
 
+impl<S: crate::atomic::Backend> crate::atomic::Backend for Storage<S> {
+    type Worker = Storage<S::Worker>;
+
+    fn atomic_worker(&self) -> Self::Worker {
+        Storage {
+            inner: self.inner.atomic_worker(),
+            metrics: self.metrics.clone(),
+        }
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        self.inner.atomic_resources()
+    }
+
+    fn new_atomic_identifier(&self) -> [u8; 16] {
+        self.inner.new_atomic_identifier()
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, Error> {
+        self.inner
+            .open_atomic_existing(partition, name)
+            .await
+            .map(|opened| {
+                opened.map(|(inner, len)| {
+                    (
+                        Blob {
+                            inner,
+                            partition: partition.into(),
+                            metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
+                        },
+                        len,
+                    )
+                })
+            })
+    }
+}
+
 /// A wrapper around a `Blob` implementation that tracks metrics
 #[derive(Clone)]
 pub struct Blob<B> {
@@ -241,7 +282,10 @@ mod tests {
     use super::*;
     use crate::{
         Blob, BufferPool, BufferPoolConfig, Storage as _,
-        storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
+        storage::{
+            memory::Storage as MemoryStorage,
+            tests::{RecordingAtomicBackend, run_storage_tests},
+        },
         telemetry::metrics::Registry,
     };
 
@@ -256,6 +300,37 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_metered_atomic_backend_forwards_worker_and_identifier() {
+        let mut registry = Registry::default();
+        let inner = RecordingAtomicBackend::new(MemoryStorage::new(test_pool(
+            &mut registry.sub_registry("pool"),
+        )));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+
+        let worker = crate::atomic::Backend::atomic_worker(&storage);
+        assert!(Arc::ptr_eq(&storage.metrics, &worker.metrics));
+        let resources = crate::atomic::Backend::atomic_resources(&storage);
+        let worker_resources = crate::atomic::Backend::atomic_resources(&worker);
+        assert!(Arc::ptr_eq(
+            &resources.exclusion,
+            &worker_resources.exclusion
+        ));
+        assert!(Arc::ptr_eq(
+            &resources.payload_budget,
+            &worker_resources.payload_budget
+        ));
+        let mut expected_identifier = [2; 16];
+        expected_identifier[8..].fill(0);
+        assert_eq!(
+            crate::atomic::Backend::new_atomic_identifier(&worker),
+            expected_identifier
+        );
+
+        assert_eq!(storage.inner().worker_calls(), 1);
+        assert_eq!(storage.inner().identifier_tags(), vec![2]);
     }
 
     /// Test that a failed open does not count an open blob.

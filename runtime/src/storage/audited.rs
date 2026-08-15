@@ -72,6 +72,52 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 }
 
+impl<S: crate::atomic::Backend> crate::atomic::Backend for Storage<S> {
+    type Worker = Storage<S::Worker>;
+
+    fn atomic_worker(&self) -> Self::Worker {
+        Storage {
+            inner: self.inner.atomic_worker(),
+            auditor: self.auditor.clone(),
+        }
+    }
+
+    fn atomic_resources(&self) -> crate::atomic::AtomicResources {
+        self.inner.atomic_resources()
+    }
+
+    fn new_atomic_identifier(&self) -> [u8; 16] {
+        self.inner.new_atomic_identifier()
+    }
+
+    async fn open_atomic_existing(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(Self::Blob, u64)>, Error> {
+        self.auditor.event(b"open_atomic_existing", |hasher| {
+            hasher.update(partition.as_bytes());
+            hasher.update(name);
+        });
+        self.inner
+            .open_atomic_existing(partition, name)
+            .await
+            .map(|opened| {
+                opened.map(|(blob, len)| {
+                    (
+                        Blob {
+                            auditor: self.auditor.clone(),
+                            inner: blob,
+                            partition: partition.into(),
+                            name: name.to_vec(),
+                        },
+                        len,
+                    )
+                })
+            })
+    }
+}
+
 #[derive(Clone)]
 pub struct Blob<B: crate::Blob> {
     auditor: Arc<Auditor>,
@@ -156,8 +202,9 @@ mod tests {
         Storage as _, WriteOptions,
         deterministic::Auditor,
         storage::{
-            audited::Storage as AuditedStorage, memory::Storage as MemStorage,
-            tests::run_storage_tests,
+            audited::Storage as AuditedStorage,
+            memory::Storage as MemStorage,
+            tests::{RecordingAtomicBackend, run_storage_tests},
         },
         telemetry::metrics::Registry,
     };
@@ -176,6 +223,35 @@ mod tests {
         let storage = AuditedStorage::new(inner, auditor.clone());
 
         run_storage_tests(storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_audited_atomic_backend_forwards_worker_and_identifier() {
+        let auditor = Arc::new(Auditor::default());
+        let inner = RecordingAtomicBackend::new(MemStorage::new(test_pool()));
+        let storage = AuditedStorage::new(inner, auditor);
+
+        let worker = crate::atomic::Backend::atomic_worker(&storage);
+        assert!(Arc::ptr_eq(&storage.auditor, &worker.auditor));
+        let resources = crate::atomic::Backend::atomic_resources(&storage);
+        let worker_resources = crate::atomic::Backend::atomic_resources(&worker);
+        assert!(Arc::ptr_eq(
+            &resources.exclusion,
+            &worker_resources.exclusion
+        ));
+        assert!(Arc::ptr_eq(
+            &resources.payload_budget,
+            &worker_resources.payload_budget
+        ));
+        let mut expected_identifier = [2; 16];
+        expected_identifier[8..].fill(0);
+        assert_eq!(
+            crate::atomic::Backend::new_atomic_identifier(&worker),
+            expected_identifier
+        );
+
+        assert_eq!(storage.inner().worker_calls(), 1);
+        assert_eq!(storage.inner().identifier_tags(), vec![2]);
     }
 
     #[tokio::test]
