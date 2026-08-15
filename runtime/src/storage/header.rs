@@ -465,8 +465,9 @@ stability_scope!(BETA {
 
     /// Reject a resolved ordinary container that cannot back atomic storage in place.
     ///
-    /// Legacy layouts remain supported through ordinary [`crate::Storage`], but atomic recovery
-    /// must never reinterpret their logical payload as its own identity and root region.
+    /// Legacy layouts remain supported through ordinary [`crate::Storage`] and explicit
+    /// migration, but atomic recovery must never reinterpret their logical payload as its own
+    /// identity and root region.
     pub(crate) fn require_atomic_layout(
         data_offset: u64,
         partition: &str,
@@ -515,27 +516,6 @@ pub(crate) mod tests {
         let mut raw = v0_header(blob_version).encode().to_vec();
         raw.extend_from_slice(payload);
         raw
-    }
-
-    /// A V0 blob whose payload begins with a complete fresh atomic prefix.
-    pub(crate) fn v0_atomic_lookalike_bytes() -> Vec<u8> {
-        const INCARNATION: [u8; 16] = [0x11; 16];
-        const IDENTITY_DOMAIN: &[u8] = b"_COMMONWARE_RUNTIME_ATOMIC_INCARNATION";
-
-        let mut payload = vec![0; crate::atomic::DATA_OFFSET as usize];
-        payload[..7].copy_from_slice(b"CWUNOID");
-        payload[7] = 1;
-        payload[8..24].copy_from_slice(&INCARNATION);
-        let mut checksum_input = IDENTITY_DOMAIN.to_vec();
-        checksum_input.extend_from_slice(&payload[..24]);
-        let checksum = commonware_cryptography::Crc32::checksum(&checksum_input);
-        payload[24..28].copy_from_slice(&checksum.to_be_bytes());
-        let identity = payload[..crate::atomic::IDENTITY_PAGE_LEN as usize]
-            .try_into()
-            .unwrap();
-        assert_eq!(crate::atomic::decode_identity(identity), Some(INCARNATION));
-        payload.extend_from_slice(b"ordinary tail");
-        v0_blob_bytes(crate::DEFAULT_BLOB_VERSION, &payload)
     }
 
     /// Raw bytes of a V1 blob with the given version, followed by `payload`.

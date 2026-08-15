@@ -23,6 +23,8 @@ enum Op {
     Resize,
     Remove,
     Scan,
+    Migrate,
+    MigratePostCommit,
 }
 
 /// Selects how retained bytes are arranged when a write is partially preserved.
@@ -77,6 +79,12 @@ pub struct Config {
 
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<f64>,
+
+    /// Failure rate before an atomic migration mutates storage.
+    pub migrate_rate: Option<f64>,
+
+    /// Failure rate after an atomic migration has committed its replacement.
+    pub migrate_post_commit_rate: Option<f64>,
 }
 
 impl Config {
@@ -90,6 +98,8 @@ impl Config {
             Op::Resize => self.resize_rate,
             Op::Remove => self.remove_rate,
             Op::Scan => self.scan_rate,
+            Op::Migrate => self.migrate_rate,
+            Op::MigratePostCommit => self.migrate_post_commit_rate,
         }
         .unwrap_or(0.0)
     }
@@ -151,6 +161,18 @@ impl Config {
     /// Set the scan failure rate.
     pub const fn scan(mut self, rate: f64) -> Self {
         self.scan_rate = Some(rate);
+        self
+    }
+
+    /// Set the failure rate before an atomic migration mutates storage.
+    pub const fn migrate(mut self, rate: f64) -> Self {
+        self.migrate_rate = Some(rate);
+        self
+    }
+
+    /// Set the failure rate after an atomic migration commits its replacement.
+    pub const fn migrate_post_commit(mut self, rate: f64) -> Self {
+        self.migrate_post_commit_rate = Some(rate);
         self
     }
 }
@@ -459,10 +481,24 @@ impl<S: crate::Storage> Storage<S> {
         Blob::new(
             self.ctx.clone(),
             self.pending.clone(),
+            Arc::new(key),
             generation,
             inner,
             size,
         )
+    }
+
+    fn retire_generation(&self, key: &FileKey, generation: &Arc<FileGeneration>) {
+        let mut generations = self.generations.lock();
+        if generations
+            .get(key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, generation))
+        {
+            generations.remove(key);
+        }
+        drop(generations);
+        clear_pending(&self.pending, generation);
     }
 
     fn retire_names(&self, partition: &str, name: Option<&[u8]>) {
@@ -591,6 +627,26 @@ impl<S: crate::atomic::Backend> crate::atomic::Backend for Storage<S> {
         self.inner.new_atomic_identifier()
     }
 
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        if self.ctx.should_fail(Op::Migrate) {
+            return Err(injected_io_error().into());
+        }
+        let key = blob.key.clone();
+        let generation = blob.generation.clone();
+        self.inner
+            .migrate_atomic_backing(blob.inner, incarnation)
+            .await?;
+        self.retire_generation(key.as_ref(), &generation);
+        if self.ctx.should_fail(Op::MigratePostCommit) {
+            return Err(injected_io_error().into());
+        }
+        Ok(())
+    }
+
     async fn open_atomic_existing(
         &self,
         partition: &str,
@@ -610,6 +666,7 @@ pub struct Blob<B: crate::Blob> {
     inner: B,
     ctx: Oracle,
     pending: PendingMutations<B>,
+    key: Arc<FileKey>,
     generation: Arc<FileGeneration>,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
@@ -619,6 +676,7 @@ impl<B: crate::Blob> Blob<B> {
     fn new(
         ctx: Oracle,
         pending: PendingMutations<B>,
+        key: Arc<FileKey>,
         generation: Arc<FileGeneration>,
         inner: B,
         size: u64,
@@ -627,6 +685,7 @@ impl<B: crate::Blob> Blob<B> {
             inner,
             ctx,
             pending,
+            key,
             generation,
             size: Arc::new(AtomicU64::new(size)),
         }
@@ -820,7 +879,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
+        AtomicBlob as _, AtomicStorage as _, Blob as _, BufferPool, BufferPoolConfig, Storage as _,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -961,6 +1020,7 @@ mod tests {
         let blob = Blob::new(
             h.storage.ctx.clone(),
             pending.clone(),
+            Arc::new(("partition".to_string(), b"overlap".to_vec())),
             Arc::new(FileGeneration::new()),
             gated,
             4,
@@ -1025,6 +1085,7 @@ mod tests {
         let blob = Blob::new(
             h.storage.ctx.clone(),
             pending.clone(),
+            Arc::new(("partition".to_string(), b"late-record".to_vec())),
             Arc::new(FileGeneration::new()),
             gated,
             5,
@@ -1599,6 +1660,59 @@ mod tests {
             .await
             .unwrap();
         assert!(h.storage.pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_atomic_migration_precommit_fault_preserves_ordinary_blob() {
+        let pre = Harness::new(Config::default().migrate(1.0));
+        let (ordinary, _) = pre.storage.open("migration", b"pre").await.unwrap();
+        ordinary
+            .write_at(0, b"ordinary", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        assert!(pre.storage.migrate_atomic(ordinary).await.is_err());
+        let (ordinary, len) = pre.storage.open("migration", b"pre").await.unwrap();
+        assert_eq!(len, b"ordinary".len() as u64);
+        assert_eq!(
+            ordinary
+                .read_at(0, b"ordinary".len())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"ordinary"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_atomic_migration_postcommit_fault_is_retryable() {
+        let post = Harness::new(Config::default().migrate_post_commit(1.0));
+        let (ordinary, _) = post.storage.open("migration", b"post").await.unwrap();
+        ordinary
+            .write_at(0, b"atomic", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        assert!(post.storage.migrate_atomic(ordinary).await.is_err());
+        let (atomic, len) = post
+            .storage
+            .open_atomic("migration", b"post")
+            .await
+            .unwrap();
+        assert_eq!(len, b"atomic".len() as u64);
+        assert_eq!(
+            atomic.read_at(0, b"atomic".len()).await.unwrap().coalesce(),
+            b"atomic"
+        );
+        drop(atomic);
+
+        post.config.write().migrate_post_commit_rate = None;
+        let (retry, _) = post.storage.open("migration", b"post").await.unwrap();
+        post.storage.migrate_atomic(retry).await.unwrap();
+        let (_, len) = post
+            .storage
+            .open_atomic("migration", b"post")
+            .await
+            .unwrap();
+        assert_eq!(len, b"atomic".len() as u64);
     }
 
     #[tokio::test]

@@ -110,6 +110,21 @@ impl Blob {
         }
     }
 
+    #[cfg(unix)]
+    pub(super) fn partition(&self) -> &str {
+        &self.partition
+    }
+
+    #[cfg(unix)]
+    pub(super) fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    #[cfg(unix)]
+    pub(super) fn file(&self) -> Arc<File> {
+        self.file.clone()
+    }
+
     fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
         // Data durability is the contract. `sync_data` covers the bytes and metadata required to
         // retrieve them, including file size, while avoiding timestamp-only journal commits.

@@ -923,6 +923,14 @@ impl crate::atomic::Backend for Context {
         crate::atomic::Backend::atomic_resources(&self.storage)
     }
 
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        crate::atomic::Backend::migrate_atomic_backing(&self.storage, blob, incarnation).await
+    }
+
     async fn open_atomic_existing(
         &self,
         partition: &str,
@@ -946,8 +954,9 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        AtomicBlob as _, AtomicStorage as _, BatchOperation, Metrics, Network, Resolver,
-        Runner as _, Sink, Stream, telemetry::metrics::raw::Counter, tokio::telemetry,
+        AtomicBlob as _, AtomicStorage as _, BatchOperation, Blob as _, Metrics, Network, Resolver,
+        Runner as _, Sink, Storage as _, Stream, WriteOptions, telemetry::metrics::raw::Counter,
+        tokio::telemetry,
     };
     use bytes::Bytes;
     use std::{
@@ -1156,6 +1165,33 @@ mod tests {
             !returned_early,
             "a returned Context kept the Tokio runtime alive after Runner::start"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_migration_runs_through_tokio_context() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            let (ordinary, _) = context.open("migration", b"blob").await.unwrap();
+            ordinary
+                .write_at(0, b"payload", WriteOptions::default())
+                .await
+                .unwrap();
+            context.migrate_atomic(ordinary).await.unwrap();
+
+            let (atomic, len) = context.open_atomic("migration", b"blob").await.unwrap();
+            assert_eq!(len, b"payload".len() as u64);
+            assert_eq!(
+                atomic
+                    .read_at(0, b"payload".len())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"payload"
+            );
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[cfg(unix)]

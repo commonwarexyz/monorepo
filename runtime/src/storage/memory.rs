@@ -1,4 +1,4 @@
-use super::Header;
+use super::{Header, Layout};
 use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher};
 use commonware_formatting::hex;
 use commonware_utils::sync::{AsyncMutex, AsyncRwLock, Mutex, RwLock};
@@ -91,6 +91,11 @@ impl Storage {
 }
 
 impl Storage {
+    fn owns(&self, blob: &Blob) -> bool {
+        Arc::ptr_eq(&self.partitions, &blob.partitions)
+            && Arc::ptr_eq(&self.generations, &blob.generations)
+    }
+
     /// Compute a SHA-256 digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
         let partitions = self.partitions.lock();
@@ -467,6 +472,78 @@ impl crate::atomic::Backend for Storage {
         self.atomic_resources.clone()
     }
 
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; crate::atomic::INCARNATION_LEN],
+    ) -> Result<(), crate::Error> {
+        if !self.owns(&blob) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "migration source belongs to another storage instance",
+            )
+            .into());
+        }
+        crate::atomic::validate_atomic_location(&blob.partition, &blob.name)?;
+
+        {
+            let generations = self.generations.lock();
+            blob.ensure_current(&generations)?;
+        }
+        blob.sync_inner()?;
+
+        let key = (blob.partition.clone(), blob.name.clone());
+        let mut generations = self.generations.lock();
+        blob.ensure_current(&generations)?;
+        let mut partitions = self.partitions.lock();
+        let content = partitions
+            .get_mut(&blob.partition)
+            .and_then(|partition| partition.get_mut(&blob.name))
+            .ok_or_else(|| crate::Error::BlobMissing(blob.partition.clone(), hex(&blob.name)))?;
+        let raw = &content[..Header::resolve_len(content.len() as u64)];
+        let (logical_len, blob_version, data_offset) =
+            Header::parse(raw, content.len() as u64, &(u16::MIN..=u16::MAX))
+                .map_err(|error| error.into_error(&blob.partition, &blob.name))?;
+        let payload_start =
+            usize::try_from(data_offset).map_err(|_| crate::Error::OffsetOverflow)?;
+        if blob_version == crate::DEFAULT_BLOB_VERSION
+            && data_offset == Layout::V1.data_offset()
+            && logical_len >= crate::atomic::IDENTITY_PAGE_LEN
+        {
+            let identity_end = payload_start
+                .checked_add(crate::atomic::IDENTITY_PAGE_LEN as usize)
+                .ok_or(crate::Error::OffsetOverflow)?;
+            let identity = content
+                .get(payload_start..identity_end)
+                .ok_or(crate::Error::BlobInsufficientLength)?
+                .try_into()
+                .expect("the identity page slice has a fixed width");
+            if crate::atomic::decode_identity(identity).is_some() {
+                return Ok(());
+            }
+        }
+
+        let payload_len = usize::try_from(logical_len).map_err(|_| crate::Error::OffsetOverflow)?;
+        let payload_end = payload_start
+            .checked_add(payload_len)
+            .ok_or(crate::Error::OffsetOverflow)?;
+        let payload = content
+            .get(payload_start..payload_end)
+            .ok_or(crate::Error::BlobInsufficientLength)?
+            .to_vec();
+        let (mut replacement, replacement_version) =
+            Header::create(&(crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION));
+        debug_assert_eq!(replacement_version, crate::DEFAULT_BLOB_VERSION);
+        let integrity_checksum = commonware_cryptography::Crc32::checksum(&payload);
+        let prefix = crate::atomic::migration_prefix(incarnation, logical_len, integrity_checksum);
+        debug_assert_eq!(prefix.len(), crate::atomic::DATA_OFFSET as usize);
+        replacement.extend_from_slice(&prefix);
+        replacement.extend_from_slice(&payload);
+        *content = replacement;
+        generations.rotate(&key);
+        Ok(())
+    }
+
     async fn open_atomic_existing(
         &self,
         partition: &str,
@@ -509,7 +586,7 @@ impl crate::atomic::Backend for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        AtomicStorage as _, Blob, BufferPoolConfig, Storage as _,
+        AtomicBlob as _, AtomicStorage as _, Blob, BufferPoolConfig, Storage as _,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -586,7 +663,10 @@ mod tests {
     #[tokio::test]
     async fn test_atomic_rejects_v0_ordinary_lookalikes_without_mutation() {
         let storage = Storage::new(test_pool());
-        let original = crate::storage::header::tests::v0_atomic_lookalike_bytes();
+        let mut payload = crate::atomic::migration_prefix([0x11; 16], 0, 0).to_vec();
+        payload.extend_from_slice(b"ordinary tail");
+        let original =
+            crate::storage::header::tests::v0_blob_bytes(crate::DEFAULT_BLOB_VERSION, &payload);
 
         for (partition, name) in [("v0_atomic_open", b"open"), ("v0_atomic_scan", b"scan")] {
             storage
@@ -697,6 +777,196 @@ mod tests {
         let (replacement, len) = storage.open("partition", b"removed").await.unwrap();
         assert_eq!(len, 4);
         assert_eq!(replacement.read_at(0, 4).await.unwrap().coalesce(), b"new!");
+    }
+
+    #[tokio::test]
+    async fn test_atomic_migration_normalizes_container_and_retry_is_idempotent() {
+        const VERSION: u16 = 7;
+        let storage = Storage::new(test_pool());
+        let mut payload = crate::atomic::migration_prefix([0xA5; 16], 0, 0).to_vec();
+        payload.extend_from_slice(b"ordinary payload");
+        let (ordinary, _, version) = storage
+            .open_versioned("migration", b"blob", VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(version, VERSION);
+        ordinary
+            .write_at(0, payload.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+
+        storage.migrate_atomic(ordinary).await.unwrap();
+        {
+            let partitions = storage.partitions.lock();
+            let content = partitions
+                .get("migration")
+                .and_then(|partition| partition.get(b"blob".as_slice()))
+                .unwrap();
+            assert_eq!(
+                &content[..Layout::V1.data_offset() as usize],
+                Header::create(&(crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION))
+                    .0
+                    .as_slice()
+            );
+        }
+        let (atomic, len) = storage.open_atomic("migration", b"blob").await.unwrap();
+        assert_eq!(len, payload.len() as u64);
+        assert_eq!(
+            atomic.read_at(0, payload.len()).await.unwrap().coalesce(),
+            payload.as_slice()
+        );
+        let snapshot = atomic.integrity_snapshot().await.unwrap();
+        assert_eq!(snapshot.scheme, crate::IntegrityScheme::Unbound);
+        let (unit, tail) = snapshot.tail.unwrap();
+        assert_eq!(
+            unit,
+            crate::IntegrityUnit {
+                offset: 0,
+                len: payload.len() as u64,
+            }
+        );
+        assert_eq!(tail.coalesce(), payload.as_slice());
+        drop(atomic);
+
+        let (retry, retry_len, retry_version) = storage
+            .open_versioned(
+                "migration",
+                b"blob",
+                crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_len, crate::atomic::DATA_OFFSET + payload.len() as u64);
+        assert_eq!(retry_version, crate::DEFAULT_BLOB_VERSION);
+        storage.migrate_atomic(retry).await.unwrap();
+
+        let (_, backing_len) = storage.open("migration", b"blob").await.unwrap();
+        assert_eq!(
+            backing_len,
+            crate::atomic::DATA_OFFSET + payload.len() as u64
+        );
+
+        let (atomic, _) = storage.open_atomic("migration", b"blob").await.unwrap();
+        let token = atomic.integrity_snapshot().await.unwrap().token;
+        let append = atomic
+            .append_integrity(token, b"!", crate::IntegrityBoundary::Complete, None)
+            .await
+            .unwrap();
+        assert_eq!(append.offset, payload.len() as u64);
+        atomic.sync().await.unwrap();
+        drop(atomic);
+
+        let (atomic, len) = storage.open_atomic("migration", b"blob").await.unwrap();
+        assert_eq!(len, payload.len() as u64 + 1 + 4);
+        let mut completed = payload.to_vec();
+        completed.push(b'!');
+        assert_eq!(
+            atomic
+                .read_integrity(crate::IntegrityUnit {
+                    offset: 0,
+                    len: completed.len() as u64,
+                })
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            completed.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_atomic_migration_recognizes_identity_only_canonical_image() {
+        const INCARNATION: [u8; crate::atomic::INCARNATION_LEN] = [0x3C; 16];
+
+        let storage = Storage::new(test_pool());
+        let partition = "identity_only_migration";
+        let name = b"blob";
+        let key = (partition.to_string(), name.to_vec());
+        let prefix = crate::atomic::migration_prefix(INCARNATION, 0, 0);
+        let (ordinary, _, version) = storage
+            .open_versioned(
+                partition,
+                name,
+                crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION,
+            )
+            .await
+            .unwrap();
+        assert_eq!(version, crate::DEFAULT_BLOB_VERSION);
+        ordinary
+            .write_at(
+                0,
+                prefix[..crate::atomic::IDENTITY_PAGE_LEN as usize].to_vec(),
+                WriteOptions::SYNC,
+            )
+            .await
+            .unwrap();
+        let generation = ordinary.generation;
+        drop(ordinary);
+
+        let (ordinary, len) = storage.open(partition, name).await.unwrap();
+        assert_eq!(len, crate::atomic::IDENTITY_PAGE_LEN);
+        storage.migrate_atomic(ordinary).await.unwrap();
+        assert_eq!(
+            storage.generations.lock().current.get(&key),
+            Some(&generation)
+        );
+
+        let (_, len) = storage.open(partition, name).await.unwrap();
+        assert_eq!(len, crate::atomic::IDENTITY_PAGE_LEN);
+        let (_, len) = storage.open_atomic(partition, name).await.unwrap();
+        assert_eq!(len, 0);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_migration_does_not_mistake_a_large_ordinary_payload_for_identity() {
+        let storage = Storage::new(test_pool());
+        let payload = vec![0xA5; crate::atomic::DATA_OFFSET as usize];
+        let (ordinary, _, _) = storage
+            .open_versioned("migration", b"large", 0..=0)
+            .await
+            .unwrap();
+        ordinary
+            .write_at(0, payload.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+
+        storage.migrate_atomic(ordinary).await.unwrap();
+        let (atomic, len) = storage.open_atomic("migration", b"large").await.unwrap();
+        assert_eq!(len, payload.len() as u64);
+        assert_eq!(
+            atomic
+                .read_at(0, payload.len())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            payload.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_atomic_migration_rejects_foreign_and_stale_sources() {
+        let owner = Storage::new(test_pool());
+        let foreign = Storage::new(test_pool());
+        let (foreign_blob, _) = foreign.open("migration", b"foreign").await.unwrap();
+        assert!(owner.migrate_atomic(foreign_blob).await.is_err());
+
+        let (stale, _) = owner.open("migration", b"stale").await.unwrap();
+        owner.remove("migration", Some(b"stale")).await.unwrap();
+        let (replacement, _) = owner.open("migration", b"stale").await.unwrap();
+        replacement
+            .write_at(0, b"replacement", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        assert!(owner.migrate_atomic(stale).await.is_err());
+        assert_eq!(
+            replacement
+                .read_at(0, b"replacement".len())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"replacement"
+        );
     }
 
     #[tokio::test]

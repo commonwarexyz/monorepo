@@ -134,6 +134,17 @@ impl<S: crate::atomic::Backend> crate::atomic::Backend for Storage<S> {
         self.inner.new_atomic_identifier()
     }
 
+    async fn migrate_atomic_backing(
+        &self,
+        blob: Self::Blob,
+        incarnation: [u8; 16],
+    ) -> Result<(), Error> {
+        // Migration is one backend namespace operation, not application Blob I/O.
+        self.inner
+            .migrate_atomic_backing(blob.inner, incarnation)
+            .await
+    }
+
     async fn open_atomic_existing(
         &self,
         partition: &str,
