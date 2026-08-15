@@ -134,6 +134,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
+    /// Clears an unrecorded local proposal request so it can be issued again.
+    pub const fn clear_proposal_request(&mut self) {
+        self.proposal.clear_request();
+    }
+
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;

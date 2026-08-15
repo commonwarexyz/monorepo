@@ -960,6 +960,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 .parent_payload(&proposal)
                 .is_ok_and(|payload| payload == context.parent.1)
         {
+            // The build latch covers one asynchronous request. An invalid
+            // result leaves the slot empty, so release it for a new context.
+            if let Some(round) = self.views.get_mut(&context.view()) {
+                round.clear_proposal_request();
+            }
             return false;
         }
 
@@ -6875,6 +6880,53 @@ mod tests {
             assert!(state.add_nullification(nullification));
             assert!(!state.proposed(&ctx, ours.payload));
             assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_retries_after_parent_invalidation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            // Prepare the outgoing tip and claim the incoming view's build on
+            // that speculative parent.
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+            let (certified, _) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let initial = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip");
+            assert_eq!(initial.parent.0, View::new(5));
+            assert!(state.try_propose().is_none());
+
+            // Abandoning the captured parent rejects the pending build. The
+            // incoming view must remain eligible to rebuild on certified ancestry.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert!(!state.proposed(&initial, fetch_proposal(6, 5, 66).payload));
+
+            // Re-resolving ancestry for the same incoming view selects the
+            // certified fallback and still permits only one pending build.
+            let retry = state
+                .try_propose()
+                .expect("rejected handoff should retry on certified ancestry");
+            assert_eq!(retry.round.view(), View::new(6));
+            assert_eq!(retry.parent, (View::new(4), certified.payload));
+            assert!(state.try_propose().is_none());
+
+            // Completing the replacement build produces a vote on the
+            // fallback branch.
+            let rebuilt = fetch_proposal(6, 4, 67);
+            assert!(state.proposed(&retry, rebuilt.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("rebuilt proposal should be votable");
+            assert_eq!(notarize.proposal, rebuilt);
         });
     }
 
