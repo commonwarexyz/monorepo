@@ -6710,6 +6710,52 @@ mod tests {
     }
 
     #[test]
+    fn pipelined_handoff_replay_restores_speculative_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+
+            // Restore the certified anchor that precedes the outgoing vote in
+            // the journal.
+            let certified = fetch_proposal(4, 3, 64);
+            let notarization = build_notarization(&verifier, &schemes, &certified);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(4), true).is_some());
+            assert_eq!(state.current_view(), View::new(5));
+
+            // The outgoing vote is durable, but its derived incoming leader is
+            // absent before replay.
+            let tip = fetch_proposal(5, 4, 65);
+            let local_vote = Notarize::sign(&schemes[3], tip.clone()).expect("local notarize vote");
+            assert_eq!(state.leader_index(View::new(6)), None);
+
+            // Replaying the vote must restore both the speculative leader and
+            // the outgoing tip as usable handoff ancestry.
+            state.replay(&Artifact::Notarize(local_vote));
+            assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
+            let ctx = state
+                .try_propose()
+                .expect("replayed outgoing vote should restore the handoff");
+            assert_eq!(ctx.round.view(), View::new(6));
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+
+            // Completing the recovered request must still produce the
+            // incoming term's notarize vote.
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("recovered handoff proposal should be votable");
+            assert_eq!(notarize.proposal, ours);
+        });
+    }
+
+    #[test]
     fn pipelined_handoff_requires_optin() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
