@@ -70,10 +70,6 @@ impl Crc32 {
     }
 
     /// Resume a CRC32C stream from a previously finalized checksum.
-    ///
-    /// This is useful when a durable checkpoint stores only the four-byte checksum of an
-    /// append-only prefix. Updating the returned hasher with a suffix produces the same checksum as
-    /// hashing the prefix and suffix together.
     pub fn resume(checksum: u32) -> Self {
         // CRC32C finalization XORs the running state with all ones. Undo that transform before
         // asking crc-fast to continue from the recovered state.
