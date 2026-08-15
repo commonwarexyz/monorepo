@@ -13,10 +13,11 @@
 //! leaf under `cache/index*` in sysfs is its last-level cache (the leaf index varies by
 //! architecture, so it is discovered rather than assumed; vendor core-layout assumptions also lie,
 //! as this was built on a machine whose spec sheet implied 8-core L3 groups while the kernel
-//! reported 4-core ones). Pinning is skipped whenever the picture is incomplete: a single or
-//! undetectable domain, a CPU the snapshot does not cover, or a failed CPU query. On non-Linux
-//! platforms the stub below reports no domains and pinning is a no-op; the same stub serves miri
-//! (the affinity syscalls are unshimmed).
+//! reported 4-core ones). Pinning is skipped whenever it cannot be done safely and profitably: a
+//! single or undetectable domain, a CPU the snapshot does not cover, a failed CPU query, an
+//! operator restriction (taskset, numactl, isolated cores) leaving no allowed CPU in the domain,
+//! or a domain already at its pin cap. On non-Linux platforms the stub below reports no domains
+//! and pinning is a no-op; the same stub serves miri (the affinity syscalls are unshimmed).
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
