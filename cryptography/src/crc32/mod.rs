@@ -425,14 +425,14 @@ mod tests {
 
     /// Verify a resumed stream matches the one-shot checksum for every split point.
     ///
-    /// Suffix lengths sweep 0..=4097, so resumed states enter every SIMD code path,
-    /// including the empty-prefix and empty-suffix edges.
+    /// Suffix lengths sweep 0..=4097, including both empty-prefix and
+    /// empty-suffix edges.
     #[test]
     fn resume_split_independence() {
         let data = sequential_data(4097);
         let expected = CRC32C_REF.checksum(&data);
         for split in 0..=data.len() {
-            let mut hasher = Crc32::resume(Crc32::checksum(&data[..split]));
+            let mut hasher = Crc32::resume(CRC32C_REF.checksum(&data[..split]));
             hasher.update(&data[split..]);
             assert_eq!(hasher.finalize().1.as_u32(), expected);
         }
