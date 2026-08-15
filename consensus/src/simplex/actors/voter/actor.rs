@@ -13,7 +13,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, Proposal, Vote,
+            Notarize, Nullification, Nullify, Vote,
         },
     },
     types::{Round as Rnd, View},
@@ -657,9 +657,9 @@ impl<
             return None;
         }
 
-        // Construct proposal
-        let proposal = Proposal::new(context.round, context.parent.0, proposed);
-        if !self.state.proposed(proposal) {
+        // Record the proposal only if the parent captured for the build is
+        // still valid.
+        if !self.state.proposed(&context, proposed) {
             warn!(round = ?context.round, "dropped our proposal");
             return None;
         }

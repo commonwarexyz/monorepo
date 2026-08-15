@@ -248,7 +248,7 @@
 //! A term's first proposal waits for certified ancestry from the prior term. This delays proposal
 //! distribution by one network trip at every term boundary. An elector that can name a term's
 //! leader before the term starts (see
-//! [`elector::Elector::elect_ahead`]) can opt into pipelining the handoff. The incoming leader
+//! [`elector::Elector::speculate`]) can opt into pipelining the handoff. The incoming leader
 //! then proposes on the outgoing term's final view as soon as it holds a valid proposal for that
 //! view. It does not wait for the view to certify. If no such proposal arrives, the leader
 //! proposes on entering the term as usual. Non-leader validators keep the same behavior: they
