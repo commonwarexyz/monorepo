@@ -16,10 +16,11 @@
 //! reported 4-core ones). Machines whose possible-CPU count exceeds `cpu_set_t`'s capacity report
 //! no domains, since the affinity syscalls could never engage there. Pinning is skipped whenever
 //! it cannot be done safely and profitably: a single or undetectable domain, a CPU the snapshot
-//! does not cover, a failed CPU query, an operator restriction (taskset, numactl, isolated cores)
-//! leaving fewer than two allowed CPUs in the domain (the caller needs one and the job another),
-//! a domain already holding its cap of live pins (the allowed CPUs minus one, reserving one for
-//! the caller), or a thread already pinned by an enclosing job. A mask rewritten mid-job to CPUs
+//! does not cover, a failed CPU query, a mask that cannot be read or applied, an operator
+//! restriction (taskset, numactl, isolated cores) leaving fewer than two allowed CPUs in the
+//! domain (the caller needs one and the job another), a domain already holding its cap of live
+//! pins (the allowed CPUs minus one, reserving one for the caller), or a thread already pinned
+//! by an enclosing job. A mask rewritten mid-job to CPUs
 //! outside the pin is left in place at unpin: the newer placement wins over the pin-time
 //! snapshot. On non-Linux platforms the stub below reports no domains and pinning is a no-op; the
 //! same stub serves miri (the affinity syscalls are unshimmed).
@@ -38,7 +39,7 @@ cfg_if::cfg_if! {
         }
 
         /// Map from CPU id to last-level-cache domain id, plus each domain's CPU set.
-        pub(crate) struct Topology {
+        struct Topology {
             /// `cpu_to_domain[cpu]` is the domain of `cpu`; `None` beyond the table or for CPUs
             /// whose cache topology was unreadable at detection time. Unknown CPUs skip pinning
             /// rather than guess: domain numbering is an artifact of iteration order, so a guess
@@ -82,7 +83,7 @@ cfg_if::cfg_if! {
             }
 
             /// Number of distinct domains (0 or 1 disables the preference and pinning).
-            pub(crate) fn domains(&self) -> usize {
+            fn domains(&self) -> usize {
                 self.domain_sets.len()
             }
 
@@ -94,7 +95,7 @@ cfg_if::cfg_if! {
             /// The domain of the CPU the calling thread is currently running on, or `None` when
             /// the query fails or the snapshot does not cover the CPU. Advisory: the thread may
             /// migrate immediately after.
-            pub(crate) fn current_domain(&self) -> Option<u16> {
+            fn current_domain(&self) -> Option<u16> {
                 // SAFETY: sched_getcpu takes no arguments and only returns a value; -1 on error.
                 let cpu = unsafe { libc::sched_getcpu() };
                 if cpu < 0 {
@@ -382,10 +383,10 @@ cfg_if::cfg_if! {
 
                 // Release the thread's pin and the domain slot unconditionally: cleanup is
                 // best effort. If a call above fails, the likeliest cause is a concurrent
-                // external rewrite that already replaced the confinement, and the worst
-                // case (a worker left narrow with its slot freed) transiently crowds one
-                // domain, whereas retaining the slot on any hiccup would strand domain
-                // capacity for the process lifetime.
+                // external rewrite that already replaced the confinement, but the worst
+                // case may leave this worker narrowed for the rest of the process with its
+                // slot freed. That is still preferred over retaining the slot on any
+                // hiccup, which would strand domain capacity for the process lifetime.
                 PINNED.set(false);
                 self.topology.pins[self.domain].fetch_sub(1, Ordering::AcqRel);
             }
@@ -663,14 +664,17 @@ cfg_if::cfg_if! {
             #[test]
             fn synthetic_nested_pin_refused_then_released() {
                 std::thread::spawn(|| {
-                    let Some((topology, half_a, _)) = synthetic_split() else {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
                         return;
                     };
                     let domain = topology.domain_of(half_a[0]).unwrap() as usize;
+                    let other = topology.domain_of(half_b[0]).unwrap() as usize;
                     let outer = AffinityGuard::pin_in(topology, domain).unwrap();
 
-                    // A pinned thread must not pin again, in any domain of any topology.
+                    // A pinned thread must not pin again, in any domain: nested jobs stay
+                    // within the outer confinement.
                     assert!(AffinityGuard::pin_in(topology, domain).is_none());
+                    assert!(AffinityGuard::pin_in(topology, other).is_none());
 
                     // Dropping the outer guard releases the thread's pin and the slot.
                     drop(outer);
