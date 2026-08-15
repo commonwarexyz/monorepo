@@ -16,6 +16,9 @@ use tokio::{
 
 mod blob;
 
+#[cfg(test)]
+pub(crate) use blob::pause_write;
+
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly
 /// fsynced.

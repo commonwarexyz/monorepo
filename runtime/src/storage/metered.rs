@@ -83,6 +83,16 @@ impl<S> Storage<S> {
     pub const fn inner(&self) -> &S {
         &self.inner
     }
+
+    #[cfg(test)]
+    pub(crate) fn storage_syncs(&self) -> u64 {
+        self.metrics.storage_syncs.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_read_bytes(&self) -> u64 {
+        self.metrics.storage_read_bytes.get()
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
