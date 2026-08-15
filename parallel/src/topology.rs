@@ -1,20 +1,18 @@
 //! Last-level-cache topology and executor affinity for spawned jobs.
 //!
-//! Threads that exchange cache lines pay far more when they sit in different last-level
-//! cache (L3) domains: on multi-CCD parts a cross-domain transfer costs several times a
-//! shared-domain one, and the scheduler's thread placement is a sticky per-process
-//! lottery it never revisits. A spawned job usually has a data relationship with its
-//! submitter (it consumes what the caller just built, and the caller consumes what it
-//! produces), so the job's executor pins itself to the submitter's domain for the job's
-//! duration via [`AffinityGuard`]: one migration the first time (tens of microseconds,
-//! against per-line fabric traffic for the job's lifetime otherwise), and a no-op
+//! Threads that exchange cache lines pay far more when they sit in different last-level cache (L3)
+//! domains: on multi-CCD parts a cross-domain transfer costs several times a shared-domain one, and
+//! the scheduler's thread placement is a sticky per-process lottery it never revisits. A spawned
+//! job usually has a data relationship with its submitter (it consumes what the caller just built,
+//! and the caller consumes what it produces), so the job's executor pins itself to the submitter's
+//! domain for the job's duration via [`AffinityGuard`]: one migration the first time (tens of
+//! microseconds, against per-line fabric traffic for the job's lifetime otherwise), and a no-op
 //! afterwards because the restored-wide executor tends to stay where it ran.
 //!
-//! Domains come from the kernel's cache topology (never from vendor core-layout
-//! assumptions, which lie: this was built on a machine whose spec sheet implied 8-core L3
-//! groups while the kernel reported 4-core ones). On non-Linux platforms the stub below
-//! reports a single domain and pinning is a no-op; the same stub serves miri (the
-//! affinity syscalls are unshimmed).
+//! Domains come from the kernel's cache topology (never from vendor core-layout assumptions, which
+//! lie: this was built on a machine whose spec sheet implied 8-core L3 groups while the kernel
+//! reported 4-core ones). On non-Linux platforms the stub below reports a single domain and pinning
+//! is a no-op; the same stub serves miri (the affinity syscalls are unshimmed).
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
@@ -98,6 +96,7 @@ cfg_if::cfg_if! {
                 let max_cpu = lists.iter().map(|(cpu, _)| *cpu).max()?;
                 let mut table = vec![0u16; max_cpu + 1];
                 let mut domains: Vec<&str> = Vec::new();
+
                 // SAFETY: an all-zero cpu_set_t is the valid empty set.
                 let empty: libc::cpu_set_t = unsafe { std::mem::zeroed() };
                 let mut sets: Vec<libc::cpu_set_t> = Vec::new();
@@ -127,9 +126,9 @@ cfg_if::cfg_if! {
             }
         }
 
-        /// The submitting caller's current LLC domain, captured at spawn time and
-        /// consumed by [`AffinityGuard::pin`] on whichever thread executes the job.
-        /// `None` when the topology has fewer than two domains.
+        /// The submitting caller's current LLC domain, captured at spawn time and consumed by
+        /// [`AffinityGuard::pin`] on whichever thread executes the job. `None` when the topology
+        /// has fewer than two domains.
         #[derive(Clone, Copy)]
         pub(crate) struct SpawnDomain(u16);
 
@@ -139,33 +138,37 @@ cfg_if::cfg_if! {
             (topology.domains() > 1).then(|| SpawnDomain(topology.current_domain()))
         }
 
-        /// Pins the calling thread to a domain's CPU set for its lifetime, restoring the
-        /// previous affinity mask on drop (including unwinds).
+        /// Pins the calling thread to a domain's CPU set for its lifetime, restoring the previous
+        /// affinity mask on drop (including unwinds).
         pub(crate) struct AffinityGuard {
             saved: libc::cpu_set_t,
         }
 
         impl AffinityGuard {
-            /// Pins the calling thread to the CPUs of `domain` that its current
-            /// affinity mask already allows, so the pin narrows placement and never
-            /// widens it past an operator's restrictions (taskset, numactl, isolated
-            /// cores). Returns `None` (no pin) if the mask cannot be read or applied,
-            /// or if the allowed intersection is empty; the job then simply runs
+            /// Pins the calling thread to the CPUs of `domain` that its current affinity mask
+            /// already allows, so the pin narrows placement and never widens it past an operator's
+            /// restrictions (taskset, numactl, isolated cores). Returns `None` (no pin) if the mask
+            /// cannot be read or applied, or if the allowed intersection is empty; the job then
+            /// simply runs
             /// wherever it was.
             pub(crate) fn pin(domain: Option<SpawnDomain>) -> Option<Self> {
                 let domain = domain?;
                 let topology = topology();
                 let target = topology.domain_sets.get(domain.0 as usize)?;
-                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by
-                // sched_getaffinity below.
+
+                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
+                // below.
                 let mut saved: libc::cpu_set_t = unsafe { std::mem::zeroed() };
                 let size = std::mem::size_of::<libc::cpu_set_t>();
+
                 // SAFETY: pid 0 is the calling thread; `saved` is a valid set of `size`.
                 if unsafe { libc::sched_getaffinity(0, size, &mut saved) } != 0 {
                     return None;
                 }
-                // Intersect the domain with the thread's current allowance.
-                // SAFETY: an all-zero cpu_set_t is the valid empty set.
+
+                // Intersect the domain with the thread's current allowance so the pin narrows
+                // placement and never widens it past operator restrictions. SAFETY: an all-zero
+                // cpu_set_t is the valid empty set.
                 let mut effective: libc::cpu_set_t = unsafe { std::mem::zeroed() };
                 let mut allowed = 0usize;
                 for cpu in 0..(libc::CPU_SETSIZE as usize) {
@@ -180,8 +183,8 @@ cfg_if::cfg_if! {
                 if allowed == 0 {
                     return None;
                 }
-                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of
-                // `size`.
+
+                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of `size`.
                 if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
                     return None;
                 }
@@ -192,10 +195,10 @@ cfg_if::cfg_if! {
         impl Drop for AffinityGuard {
             fn drop(&mut self) {
                 let size = std::mem::size_of::<libc::cpu_set_t>();
-                // SAFETY: pid 0 is the calling thread; `saved` is the mask read at pin
-                // time. Restoring wide does not migrate the thread, so a worker that
-                // served a caller tends to stay in that caller's domain: repeat spawns
-                // pin without moving anyone.
+
+                // SAFETY: pid 0 is the calling thread; `saved` is the mask read at pin time.
+                // Restoring wide does not migrate the thread, so a worker that served a caller
+                // tends to stay in that caller's domain: repeat spawns pin without moving anyone.
                 unsafe { libc::sched_setaffinity(0, size, &self.saved) };
             }
         }
@@ -220,6 +223,7 @@ cfg_if::cfg_if! {
                     // SAFETY: cpu < CPU_SETSIZE; the set was built by from_lists.
                     assert!(unsafe { libc::CPU_ISSET(cpu, &topology.domain_sets[d0]) });
                 }
+
                 // SAFETY: as above.
                 assert!(!unsafe { libc::CPU_ISSET(4, &topology.domain_sets[d0]) });
             }
@@ -237,12 +241,15 @@ cfg_if::cfg_if! {
                     // Restrict this thread to its current CPU only.
                     // SAFETY: valid empty set, filled below.
                     let mut only: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+
                     // SAFETY: no arguments; returns a value.
                     let cpu = unsafe { libc::sched_getcpu() };
                     assert!(cpu >= 0);
+
                     // SAFETY: cpu < CPU_SETSIZE (kernel CPU ids are small), valid set.
                     unsafe { libc::CPU_SET(cpu as usize, &mut only) };
                     let size = std::mem::size_of::<libc::cpu_set_t>();
+
                     // SAFETY: pid 0 = this thread, valid set.
                     assert_eq!(unsafe { libc::sched_setaffinity(0, size, &only) }, 0);
 
@@ -272,6 +279,7 @@ cfg_if::cfg_if! {
                 {
                     let _guard = AffinityGuard::pin(spawn_domain());
                 }
+
                 // SAFETY: as above.
                 let mut after: libc::cpu_set_t = unsafe { std::mem::zeroed() };
                 assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut after) }, 0);

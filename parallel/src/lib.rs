@@ -1082,9 +1082,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // Offload: hand the job to the pool. The worker times the job's own wall so we can
             // estimate the inline cost; the returned future times the residual wait once joined.
             let setup_start = measure.then(Instant::now);
-            // The executor pins itself to the submitter's LLC domain for the job's
-            // duration: spawned jobs exchange data with their caller, and a one-time
-            // migration is orders cheaper than cross-domain traffic for the job's life.
+
+            // The executor pins itself to the submitter's LLC domain for the job's duration:
+            // spawned jobs exchange data with their caller, and a one-time migration is orders
+            // cheaper than cross-domain traffic for the job's life.
             let domain = topology::spawn_domain();
             let (tx, mut rx) = oneshot::channel();
             let s = self.clone();
