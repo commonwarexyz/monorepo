@@ -405,6 +405,13 @@ cfg_if::cfg_if! {
                 let Some(domain) = spawn_domain() else {
                     return;
                 };
+
+                // The environment may forbid pinning outright (e.g. a taskset restriction
+                // leaving fewer than two allowed CPUs in the domain); leak detection needs
+                // an environment where a pin can succeed at all.
+                if AffinityGuard::pin(Some(domain)).is_none() {
+                    return;
+                }
                 for _ in 0..100 {
                     drop(AffinityGuard::pin(Some(domain)));
                 }
