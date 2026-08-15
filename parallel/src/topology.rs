@@ -20,7 +20,10 @@
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
-        use std::sync::OnceLock;
+        use std::sync::{
+            OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        };
 
         /// The process-wide topology, detected on first use.
         fn topology() -> &'static Topology {
@@ -37,6 +40,9 @@ cfg_if::cfg_if! {
             cpu_to_domain: Box<[Option<u16>]>,
             /// The CPUs of each domain, as ready-to-use affinity sets.
             domain_sets: Box<[libc::cpu_set_t]>,
+            /// Live pins per domain. Capped so pinned jobs can never crowd a domain: past the
+            /// cap, a job simply runs unpinned wherever the scheduler likes.
+            pins: Box<[AtomicUsize]>,
         }
 
         impl Topology {
@@ -45,7 +51,17 @@ cfg_if::cfg_if! {
                 Self::from_sysfs().unwrap_or(Self {
                     cpu_to_domain: Box::new([]),
                     domain_sets: Box::new([]),
+                    pins: Box::new([]),
                 })
+            }
+
+            /// The most live pins a domain accepts: its width minus one, reserving a core for
+            /// the submitting caller (who is usually in the domain and working).
+            fn pin_cap(&self, domain: usize) -> usize {
+                let set = &self.domain_sets[domain];
+                // SAFETY: `set` is a valid cpu_set_t built at detection time.
+                let width = unsafe { libc::CPU_COUNT(set) } as usize;
+                width.saturating_sub(1).max(1)
             }
 
             /// Number of distinct domains (0 or 1 disables the preference and pinning).
@@ -153,9 +169,11 @@ cfg_if::cfg_if! {
                 if domains.len() <= 1 {
                     return None;
                 }
+                let pins = (0..sets.len()).map(|_| AtomicUsize::new(0)).collect();
                 Some(Self {
                     cpu_to_domain: table.into_boxed_slice(),
                     domain_sets: sets.into_boxed_slice(),
+                    pins,
                 })
             }
         }
@@ -179,6 +197,7 @@ cfg_if::cfg_if! {
         /// affinity mask on drop (including unwinds).
         pub(crate) struct AffinityGuard {
             saved: libc::cpu_set_t,
+            domain: usize,
         }
 
         impl AffinityGuard {
@@ -188,9 +207,20 @@ cfg_if::cfg_if! {
             /// cannot be read or applied, or if the allowed intersection is empty; the job then
             /// simply runs wherever it was.
             pub(crate) fn pin(domain: Option<SpawnDomain>) -> Option<Self> {
-                let domain = domain?;
+                let domain = domain?.0 as usize;
                 let topology = topology();
-                let target = topology.domain_sets.get(domain.0 as usize)?;
+                let target = topology.domain_sets.get(domain)?;
+
+                // Take a pin slot: a domain accepts at most width minus one live pins, so
+                // concurrent pinned jobs can never crowd it (nor evict the caller). Past the
+                // cap the job runs unpinned.
+                let cap = topology.pin_cap(domain);
+                topology.pins[domain]
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                        (live < cap).then_some(live + 1)
+                    })
+                    .ok()?;
+                let slot = PinSlot { domain };
 
                 // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
                 // below.
@@ -224,12 +254,27 @@ cfg_if::cfg_if! {
                 if unsafe { libc::sched_setaffinity(0, size, &effective) } != 0 {
                     return None;
                 }
-                Some(Self { saved })
+
+                // The mask is applied: the guard now owns both the restore and the slot.
+                core::mem::forget(slot);
+                Some(Self { saved, domain })
+            }
+        }
+
+        /// Releases a reserved pin slot if `pin` bails before the mask is applied.
+        struct PinSlot {
+            domain: usize,
+        }
+
+        impl Drop for PinSlot {
+            fn drop(&mut self) {
+                topology().pins[self.domain].fetch_sub(1, Ordering::AcqRel);
             }
         }
 
         impl Drop for AffinityGuard {
             fn drop(&mut self) {
+                topology().pins[self.domain].fetch_sub(1, Ordering::AcqRel);
                 let size = std::mem::size_of::<libc::cpu_set_t>();
 
                 // SAFETY: pid 0 is the calling thread; `saved` is the mask read at pin time.
@@ -332,6 +377,19 @@ cfg_if::cfg_if! {
                 })
                 .join()
                 .unwrap();
+            }
+
+            #[test]
+            fn pin_slots_do_not_leak() {
+                // Repeated pin and release must not consume permanent slots: if the counter
+                // leaked, pins would start failing after about a domain's width of cycles.
+                let Some(domain) = spawn_domain() else {
+                    return;
+                };
+                for _ in 0..100 {
+                    drop(AffinityGuard::pin(Some(domain)));
+                }
+                assert!(AffinityGuard::pin(Some(domain)).is_some());
             }
 
             #[test]
