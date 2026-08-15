@@ -392,6 +392,48 @@ cfg_if::cfg_if! {
         #[cfg(test)]
         mod tests {
             use super::*;
+            use std::sync::atomic::AtomicBool;
+
+            /// The calling thread's current affinity mask.
+            fn current_mask() -> libc::cpu_set_t {
+                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
+                let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                let size = std::mem::size_of::<libc::cpu_set_t>();
+
+                // SAFETY: pid 0 is the calling thread; `mask` is a valid set of `size`.
+                assert_eq!(unsafe { libc::sched_getaffinity(0, size, &mut mask) }, 0);
+                mask
+            }
+
+            /// The CPUs the calling thread may currently use.
+            fn allowed_cpus() -> Vec<usize> {
+                let mask = current_mask();
+                (0..(libc::CPU_SETSIZE as usize))
+                    // SAFETY: cpu is within CPU_SETSIZE; the set is valid.
+                    .filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &mask) })
+                    .collect()
+            }
+
+            /// A leaked two-domain topology splitting this process's allowed CPUs in half,
+            /// plus the CPUs of each half. Unlike the process-global topology, each call
+            /// returns private pin counters, so tests can assert pin success and exact
+            /// counter values without racing concurrently running tests; and unlike the
+            /// real topology, it exists on any machine with four allowed CPUs (each half
+            /// needs two so pins can engage), which standard CI runners have.
+            fn synthetic_split() -> Option<(&'static Topology, Vec<usize>, Vec<usize>)> {
+                let cpus = allowed_cpus();
+                if cpus.len() < 4 {
+                    return None;
+                }
+                let (a, b) = cpus.split_at(cpus.len() / 2);
+                let lists: Vec<(usize, String)> = a
+                    .iter()
+                    .map(|&cpu| (cpu, "a".to_string()))
+                    .chain(b.iter().map(|&cpu| (cpu, "b".to_string())))
+                    .collect();
+                let topology = Box::leak(Box::new(Topology::from_lists(&lists)?));
+                Some((topology, a.to_vec(), b.to_vec()))
+            }
 
             #[test]
             fn from_lists_groups_and_masks() {
@@ -451,6 +493,28 @@ cfg_if::cfg_if! {
             }
 
             #[test]
+            fn from_lists_smt_discontiguous_domains() {
+                // SMT siblings share the LLC, so real sharing lists are discontiguous:
+                // physical cores 0-3 pair with logical CPUs 64-67.
+                let mut lists: Vec<(usize, String)> = Vec::new();
+                for cpu in (0..4).chain(64..68) {
+                    lists.push((cpu, "0-3,64-67".to_string()));
+                }
+                for cpu in (4..8).chain(68..72) {
+                    lists.push((cpu, "4-7,68-71".to_string()));
+                }
+                let topology = Topology::from_lists(&lists).unwrap();
+                assert_eq!(topology.domains(), 2);
+                assert_eq!(topology.domain_of(0), topology.domain_of(64));
+                assert_eq!(topology.domain_of(4), topology.domain_of(68));
+                assert_ne!(topology.domain_of(0), topology.domain_of(4));
+                let d0 = topology.domain_of(0).unwrap() as usize;
+
+                // SAFETY: cpu is within CPU_SETSIZE; the set was built by from_lists.
+                assert!(unsafe { libc::CPU_ISSET(64, &topology.domain_sets[d0]) });
+            }
+
+            #[test]
             fn from_lists_rejects_cpus_past_setsize() {
                 // cpu_set_t cannot represent such CPUs, so the machine must report no
                 // topology instead of pinning within a truncated view of it.
@@ -459,6 +523,44 @@ cfg_if::cfg_if! {
                     (libc::CPU_SETSIZE as usize, "b".to_string()),
                 ];
                 assert!(Topology::from_lists(&lists).is_none());
+            }
+
+            #[test]
+            fn llc_list_picks_highest_level_data_or_unified_leaf() {
+                // A synthetic sysfs cache directory: the LLC is the level-3 Unified leaf,
+                // and neither the level-1 Data leaf (first in directory order), the
+                // Instruction leaf, nor a fixed index number may win instead.
+                let dir =
+                    std::env::temp_dir().join(format!("commonware_llc_{}", std::process::id()));
+                let cache = dir.join("cache");
+                let leaves = [
+                    ("index0", "Data", "1", "0"),
+                    ("index1", "Instruction", "1", "0"),
+                    ("index2", "Unified", "2", "0-1"),
+                    ("index3", "Unified", "3", "0-7,64-71"),
+                ];
+                for (leaf, kind, level, list) in leaves {
+                    let path = cache.join(leaf);
+                    std::fs::create_dir_all(&path).unwrap();
+                    std::fs::write(path.join("type"), kind).unwrap();
+                    std::fs::write(path.join("level"), level).unwrap();
+                    std::fs::write(path.join("shared_cpu_list"), list).unwrap();
+                }
+                assert_eq!(Topology::llc_list(&dir).as_deref(), Some("0-7,64-71"));
+                std::fs::remove_dir_all(&dir).unwrap();
+            }
+
+            #[test]
+            fn llc_list_ignores_instruction_only_caches() {
+                let dir =
+                    std::env::temp_dir().join(format!("commonware_llc_i_{}", std::process::id()));
+                let path = dir.join("cache").join("index0");
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("type"), "Instruction").unwrap();
+                std::fs::write(path.join("level"), "1").unwrap();
+                std::fs::write(path.join("shared_cpu_list"), "0").unwrap();
+                assert_eq!(Topology::llc_list(&dir), None);
+                std::fs::remove_dir_all(&dir).unwrap();
             }
 
             #[test]
@@ -506,23 +608,153 @@ cfg_if::cfg_if! {
             }
 
             #[test]
-            fn pin_slots_do_not_leak() {
+            fn synthetic_pin_narrows_to_domain_and_restores() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    let domain = topology.domain_of(half_a[0]).unwrap() as usize;
+                    let before = current_mask();
+                    {
+                        let _guard = AffinityGuard::pin_in(topology, domain).unwrap();
+
+                        // The pin narrows the mask to exactly the domain's allowed CPUs.
+                        let now = current_mask();
+                        for cpu in 0..(libc::CPU_SETSIZE as usize) {
+                            // SAFETY: cpu is within CPU_SETSIZE; the set is valid.
+                            let set = unsafe { libc::CPU_ISSET(cpu, &now) };
+                            assert_eq!(set, half_a.contains(&cpu), "mask mismatch at cpu {cpu}");
+                        }
+                    }
+
+                    // Dropping the guard restores the pre-pin mask exactly.
+                    let after = current_mask();
+                    // SAFETY: both sets are valid; CPU_EQUAL only compares their bits.
+                    assert!(unsafe { libc::CPU_EQUAL(&before, &after) });
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_pin_slots_do_not_leak() {
                 // Repeated pin and release must not consume permanent slots: if the counter
                 // leaked, pins would start failing after about a domain's width of cycles.
-                let Some(domain) = spawn_domain() else {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    let domain = topology.domain_of(half_a[0]).unwrap() as usize;
+                    for _ in 0..100 {
+                        assert!(AffinityGuard::pin_in(topology, domain).is_some());
+                    }
+                    assert_eq!(topology.pins[domain].load(Ordering::Acquire), 0);
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_nested_pin_refused_then_released() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    let domain = topology.domain_of(half_a[0]).unwrap() as usize;
+                    let outer = AffinityGuard::pin_in(topology, domain).unwrap();
+
+                    // A pinned thread must not pin again, in any domain of any topology.
+                    assert!(AffinityGuard::pin_in(topology, domain).is_none());
+
+                    // Dropping the outer guard releases the thread's pin and the slot.
+                    drop(outer);
+                    assert_eq!(topology.pins[domain].load(Ordering::Acquire), 0);
+                    assert!(AffinityGuard::pin_in(topology, domain).is_some());
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_cap_bounds_pins_and_returns_to_zero() {
+                let Some((topology, half_a, _)) = synthetic_split() else {
                     return;
                 };
+                let domain = topology.domain_of(half_a[0]).unwrap() as usize;
 
-                // The environment may forbid pinning outright (e.g. a taskset restriction
-                // leaving fewer than two allowed CPUs in the domain); leak detection needs
-                // an environment where a pin can succeed at all.
-                if AffinityGuard::pin(Some(domain)).is_none() {
+                // Every spawned thread is unrestricted, so each sees the same effective
+                // width and the same cap: the domain's CPUs minus the caller reservation.
+                let cap = half_a.len() - 1;
+
+                // No assertions run on the worker threads and no thread waits on anything
+                // the main thread's unwind would strand: workers spin on `released`, which
+                // a drop guard sets even if an assertion below panics, so a failing test
+                // fails instead of deadlocking the scope's implicit join.
+                let granted = AtomicUsize::new(0);
+                let settled = AtomicUsize::new(0);
+                let released = AtomicBool::new(false);
+                struct ReleaseOnDrop<'a>(&'a AtomicBool);
+                impl Drop for ReleaseOnDrop<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
+                std::thread::scope(|s| {
+                    let _release = ReleaseOnDrop(&released);
+                    for _ in 0..cap {
+                        s.spawn(|| {
+                            let guard = AffinityGuard::pin_in(topology, domain);
+                            if guard.is_some() {
+                                granted.fetch_add(1, Ordering::AcqRel);
+                            }
+                            settled.fetch_add(1, Ordering::AcqRel);
+                            while !released.load(Ordering::Acquire) {
+                                std::thread::yield_now();
+                            }
+                        });
+                    }
+                    while settled.load(Ordering::Acquire) < cap {
+                        std::thread::yield_now();
+                    }
+
+                    // Every slot is taken: each pin under the cap succeeded, the counter
+                    // sits at the cap, and a further pin is refused.
+                    assert_eq!(granted.load(Ordering::Acquire), cap);
+                    assert_eq!(topology.pins[domain].load(Ordering::Acquire), cap);
+                    assert!(AffinityGuard::pin_in(topology, domain).is_none());
+                });
+
+                // All guards dropped: the counter returns exactly to zero and pins engage
+                // again.
+                assert_eq!(topology.pins[domain].load(Ordering::Acquire), 0);
+                std::thread::spawn(move || {
+                    assert!(AffinityGuard::pin_in(topology, domain).is_some());
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_pin_stress_never_exceeds_cap() {
+                let Some((topology, half_a, _)) = synthetic_split() else {
                     return;
-                }
-                for _ in 0..100 {
-                    drop(AffinityGuard::pin(Some(domain)));
-                }
-                assert!(AffinityGuard::pin(Some(domain)).is_some());
+                };
+                let domain = topology.domain_of(half_a[0]).unwrap() as usize;
+                let cap = half_a.len() - 1;
+                std::thread::scope(|s| {
+                    for _ in 0..(4 * half_a.len()) {
+                        s.spawn(|| {
+                            for _ in 0..200 {
+                                let guard = AffinityGuard::pin_in(topology, domain);
+
+                                // An underflowed counter would wrap far past the cap.
+                                assert!(topology.pins[domain].load(Ordering::Acquire) <= cap);
+                                drop(guard);
+                            }
+                        });
+                    }
+                });
+                assert_eq!(topology.pins[domain].load(Ordering::Acquire), 0);
             }
 
             #[test]
