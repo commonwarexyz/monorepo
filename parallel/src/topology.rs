@@ -380,10 +380,12 @@ cfg_if::cfg_if! {
                     unsafe { libc::sched_setaffinity(0, size, &self.saved) };
                 }
 
-                // Release the thread's pin and the domain slot unconditionally. Both
-                // syscalls above proved viable at pin time with the same arguments, so a
-                // failure here can only come from a concurrent external rewrite, which
-                // means the pin's confinement is already gone.
+                // Release the thread's pin and the domain slot unconditionally: cleanup is
+                // best effort. If a call above fails, the likeliest cause is a concurrent
+                // external rewrite that already replaced the confinement, and the worst
+                // case (a worker left narrow with its slot freed) transiently crowds one
+                // domain, whereas retaining the slot on any hiccup would strand domain
+                // capacity for the process lifetime.
                 PINNED.set(false);
                 self.topology.pins[self.domain].fetch_sub(1, Ordering::AcqRel);
             }
@@ -421,10 +423,14 @@ cfg_if::cfg_if! {
             /// real topology, it exists on any machine with four allowed CPUs (each half
             /// needs two so pins can engage), which standard CI runners have.
             fn synthetic_split() -> Option<(&'static Topology, Vec<usize>, Vec<usize>)> {
-                let cpus = allowed_cpus();
+                let mut cpus = allowed_cpus();
                 if cpus.len() < 4 {
                     return None;
                 }
+
+                // Bound the domains so the cap and stress tests spawn a handful of threads
+                // on any machine, rather than hundreds on a wide builder.
+                cpus.truncate(8);
                 let (a, b) = cpus.split_at(cpus.len() / 2);
                 let lists: Vec<(usize, String)> = a
                     .iter()
@@ -759,7 +765,7 @@ cfg_if::cfg_if! {
 
             #[test]
             fn nested_pin_is_refused() {
-                // Success-side assertions live in the synthetic-topology tests below: on the
+                // Success-side assertions live in the synthetic-topology tests: on the
                 // process-global topology, concurrently running tests contend for the same
                 // pin slots, so only a refusal can be asserted deterministically here.
                 std::thread::spawn(|| {
