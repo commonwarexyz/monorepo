@@ -89,6 +89,7 @@ commonware_macros::stability_scope!(BETA {
             };
 
             mod policy;
+            mod topology;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1083,7 +1084,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         None
                     };
                     let worker_recorder = recorder.clone();
+                    // The executor pins itself to the submitter's LLC domain for the job's
+                    // duration: spawned jobs exchange data with their caller, and a one-time
+                    // migration is orders cheaper than cross-domain traffic for the job's life.
+                    let domain = topology::spawn_domain();
                     self.thread_pool.spawn(move || {
+                        let _affinity = topology::AffinityGuard::pin(domain);
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
