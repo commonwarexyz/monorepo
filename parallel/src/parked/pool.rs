@@ -9,6 +9,7 @@
 use super::{
     scoped::{Job, Slot},
     sync::{Arc, AtomicBool, AtomicU8, AtomicUsize, Mutex, Ordering, Parker, fence, spin},
+    topology::Topology,
 };
 use std::collections::VecDeque;
 
@@ -68,6 +69,9 @@ struct IdleEntry {
     /// spent wake budget on this worker; a token is deposited).
     state: AtomicU8,
     parker: Parker,
+    /// The worker's last-known LLC domain, recorded when it registers idle. Advisory
+    /// wake-ordering data only (see [`Shared::wake`]); staleness is harmless.
+    domain: AtomicUsize,
 }
 
 /// State shared by all workers and every `Parked` handle.
@@ -81,6 +85,8 @@ pub(super) struct Shared {
     /// recheck) never touch the queue mutex.
     oneshot_len: AtomicUsize,
     idle: Box<[IdleEntry]>,
+    /// LLC topology for affinity-aware wake ordering (single-domain when undetectable).
+    topology: Topology,
     /// Approximate count of REGISTERED entries, maintained by registrants and claimants.
     /// Used only to short-circuit wake scans; correctness never depends on it.
     idle_count: AtomicUsize,
@@ -98,8 +104,10 @@ impl Shared {
                 .map(|_| IdleEntry {
                     state: AtomicU8::new(ACTIVE),
                     parker: Parker::new(),
+                    domain: AtomicUsize::new(0),
                 })
                 .collect(),
+            topology: Topology::detect(),
             idle_count: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             workers,
@@ -184,23 +192,46 @@ impl Shared {
 
     /// Wakes up to `budget` idle workers, spending each unit of budget on a genuinely
     /// parked (REGISTERED) worker via CAS so stale registrations cannot consume it.
+    ///
+    /// Workers whose last-known LLC domain matches the submitting caller's are preferred:
+    /// a job with a data relationship to the caller (a spawned hand-off, a small scoped
+    /// job) runs several times cheaper when its worker shares the caller's L3, and the
+    /// scheduler's own placement is an unrevisited per-process lottery. Purely an
+    /// ordering preference over identical CAS claims; with a single detected domain the
+    /// first pass claims everything and the behavior is exactly the unordered scan.
     pub(super) fn wake(&self, budget: usize) {
         if budget == 0 {
             return;
         }
+        let near = if self.topology.domains() > 1 {
+            self.topology.current_domain() as usize
+        } else {
+            0
+        };
         let mut woken = 0;
-        for entry in self.idle.iter() {
-            if woken == budget || self.idle_count.load(Ordering::SeqCst) == 0 {
-                break;
+        for pass in 0..2 {
+            for entry in self.idle.iter() {
+                if woken == budget || self.idle_count.load(Ordering::SeqCst) == 0 {
+                    return;
+                }
+                // Pass 0 claims only same-domain workers; pass 1 claims the rest. The
+                // domain read is advisory (Relaxed; may be stale), so a matching entry
+                // skipped by a racing update is simply claimed in pass 1.
+                if pass == 0 && entry.domain.load(Ordering::Relaxed) != near {
+                    continue;
+                }
+                if entry
+                    .state
+                    .compare_exchange(REGISTERED, CLAIMED, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    self.idle_count.fetch_sub(1, Ordering::SeqCst);
+                    entry.parker.unpark();
+                    woken += 1;
+                }
             }
-            if entry
-                .state
-                .compare_exchange(REGISTERED, CLAIMED, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                self.idle_count.fetch_sub(1, Ordering::SeqCst);
-                entry.parker.unpark();
-                woken += 1;
+            if self.topology.domains() <= 1 {
+                return;
             }
         }
     }
@@ -299,6 +330,10 @@ pub(super) fn worker_loop(shared: Arc<Shared>, id: usize) {
         // registration: a submitter that saw an empty registry will not wake us, so we
         // must not park with work pending.
         let me = &shared.idle[id];
+        // Record where this worker currently sits so submitters can prefer waking a
+        // worker in their own LLC domain. Relaxed: purely advisory ordering data.
+        me.domain
+            .store(shared.topology.current_domain() as usize, Ordering::Relaxed);
         // Count first, then become claimable: the count over-approximates registered
         // workers, so a claimant's decrement (which follows a successful CAS on `state`,
         // which follows this store) can never underflow it.
