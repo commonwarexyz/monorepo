@@ -1058,7 +1058,7 @@ pub(super) mod tests {
         let ((), allocation_calls) = allocation_calls_during(|| drop(set));
         assert_eq!(
             allocation_calls, 0,
-            "final destruction must not allocate replacement stripes"
+            "final destruction must not allocate replacement capacity"
         );
     }
 
@@ -1152,7 +1152,7 @@ mod loom_tests {
     #[test]
     fn completed_put_is_discoverable() {
         loom::model(|| {
-            let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
+            let set = Arc::new(empty(1));
             let buffer = set.try_create(false).expect("creation permit");
             let returned = Arc::new(AtomicBool::new(false));
 
@@ -1201,7 +1201,7 @@ mod loom_tests {
     #[test]
     fn concurrent_puts_preserve_both_slots() {
         loom::model(|| {
-            let set = Arc::new(Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false));
+            let set = Arc::new(empty(2));
             let first = set.try_create(false).expect("first permit");
             let second = set.try_create(false).expect("second permit");
 
