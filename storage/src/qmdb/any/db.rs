@@ -34,13 +34,39 @@ use futures::future::BoxFuture;
 pub(crate) type WarmSpawner = Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
 /// Build a [`WarmSpawner`] whose tasks are supervised children of `context`.
+///
+/// At most one warming pass runs at a time: while one is in flight, later requests are
+/// dropped. Skipped windows are recovered naturally, since each arm starts at the current
+/// floor and consecutive windows overlap.
 pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
+    /// Clears the in-flight flag when the pass finishes or is aborted mid-flight.
+    struct InFlight(Arc<AtomicBool>);
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
     let context = context.child("floor_prefetch");
+    let in_flight = Arc::new(AtomicBool::new(false));
     Box::new(move |fut| {
-        drop(context.child("warm").spawn(move |_| fut));
+        if in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let guard = InFlight(Arc::clone(&in_flight));
+        drop(context.child("warm").spawn(move |_| async move {
+            let _guard = guard;
+            fut.await;
+        }));
     })
 }
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
