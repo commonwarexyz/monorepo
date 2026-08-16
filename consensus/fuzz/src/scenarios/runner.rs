@@ -18,17 +18,13 @@ use super::{
 use crate::{
     NetworkChannels,
     marshal::end_to_end::{
-        app::{
-            BlockContextRegistry, DeliveryReporter, FaultyConfig, ProgressHandle,
-            SelectedBlockBuilderApp,
-        },
+        app::{AlwaysAcceptBlockBuilderApp, BlockContextRegistry, DeliveryReporter, ProgressHandle},
         invariants,
         twins::{
             B, Ctx, PublicKeyOf, SchemeOf,
             stack::{
-                DEFAULT_MAX_PENDING_ACKS, SelectedMarshal, TwinsBlockBuilder, TwinsMarshal,
-                genesis_block, register_engine_networks, setup_network, setup_network_links,
-                setup_validator, start_engine_with_floor,
+                DEFAULT_MAX_PENDING_ACKS, genesis_block, register_engine_networks, setup_network,
+                setup_network_links, setup_validator, start_engine_with_floor,
             },
         },
     },
@@ -37,12 +33,15 @@ use crate::{
 };
 use commonware_consensus::{
     Heightable,
-    marshal::mocks::{
-        application::Application,
-        harness::{LINK, NUM_VALIDATORS},
+    marshal::{
+        mocks::{
+            application::Application,
+            harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS},
+        },
+        standard::Deferred,
     },
     simplex::Floor,
-    types::{Height, TermLength, View},
+    types::{FixedEpocher, Height, TermLength, View},
 };
 use commonware_cryptography::{
     Digestible, certificate::ConstantProvider, sha256::Digest as Sha256Digest,
@@ -80,7 +79,7 @@ const POLL: Duration = Duration::from_millis(50);
 /// height, to cover views nullified by the fault.
 const LIVE_FAULT_MARGIN: u64 = 5;
 /// Single-epoch delivery ceiling (epoch-0 boundary).
-const MAX_REQUIRED: u64 = commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH.get() - 1;
+const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;
 
 /// Degrade the last participant's links, mirroring the disrupter runner.
 async fn apply_degraded_network<P: Simplex>(
@@ -188,7 +187,6 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
         let genesis_commitment = genesis.digest();
         let block_contexts = BlockContextRegistry::<Ctx<P>>::default();
         block_contexts.record(genesis_commitment, genesis.context.clone());
-        let faulty_config = FaultyConfig::new(&mut FuzzRng::new(vec![0]), View::new(0));
         let stack_label: Arc<str> = "scenario".into();
 
         let byzantine = matches!(input.mode, Mode::DisrupterN4F1C3);
@@ -217,19 +215,22 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
             )
             .await;
             let progress = ProgressHandle::new();
-            let application = <SelectedBlockBuilderApp<Ctx<P>, SchemeOf<P>> as TwinsBlockBuilder<P>>::create(
-                input.scenario.application_choice(),
-                faulty_config,
-                None,
-                block_contexts.clone(),
-                DeliveryReporter::new(idx, validator_state.application.clone(), None, stack_label.clone())
+            let application = AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
+                .with_block_contexts(block_contexts.clone())
+                .with_reporter(
+                    DeliveryReporter::new(
+                        idx,
+                        validator_state.application.clone(),
+                        None,
+                        stack_label.clone(),
+                    )
                     .with_progress(progress.clone()),
-            );
-            let builder = <SelectedMarshal as TwinsMarshal<P, _>>::create(
-                input.scenario.marshal_choice(),
-                &validator_ctx,
+                );
+            let builder = Deferred::new(
+                validator_ctx.child("deferred"),
                 application,
                 validator_state.mailbox.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
             validator_state.start(builder.clone());
             nodes.push(Some(MarshalNode {
@@ -322,7 +323,8 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
                     adversary::start_simplex_disrupter::<P>(
                         context.child("adversary").child("disrupter"),
                         schemes[idx].clone(),
-                        input.strategy,
+                        input.fault_rounds,
+                        input.fault_rounds_bound,
                         attack_view.get() + 1,
                         attack_view.get() + span + LIVE_FAULT_MARGIN,
                         input.required_containers,
@@ -613,7 +615,6 @@ mod tests {
     use crate::scenarios::input::{
         BackfillFault, BlockFault, ConsensusMutation, FaultPlan, Mode, ScenarioKind,
     };
-    use crate::strategy::StrategyChoice;
     use crate::utils::Partition;
     use commonware_consensus::simplex::ForwardingPolicy;
 
@@ -627,10 +628,8 @@ mod tests {
                 backfill: BackfillFault::Poison,
                 consensus: ConsensusMutation::Corrupt,
             },
-            strategy: StrategyChoice::SmallScope {
-                fault_rounds: 1,
-                fault_rounds_bound: 1,
-            },
+            fault_rounds: 1,
+            fault_rounds_bound: 1,
             required_containers: 1,
             degraded_network: false,
             partition: Partition::Connected,
@@ -703,7 +702,8 @@ mod tests {
                 backfill: BackfillFault::Withhold,
                 consensus: ConsensusMutation::Corrupt,
             },
-            strategy: StrategyChoice::AnyScope,
+            fault_rounds: 1,
+            fault_rounds_bound: 1,
             required_containers: 1,
             degraded_network: true,
             partition: Partition::Connected,

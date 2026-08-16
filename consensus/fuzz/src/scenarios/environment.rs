@@ -10,11 +10,8 @@
 
 use crate::{
     marshal::end_to_end::{
-        app::SelectedBlockBuilderApp,
-        twins::{
-            B, Ctx, PublicKeyOf, SchemeOf,
-            stack::{SelectedMarshal, TwinsMarshal},
-        },
+        app::AlwaysAcceptBlockBuilderApp,
+        twins::{B, Ctx, PublicKeyOf, SchemeOf},
     },
     simplex::Simplex,
 };
@@ -23,10 +20,10 @@ use commonware_consensus::{
     Automaton as _, CertifiableAutomaton as _, Heightable, Reporter as _,
     marshal::{
         core::{DigestFallback, Mailbox},
-        standard::Standard,
+        standard::{Deferred, Standard},
     },
     simplex::types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
-    types::{Epoch, Height, Round, View},
+    types::{Epoch, FixedEpocher, Height, Round, View},
 };
 use commonware_cryptography::{Digestible, Sha256};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
@@ -44,11 +41,16 @@ pub(crate) type Mb<P> = Mailbox<SchemeOf<P>, Standard<B<P>>>;
 /// certify -> notarized-fetch path fails clearly instead of hanging.
 const CERTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The marshal automaton wrapper the scenario setup builds, matching the wrapper
-/// type in [`runner`](super::runner). Lets a scenario drive the real
-/// `verify`/`certify` automaton path rather than the raw mailbox.
-pub(crate) type Wrapper<P> =
-    <SelectedMarshal as TwinsMarshal<P, SelectedBlockBuilderApp<Ctx<P>, SchemeOf<P>>>>::Wrapper;
+/// The concrete `Deferred` marshal automaton the scenario setup builds, over the
+/// always-accept block builder. Lets a scenario drive the real `verify`/`certify`
+/// automaton path rather than the raw mailbox.
+pub(crate) type Wrapper<P> = Deferred<
+    deterministic::Context,
+    SchemeOf<P>,
+    AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>,
+    B<P>,
+    FixedEpocher,
+>;
 
 /// A validator of the four-node cluster, addressed by its participant index.
 ///

@@ -12,30 +12,17 @@ use super::{
     environment::{Expectation, FuzzPoint, Node, PendingBlock, QUORUM_SIGNERS, ScenarioEnv},
     input::ScenarioKind,
 };
-use crate::{
-    marshal::end_to_end::{app::ApplicationChoice, twins::B, twins::stack::MarshalChoice},
-    simplex::Simplex,
-};
+use crate::{marshal::end_to_end::twins::B, simplex::Simplex};
 use commonware_consensus::types::Height;
 use commonware_cryptography::Digestible;
 
 /// A scripted prefix that drives the cluster to an interesting marshal state.
+///
+/// Every scenario runs on the `Deferred` marshal (the certify-fetch path is only
+/// meaningful there; `Inline`'s certify structurally returns true) with the
+/// always-accept block builder, so the runner uses those concrete types directly.
 pub(crate) trait Scenario {
     async fn drive<P: Simplex>(&self, env: &mut ScenarioEnv<P>) -> FuzzPoint<P>;
-}
-
-impl ScenarioKind {
-    /// Marshal wrapper the scenario's source test exercises.
-    pub(crate) const fn marshal_choice(self) -> MarshalChoice {
-        // The certify-fetch path is only meaningful under Deferred; Inline's
-        // certify structurally returns true.
-        MarshalChoice::Deferred
-    }
-
-    /// Application the scenario's source test exercises.
-    pub(crate) const fn application_choice(self) -> ApplicationChoice {
-        ApplicationChoice::AlwaysAccept
-    }
 }
 
 /// Dispatch to the concrete scenario for `kind`.

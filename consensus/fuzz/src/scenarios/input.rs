@@ -4,10 +4,7 @@
 //! connected network; larger inputs pick other scenarios, the honest mode, and
 //! reshape the pre-GST topology, byzantine strategy, and forwarding around them.
 
-use crate::{
-    strategy::StrategyChoice,
-    utils::{Partition, SetPartition},
-};
+use crate::utils::{Partition, SetPartition};
 use arbitrary::Arbitrary;
 use commonware_consensus::{marshal::mocks::harness::BLOCKS_PER_EPOCH, simplex::ForwardingPolicy};
 
@@ -80,7 +77,8 @@ pub enum ConsensusMutation {
 
 /// Independently-enabled per-layer faults for the two-disrupter adversary: a
 /// dissemination-layer disrupter on channels 1 + 2 and a Simplex-layer Disrupter
-/// on channels 3/4/5 (driven by the run's [`StrategyChoice`]).
+/// on channels 3/4/5 (a `SmallScope` whose density is set by the run's
+/// `fault_rounds`/`fault_rounds_bound`).
 #[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FaultPlan {
     /// Block-dissemination fault on channels 2 + 3.
@@ -97,9 +95,10 @@ pub struct MarshalScenarioPrefixInput {
     pub scenario: ScenarioKind,
     pub mode: Mode,
     pub fault_plan: FaultPlan,
-    /// Byzantine message-mutation strategy the Disrupter uses (wrapped by
-    /// `LiveScope` so it faults live views above the floor).
-    pub strategy: StrategyChoice,
+    /// Fault-density parameters for the Simplex disrupter's `SmallScope` (wrapped
+    /// by `LiveScope` so it faults live views above the floor).
+    pub fault_rounds: u64,
+    pub fault_rounds_bound: u64,
     pub required_containers: u64,
     pub degraded_network: bool,
     pub partition: Partition,
@@ -119,25 +118,7 @@ impl Arbitrary<'_> for MarshalScenarioPrefixInput {
         let degraded_network = partition == Partition::Connected && u.int_in_range(0..=9)? == 0;
         let required_containers = u.int_in_range(MIN_REQUIRED..=MAX_REQUIRED)?;
 
-        let strategy = match u.int_in_range(0..=9)? {
-            0 => StrategyChoice::AnyScope,
-            1 => {
-                let (fault_rounds, fault_rounds_bound) =
-                    sample_fault_rounds(u, required_containers)?;
-                StrategyChoice::FutureScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                }
-            }
-            _ => {
-                let (fault_rounds, fault_rounds_bound) =
-                    sample_fault_rounds(u, required_containers)?;
-                StrategyChoice::SmallScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                }
-            }
-        };
+        let (fault_rounds, fault_rounds_bound) = sample_fault_rounds(u, required_containers)?;
 
         let forwarding = match u.int_in_range(0..=2)? {
             0 => ForwardingPolicy::Disabled,
@@ -157,7 +138,8 @@ impl Arbitrary<'_> for MarshalScenarioPrefixInput {
             scenario,
             mode,
             fault_plan,
-            strategy,
+            fault_rounds,
+            fault_rounds_bound,
             required_containers,
             degraded_network,
             partition,

@@ -24,7 +24,7 @@ use crate::{
     marshal::end_to_end::twins::{B, Ctx, PublicKeyOf, SchemeOf},
     scenarios::input::{BackfillFault, BlockFault, FaultPlan},
     simplex::Simplex,
-    strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
+    strategy::SmallScope,
 };
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_consensus::{
@@ -56,14 +56,14 @@ const DISSEMINATE_DELAY: Duration = Duration::from_millis(250);
 /// with this digest, so the certificate can never be certified or finalized.
 const UNAVAILABLE_PAYLOAD: Sha256Digest = Sha256Digest([0xEE; 32]);
 
-/// Simplex-layer disrupter on node 0's consensus channels (3/4/5), using the
-/// live-scoped wrapper of `strategy` faulting distinct views in
-/// `[first_view, last_view]`.
+/// Simplex-layer disrupter on node 0's consensus channels (3/4/5): a live-scoped
+/// [`SmallScope`] faulting distinct views in `[first_view, last_view]`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_simplex_disrupter<P: Simplex>(
     context: deterministic::Context,
     scheme: SchemeOf<P>,
-    strategy: StrategyChoice,
+    fault_rounds: u64,
+    fault_rounds_bound: u64,
     first_view: u64,
     last_view: u64,
     required_containers: u64,
@@ -80,52 +80,21 @@ pub(crate) fn start_simplex_disrupter<P: Simplex>(
         impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) {
-    match strategy {
-        StrategyChoice::SmallScope {
-            fault_rounds,
-            fault_rounds_bound,
-        } => Disrupter::new_with_epoch(
-            context,
-            scheme,
-            LiveScope::new(
-                SmallScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                },
-                first_view,
-                last_view,
-            ),
-            required_containers,
-            Epoch::zero(),
-        )
-        .start(vote, certificate, resolver),
-        StrategyChoice::FutureScope {
-            fault_rounds,
-            fault_rounds_bound,
-        } => Disrupter::new_with_epoch(
-            context,
-            scheme,
-            LiveScope::new(
-                FutureScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                },
-                first_view,
-                last_view,
-            ),
-            required_containers,
-            Epoch::zero(),
-        )
-        .start(vote, certificate, resolver),
-        _ => Disrupter::new_with_epoch(
-            context,
-            scheme,
-            LiveScope::new(AnyScope, first_view, last_view),
-            required_containers,
-            Epoch::zero(),
-        )
-        .start(vote, certificate, resolver),
-    };
+    Disrupter::new_with_epoch(
+        context,
+        scheme,
+        LiveScope::new(
+            SmallScope {
+                fault_rounds,
+                fault_rounds_bound,
+            },
+            first_view,
+            last_view,
+        ),
+        required_containers,
+        Epoch::zero(),
+    )
+    .start(vote, certificate, resolver);
 }
 
 /// Dissemination-layer disrupter on node 0's marshal channels (2 + 1).
