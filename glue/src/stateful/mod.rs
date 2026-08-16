@@ -311,11 +311,12 @@ where
     /// finalized block it receives from marshal before releasing that block's
     /// marshal acknowledgement. Blocks applied through normal processing are
     /// reported after [`DatabaseSet::apply`] succeeds: the block's state is
-    /// readable from the databases, but durability through that block may still
-    /// be pending. When an earlier database sync is active, the sync covering
-    /// this block may not have started yet. Blocks already reflected by startup
-    /// reconciliation or completed state sync are reported without reapplying
-    /// them.
+    /// readable from the databases for the duration of this hook, and the next
+    /// finalized database apply starts only after the hook returns. Durability
+    /// through the reported block may still be pending. When an earlier database
+    /// sync is active, the sync covering this block may not have started yet.
+    /// Blocks already reflected by startup reconciliation or completed state
+    /// sync are reported without reapplying them.
     ///
     /// During peer state sync, a finalized block may be absorbed into a recorded sync target and
     /// acknowledged without invoking this hook. Blocks still pending when sync completes are

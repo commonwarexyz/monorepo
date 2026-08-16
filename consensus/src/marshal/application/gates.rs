@@ -29,8 +29,9 @@ pub(crate) enum GateOutcome {
 struct Inner<D: Digest, B> {
     /// In-flight certification gate tasks, consumed by certification.
     certifications: HashMap<(Round, D), oneshot::Receiver<GateOutcome>>,
-    /// Proposals staged for their relay broadcast, consumed by the relay (or
-    /// by certification when no broadcast was requested).
+    /// Proposals awaiting ownership transfer to marshal. Standard relays take
+    /// the entry, while coding relays clone its block and leave the entry for
+    /// certification.
     proposals: HashMap<(Round, D), Staged<B>>,
 }
 
@@ -48,10 +49,11 @@ struct Inner<D: Digest, B> {
 ///
 /// Tasks are inserted when a block enters proposal or verification handling and
 /// taken (consumed) when certification is ready to act on the result. A staged
-/// proposal holds the block itself until consensus requests its broadcast via
-/// [`crate::Relay::broadcast`] (or certification demands durability first),
-/// keeping marshal's mailbox free of any propose-time handshake. Stale entries
-/// are pruned after finalization via [`retain_after`](Self::retain_after).
+/// proposal holds the block and durability ack until its adapter transfers
+/// ownership to marshal. Standard adapters transfer at relay, while the coding
+/// adapter relays a shared block through its shard engine and transfers the
+/// staged entry at certification. Stale entries are pruned after finalization
+/// via [`retain_after`](Self::retain_after).
 #[derive(Clone)]
 pub(crate) struct Gates<D: Digest, B> {
     inner: Arc<Mutex<Inner<D, B>>>,
@@ -87,22 +89,47 @@ impl<D: Digest, B> Gates<D, B> {
         self.inner.lock().certifications.remove(&(round, digest))
     }
 
+    /// Returns the staged block for `(round, digest)` while retaining the
+    /// staged block and durability ack in the registry.
+    pub(crate) fn get_staged(&self, round: Round, digest: D) -> Option<Arc<B>> {
+        self.inner
+            .lock()
+            .proposals
+            .get(&(round, digest))
+            .map(|(block, _)| Arc::clone(block))
+    }
+
+    /// Removes the certification gate and staged proposal for `(round,
+    /// digest)` under one lock.
+    pub(crate) fn take_for_certification(
+        &self,
+        round: Round,
+        digest: D,
+    ) -> (Option<oneshot::Receiver<GateOutcome>>, Option<Staged<B>>) {
+        let mut inner = self.inner.lock();
+        let key = (round, digest);
+        (
+            inner.certifications.remove(&key),
+            inner.proposals.remove(&key),
+        )
+    }
+
     /// Removes and returns the staged proposal for `(round, digest)`, if present.
     ///
-    /// The taken block and ack are handed to marshal exactly once: by the relay
-    /// broadcast, or by certification when no broadcast was ever requested.
+    /// Callers transfer the taken block and ack to marshal exactly once.
     pub(crate) fn take_staged(&self, round: Round, digest: D) -> Option<Staged<B>> {
         self.inner.lock().proposals.remove(&(round, digest))
     }
 
-    /// Persists the staged proposal for `(round, id)` without broadcasting it,
-    /// completing the propose durability handshake.
+    /// Transfers the staged proposal for `(round, id)` to marshal without
+    /// broadcasting it, completing the standard adapter's propose durability
+    /// handshake.
     ///
-    /// A staged proposal whose broadcast was never requested cannot resolve
+    /// A standard proposal whose broadcast was never requested cannot resolve
     /// its certification gate. Certification demands durability, so the staged
     /// block is flushed to `marshal` for persistence, which delivers the
-    /// durable-sync handle through the staged ack. Does nothing when no
-    /// proposal is staged (the relay broadcast already took it).
+    /// durable-sync handle through the staged ack. Does nothing when the
+    /// standard relay already took the proposal.
     pub(crate) fn flush_unrelayed<S, V>(&self, marshal: &Mailbox<S, V>, round: Round, id: D)
     where
         S: Scheme,
@@ -136,13 +163,12 @@ impl<D: Digest, B> Gates<D, B> {
     /// before the finalize vote. Both registrations happen before `id` is
     /// published so the relay broadcast and `certify` always find them.
     ///
-    /// The handle arrives once marshal persists the staged block, which happens
-    /// when consensus requests its broadcast (or at certification when no
-    /// broadcast was requested), so this await can outlive the round. A real
-    /// sync failure panics here (the fatal policy, annotated with `name`). A
-    /// dropped ack means the marshal actor is gone or the staged entry was
-    /// pruned without ever being taken, so the gate is left unresolved and
-    /// `certify` falls back to its recovery fetch.
+    /// The handle arrives once the adapter transfers the staged block to
+    /// marshal, so this await can outlive the round. A real sync failure panics
+    /// here (the fatal policy, annotated with `name`). A dropped ack means the
+    /// marshal actor is gone or the staged entry was pruned without ever being
+    /// taken, so the gate is left unresolved and `certify` falls back to its
+    /// recovery fetch.
     pub(crate) async fn stage(
         &self,
         round: Round,
@@ -265,6 +291,7 @@ mod tests {
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+    use commonware_utils::channel::oneshot::error::TryRecvError;
     use std::future::ready;
 
     type D = Sha256Digest;
@@ -506,6 +533,73 @@ mod tests {
             );
 
             // Delivering a durable handle resolves the gate.
+            ack.send_lossy(Handle::ready(Ok(())));
+            assert_eq!(gate.await.expect("gate resolved"), GateOutcome::Ready(true));
+        });
+    }
+
+    #[test]
+    fn test_stage_gate_waits_for_durable_handle() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let gates = TestGates::new();
+            let digest = Sha256::hash(&[b"block"]);
+            let (tx, rx) = oneshot::channel();
+
+            context.spawn({
+                let gates = gates.clone();
+                move |_| async move {
+                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                }
+            });
+
+            assert_eq!(rx.await.expect("id published"), digest);
+            let (gate, staged) = gates.take_for_certification(round(1), digest);
+            let mut gate = gate.expect("gate registered");
+            let (_, ack) = staged.expect("block staged");
+            let (durable_tx, durable_rx) = oneshot::channel();
+            ack.send_lossy(Handle::from_receiver(durable_rx));
+
+            assert!(matches!(gate.try_recv(), Err(TryRecvError::Empty)));
+            durable_tx.send_lossy(Ok(()));
+            assert_eq!(gate.await.expect("gate resolved"), GateOutcome::Ready(true));
+        });
+    }
+
+    #[test]
+    fn test_take_for_certification_is_exact_and_once() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let gates = TestGates::new();
+            let digest = Sha256::hash(&[b"block"]);
+            let other = Sha256::hash(&[b"other"]);
+            let (tx, rx) = oneshot::channel();
+
+            context.spawn({
+                let gates = gates.clone();
+                move |_| async move {
+                    gates.stage(round(1), digest, Arc::new(7), tx, "test").await;
+                }
+            });
+
+            assert_eq!(rx.await.expect("id published"), digest);
+            assert!(gates.get_staged(round(1), other).is_none());
+            let relayed = gates
+                .get_staged(round(1), digest)
+                .expect("staged block missing");
+            assert_eq!(*relayed, 7);
+
+            let (gate, staged) = gates.take_for_certification(round(1), digest);
+            let gate = gate.expect("gate registered");
+            let (block, ack) = staged.expect("block staged");
+            assert_eq!(*block, 7);
+            assert!(Arc::ptr_eq(&relayed, &block));
+            assert!(gates.get_staged(round(1), digest).is_none());
+            assert!(
+                matches!(gates.take_for_certification(round(1), digest), (None, None)),
+                "certification ownership must transfer once"
+            );
+
             ack.send_lossy(Handle::ready(Ok(())));
             assert_eq!(gate.await.expect("gate resolved"), GateOutcome::Ready(true));
         });

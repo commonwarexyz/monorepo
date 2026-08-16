@@ -20,12 +20,14 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
-        db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
+        db::{
+            AttachableResolver, DatabaseSet, ManagedDb, Merkleized as _, Shared, SyncEngineConfig,
+        },
     },
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    CertifiableAutomaton as _, Reporter,
+    Application as _, CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -33,7 +35,10 @@ use commonware_consensus::{
         resolver::handler,
         standard::{Deferred, Standard},
     },
-    simplex::{mocks::scheme as scheme_mocks, types::Context},
+    simplex::{
+        mocks::scheme as scheme_mocks,
+        types::{Activity, Context},
+    },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -43,12 +48,13 @@ use commonware_macros::{select, test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Runner as _, Spawner as _, Supervisor as _,
+    Clock as _, Runner as _, Spawner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
-    mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
+    mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::{
+    Context as StorageContext,
     archive::prunable,
     mmr,
     qmdb::{
@@ -58,14 +64,26 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{
-    Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-    non_empty_range, sync::Mutex,
+    Acknowledgement as _, NZU64, NZUsize,
+    acknowledgement::{Exact, ExactWaiter},
+    channel::oneshot,
+    non_empty_range,
+    sync::Mutex,
 };
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc, time::Duration};
+use rand_core::Rng;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    convert::Infallible,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+    time::Duration,
+};
 
 mod common;
 pub(crate) mod fixtures;
@@ -922,6 +940,48 @@ impl Reporter for NoopMultiMarshalApplication {
     }
 }
 
+#[derive(Clone)]
+struct ExactTap<R> {
+    inner: R,
+    dispatched: Arc<Mutex<Vec<Height>>>,
+    pending: Arc<Mutex<VecDeque<PendingExact>>>,
+}
+
+struct PendingExact {
+    height: Height,
+    marshal: Exact,
+    stateful: ExactWaiter,
+}
+
+fn exact_is_pending(waiter: &mut ExactWaiter) -> bool {
+    let waker = futures::task::noop_waker();
+    let mut context = TaskContext::from_waker(&waker);
+    matches!(Pin::new(waiter).poll(&mut context), Poll::Pending)
+}
+
+impl<R> Reporter for ExactTap<R>
+where
+    R: Reporter<Activity = marshal::Update<MultiBlock>>,
+{
+    type Activity = marshal::Update<MultiBlock>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        match activity {
+            marshal::Update::Block(block, marshal) if block.height > Height::zero() => {
+                let (stateful, waiter) = Exact::handle();
+                self.dispatched.lock().push(block.height);
+                self.pending.lock().push_back(PendingExact {
+                    height: block.height,
+                    marshal,
+                    stateful: waiter,
+                });
+                self.inner.report(marshal::Update::Block(block, stateful))
+            }
+            activity => self.inner.report(activity),
+        }
+    }
+}
+
 struct ApplicationGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
@@ -943,30 +1003,43 @@ fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sende
 #[derive(Clone)]
 struct GatedMultiApp {
     inner: MultiApp,
+    proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
+    proposal_calls: Arc<Mutex<usize>>,
     verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
-    finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
+    verify_height_gates: Arc<Mutex<BTreeMap<Height, ApplicationGate>>>,
+    apply_height_gates: Arc<Mutex<BTreeMap<Height, ApplicationGate>>>,
+    finalize_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
+    finalized_hooks: Arc<Mutex<Vec<Height>>>,
+    verify_calls: Arc<Mutex<BTreeMap<Height, usize>>>,
+    apply_calls: Arc<Mutex<BTreeMap<Height, usize>>>,
 }
 
-impl Application<deterministic::Context> for GatedMultiApp {
-    type SigningScheme = <MultiApp as Application<deterministic::Context>>::SigningScheme;
-    type Context = <MultiApp as Application<deterministic::Context>>::Context;
+impl<E: Rng + Spawner + StorageContext> Application<E> for GatedMultiApp {
+    type SigningScheme = <MultiApp as Application<E>>::SigningScheme;
+    type Context = <MultiApp as Application<E>>::Context;
     type Block = MultiBlock;
-    type Databases = MultiDatabaseSet<deterministic::Context>;
+    type Databases = MultiDatabaseSet<E>;
     type Provider = ();
     type Input = ();
 
     async fn genesis(&mut self) -> Self::Block {
-        <MultiApp as Application<deterministic::Context>>::genesis(&mut self.inner).await
+        <MultiApp as Application<E>>::genesis(&mut self.inner).await
     }
 
     async fn propose(
         &mut self,
-        context: (deterministic::Context, Self::Context),
+        context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
-        let proposed = <MultiApp as Application<deterministic::Context>>::propose(
+    ) -> Option<Proposed<Self, E>> {
+        *self.proposal_calls.lock() += 1;
+        let gate = self.proposal_gate.lock().take();
+        if let Some(mut gate) = gate {
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+        }
+        let proposed = <MultiApp as Application<E>>::propose(
             &mut self.inner,
             context,
             ancestry,
@@ -982,63 +1055,67 @@ impl Application<deterministic::Context> for GatedMultiApp {
 
     async fn verify(
         &mut self,
-        context: (deterministic::Context, Self::Context),
+        context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-        let gate = self.verify_gates.lock().pop_front();
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        let height = Height::new(context.1.round.view().get());
+        *self.verify_calls.lock().entry(height).or_default() += 1;
+        let gate = self.verify_height_gates.lock().remove(&height);
+        let gate = gate.or_else(|| self.verify_gates.lock().pop_front());
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
         }
-        <MultiApp as Application<deterministic::Context>>::verify(
-            &mut self.inner,
-            context,
-            ancestry,
-            batches,
-        )
-        .await
+        <MultiApp as Application<E>>::verify(&mut self.inner, context, ancestry, batches).await
     }
 
     async fn apply(
         &mut self,
-        context: (deterministic::Context, Self::Context),
+        context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
-        <MultiApp as Application<deterministic::Context>>::apply(
-            &mut self.inner,
-            context,
-            block,
-            batches,
-        )
-        .await
-    }
-
-    async fn finalized(
-        &mut self,
-        context: (deterministic::Context, Self::Context),
-        block: &Self::Block,
-        readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
-    ) {
-        <MultiApp as Application<deterministic::Context>>::finalized(
-            &mut self.inner,
-            context,
-            block,
-            readers,
-        )
-        .await;
-        let gate = self.finalize_gate.lock().take();
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        *self.apply_calls.lock().entry(block.height).or_default() += 1;
+        let gate = self.apply_height_gates.lock().remove(&block.height);
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
         }
+        <MultiApp as Application<E>>::apply(&mut self.inner, context, block, batches).await
     }
 
-    fn sync_targets(
+    async fn finalized(
+        &mut self,
+        context: (E, Self::Context),
         block: &Self::Block,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-        <MultiApp as Application<deterministic::Context>>::sync_targets(block)
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+        let gate = self.finalize_gates.lock().pop_front();
+        if let Some(mut gate) = gate {
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+        }
+        let expected = <Self as Application<E>>::sync_targets(block);
+        let actual_a = {
+            let database = readers.0.read().await;
+            ManagedDb::sync_target(&*database)
+        };
+        let actual_b = {
+            let database = readers.1.read().await;
+            ManagedDb::sync_target(&*database)
+        };
+        assert_eq!(
+            (actual_a, actual_b),
+            expected,
+            "a finalized hook must observe the reported block's database state",
+        );
+        <MultiApp as Application<E>>::finalized(&mut self.inner, context, block, readers).await;
+        self.finalized_hooks.lock().push(block.height);
+    }
+
+    fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
+        <MultiApp as Application<E>>::sync_targets(block)
     }
 }
 
@@ -1089,12 +1166,11 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     (genesis, chain)
 }
 
-async fn build_multi_chain(
-    context: &deterministic::Context,
-    blocks: u64,
-) -> (MultiBlock, Vec<MultiBlock>) {
-    let (initial_a, initial_b) =
-        <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+async fn build_multi_chain<E>(context: &E, blocks: u64) -> (MultiBlock, Vec<MultiBlock>)
+where
+    E: Rng + Spawner + StorageContext,
+{
+    let (initial_a, initial_b) = <MultiDatabaseSet<E> as DatabaseSet<_>>::initial_sync_targets();
     let genesis = MultiBlock::genesis(
         initial_a.root,
         initial_a.range,
@@ -1102,15 +1178,12 @@ async fn build_multi_chain(
         non_empty_range!(mmr::Location::new(0), initial_b.size),
     );
     let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
-    let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
+    let databases = <MultiDatabaseSet<E> as DatabaseSet<_>>::init(
         context.child("multi_chain_builder"),
         multi_qmdb_config("certify-multi-chain-builder", page_cache),
     )
     .await;
-    let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-        deterministic::Context,
-    >>::new_batches(&databases)
-    .await;
+    let mut batches = <MultiDatabaseSet<E> as DatabaseSet<E>>::new_batches(&databases).await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
     let mut speculative = Vec::with_capacity(blocks as usize);
@@ -1134,7 +1207,7 @@ async fn build_multi_chain(
             range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
         };
         speculative.push((merkleized_a, merkleized_b));
-        batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
+        batches = <MultiDatabaseSet<E> as DatabaseSet<_>>::fork_batches(
             speculative.last().expect("speculative batches missing"),
         );
         parent = block.clone();
@@ -1226,7 +1299,6 @@ fn out_of_order_certifications_complete_on_qmdb() {
             },
         );
         let stateful_actor = stateful.start();
-        let _databases = stateful_mailbox.subscribe_databases().await;
 
         for block in &blocks {
             assert!(marshal.verified(block.context.round, block.clone()).await);
@@ -1263,7 +1335,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
 }
 
 #[test]
-fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
+fn stable_leader_finalizations_do_not_wait_for_qmdb_sync() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
         const BLOCKS: u64 = 32;
         const BLOCK_INTERVAL: Duration = Duration::from_millis(10);
@@ -1382,17 +1454,9 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         })
         .await;
 
-        // Model storage that is slower than the 10 ms block pace but continues making progress.
-        // Every 50 ms, all currently issued low-level syncs are allowed to finish.
-        const SYNC_INTERVAL: Duration = Duration::from_millis(50);
+        // Any durability operation after startup remains blocked. Finalized apply and
+        // acknowledgement must still advance because no pruning boundary is due.
         pending.arm();
-        let pending_for_flusher = pending.clone();
-        let flusher = context.child("slow_qmdb_sync").spawn(move |task_context| async move {
-            loop {
-                task_context.sleep(SYNC_INTERVAL).await;
-                release_pending_syncs(&pending_for_flusher);
-            }
-        });
 
         let mut waiters = Vec::with_capacity(BLOCKS as usize);
         for block in &blocks {
@@ -1422,7 +1486,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             } => {},
             _ = context.sleep(Duration::from_millis(500)) => {
                 panic!(
-                    "stable-leader finalization stalled behind QMDB sync (calls={}, starts={}, entered={}, completions={})",
+                    "stable-leader finalization stalled behind QMDB durability (calls={}, starts={}, entered={}, completions={})",
                     pending.calls(),
                     pending.starts(),
                     pending.entered(),
@@ -1431,20 +1495,16 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             },
         }
         let calls_at_tip = pending.calls();
-        assert!(calls_at_tip > 0, "stable-leader run did not start QMDB syncs");
-        assert!(
-            calls_at_tip < BLOCKS as usize,
-            "QMDB durability work was not coalesced (calls={calls_at_tip}, blocks={BLOCKS})",
-        );
+        assert_eq!(calls_at_tip, 0, "routine finalization started QMDB sync");
 
         select! {
             results = futures::future::join_all(waiters) => {
                 for result in results {
-                    result.expect("stable-leader finalization should become durable");
+                    result.expect("stable-leader finalization should be applied");
                 }
             },
             _ = context.sleep(Duration::from_secs(1)) => {
-                panic!("stable-leader QMDB durability did not catch up");
+                panic!("stable-leader QMDB apply did not catch up");
             },
         }
         let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<DelayedContext>>::committed_targets(
@@ -1453,7 +1513,6 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         .await;
         assert_eq!(committed, expected, "stable-leader QMDB target diverged");
 
-        flusher.abort();
         pending.unblock();
         stateful_actor.abort();
         marshal_actor.abort();
@@ -1462,10 +1521,15 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
     });
 }
 
-#[test]
-fn overlapping_finalizations_complete_on_multi_qmdb() {
+#[test_traced]
+fn ordered_finalizations_complete_on_multi_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        const ACK_WINDOW: usize = 8;
+        const FINALIZED_PREFIX: usize = ACK_WINDOW * 2 + 3;
+        const DESCENDANTS: usize = 1;
+        type TestContext = deterministic::Context;
+        let (genesis, blocks) =
+            build_multi_chain(&context, (FINALIZED_PREFIX + DESCENDANTS) as u64).await;
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1506,33 +1570,44 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone()),
                     partition_prefix: "certify-multi-qmdb-marshal".to_string(),
-                    mailbox_size: NZUsize!(8),
-                    view_retention: ViewDelta::new(10),
-                    prunable_items_per_section: NZU64!(10),
+                    mailbox_size: NZUsize!(64),
+                    view_retention: ViewDelta::new(64),
+                    prunable_items_per_section: NZU64!(64),
                     page_cache: page_cache.clone(),
                     replay_buffer: IO_BUFFER_SIZE,
                     key_write_buffer: IO_BUFFER_SIZE,
                     value_write_buffer: IO_BUFFER_SIZE,
                     block_codec_config: (),
-                    max_repair: NZUsize!(10),
-                    max_pending_acks: NZUsize!(1),
+                    max_repair: NZUsize!(64),
+                    max_pending_acks: NZUsize!(8),
                     strategy: Sequential,
                 },
             )
             .await;
+        assert_eq!(marshal.max_pending_acks(), ACK_WINDOW);
         let (resolver_receiver, _resolver_handler) =
             handler::init(context.child("marshal_resolver"), NZUsize!(8));
-        let marshal_actor = marshal_actor.start_unbuffered(
-            NoopMultiMarshalApplication,
-            (resolver_receiver, fixtures::IgnoreResolver),
-        );
 
         let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
-        let finalize_gate = Arc::new(Mutex::new(None));
+        let verify_height_gates = Arc::new(Mutex::new(BTreeMap::new()));
+        let apply_height_gates = Arc::new(Mutex::new(BTreeMap::new()));
+        let proposal_gate = Arc::new(Mutex::new(None));
+        let proposal_calls = Arc::new(Mutex::new(0));
+        let finalize_gates = Arc::new(Mutex::new(VecDeque::new()));
+        let finalized_hooks = Arc::new(Mutex::new(Vec::new()));
+        let verify_calls = Arc::new(Mutex::new(BTreeMap::new()));
+        let apply_calls = Arc::new(Mutex::new(BTreeMap::new()));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
+            proposal_gate: proposal_gate.clone(),
+            proposal_calls: proposal_calls.clone(),
             verify_gates: verify_gates.clone(),
-            finalize_gate: finalize_gate.clone(),
+            verify_height_gates: verify_height_gates.clone(),
+            apply_height_gates: apply_height_gates.clone(),
+            finalize_gates: finalize_gates.clone(),
+            finalized_hooks: finalized_hooks.clone(),
+            verify_calls: verify_calls.clone(),
+            apply_calls: apply_calls.clone(),
         };
         let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
         let (stateful, stateful_mailbox) = StatefulActor::init(
@@ -1542,7 +1617,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 db_config: multi_qmdb_config("certify-multi-qmdb-stateful", page_cache),
                 provider: (),
                 marshal: (marshal.clone(), floor),
-                mailbox_size: NZUsize!(1),
+                mailbox_size: NZUsize!(16),
                 plan,
                 resolvers: (NoopQmdbResolver, NoopCompactQmdbResolver),
                 sync_config: SyncEngineConfig {
@@ -1555,8 +1630,22 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 prune_config: None,
             },
         );
+        let dispatched = Arc::new(Mutex::new(Vec::new()));
+        let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            ExactTap {
+                inner: stateful_mailbox.clone(),
+                dispatched: dispatched.clone(),
+                pending: pending.clone(),
+            },
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
         let stateful_actor = stateful.start();
         let databases = stateful_mailbox.subscribe_databases().await;
+        while marshal.get_processed_height().await != Some(Height::zero()) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        finalized_hooks.lock().clear();
 
         for block in &blocks {
             assert!(marshal.verified(block.context.round, block.clone()).await);
@@ -1565,147 +1654,526 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         let mut deferred = Deferred::new(
             context.child("deferred"),
             stateful_mailbox.clone(),
-            marshal,
+            marshal.clone(),
             FixedEpocher::new(EPOCH_LENGTH),
         );
 
-        // Cache the batches that will be finalized so the held descendant
-        // verification does not own their replay.
-        for block in &blocks[..3] {
+        // Seed the first two pending states through normal independent verification. The
+        // transitive-wait regression is covered at the processing boundary, where replay can be
+        // gated deterministically without depending on QMDB buffering behavior.
+        for block in &blocks[..2] {
             let certification = deferred.certify(block.context.round, block.digest()).await;
-            assert!(
-                certification
-                    .await
-                    .expect("priming certification result missing"),
-            );
+            select! {
+                result = certification => {
+                    assert!(result.expect("prefix certification result missing"));
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("prefix certification did not complete at height {}", block.height.get());
+                },
+            }
         }
 
-        let mut verify_started = Vec::with_capacity(3);
-        let mut verify_releases = Vec::with_capacity(3);
-        for _ in 0..3 {
-            let (gate, started, release) = application_gate();
-            verify_gates.lock().push_back(gate);
-            verify_started.push(started);
-            verify_releases.push(release);
-        }
-        let (gate, finalize_started, finalize_release) = application_gate();
+        let descendant = blocks
+            .last()
+            .expect("multi-QMDB chain has a descendant")
+            .clone();
+        let (verify_gate, verify_started, verify_release) = application_gate();
         assert!(
-            finalize_gate.lock().replace(gate).is_none(),
-            "finalization gate already installed",
+            verify_height_gates
+                .lock()
+                .insert(descendant.height, verify_gate)
+                .is_none(),
+            "descendant verification gate already installed",
+        );
+        let replay_root = &blocks[2];
+        let (replay_gate, replay_started, mut replay_release) = application_gate();
+        assert!(
+            apply_height_gates
+                .lock()
+                .insert(replay_root.height, replay_gate)
+                .is_none(),
+            "replay-root gate already installed",
         );
 
-        let mut certifications = Vec::with_capacity(3);
-        for index in [5, 3, 4] {
+        // Reproduce a full optimistic window above the two cached blocks. Three out-of-order
+        // requests share the same deep replay, while an independent verification of its root
+        // supplies state that makes the original replay owner redundant.
+        let mut descendant_certification = deferred
+            .certify(descendant.context.round, descendant.digest())
+            .await;
+        let mut prefix_certifications = Vec::new();
+        for index in [FINALIZED_PREFIX - 2, FINALIZED_PREFIX - 1] {
             let block = &blocks[index];
-            certifications.push((
-                index,
-                deferred.certify(block.context.round, block.digest()).await,
-            ));
+            prefix_certifications.push(deferred.certify(block.context.round, block.digest()).await);
         }
-        for started in verify_started {
-            started
-                .await
-                .expect("multi-QMDB verification should reach the application gate");
+        select! {
+            result = replay_started => {
+                result.expect("deep replay should start at the first block");
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("deep replay did not reach its first block");
+            },
         }
-        for (_, certification) in &mut certifications {
+
+        let replay_root_certification = deferred
+            .certify(replay_root.context.round, replay_root.digest())
+            .await;
+        select! {
+            result = replay_root_certification => {
+                assert!(result.expect("replay-root certification result missing"));
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("independent replay-root verification did not complete");
+            },
+        }
+        select! {
+            _ = replay_release.closed() => {},
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("cached replay-root state did not stop its redundant replay");
+            },
+        }
+        select! {
+            results = futures::future::join_all(prefix_certifications) => {
+                for result in results {
+                    assert!(result.expect("out-of-order prefix certification result missing"));
+                }
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("out-of-order prefix certifications stalled behind stale replay");
+            },
+        }
+        select! {
+            result = verify_started => {
+                result.expect("multi-QMDB descendant verification should reach its application gate");
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("deep descendant verification did not start after replay");
+            },
+        }
+        assert!(
+            futures::poll!(&mut descendant_certification).is_pending(),
+            "descendant certification completed before finalization",
+        );
+        for height in 3..=FINALIZED_PREFIX as u64 {
             assert!(
-                futures::poll!(certification).is_pending(),
-                "multi-QMDB certification completed before finalization",
+                apply_calls
+                    .lock()
+                    .get(&Height::new(height))
+                    .copied()
+                    .unwrap_or_default()
+                    <= 1,
+                "a missing ancestor was replayed more than once at height {height}",
             );
         }
-
-        let finalized_tip = &blocks[2];
-        let _ = deferred.report(marshal::Update::Tip(
-            finalized_tip.context.round,
-            finalized_tip.height,
-            finalized_tip.digest(),
-        ));
-        let mut reporter = deferred;
-        let mut finalizations = Vec::with_capacity(3);
-        let (acknowledgement, waiter) = Exact::handle();
-        let _ = reporter.report(marshal::Update::Block(
-            Arc::new(blocks[0].clone()),
-            acknowledgement,
-        ));
-        finalizations.push(waiter);
-        finalize_started
-            .await
-            .expect("first multi-QMDB finalization should reach the application gate");
-        assert!(
-            verify_releases.iter().all(|release| !release.is_closed()),
-            "the first finalization should retain descendant verifications",
-        );
-
-        // A queued finalization is not active until the current one completes.
-        for block in &blocks[1..3] {
-            let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(marshal::Update::Block(
-                Arc::new(block.clone()),
-                acknowledgement,
-            ));
-            finalizations.push(waiter);
+        for height in [
+            1,
+            2,
+            3,
+            FINALIZED_PREFIX as u64 - 1,
+            FINALIZED_PREFIX as u64,
+            blocks.len() as u64,
+        ] {
+            assert_eq!(
+                verify_calls.lock().get(&Height::new(height)).copied(),
+                Some(1),
+                "each independent candidate should be fully verified once",
+            );
         }
-        context.sleep(Duration::from_millis(10)).await;
+        let replay_apply_calls = apply_calls.lock().clone();
+        let expected_verify_calls = verify_calls.lock().clone();
+
+        verify_release
+            .send(())
+            .expect("compatible descendant verification should remain active");
+        select! {
+            certification = &mut descendant_certification => {
+                assert!(certification.expect("descendant certification result missing"));
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("descendant certification did not complete before finalization");
+            },
+        }
+
+        let mut finalization_controls = VecDeque::new();
+        for _ in 0..=FINALIZED_PREFIX {
+            let (gate, started, release) = application_gate();
+            finalize_gates.lock().push_back(gate);
+            finalization_controls.push_back((started, release));
+        }
+        let (mut finalize_started, finalize_release) = finalization_controls
+            .pop_front()
+            .expect("first finalization gate missing");
+
+        let finalized_tip = &blocks[FINALIZED_PREFIX - 1];
+        let mut marshal_reporter = marshal.clone();
+        let _ = marshal_reporter.report(Activity::Finalization(fixtures::finalization(
+            &fixture,
+            finalized_tip.height.get(),
+            finalized_tip.digest(),
+        )));
+        select! {
+            started = &mut finalize_started => {
+                started.expect("first finalization should reach its hook after apply and flush");
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("first finalization did not reach its hook after apply and flush");
+            },
+        }
+
+        // The real QMDBs have completed apply and flush, but the processing actor still owns the
+        // finalized hook. A queued proposal cannot cross that ordered finalization boundary.
+        let (gate, proposal_started, proposal_release) = application_gate();
         assert!(
-            verify_releases.iter().all(|release| !release.is_closed()),
-            "queued finalization quiesced work before the current finalization completed",
+            proposal_gate.lock().replace(gate).is_none(),
+            "proposal gate already installed",
         );
+        let mut proposer = stateful_mailbox.clone();
+        let mut proposal = Box::pin(proposer.propose(
+            (
+                context.child("proposal_during_finalized_hook"),
+                descendant.context.clone(),
+            ),
+            marshal::ancestry::from_iter([Arc::new(finalized_tip.clone())]),
+            (),
+        ));
+        assert!(
+            futures::poll!(&mut proposal).is_pending(),
+            "proposal bypassed its application gate",
+        );
+        let mut proposal_started = Box::pin(proposal_started);
+        let mut proposal_release = Some(proposal_release);
+        select! {
+            started = &mut proposal_started => {
+                started.expect("proposal start signal should remain connected");
+                panic!("proposal entered the application during the finalized hook");
+            },
+            _ = context.sleep(Duration::from_millis(10)) => {},
+        }
+        assert_eq!(
+            *proposal_calls.lock(),
+            0,
+            "active finalized hook must retain the proposal in the actor mailbox",
+        );
+
+        let admitted = (1..=ACK_WINDOW as u64).map(Height::new).collect::<Vec<_>>();
+        loop {
+            let observed = pending
+                .lock()
+                .iter()
+                .map(|pending| pending.height)
+                .collect::<Vec<_>>();
+            assert!(
+                observed.len() <= ACK_WINDOW,
+                "marshal exceeded its acknowledgement window: {observed:?}",
+            );
+            if observed.len() == ACK_WINDOW {
+                assert_eq!(observed, admitted, "marshal dispatch order diverged");
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(*dispatched.lock(), admitted);
+        assert_eq!(marshal.get_processed_height().await, Some(Height::zero()));
+        assert_eq!(
+            marshal.get_info(Height::new(FINALIZED_PREFIX as u64)).await,
+            Some((Height::new(FINALIZED_PREFIX as u64), finalized_tip.digest(),)),
+        );
+        assert!(
+            marshal
+                .get_finalization(Height::new(FINALIZED_PREFIX as u64))
+                .await
+                .is_some()
+        );
+        assert!(finalized_hooks.lock().is_empty());
+        assert_eq!(marshal.get_processed_height().await, Some(Height::zero()));
+        {
+            let mut pending = pending.lock();
+            for acknowledgement in pending.iter_mut() {
+                assert!(
+                    exact_is_pending(&mut acknowledgement.stateful),
+                    "Stateful acknowledged height {} before its finalized hook completed",
+                    acknowledgement.height,
+                );
+            }
+        }
+
+        let (mut second_finalize_started, second_finalize_release) = finalization_controls
+            .pop_front()
+            .expect("second finalization gate missing");
         finalize_release
             .send(())
             .expect("first multi-QMDB finalization should remain active");
 
         select! {
-            acknowledgements = futures::future::join_all(finalizations) => {
-                for acknowledgement in acknowledgements {
-                    acknowledgement.expect("finalized block should be durable");
+            _ = async {
+                loop {
+                    if finalized_hooks.lock().first() == Some(&Height::new(1)) {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
                 }
+            } => {},
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("first finalized hook did not complete");
+            },
+        }
+
+        let mut first_acknowledgement = loop {
+            if let Some(pending) = pending.lock().pop_front() {
+                break pending;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        };
+        assert_eq!(first_acknowledgement.height, Height::new(1));
+        select! {
+            result = &mut first_acknowledgement.stateful => {
+                result.expect("first Stateful acknowledgement was cancelled");
             },
             _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("multi-QMDB finalizations did not become durable");
+                panic!("first Exact acknowledgement did not follow its finalized hook");
             },
         }
-        for release in verify_releases {
-            release
-                .send(())
-                .expect("compatible verification should remain active across finalization");
+        let mut first_acknowledgement = Some((
+            first_acknowledgement.height,
+            first_acknowledgement.marshal,
+        ));
+
+        select! {
+            started = &mut second_finalize_started => {
+                started.expect("second finalization should reach its hook after apply and flush");
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("second finalization did not reach its hook after apply and flush");
+            },
         }
-        for (index, certification) in certifications {
-            select! {
-                result = certification => {
-                    assert!(result.expect("certification result missing"));
-                },
-                _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("multi-QMDB certification {index} did not complete after finalization");
-                },
+        assert_eq!(marshal.get_processed_height().await, Some(Height::zero()));
+        second_finalize_release
+            .send(())
+            .expect("second multi-QMDB finalization should remain active");
+
+        let finalized_heights = (1..=FINALIZED_PREFIX as u64)
+            .map(Height::new)
+            .collect::<Vec<_>>();
+        for (index, &height) in finalized_heights.iter().enumerate() {
+            if index > 1 {
+                let (mut started, release) = finalization_controls
+                    .pop_front()
+                    .expect("finalization gate missing");
+                select! {
+                    result = &mut started => {
+                        result.expect("finalization should reach its application gate");
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("finalization did not reach its application gate at height {height}");
+                    },
+                }
+                {
+                    let mut pending = pending.lock();
+                    assert_eq!(pending.front().map(|pending| pending.height), Some(height));
+                    for acknowledgement in pending.iter_mut() {
+                        assert!(
+                            exact_is_pending(&mut acknowledgement.stateful),
+                            "Stateful acknowledged height {} before its finalized hook completed",
+                            acknowledgement.height,
+                        );
+                    }
+                }
+                release
+                    .send(())
+                    .expect("finalization should remain active at its application gate");
+            }
+            loop {
+                let hooks = finalized_hooks.lock().clone();
+                if hooks.len() > index {
+                    assert_eq!(
+                        &hooks[..=index],
+                        &finalized_heights[..=index],
+                        "application hooks must complete FIFO",
+                    );
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let marshal_acknowledgement = if index == 0 {
+                let (acknowledgement_height, acknowledgement) = first_acknowledgement
+                    .take()
+                    .expect("first Exact acknowledgement missing");
+                assert_eq!(
+                    acknowledgement_height, height,
+                    "Exact acknowledgements must drain FIFO",
+                );
+                acknowledgement
+            } else {
+                let mut acknowledgement = loop {
+                    if let Some(pending) = pending.lock().pop_front() {
+                        break pending;
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                };
+                assert_eq!(
+                    acknowledgement.height, height,
+                    "Exact acknowledgements must drain FIFO"
+                );
+                select! {
+                    result = &mut acknowledgement.stateful => {
+                        result.expect("Stateful acknowledgement was cancelled");
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("Stateful did not acknowledge finalized height {height}");
+                    },
+                }
+                acknowledgement.marshal
+            };
+            marshal_acknowledgement.acknowledge();
+
+            loop {
+                let processed = marshal
+                    .get_processed_height()
+                    .await
+                    .expect("marshal has a processed genesis");
+                assert!(
+                    processed <= height,
+                    "marshal skipped a held Exact acknowledgement: {processed} > {height}",
+                );
+                if processed == height {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let expected_dispatched = (ACK_WINDOW + index + 1).min(FINALIZED_PREFIX);
+            while dispatched.lock().len() < expected_dispatched {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert_eq!(
+                dispatched.lock().as_slice(),
+                &finalized_heights[..expected_dispatched],
+                "marshal did not roll its acknowledgement window forward in order",
+            );
+            assert!(
+                pending.lock().len() <= ACK_WINDOW,
+                "marshal exceeded its acknowledgement window while draining",
+            );
+            if index + 1 == ACK_WINDOW {
+                select! {
+                    started = &mut proposal_started => {
+                        started.expect("queued proposal should reach the application");
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("queued proposal did not start at its FIFO position");
+                    },
+                }
+                proposal_release
+                    .take()
+                    .expect("proposal release already consumed")
+                    .send(())
+                    .expect("proposal should remain active at its application gate");
+                select! {
+                    proposed = &mut proposal => {
+                        assert_eq!(
+                            proposed.expect("queued proposal should complete"),
+                            descendant,
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("queued proposal did not complete");
+                    },
+                }
             }
         }
+        assert!(proposal_release.is_none());
+        assert!(first_acknowledgement.is_none());
+        assert!(pending.lock().is_empty());
+        assert_eq!(*finalized_hooks.lock(), finalized_heights);
 
-        let mut descendant_finalizations = Vec::new();
-        for block in &blocks[3..] {
-            let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(marshal::Update::Block(
-                Arc::new(block.clone()),
-                acknowledgement,
-            ));
-            descendant_finalizations.push(waiter);
-        }
+        let _ = marshal_reporter.report(Activity::Finalization(fixtures::finalization(
+            &fixture,
+            descendant.height.get(),
+            descendant.digest(),
+        )));
+        let (mut descendant_finalize_started, descendant_finalize_release) = finalization_controls
+            .pop_front()
+            .expect("descendant finalization gate missing");
         select! {
-            acknowledgements = futures::future::join_all(descendant_finalizations) => {
-                for acknowledgement in acknowledgements {
-                    acknowledgement.expect("descendant block should be durable");
-                }
+            result = &mut descendant_finalize_started => {
+                result.expect("descendant finalization should reach its application gate");
             },
             _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("descendant batches did not finalize from their original ancestry");
+                panic!("descendant finalization did not reach its application gate");
             },
         }
+        {
+            let mut pending = pending.lock();
+            assert_eq!(
+                pending.front().map(|pending| pending.height),
+                Some(descendant.height),
+            );
+            for acknowledgement in pending.iter_mut() {
+                assert!(
+                    exact_is_pending(&mut acknowledgement.stateful),
+                    "Stateful acknowledged the descendant before its finalized hook completed",
+                );
+            }
+        }
+        descendant_finalize_release
+            .send(())
+            .expect("descendant finalization should remain active at its application gate");
+        loop {
+            if finalized_hooks.lock().last() == Some(&descendant.height)
+                && pending.lock().front().map(|pending| pending.height) == Some(descendant.height)
+            {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        let mut acknowledgement = pending
+            .lock()
+            .pop_front()
+            .expect("descendant Exact acknowledgement missing");
+        assert_eq!(acknowledgement.height, descendant.height);
+        select! {
+            result = &mut acknowledgement.stateful => {
+                result.expect("descendant Stateful acknowledgement was cancelled");
+            },
+            _ = context.sleep(Duration::from_secs(2)) => {
+                panic!("Stateful did not acknowledge the finalized descendant");
+            },
+        }
+        acknowledgement.marshal.acknowledge();
+        while marshal.get_processed_height().await != Some(descendant.height) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        let all_heights = (1..=blocks.len() as u64)
+            .map(Height::new)
+            .collect::<Vec<_>>();
+        assert_eq!(*dispatched.lock(), all_heights);
+        assert_eq!(*finalized_hooks.lock(), all_heights);
+        assert!(pending.lock().is_empty());
+        assert!(finalization_controls.is_empty());
+        assert_eq!(
+            *apply_calls.lock(),
+            replay_apply_calls,
+            "finalization must not reconstruct or retry already supplied pending state",
+        );
+        assert_eq!(
+            *verify_calls.lock(),
+            expected_verify_calls,
+            "finalization must not restart completed or retained verification work",
+        );
+        assert_eq!(
+            *proposal_calls.lock(),
+            1,
+            "each proposal request should enter the application exactly once",
+        );
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
+        let committed = <MultiDatabaseSet<TestContext> as DatabaseSet<TestContext>>::committed_targets(
+            &databases,
+        )
         .await;
-        let expected =
-            <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
+        let expected = <GatedMultiApp as Application<TestContext>>::sync_targets(
+            blocks.last().expect("multi-QMDB chain is non-empty"),
+        );
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
         assert_eq!(committed.1, expected.1, "compact QMDB target diverged");
 
@@ -1782,11 +2250,18 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         );
 
         let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
-        let finalize_gate = Arc::new(Mutex::new(None));
+        let finalize_gates = Arc::new(Mutex::new(VecDeque::new()));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
+            proposal_gate: Arc::new(Mutex::new(None)),
+            proposal_calls: Arc::new(Mutex::new(0)),
             verify_gates: verify_gates.clone(),
-            finalize_gate: finalize_gate.clone(),
+            verify_height_gates: Arc::new(Mutex::new(BTreeMap::new())),
+            apply_height_gates: Arc::new(Mutex::new(BTreeMap::new())),
+            finalize_gates: finalize_gates.clone(),
+            finalized_hooks: Arc::new(Mutex::new(Vec::new())),
+            verify_calls: Arc::new(Mutex::new(BTreeMap::new())),
+            apply_calls: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let plan = SyncPlan::init(&context, "prune-overlap-multi-qmdb-stateful".to_string()).await;
         let (stateful, stateful_mailbox) = StatefulActor::init(
@@ -1860,7 +2335,6 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 },
             }
         }
-
         let expected_floor = *blocks[2].range_a.start();
         assert!(
             expected_floor > mmr::Location::new(0),
@@ -1871,10 +2345,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         let (retry_gate, mut retry_started, retry_release) = application_gate();
         verify_gates.lock().extend([first_gate, retry_gate]);
         let (gate, finalize_started, finalize_release) = application_gate();
-        assert!(
-            finalize_gate.lock().replace(gate).is_none(),
-            "finalization gate already installed",
-        );
+        finalize_gates.lock().push_back(gate);
 
         let block = &blocks[4];
         let mut certification = reporter.certify(block.context.round, block.digest()).await;

@@ -417,6 +417,45 @@ pub(crate) mod test {
         });
     }
 
+    /// Flush pushes buffered state to storage without durability and leaves the db usable.
+    #[test_traced]
+    fn test_flush_preserves_state_and_usability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key0, Some(value0))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            let root = db.root();
+
+            // Flush preserves the root and reads.
+            let mut db = db.flush().await.unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+
+            // Batches continue to apply after a flush, and a later commit succeeds.
+            let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let value1 = Sha256::hash(&[&200u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key1, Some(value1))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.commit().await.unwrap();
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
     #[test_traced]
     fn test_get_many_fused_sharded_matches_get() {

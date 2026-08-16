@@ -18,7 +18,7 @@ use std::{
     convert::Infallible,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -57,8 +57,8 @@ impl Merkleized for TestMerkleized {
 /// Completes one parked flush when released by the test.
 pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
 
-/// Signals that pruning has started, then blocks it until the test releases it.
-struct PruneGate {
+/// Signals that a database operation has started, then blocks it until the test releases it.
+struct OperationGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
@@ -70,10 +70,39 @@ pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
     pub(crate) applied: Arc<AtomicUsize>,
-    prune_gate: Arc<Mutex<Option<PruneGate>>>,
+    pub(crate) memory_flushes: Arc<AtomicUsize>,
+    pub(crate) finalized: Arc<Mutex<Vec<u64>>>,
+    fail_next_apply: Arc<AtomicBool>,
+    apply_gate: Arc<Mutex<Option<OperationGate>>>,
+    prune_gate: Arc<Mutex<Option<OperationGate>>>,
 }
 
 impl FlushControl {
+    /// Gates the next apply.
+    pub(crate) fn gate_apply(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        assert!(
+            self.apply_gate
+                .lock()
+                .replace(OperationGate {
+                    started,
+                    release: release_rx,
+                })
+                .is_none(),
+            "apply gate already installed",
+        );
+        (started_rx, release)
+    }
+
+    /// Panics the next database apply.
+    pub(crate) fn fail_next_apply(&self) {
+        assert!(
+            !self.fail_next_apply.swap(true, Ordering::Relaxed),
+            "apply failure already installed",
+        );
+    }
+
     /// Gates the next prune. The receiver reports entry, and sending on the
     /// returned sender lets pruning continue. Only one gate may be active.
     pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -82,7 +111,7 @@ impl FlushControl {
         assert!(
             self.prune_gate
                 .lock()
-                .replace(PruneGate {
+                .replace(OperationGate {
                     started,
                     release: release_rx,
                 })
@@ -140,7 +169,23 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
         if let Some(control) = &self.control {
+            let gate = control.apply_gate.lock().take();
+            if let Some(mut gate) = gate {
+                gate.started.send(()).expect("test must await apply");
+                let _ = (&mut gate.release).await;
+            }
+            assert!(
+                !control.fail_next_apply.swap(false, Ordering::Relaxed),
+                "injected database apply failure",
+            );
             control.applied.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(self)
+    }
+
+    async fn flush(self) -> Result<Self, Self::Error> {
+        if let Some(control) = &self.control {
+            control.memory_flushes.fetch_add(1, Ordering::Relaxed);
         }
         Ok(self)
     }

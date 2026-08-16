@@ -285,6 +285,31 @@ pub(crate) async fn marshal_fixture_with_floor(
     .await
 }
 
+/// Initializes a started marshal actor with a durable finalized block whose application
+/// acknowledgement remains open.
+pub(crate) async fn marshal_fixture_with_held_finalization(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    block: &TestBlock,
+    finalization: Finalization<TestScheme, Sha256Digest>,
+    max_pending_acks: NonZeroUsize,
+) -> MarshalFixture {
+    marshal_fixture_inner(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed: Some((block, finalization)),
+            block: Some(block),
+            floor: None,
+            max_pending_acks,
+            dispatch: Dispatch::Hold,
+        },
+    )
+    .await
+}
+
 /// Initializes a started marshal actor over prunable finalized archives.
 ///
 /// When provided, `block` is pre-seeded. Dispatched blocks are held open unless

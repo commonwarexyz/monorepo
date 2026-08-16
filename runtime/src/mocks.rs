@@ -655,6 +655,189 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     }
 }
 
+/// One blob write deferred by a [`DelayedWriteContext`].
+pub struct DeferredWrite {
+    /// Releases the blocked write.
+    pub release: oneshot::Sender<()>,
+    /// Resolves when the matching write reaches the gate.
+    pub blocked: oneshot::Receiver<()>,
+}
+
+struct WriteWaiter {
+    blocked: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+struct WriteGate {
+    partition_prefix: String,
+    waiter: WriteWaiter,
+}
+
+/// Coordinates a one-shot, partition-scoped blob-write gate.
+#[derive(Clone, Default)]
+pub struct PendingWrites {
+    gate: Arc<Mutex<Option<WriteGate>>>,
+}
+
+impl PendingWrites {
+    /// Block the next write whose partition starts with `partition_prefix`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another write gate is still armed.
+    pub fn arm(&self, partition_prefix: impl Into<String>) -> DeferredWrite {
+        let (release, release_rx) = oneshot::channel();
+        let (blocked, blocked_rx) = oneshot::channel();
+        let gate = WriteGate {
+            partition_prefix: partition_prefix.into(),
+            waiter: WriteWaiter {
+                blocked,
+                release: release_rx,
+            },
+        };
+        assert!(
+            self.gate.lock().replace(gate).is_none(),
+            "write gate already armed"
+        );
+        DeferredWrite {
+            release,
+            blocked: blocked_rx,
+        }
+    }
+
+    fn take(&self, partition: &str) -> Option<WriteWaiter> {
+        let mut gate = self.gate.lock();
+        if gate
+            .as_ref()
+            .is_some_and(|gate| partition.starts_with(&gate.partition_prefix))
+        {
+            gate.take().map(|gate| gate.waiter)
+        } else {
+            None
+        }
+    }
+}
+
+/// Context wrapper that can pause one matching [`Blob::write_at`] operation.
+#[derive(Clone)]
+pub struct DelayedWriteContext<E> {
+    /// Wrapped runtime context.
+    pub inner: E,
+    /// Shared controller used to arm the next matching write.
+    pub pending: PendingWrites,
+}
+
+forward_context!(DelayedWriteContext, pending);
+
+impl<E: Spawner> Spawner for DelayedWriteContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let pending = self.pending;
+        self.inner.spawn(move |inner| f(Self { inner, pending }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
+
+impl<E: Storage> Storage for DelayedWriteContext<E> {
+    type Blob = DelayedWriteBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            DelayedWriteBlob {
+                inner,
+                partition: Arc::from(partition),
+                pending: self.pending.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper used by [`DelayedWriteContext`].
+#[derive(Clone)]
+pub struct DelayedWriteBlob<B> {
+    inner: B,
+    partition: Arc<str>,
+    pending: PendingWrites,
+}
+
+impl<B: Blob> Blob for DelayedWriteBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        if let Some(waiter) = self.pending.take(&self.partition) {
+            waiter.blocked.send_lossy(());
+            waiter.release.await.map_err(|_| Error::Closed)?;
+        }
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
 /// Take the oldest pending sync, panicking if none was started.
 pub fn next_pending_sync(pending: &PendingSyncs) -> DeferredSync {
     let mut pending = pending.lock();
@@ -1039,6 +1222,40 @@ mod tests {
     use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn test_delayed_write_context_scopes_one_shot_gate() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingWrites::default();
+            let delayed = DelayedWriteContext {
+                inner: context.child("storage"),
+                pending: pending.clone(),
+            };
+            let (matching, _) = delayed.open("target-partition", b"matching").await.unwrap();
+            let (other, _) = delayed.open("other-partition", b"other").await.unwrap();
+            let deferred = pending.arm("target-");
+
+            other
+                .write_at(0, b"other".as_slice(), WriteOptions::default())
+                .await
+                .unwrap();
+
+            let write = context.child("matching_write").spawn(move |_| async move {
+                matching
+                    .write_at(0, b"match".as_slice(), WriteOptions::default())
+                    .await
+            });
+            deferred
+                .blocked
+                .await
+                .expect("matching write should reach the gate");
+            deferred
+                .release
+                .send(())
+                .expect("matching write should still be blocked");
+            write.await.unwrap().unwrap();
+        });
+    }
 
     #[test]
     fn test_send_recv() {

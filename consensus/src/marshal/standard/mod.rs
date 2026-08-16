@@ -7756,8 +7756,8 @@ mod tests {
     /// after each step.
     #[test_traced("WARN")]
     fn test_standard_update_block_processed_height_invariant() {
-        const MAX_PENDING_ACKS: u64 = 4;
-        const NUM_BLOCKS: u64 = 12;
+        const MAX_PENDING_ACKS: u64 = 8;
+        const NUM_BLOCKS: u64 = 24;
 
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -7850,6 +7850,18 @@ mod tests {
             while (application.blocks().len() as u64) < MAX_PENDING_ACKS {
                 context.sleep(Duration::from_millis(10)).await;
             }
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                application.pending_ack_heights().len() as u64,
+                MAX_PENDING_ACKS,
+                "marshal dispatched beyond the full acknowledgement window",
+            );
+            assert!(
+                !application
+                    .blocks()
+                    .contains_key(&Height::new(MAX_PENDING_ACKS + 1)),
+                "marshal dispatched the ninth unacknowledged block",
+            );
             check_invariant("pipeline full");
 
             // Drain: acknowledge blocks as they arrive; re-check the bound

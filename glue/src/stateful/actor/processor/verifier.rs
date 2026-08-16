@@ -30,7 +30,6 @@ enum ProcessedBlock {
     /// The check ended without a verdict because its request was cancelled.
     Cancelled,
 }
-
 /// Failure to prepare the parent state needed for verification.
 enum PrepareFailure {
     /// The supplied ancestry is provably invalid.
@@ -380,6 +379,7 @@ where
             );
             return Some(false);
         }
+        self.replays.supply(block_digest);
         self.execution.update_pending_metric();
         drop(block);
         drop(tail);

@@ -317,6 +317,10 @@ where
         let artifact = self.artifact.take().expect("transition must have artifact");
         let mut completed_height = artifact.anchor.height;
 
+        // State sync may converge without applying a handoff block. Prepare applied-state readers
+        // before any finalized hook, resolver, or subscriber can observe the database set.
+        drop(artifact.databases.new_batches().await);
+
         let _ = self.metrics.sync_done.try_set(1);
         let mut processor = Processor::new(
             self.application,
@@ -327,8 +331,6 @@ where
         );
 
         let mut pending_prune = None;
-        let mut pending_acknowledgements = Vec::new();
-
         for handoff in handoffs {
             match handoff {
                 FinalizedHandoff::Covered(block, acknowledgement)
@@ -340,33 +342,28 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     let Applied { prune, .. } = processor
-                        .finalize(self.context.as_present(), block.as_ref(), false)
+                        .finalize_inline(self.context.as_present(), Arc::clone(&block))
                         .await
                         .expect("sync handoff block cannot be a duplicate");
-                    pending_acknowledgements.push(acknowledgement);
+                    acknowledgement.acknowledge();
                     pending_prune = prune.or(pending_prune);
                     completed_height = block.height();
                 }
             }
         }
 
-        if !pending_acknowledgements.is_empty() {
+        if let Some(prune) = pending_prune {
             let barrier = processor.databases().finalize().await;
             if !barrier.durable().await {
                 return;
             }
-            for acknowledgement in pending_acknowledgements {
-                acknowledgement.acknowledge();
-            }
-            debug!(
-                height = completed_height.get(),
-                "persisted finalized database batches during sync handoff"
-            );
-        }
-
-        self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
-        if let Some(prune) = pending_prune {
+            self.sync_metadata = self.sync_metadata.set_complete(prune.barrier_height).await;
             prune.run(processor.databases(), &self.marshal).await;
+        } else {
+            self.sync_metadata = self
+                .sync_metadata
+                .set_complete(artifact.anchor.height)
+                .await;
         }
 
         // Attach the resolvers to the initialized databases before starting the processor,
@@ -381,16 +378,20 @@ where
             subscriber.send_lossy(processor.databases().clone());
         }
 
-        Processing {
-            context: self.context,
-            mailbox: self.mailbox,
-            provider: self.provider,
-            marshal: self.marshal,
-            processor,
-            deferred_verifications: self.deferred_verifications,
-            skip_finalized_until: Some(completed_height),
-        }
-        .start()
+        Box::pin(
+            Processing {
+                context: self.context,
+                mailbox: self.mailbox,
+                provider: self.provider,
+                marshal: self.marshal,
+                sync_metadata: self.sync_metadata,
+                processor,
+                deferred_verifications: self.deferred_verifications,
+                skip_finalized_until: Some(completed_height),
+                replayed_finalized_after: None,
+            }
+            .start(),
+        )
         .await
     }
 }
@@ -708,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_coalesces_handoff_durability_before_completion() {
+    fn transition_persists_prune_replay_base_after_handoff_apply() {
         deterministic::Runner::default().start(|context| async move {
             // Gate the sync-complete metadata write and the handoff flush independently.
             let pending = PendingSyncs::default();
@@ -735,23 +736,20 @@ mod tests {
                 .expect("harness must contain a sync artifact")
                 .databases = Shared::new("test", TestDb::gated(control.clone()));
 
-            // Completion metadata must not be written until the handoff batch is durable.
+            // Replay-base metadata must not advance until the prune barrier is durable.
             pending.arm();
             let gate = next_pending_sync(&pending);
             let (reflected_acknowledgement, mut reflected_waiter) = Exact::handle();
             let (first_acknowledgement, mut first_waiter) = Exact::handle();
             let (second_acknowledgement, mut second_waiter) = Exact::handle();
+            let anchor_block = TestBlock::new(7, 9);
+            let first_block = TestBlock::child(&anchor_block, 10);
+            let second_block = TestBlock::child(&first_block, 11);
             let transition = context.child("transition").spawn(move |_| {
                 harness.syncing.transition([
-                    FinalizedHandoff::Reflected(
-                        Arc::new(TestBlock::new(7, 9)),
-                        reflected_acknowledgement,
-                    ),
-                    FinalizedHandoff::Apply(Arc::new(TestBlock::new(8, 10)), first_acknowledgement),
-                    FinalizedHandoff::Apply(
-                        Arc::new(TestBlock::new(9, 11)),
-                        second_acknowledgement,
-                    ),
+                    FinalizedHandoff::Reflected(Arc::new(anchor_block), reflected_acknowledgement),
+                    FinalizedHandoff::Apply(Arc::new(first_block), first_acknowledgement),
+                    FinalizedHandoff::Apply(Arc::new(second_block), second_acknowledgement),
                 ])
             });
             while control.flushes.lock().is_empty() {
@@ -759,7 +757,8 @@ mod tests {
             }
             assert!(poll!(&mut reflected_waiter).is_ready());
             assert!(
-                poll!(&mut first_waiter).is_pending() && poll!(&mut second_waiter).is_pending(),
+                poll!(&mut first_waiter).is_ready() && poll!(&mut second_waiter).is_ready(),
+                "handoff acknowledgements should follow apply rather than durability",
             );
             assert_eq!(
                 pending.calls(),
@@ -769,15 +768,10 @@ mod tests {
             let first_flush = control.flushes.lock().remove(0);
             first_flush
                 .send(Ok(()))
-                .expect("handoff must be waiting on its database flush");
-            while control.flushes.lock().is_empty() && poll!(&mut second_waiter).is_pending() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert!(poll!(&mut first_waiter).is_ready());
-            assert!(poll!(&mut second_waiter).is_ready());
+                .expect("prune must be waiting on its database barrier");
             assert!(
                 control.flushes.lock().is_empty(),
-                "one database flush must cover the complete handoff prefix",
+                "one database barrier must cover the complete handoff prefix",
             );
 
             gate.blocked
@@ -797,14 +791,23 @@ mod tests {
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(9)));
+            assert_eq!(reopened.sync_height(), Some(Height::new(8)));
         });
     }
 
     #[test]
-    fn aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete() {
+    fn aborted_prune_barrier_keeps_replay_base_incomplete() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            harness.syncing.pruning = Some(Pruning::build(
+                PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                },
+                harness.syncing.marshal.max_pending_acks(),
+                0,
+            ));
             let databases = Shared::new(
                 "test",
                 TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
@@ -816,19 +819,21 @@ mod tests {
                 .expect("harness must contain a sync artifact")
                 .databases = databases;
 
-            let (acknowledgement, waiter) = Exact::handle();
+            let (first_acknowledgement, first_waiter) = Exact::handle();
+            let (second_acknowledgement, second_waiter) = Exact::handle();
+            let anchor_block = TestBlock::new(7, 9);
+            let first_block = TestBlock::child(&anchor_block, 10);
+            let second_block = TestBlock::child(&first_block, 11);
             harness
                 .syncing
-                .transition(Some(FinalizedHandoff::Apply(
-                    Arc::new(TestBlock::new(8, 10)),
-                    acknowledgement,
-                )))
+                .transition([
+                    FinalizedHandoff::Apply(Arc::new(first_block), first_acknowledgement),
+                    FinalizedHandoff::Apply(Arc::new(second_block), second_acknowledgement),
+                ])
                 .await;
 
-            assert!(
-                waiter.await.is_err(),
-                "an aborted handoff must cancel marshal's acknowledgement",
-            );
+            assert!(first_waiter.await.is_ok());
+            assert!(second_waiter.await.is_ok());
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
@@ -919,15 +924,16 @@ mod tests {
                 .child("syncing_actor")
                 .spawn(move |_| harness.syncing.start());
             let mut waiters = Vec::new();
+            let mut parent = TestBlock::new(7, 9);
             for (height, digest) in [(8, 10), (9, 11)] {
+                let block = TestBlock::child(&parent, digest);
+                assert_eq!(block.height(), Height::new(height));
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(
-                        Arc::new(TestBlock::new(height, digest)),
-                        acknowledgement,
-                    )),
+                    mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement,)),
                     Feedback::Ok
                 ));
+                parent = block;
                 let proposal = TestBlock::new(height + 10, digest + 10);
                 assert!(
                     mailbox
@@ -965,7 +971,7 @@ mod tests {
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(9)));
+            assert_eq!(reopened.sync_height(), Some(Height::new(7)));
         });
     }
 
@@ -1012,15 +1018,16 @@ mod tests {
                 .spawn(move |_| harness.syncing.start());
 
             let mut waiters = Vec::new();
+            let mut parent = TestBlock::new(7, 9);
             for (height, digest) in [(8, 10), (9, 11)] {
+                let block = TestBlock::child(&parent, digest);
+                assert_eq!(block.height(), Height::new(height));
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(
-                        Arc::new(TestBlock::new(height, digest)),
-                        acknowledgement,
-                    )),
+                    mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement,)),
                     Feedback::Ok
                 ));
+                parent = block;
                 let proposal = TestBlock::new(height + 10, digest + 10);
                 assert!(
                     mailbox
@@ -1067,7 +1074,7 @@ mod tests {
             let reopened =
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
-            assert_eq!(reopened.sync_height(), Some(Height::new(9)));
+            assert_eq!(reopened.sync_height(), Some(Height::new(7)));
         });
     }
 

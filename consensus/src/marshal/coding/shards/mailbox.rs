@@ -5,7 +5,10 @@ use crate::{
     marshal::{coding::types::CodedBlock, core::Retirement},
     types::{Round, coding::Commitment},
 };
-use commonware_actor::mailbox::{Overflow, Policy, Sender};
+use commonware_actor::{
+    Feedback,
+    mailbox::{Overflow, Policy, Sender},
+};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
@@ -231,11 +234,15 @@ where
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
-        self.proposed_shared(round, Arc::new(block));
+        let _ = self.proposed_shared(round, Arc::new(block));
     }
 
-    pub(crate) fn proposed_shared(&self, round: Round, block: Arc<CodedBlock<B, C, H>>) {
-        let _ = self.sender.enqueue(Message::Proposed { block, round });
+    pub(crate) fn proposed_shared(
+        &self,
+        round: Round,
+        block: Arc<CodedBlock<B, C, H>>,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Proposed { block, round })
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].

@@ -394,9 +394,6 @@ impl<B: Blob> Writer<B> {
             return Ok(false);
         }
 
-        // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
-        self.sync_state.wait_for_pending().await?;
-
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
         let page_size = self.cache_ref.page_size() as usize;
@@ -409,6 +406,33 @@ impl<B: Blob> Writer<B> {
         } else {
             None
         };
+
+        let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+        let write_at_offset = self.current_page * physical_page_size as u64;
+
+        // Rewriting a physical page resubmits its committed bytes and protected checksum
+        // unchanged, so a torn write leaves the previous state recoverable. Keep the logical tip
+        // unchanged until the write completes so a cancelled flush can safely retry the same
+        // bytes at the same offset.
+        if sync {
+            self.sync_state
+                .write_at(
+                    &self.blob,
+                    write_at_offset,
+                    physical_pages,
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+                )
+                .await?;
+        } else {
+            self.sync_state
+                .write_at(
+                    &self.blob,
+                    write_at_offset,
+                    physical_pages,
+                    WriteOptions::DONT_CACHE,
+                )
+                .await?;
+        }
 
         // Drain full pages from the buffered logical data. If the tip is fully drained, detach its
         // backing so empty append buffers don't retain pooled storage.
@@ -430,39 +454,11 @@ impl<B: Blob> Writer<B> {
             assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
         }
 
-        let physical_page_size = page_size + CHECKSUM_SIZE as usize;
-        let write_at_offset = self.current_page * physical_page_size as u64;
-
-        // Update state before writing. This may appear to risk data loss if writes fail,
-        // but write failures are fatal per this codebase's design: callers must not use
-        // the blob after any mutable method returns an error.
         self.current_page += pages_to_cache as u64;
         self.partial_page_state = partial_page_state;
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
-
-        // Rewriting a physical page resubmits its committed bytes and protected checksum
-        // unchanged, so a torn write leaves the previous state recoverable.
-        if sync {
-            self.sync_state
-                .write_at(
-                    &self.blob,
-                    write_at_offset,
-                    physical_pages,
-                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-                )
-                .await?;
-        } else {
-            self.sync_state
-                .write_at(
-                    &self.blob,
-                    write_at_offset,
-                    physical_pages,
-                    WriteOptions::DONT_CACHE,
-                )
-                .await?;
-        }
         Ok(sync)
     }
 
@@ -832,6 +828,15 @@ impl<B: Blob> Writer<B> {
     pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.cache_ref.next_id()))
+    }
+
+    /// Flushes buffered data (including any partial page) to the blob without making it durable.
+    ///
+    /// Flushed bytes are not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [`Self::sync`]) completes.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        self.flush_internal(true, false).await?;
+        Ok(())
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -2235,6 +2240,54 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    // Verifies flush writes buffered bytes (including a partial page) without any sync.
+    fn test_flush_writes_without_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Flushing an empty writer performs no blob operations.
+            append.flush().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // A buffered partial page reaches the blob on flush, with no sync issued and no
+            // durability provided.
+            let data = b"hello world";
+            append.append(data).await.unwrap();
+            append.flush().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(blob.size() > 0);
+            assert!(durable.is_empty());
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Flushed bytes remain readable.
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data);
+
+            // Re-flushing an unchanged partial page writes nothing new.
+            append.flush().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // A later sync provides the durability barrier.
+            append.sync().await.unwrap();
+            let (_, _, full_syncs, range_syncs) = blob.snapshot();
+            assert!(full_syncs + range_syncs > 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     // Verifies a successful start_sync marks the writer clean.
     fn test_start_sync_persists_and_marks_clean() {
         let executor = deterministic::Runner::default();
@@ -2928,6 +2981,125 @@ mod tests {
     fn read_crc_record_from_page(page_bytes: &[u8]) -> Checksum {
         let crc_start = page_bytes.len() - CHECKSUM_SIZE as usize;
         Checksum::read(&mut &page_bytes[crc_start..]).unwrap()
+    }
+
+    /// Blob wrapper that blocks the first write before forwarding it to the inner blob.
+    #[derive(Clone)]
+    struct DelayedWriteBlob<B: Blob> {
+        inner: B,
+        writes: Arc<AtomicUsize>,
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl<B: Blob> DelayedWriteBlob<B> {
+        fn new(inner: B, started: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+            Self {
+                inner,
+                writes: Arc::new(AtomicUsize::new(0)),
+                started: Arc::new(Mutex::new(Some(started))),
+                release: Arc::new(Mutex::new(Some(release))),
+            }
+        }
+    }
+
+    impl<B: Blob> crate::Blob for DelayedWriteBlob<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            if self.writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started
+                    .lock()
+                    .take()
+                    .expect("delayed write start signal consumed more than once")
+                    .send(())
+                    .expect("delayed write observer dropped");
+                let release = self
+                    .release
+                    .lock()
+                    .take()
+                    .expect("delayed write release receiver consumed more than once");
+                release.await.expect("delayed write release signal dropped");
+            }
+            self.inner.write_at(offset, bufs, options).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_snapshot_cancellation_during_write_preserves_writer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"snapshot_cancel_write")
+                .await
+                .unwrap();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let delayed = DelayedWriteBlob::new(blob.clone(), started_tx, release_rx);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(delayed, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let data: Vec<u8> = (0..PAGE_SIZE.get() as usize + 17)
+                .map(|i| (i % 251) as u8)
+                .collect();
+            writer.append(&data).await.unwrap();
+
+            let mut snapshot = Box::pin(writer.snapshot());
+            assert!(
+                snapshot.as_mut().now_or_never().is_none(),
+                "snapshot must stop at the delayed blob write"
+            );
+            started_rx.await.expect("snapshot never reached blob write");
+            drop(snapshot);
+            drop(release_tx);
+
+            let snapshot = writer.snapshot().await.unwrap();
+            let read = snapshot.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+            writer.sync().await.unwrap();
+            drop(snapshot);
+            drop(writer);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"snapshot_cancel_write")
+                .await
+                .unwrap();
+            let reopened = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), data.len() as u64);
+            let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
     }
 
     /// Blob wrapper that turns one write into a durable partial write followed by an error.

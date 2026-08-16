@@ -104,7 +104,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock, Metrics, Runner, Storage as _, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -484,6 +485,46 @@ mod tests {
         let coded_candidate: TestCodedBlock =
             CodedBlock::new(candidate, coding_config, &Sequential);
         (candidate_ctx, coded_candidate)
+    }
+
+    async fn partition_size(context: &deterministic::Context, partition: &str) -> u64 {
+        let mut size = 0;
+        for name in context
+            .scan(partition)
+            .await
+            .expect("failed to scan partition")
+        {
+            let (_, len) = context
+                .open(partition, &name)
+                .await
+                .expect("failed to open partition blob");
+            size += len;
+        }
+        size
+    }
+
+    #[test]
+    fn test_shard_proposal_mailbox_reports_backpressure_and_closure() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (sender, receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let shards: shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> =
+                shards::Mailbox::new(sender);
+            let (candidate_context, candidate) = missing_candidate(default_leader());
+            let round = candidate_context.round;
+            let candidate = Arc::new(candidate);
+
+            assert_eq!(
+                shards.proposed_shared(round, Arc::clone(&candidate)),
+                Feedback::Ok
+            );
+            assert_eq!(
+                shards.proposed_shared(round, Arc::clone(&candidate)),
+                Feedback::Backoff
+            );
+            drop(receiver);
+            assert_eq!(shards.proposed_shared(round, candidate), Feedback::Closed);
+        });
     }
 
     #[test_traced("WARN")]
@@ -3644,10 +3685,9 @@ mod tests {
         });
     }
 
-    /// Regression: a leader must be able to recover its own block across an unclean restart.
-    /// `propose` registers a certification gate, so the leader establishes durability by
-    /// certifying its own proposal. After certify, the block must survive restart even if
-    /// `Relay::broadcast` never runs. This is the >= f+1 guarantee for the leader's own block.
+    /// Regression: a leader must be able to certify before relay, forward the
+    /// certified block through the relay fallback, and recover it across an
+    /// unclean restart.
     #[test_traced("WARN")]
     fn test_marshaled_proposed_block_persists_across_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -3742,6 +3782,31 @@ mod tests {
                 "certify must succeed for the leader's own proposal"
             );
 
+            assert!(
+                marshal.get_verified(propose_round).await.is_none(),
+                "local certification must use notarized storage, not verified storage"
+            );
+
+            // Certification consumed the staged entry, so relay must use the
+            // core forwarding fallback and still seed the shard cache.
+            let subscription = shards.subscribe(commitment);
+            assert_eq!(
+                marshaled.broadcast(
+                    commitment,
+                    Plan::Propose {
+                        round: propose_round,
+                    },
+                ),
+                Feedback::Ok
+            );
+            assert_eq!(
+                subscription
+                    .await
+                    .expect("certified proposal must be forwarded to shards")
+                    .digest(),
+                block_digest
+            );
+
             // Abort marshal after certify; the leader's own block must be durable.
             marshal_actor_handle.abort();
             drop(marshaled);
@@ -3759,9 +3824,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            // The proposer must recover its own block after restart. Without
-            // the broadcast-path persistence fix, the block lived only in the
-            // shards engine's in-memory cache and is now gone.
+            // The proposer must recover its own block after restart.
             let post_restart = marshal2.get_block(&block_digest).await;
             assert!(
                 post_restart.is_some(),
@@ -3850,22 +3913,47 @@ mod tests {
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
 
-            // The relay must take the staged proposal and broadcast its
-            // shards, seeding the shard engine's local cache.
+            // The relay must clone the staged proposal into the shard engine,
+            // seeding its local cache without transferring the durability ack.
             let subscription = shards.subscribe(commitment);
-            let _ = marshaled.broadcast(
-                commitment,
-                Plan::Propose {
-                    round: propose_round,
-                },
+            assert_eq!(
+                marshaled.broadcast(
+                    commitment,
+                    Plan::Propose {
+                        round: propose_round,
+                    },
+                ),
+                Feedback::Ok,
             );
             let cached = subscription
                 .await
                 .expect("shard engine must cache the relayed proposal");
             assert_eq!(cached.digest(), block_digest);
 
-            // The relayed proposal is persisted through the staged ack, so
-            // certification resolves durably without a flush.
+            let resolved = marshal
+                .subscribe_by_commitment(commitment, core::CommitmentFallback::Wait)
+                .await
+                .expect("core must resolve the whole block from the shard cache");
+            assert!(Arc::ptr_eq(&cached, &resolved));
+
+            assert_eq!(
+                marshaled.broadcast(
+                    commitment,
+                    Plan::Propose {
+                        round: propose_round,
+                    },
+                ),
+                Feedback::Ok,
+                "a repeated relay must retain the certification handshake"
+            );
+
+            assert!(
+                marshal.get_verified(propose_round).await.is_none(),
+                "relay must not persist a fresh coding proposal as verified"
+            );
+
+            // Certification persists the staged proposal and waits for its
+            // durable-sync handle before resolving.
             assert!(
                 marshaled
                     .certify(propose_round, commitment)
@@ -3873,6 +3961,119 @@ mod tests {
                     .await
                     .expect("certify result missing"),
                 "certify must succeed for the relayed proposal"
+            );
+
+            assert_eq!(
+                marshaled.broadcast(
+                    commitment,
+                    Plan::Propose {
+                        round: propose_round,
+                    },
+                ),
+                Feedback::Ok,
+                "relay after certification must use core forwarding"
+            );
+        });
+    }
+
+    /// Notarization and Certified may reach core in either order. Both paths
+    /// target the same single-item notarized archive slot, so the second
+    /// message must not append another full block payload.
+    #[test_traced("WARN")]
+    fn test_notarization_and_certified_orders_write_one_notarized_payload() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut marshal = setup.mailbox;
+            let shards = setup.extra;
+            let value_partition = format!("validator-{me}-cache-cache-0-notarized-value");
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let genesis = genesis_block();
+            let genesis_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+            let round_one = Round::new(Epoch::zero(), View::new(1));
+            let context_one = CodingCtx {
+                round: round_one,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment),
+            };
+            let block_one = make_coding_block(context_one, genesis.digest(), Height::new(1), 100);
+            let block_one_digest = block_one.digest();
+            let coded_one = CodedBlock::new(block_one, coding_config, &Sequential);
+            let commitment_one = coded_one.commitment();
+            let available_one = shards.subscribe(commitment_one);
+            shards.proposed(round_one, coded_one.clone());
+            available_one
+                .await
+                .expect("first block must enter shard cache");
+
+            let notarization_one = CodingHarness::make_notarization(
+                Proposal::new(round_one, View::zero(), commitment_one),
+                &schemes,
+                QUORUM,
+            );
+            CodingHarness::report_notarization(&mut marshal, notarization_one).await;
+            assert!(marshal.get_verified(round_one).await.is_none());
+            let after_notarization = partition_size(&context, &value_partition).await;
+
+            assert!(marshal.certified(round_one, coded_one).await);
+            let after_certified_duplicate = partition_size(&context, &value_partition).await;
+            assert_eq!(
+                after_certified_duplicate, after_notarization,
+                "Certified after Notarization appended a second block payload"
+            );
+
+            let round_two = Round::new(Epoch::zero(), View::new(2));
+            let context_two = CodingCtx {
+                round: round_two,
+                leader: me,
+                parent: (View::new(1), commitment_one),
+            };
+            let block_two = make_coding_block(context_two, block_one_digest, Height::new(2), 200);
+            let coded_two = CodedBlock::new(block_two, coding_config, &Sequential);
+            let commitment_two = coded_two.commitment();
+            let available_two = shards.subscribe(commitment_two);
+            shards.proposed(round_two, coded_two.clone());
+            available_two
+                .await
+                .expect("second block must enter shard cache");
+
+            assert!(marshal.certified(round_two, coded_two).await);
+            let after_certified = partition_size(&context, &value_partition).await;
+            assert!(
+                after_certified > after_certified_duplicate,
+                "second certified block did not append its payload"
+            );
+
+            let notarization_two = CodingHarness::make_notarization(
+                Proposal::new(round_two, View::new(1), commitment_two),
+                &schemes,
+                QUORUM,
+            );
+            CodingHarness::report_notarization(&mut marshal, notarization_two).await;
+            assert!(marshal.get_verified(round_two).await.is_none());
+            let after_notarization_duplicate = partition_size(&context, &value_partition).await;
+            assert_eq!(
+                after_notarization_duplicate, after_certified,
+                "Notarization after Certified appended a second block payload"
             );
         });
     }
@@ -3884,8 +4085,7 @@ mod tests {
     /// commitment may already have been broadcast, so proposing a rebuilt
     /// block for the same round would equivocate. The recovered proposal
     /// must also be staged for the relay, so the broadcast re-sends its
-    /// shards and certification resolves through the deduplicated
-    /// re-persist.
+    /// shards and certification obtains the covering verified sync handle.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -3964,17 +4164,16 @@ mod tests {
                 "propose must reuse the block marshal already persisted for this round"
             );
 
-            // The relay broadcast must find the recovered proposal staged and
-            // re-persist it (a dedup no-op whose handle covers the pre-crash
-            // write), resolving the certification gate registered by the
-            // recovery path.
+            // The relay broadcast must find the recovered proposal staged.
+            // Certification then obtains a handle covering the pre-crash
+            // verified write without running application verification.
             let _ = marshaled.broadcast(commitment, Plan::Propose { round });
             let certify_rx = marshaled.certify(round, commitment).await;
             select! {
                 result = certify_rx => {
                     assert!(
                         result.expect("certify result missing"),
-                        "recovered proposal must certify through the relay handshake"
+                        "recovered proposal must certify through its staged handshake"
                     );
                 },
                 _ = verify_started => {

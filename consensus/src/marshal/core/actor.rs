@@ -138,6 +138,9 @@ where
     cleared_acks: Vec<(Height, V::Commitment)>,
     // Highest known finalized height
     tip: Height,
+    // Highest contiguous finalized block that was durable during startup, above the processed
+    // floor. This does not advance with live finalizations.
+    startup_replay_tip: Option<Height>,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
     // Defers application dispatch of finalized-archive writes until a sync
@@ -262,6 +265,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 cleared_acks: Vec::new(),
                 tip: Height::zero(),
+                startup_replay_tip: None,
                 block_subscriptions: Subscriptions::new(),
                 dispatch_gate: DispatchGate::default(),
                 cache,
@@ -426,6 +430,14 @@ where
             if repaired {
                 self = self.sync_finalized().await;
             }
+
+            // Recovery may need to reconstruct finalized blocks whose application
+            // acknowledgements were interrupted by the prior shutdown. Capture the durable,
+            // gap-free suffix once, before live mailbox traffic can extend the finalized tip.
+            self.startup_replay_tip = self
+                .finalized_blocks
+                .next_gap(self.floor.processed_height().next())
+                .0;
 
             // Attempt to dispatch the next finalized block to the application, if it is ready.
             self = self.try_dispatch_blocks(&mut application).await;
@@ -857,6 +869,9 @@ where
             }
             Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
+            }
+            Message::GetStartupReplayTip { response, .. } => {
+                response.send_lossy(self.startup_replay_tip);
             }
             Message::HintFinalized {
                 height, targets, ..

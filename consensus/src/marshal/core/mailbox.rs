@@ -70,6 +70,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the latest processed height.
         response: oneshot::Sender<Option<Height>>,
     },
+    /// A request to retrieve the contiguous finalized suffix available when the actor started.
+    GetStartupReplayTip {
+        /// The span carried with this request.
+        span: Span,
+        /// A channel to send the startup replay tip, if it extends above the processed floor.
+        response: oneshot::Sender<Option<Height>>,
+    },
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
@@ -293,6 +300,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
             | Self::GetProcessedHeight { span, .. }
+            | Self::GetStartupReplayTip { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -307,6 +315,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::GetStartupReplayTip { .. } => "get_startup_replay_tip",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -348,7 +357,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessedHeight { .. } => false,
+            | Self::GetProcessedHeight { .. }
+            | Self::GetStartupReplayTip { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -369,6 +379,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response, .. } => response.is_closed(),
+            Self::GetStartupReplayTip { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -708,6 +719,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
+    /// Retrieves the highest contiguous finalized block that was durable when marshal started.
+    ///
+    /// This frozen watermark excludes finalizations learned after startup. It is used to replay
+    /// locally archived, unacknowledged blocks before an application publishes startup state.
+    pub async fn get_startup_replay_tip(&self) -> Option<Height> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetStartupReplayTip {
+            span: info_span!("marshal.mailbox.get_startup_replay_tip"),
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
     /// Hints that a finalized block may be available at the given height.
     ///
     /// This method will request the finalization from the network via the resolver
@@ -926,18 +950,31 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         handle.durable(round, "verified").await
     }
 
-    /// Notifies the actor that a block has been certified.
+    /// Notifies the actor that a block has been certified, delivering the
+    /// covering durable-sync handle through `ack` without awaiting it.
     ///
-    /// Returns after the block is durably persisted.
-    #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn certified(&self, round: Round, block: impl Into<Arc<V::Block>>) -> bool {
-        let (ack, receiver) = oneshot::channel();
+    /// A dropped `ack` (the mailbox is closed) abandons the handshake.
+    pub(crate) fn certified_deferred(
+        &self,
+        round: Round,
+        block: impl Into<Arc<V::Block>>,
+        ack: oneshot::Sender<Handle<()>>,
+    ) {
         let _ = self.sender.enqueue(Message::Certified {
             span: info_span!("marshal.mailbox.certified", round = %round),
             round,
             block: block.into(),
             ack,
         });
+    }
+
+    /// Notifies the actor that a block has been certified.
+    ///
+    /// Returns after the block is durably persisted.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn certified(&self, round: Round, block: impl Into<Arc<V::Block>>) -> bool {
+        let (ack, receiver) = oneshot::channel();
+        self.certified_deferred(round, block, ack);
         let Ok(handle) = receiver.await else {
             return false;
         };
@@ -1299,6 +1336,10 @@ mod tests {
             assert!(receiver.await.is_err());
             assert!(!mailbox.verified(round(2), block(2)).await);
             assert!(!mailbox.certified(round(3), block(3)).await);
+
+            let (ack, receiver) = oneshot::channel();
+            mailbox.certified_deferred(round(4), block(4), ack);
+            assert!(receiver.await.is_err());
         });
     }
 

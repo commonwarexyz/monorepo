@@ -87,23 +87,20 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
             let mut instances = Vec::new();
             for reservation in resp.reservations.unwrap_or_default() {
                 for instance in reservation.instances.unwrap_or_default() {
-                    if let Some(tags) = &instance.tags {
-                        if let Some(name_tag) =
+                    if let Some(tags) = &instance.tags
+                        && let Some(name_tag) =
                             tags.iter().find(|t| t.key.as_deref() == Some("name"))
-                        {
-                            if name_tag.value.as_deref() != Some(MONITORING_NAME) {
-                                if let Some(public_ip) = &instance.public_ip_address {
-                                    let name = name_tag.value.clone().unwrap();
-                                    info!(
-                                        region = region.as_str(),
-                                        name = name.as_str(),
-                                        ip = public_ip.as_str(),
-                                        "found instance"
-                                    );
-                                    instances.push((name, public_ip.clone()));
-                                }
-                            }
-                        }
+                        && name_tag.value.as_deref() != Some(MONITORING_NAME)
+                        && let Some(public_ip) = &instance.public_ip_address
+                    {
+                        let name = name_tag.value.clone().unwrap();
+                        info!(
+                            region = region.as_str(),
+                            name = name.as_str(),
+                            ip = public_ip.as_str(),
+                            "found instance"
+                        );
+                        instances.push((name, public_ip.clone()));
                     }
                 }
             }

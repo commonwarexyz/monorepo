@@ -479,7 +479,6 @@ where
 /// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// applied state.
-///
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -551,6 +550,10 @@ where
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
+    }
+
+    async fn flush(self) -> Result<Self, Error<F>> {
+        self.flush().await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -659,6 +662,10 @@ where
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
         Ok(db)
+    }
+
+    async fn flush(self) -> Result<Self, Error<F>> {
+        self.flush().await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {

@@ -51,6 +51,11 @@ tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"], optional = true }
 
+[dev-dependencies]
+aws-smithy-runtime-api.workspace = true
+aws-smithy-types.workspace = true
+http.workspace = true
+
 [[bin]]
 name = "deployer"
 path = "src/main.rs"

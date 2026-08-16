@@ -4,7 +4,7 @@ use crate::stateful::{
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
-    CertifiableBlock, Heightable, Roundable,
+    Block as _, CertifiableBlock, Heightable,
     marshal::{
         Identifier,
         core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
@@ -20,6 +20,7 @@ use commonware_storage::{
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand_core::Rng;
+use std::future::Future;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};
@@ -51,7 +52,7 @@ where
     S: Scheme,
     C: Digest,
 {
-    /// Returns the completed state sync height, if state sync has finished.
+    /// Returns the durable database replay base, if state sync has finished.
     pub(crate) const fn sync_height(&self) -> Option<Height> {
         match self {
             Self::InProgress(_) => None,
@@ -203,7 +204,7 @@ where
         self.partition_prefix.as_str()
     }
 
-    /// Returns the completed state sync height, if state sync has finished.
+    /// Returns the durable database replay base, if state sync has finished.
     pub(crate) fn sync_height(&self) -> Option<Height> {
         self.metadata
             .get(&SYNC_STATE_KEY)
@@ -231,8 +232,6 @@ where
     ///
     /// This must be persisted before any state sync database mutation begins so the database
     /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
-    /// The storage target may still advance to marshal's durable processed height during startup.
-    ///
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from the same or a later consensus round.
     pub(crate) async fn begin_sync(mut self, floor: Finalization<S, C>) -> Self {
@@ -263,11 +262,12 @@ where
         self
     }
 
-    /// Records that one-time state sync completed at the given height.
+    /// Records a durable database replay base at the given height.
     ///
-    /// Once this height is set, future startups skip peer state sync and initialize
-    /// from the later of this height and marshal's processed height instead. This
-    /// action is irreversible.
+    /// Once this height is set, future startups skip peer state sync, reopen the
+    /// databases at this block, and replay marshal's retained finalized suffix.
+    /// The height may advance only after the database state is durable and before
+    /// marshal prunes any block required by the new replay base.
     pub(crate) async fn set_complete(mut self, height: Height) -> Self {
         if let Some(SyncState::Complete(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
             assert!(
@@ -352,103 +352,168 @@ where
     }
 }
 
-/// The result of initializing state from marshal on startup.
-pub(crate) struct StartupResult<E, A>
+/// Startup recovery result carrying the replay-base metadata into normal processing.
+pub(crate) struct RecoveryResult<E, A, S, C>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Context,
     A: Application<E>,
+    S: Scheme,
+    C: Digest,
 {
-    /// The initialized database set and anchor.
+    /// The initialized database set and recovered anchor.
     pub sync: SyncResult<E, A>,
 
-    /// Finalized marshal blocks at or below this height are already reflected
-    /// in the initialized database set and should be acknowledged without
-    /// applying them again.
+    /// Finalized blocks at or below this height are already reflected in the databases.
     pub skip_finalized_until: Option<Height>,
+
+    /// Exclusive lower bound of startup-replayed blocks whose finalized hooks already ran.
+    /// When present, it is bounded above by `skip_finalized_until`.
+    pub replayed_finalized_after: Option<Height>,
+
+    /// Durable replay-base metadata owned by normal processing after startup.
+    pub sync_metadata: StateSyncMetadata<E, S, C>,
 }
 
-/// Initializes databases at marshal's current startup anchor.
-///
-/// This initialization route is used when startup should recover from marshal
-/// instead of running peer state sync. If marshal has not yet recorded a
-/// processed height, this falls back to marshal's genesis block so fresh boots
-/// and post-sync restarts share the same path.
-///
-/// If the databases are found to be inconsistent with the marshal floor, this
-/// function will attempt to repair by rewinding the databases which are ahead. If the
-/// databases are entirely inconsistent, this function will panic.
-pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
+/// Reopens databases at an inclusive durable base and replays a finalized suffix.
+async fn replay_databases_from_base<E, A, F, Fut>(
+    context: &E,
+    db_config: <A::Databases as DatabaseSet<E>>::Config,
+    application: &mut A,
+    base_block: A::Block,
+    replay_tip: Height,
+    mut get_block: F,
+) -> SyncResult<E, A>
+where
+    E: Rng + Spawner + Context,
+    A: Application<E>,
+    F: FnMut(Height) -> Fut + Send,
+    Fut: Future<Output = Option<A::Block>> + Send,
+{
+    assert!(
+        replay_tip >= base_block.height(),
+        "replay tip cannot precede the durable base",
+    );
+
+    let databases = A::Databases::init(context.child("db_set"), db_config).await;
+    let base_targets = A::sync_targets(&base_block);
+    databases.rewind_to_targets(base_targets.clone()).await;
+    assert!(
+        databases.committed_targets().await == base_targets,
+        "databases must match the durable replay base after rewind",
+    );
+
+    let mut previous = base_block;
+    while previous.height() < replay_tip {
+        let expected_height = previous.height().next();
+        let block = get_block(expected_height)
+            .await
+            .expect("marshal must retain every finalized block after the replay base");
+        assert!(
+            block.height() == expected_height,
+            "archived replay blocks must have contiguous heights",
+        );
+        assert!(
+            block.parent() == previous.digest(),
+            "archived replay blocks must have contiguous parents",
+        );
+
+        let batches = databases.new_batches().await;
+        let merkleized = application
+            .apply((context.child("apply"), block.context()), &block, batches)
+            .await;
+        let targets = A::sync_targets(&block);
+        // Application execution only constructs batches. Validate their commitments before the
+        // database set publishes the replayed state.
+        assert!(
+            A::Databases::matches_sync_targets(&merkleized, &targets),
+            "replayed database batches must match block sync targets",
+        );
+        databases.apply(merkleized).await;
+        application
+            .finalized(
+                (context.child("finalized"), block.context()),
+                &block,
+                databases.readers(),
+            )
+            .await;
+
+        previous = block;
+    }
+
+    let anchor = Anchor::from(&previous);
+    SyncResult { databases, anchor }
+}
+
+/// Initializes databases from their durable replay base and reconstructs marshal's startup tip.
+pub(crate) async fn recover_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
-) -> StartupResult<E, A>
+    application: &mut A,
+) -> RecoveryResult<E, A, S, V::Commitment>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    assert!(
+        !sync_metadata.in_progress(),
+        "startup replay cannot replace an interrupted state sync",
+    );
     let sync_height = sync_metadata.sync_height();
+    let base_height = sync_height.unwrap_or_else(Height::zero);
     let processed_height = marshal.get_processed_height().await;
-    let skip_finalized_until = match (sync_height, processed_height) {
-        (Some(sync_height), Some(processed_height)) if processed_height < sync_height => {
-            Some(sync_height)
-        }
-        (Some(sync_height), None) => Some(sync_height),
-        _ => None,
-    };
-    let marshal_floor = sync_height
+    let startup_replay_tip = marshal.get_startup_replay_tip().await;
+    let replay_tip = [processed_height, startup_replay_tip]
         .into_iter()
-        .chain(processed_height)
-        .max()
-        .unwrap_or_else(Height::zero);
-    let floor_block = if processed_height == Some(marshal_floor) {
-        V::into_inner(processed_anchor(marshal, marshal_floor).await)
-    } else {
-        V::into_inner(
+        .flatten()
+        .fold(base_height, Height::max);
+    let skip_finalized_until = [sync_height, startup_replay_tip]
+        .into_iter()
+        .flatten()
+        .any(|height| processed_height.is_none_or(|processed| height > processed))
+        .then_some(replay_tip);
+    let replayed_finalized_after =
+        (skip_finalized_until.is_some() && replay_tip > base_height).then_some(base_height);
+
+    let base_block = marshal
+        .get_block(Identifier::Height(base_height))
+        .await
+        .expect("marshal must retain the durable replay base block");
+    let base_block = V::into_inner(base_block);
+    assert!(
+        base_block.height() == base_height,
+        "marshal must return the exact durable replay base block",
+    );
+
+    let sync = replay_databases_from_base(
+        context,
+        db_config,
+        application,
+        base_block,
+        replay_tip,
+        |height| async move {
             marshal
-                .get_block(Identifier::Height(marshal_floor))
+                .get_block(Identifier::Height(height))
                 .await
-                .expect("marshal must return completed state sync block"),
-        )
+                .map(V::into_inner)
+        },
+    )
+    .await;
+
+    let sync_metadata = if sync_height.is_none() {
+        sync_metadata.set_complete(base_height).await
+    } else {
+        sync_metadata
     };
-    let skip_finalized_until = skip_finalized_until
-        .into_iter()
-        .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
-        .max();
 
-    let databases = A::Databases::init(context.child("db_set"), db_config).await;
-    let processed_targets = A::sync_targets(&floor_block);
-
-    // In the case that the committed targets do not match the marshal floor, we may
-    // have suffered a crash that left the set in an inconsistent state. In this case,
-    // we attempt to repair by rewinding the databases back to the marshal floor. If
-    // the rewind fails to produce a consistent state, we must crash. This can occur
-    // if the databases were corrupted or pruned too aggressively.
-    let committed = databases.committed_targets().await;
-    if committed != processed_targets {
-        databases.rewind_to_targets(processed_targets.clone()).await;
-        let rewound_targets = databases.committed_targets().await;
-        assert!(
-            rewound_targets == processed_targets,
-            "databases must be consistent with marshal floor after rewind"
-        );
-    }
-
-    // Once startup has aligned databases with marshal, future boots should skip peer
-    // state sync and recover from the later of this anchor and marshal's durable
-    // processed height.
-    sync_metadata.set_complete(floor_block.height()).await;
-
-    let anchor = Anchor {
-        height: floor_block.height(),
-        round: floor_block.context().round(),
-        digest: floor_block.digest(),
-    };
-    StartupResult {
-        sync: SyncResult { databases, anchor },
+    RecoveryResult {
+        sync,
         skip_finalized_until,
+        replayed_finalized_after,
+        sync_metadata,
     }
 }
 

@@ -69,7 +69,7 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
             "cleaning up S3 deployment data"
         );
         let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
-        let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, &tag);
+        let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, tag);
         match delete_prefix(&s3_client, &bucket_name, &deployment_prefix).await {
             Ok(()) => {
                 info!(

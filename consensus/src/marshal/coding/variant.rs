@@ -161,7 +161,7 @@ where
 
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed_shared(round, block);
+        let _ = self.proposed_shared(round, block);
     }
 }
 

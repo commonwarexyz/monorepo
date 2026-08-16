@@ -257,16 +257,24 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
         let (marshal, _) = self.marshal;
-        let syncer::StartupResult {
+        let mut application = self.application;
+        let syncer::RecoveryResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
-        } = syncer::init_databases_from_marshal::<E, A, S, V>(
+            replayed_finalized_after,
+            sync_metadata,
+        } = syncer::recover_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &marshal,
             self.db_config,
             self.plan.into_sync_metadata(),
+            &mut application,
         )
         .await;
+
+        // Subscribers and resolvers receive a database set whose applied-state readers are ready,
+        // including when recovery has no finalized suffix to replay.
+        drop(databases.new_batches().await);
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs. The
@@ -276,15 +284,17 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let processor = Processor::new(application, databases, anchor, metrics, self.pruning);
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
+            sync_metadata,
             processor,
             deferred_verifications: Vec::new(),
             skip_finalized_until,
+            replayed_finalized_after,
         }
         .start()
         .await

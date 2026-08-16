@@ -5,7 +5,7 @@ use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Resolver as _, p2p};
 use commonware_runtime::{
@@ -345,7 +345,7 @@ where
     async fn handle_produce(
         &mut self,
         key: Request<F>,
-        response_tx: oneshot::Sender<bytes::Bytes>,
+        mut response_tx: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
@@ -357,7 +357,14 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let result = database.serve(key).await;
+        let result = select! {
+            result = database.serve(key) => Some(result),
+            _ = response_tx.closed() => None,
+        };
+        let Some(result) = result else {
+            self.metrics.serve_requests.inc(status::Status::Dropped);
+            return;
+        };
 
         let Ok((response, _feedback_tx)) = result else {
             self.metrics.serve_requests.inc(status::Status::Failure);
@@ -386,6 +393,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, channel::oneshot};
+    use futures::poll;
     use std::time::Duration;
 
     #[derive(Clone, Debug)]
@@ -564,6 +572,62 @@ mod tests {
             actor.handle_produce(request, response_tx).await;
 
             assert!(response_rx.await.is_err());
+        });
+    }
+
+    #[test]
+    fn cancelled_produce_releases_database_serve() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            for (suffix, db_context, actor_context, boundary) in [
+                (
+                    "operations",
+                    "resolver_db_operations",
+                    "actor_operations",
+                    false,
+                ),
+                ("boundary", "resolver_db_boundary", "actor_boundary", true),
+            ] {
+                let db = init_db(
+                    context.child(db_context),
+                    &format!("resolver-cancel-{suffix}"),
+                )
+                .await;
+                let size = db.read().await.bounds().end;
+                let request = if boundary {
+                    Request::Boundary {
+                        size,
+                        start: Location::new(0),
+                    }
+                } else {
+                    test_request_at(size)
+                };
+                let (mut actor, _mailbox) =
+                    TestActor::new(context.child(actor_context), test_config(Some(db.clone())));
+
+                let (slot, database) = db.write().await;
+                let (response_tx, response_rx) = oneshot::channel();
+                let mut produce = Box::pin(actor.handle_produce(request, response_tx));
+                assert!(poll!(&mut produce).is_pending());
+                drop(response_rx);
+                commonware_macros::select! {
+                    _ = &mut produce => {},
+                    _ = context.sleep(Duration::from_millis(100)) => {
+                        panic!("cancelled {suffix} request retained the database serve future");
+                    },
+                }
+                drop(produce);
+                slot.put(database);
+
+                let (response_tx, response_rx) = oneshot::channel();
+                actor.handle_produce(request, response_tx).await;
+                assert!(
+                    !response_rx
+                        .await
+                        .expect("subsequent request should complete")
+                        .is_empty(),
+                    "subsequent {suffix} response should not be empty",
+                );
+            }
         });
     }
 

@@ -229,7 +229,9 @@ mod tests {
     use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
-        actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
+        actor::syncer::{
+            StateSyncMetadata, recover_databases_from_marshal, replay_databases_from_base,
+        },
         db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
@@ -246,7 +248,7 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        ed25519,
+        Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_runtime::{
@@ -255,8 +257,9 @@ mod tests {
     use commonware_utils::{
         NZU64, NZUsize,
         channel::{oneshot, ring},
+        sync::Mutex,
     };
-    use std::{convert::Infallible, time::Duration};
+    use std::{convert::Infallible, sync::Arc, time::Duration};
 
     /// Database set whose sync holds the tip-update ring receiver without draining it, then
     /// completes once the actor has parked a forwarded update in the ring buffer.
@@ -384,6 +387,469 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum ReplayEvent {
+        Rewind(u64),
+        ApplicationApply(u64),
+        DatabaseApply(u64),
+        Finalized(u64),
+    }
+
+    #[derive(Clone)]
+    struct ReplayConfig {
+        opened_at: u64,
+        events: Arc<Mutex<Vec<ReplayEvent>>>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ReplayUnmerkleized(u64);
+
+    #[derive(Clone, Copy)]
+    struct ReplayMerkleized(u64);
+
+    #[derive(Clone)]
+    struct ReplaySet {
+        height: Arc<Mutex<u64>>,
+        events: Arc<Mutex<Vec<ReplayEvent>>>,
+    }
+
+    impl DatabaseSet<deterministic::Context> for ReplaySet {
+        type Unmerkleized = ReplayUnmerkleized;
+        type Merkleized = ReplayMerkleized;
+        type Readers = u64;
+        type Config = ReplayConfig;
+        type SyncTargets = u64;
+
+        async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
+            Self {
+                height: Arc::new(Mutex::new(config.opened_at)),
+                events: config.events,
+            }
+        }
+
+        fn initial_sync_targets() -> Self::SyncTargets {
+            0
+        }
+
+        async fn new_batches(&self) -> Self::Unmerkleized {
+            ReplayUnmerkleized(*self.height.lock())
+        }
+
+        fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
+            ReplayUnmerkleized(parent.0)
+        }
+
+        fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool {
+            batches.0 == *targets
+        }
+
+        fn readers(&self) -> Self::Readers {
+            *self.height.lock()
+        }
+
+        async fn apply(&self, batches: Self::Merkleized) {
+            let mut height = self.height.lock();
+            assert_eq!(
+                batches.0,
+                height.checked_add(1).expect("test height overflow"),
+                "replay database applies must be contiguous",
+            );
+            *height = batches.0;
+            self.events
+                .lock()
+                .push(ReplayEvent::DatabaseApply(batches.0));
+        }
+
+        async fn finalize(&self) -> Barrier {
+            unreachable!("startup replay must not finalize per block")
+        }
+
+        async fn prune(&self, _targets: &Self::SyncTargets) {
+            unreachable!("ReplaySet only serves the startup recovery harness")
+        }
+
+        async fn committed_targets(&self) -> Self::SyncTargets {
+            *self.height.lock()
+        }
+
+        async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
+            let mut height = self.height.lock();
+            assert!(
+                targets <= *height,
+                "test database cannot advance through rewind",
+            );
+            *height = targets;
+            self.events.lock().push(ReplayEvent::Rewind(targets));
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReplayApp {
+        events: Arc<Mutex<Vec<ReplayEvent>>>,
+        mismatch_at: Option<Height>,
+    }
+
+    impl Application<deterministic::Context> for ReplayApp {
+        type SigningScheme = TestScheme;
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+        type Block = TestBlock;
+        type Databases = ReplaySet;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            unreachable!("ReplayApp only serves the startup recovery harness")
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: ReplayUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            unreachable!("ReplayApp only serves the startup recovery harness")
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: ReplayUnmerkleized,
+        ) -> Option<ReplayMerkleized> {
+            unreachable!("ReplayApp only serves the startup recovery harness")
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            batches: ReplayUnmerkleized,
+        ) -> ReplayMerkleized {
+            let height = block.height();
+            assert_eq!(
+                height.get(),
+                batches.0.checked_add(1).expect("test height overflow"),
+                "application replay must be contiguous",
+            );
+            self.events
+                .lock()
+                .push(ReplayEvent::ApplicationApply(height.get()));
+            ReplayMerkleized(if self.mismatch_at == Some(height) {
+                height.next().get()
+            } else {
+                height.get()
+            })
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            applied_height: u64,
+        ) {
+            assert_eq!(applied_height, block.height().get());
+            self.events
+                .lock()
+                .push(ReplayEvent::Finalized(applied_height));
+        }
+    }
+
+    async fn marshal_with_chain(
+        mut context: deterministic::Context,
+        prefix: &str,
+        tip: u64,
+    ) -> (MarshalFixture, Vec<TestBlock>) {
+        let fixture = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
+        let marshal_fixture = fixtures::marshal_fixture(
+            context.child("marshal"),
+            prefix,
+            fixture.schemes[0].clone(),
+            None,
+            NZUsize!(1),
+            true,
+        )
+        .await;
+        let mut marshal = marshal_fixture.mailbox.clone();
+        let mut blocks = vec![TestBlock::new(0, 0)];
+        for height in 1..=tip {
+            let block = TestBlock::child(
+                blocks.last().expect("genesis block must exist"),
+                height as u8,
+            );
+            let finalization = fixtures::finalization(&fixture, height, block.digest());
+            assert!(
+                marshal
+                    .verified(finalization.proposal.round, block.clone())
+                    .await
+            );
+            let _ = marshal.report(Activity::Finalization(finalization));
+            while marshal.get_processed_height().await != Some(block.height()) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            blocks.push(block);
+        }
+        (marshal_fixture, blocks)
+    }
+
+    #[test]
+    fn startup_replays_processed_suffix_from_durable_base() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let base = Height::new(2);
+            let (fixture, blocks) =
+                marshal_with_chain(context.child("fixture"), "syncer-replay", 5).await;
+            let metadata =
+                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncer-replay")
+                    .await
+                    .set_complete(base)
+                    .await;
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut application = ReplayApp {
+                events: events.clone(),
+                mismatch_at: None,
+            };
+
+            let startup = recover_databases_from_marshal::<
+                deterministic::Context,
+                ReplayApp,
+                TestScheme,
+                TestVariant,
+            >(
+                &context,
+                &fixture.mailbox,
+                ReplayConfig {
+                    opened_at: base.get(),
+                    events: events.clone(),
+                },
+                metadata,
+                &mut application,
+            )
+            .await;
+
+            assert_eq!(startup.sync.anchor.height, Height::new(5));
+            assert_eq!(startup.sync.anchor.digest, blocks[5].digest());
+            assert_eq!(startup.sync.databases.committed_targets().await, 5);
+            assert_eq!(startup.skip_finalized_until, None);
+            assert_eq!(startup.replayed_finalized_after, None);
+            assert_eq!(startup.sync_metadata.sync_height(), Some(base));
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    ReplayEvent::Rewind(2),
+                    ReplayEvent::ApplicationApply(3),
+                    ReplayEvent::DatabaseApply(3),
+                    ReplayEvent::Finalized(3),
+                    ReplayEvent::ApplicationApply(4),
+                    ReplayEvent::DatabaseApply(4),
+                    ReplayEvent::Finalized(4),
+                    ReplayEvent::ApplicationApply(5),
+                    ReplayEvent::DatabaseApply(5),
+                    ReplayEvent::Finalized(5),
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn startup_replays_durable_finalizations_before_acknowledgement() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let prefix = "syncer-replay-unacknowledged";
+            let scheme = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let finalization = fixtures::finalization(&scheme, 1, block.digest());
+            let fixture = fixtures::marshal_fixture_with_held_finalization(
+                context.child("marshal"),
+                prefix,
+                scheme.schemes[0].clone(),
+                &block,
+                finalization,
+                NZUsize!(8),
+            )
+            .await;
+
+            assert_eq!(
+                fixture.mailbox.get_startup_replay_tip().await,
+                Some(Height::new(1)),
+            );
+            assert_eq!(fixture.mailbox.get_processed_height().await, None);
+
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let metadata =
+                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, prefix).await;
+            let mut application = ReplayApp {
+                events: events.clone(),
+                mismatch_at: None,
+            };
+            let startup = recover_databases_from_marshal::<
+                deterministic::Context,
+                ReplayApp,
+                TestScheme,
+                TestVariant,
+            >(
+                &context,
+                &fixture.mailbox,
+                ReplayConfig {
+                    opened_at: 0,
+                    events: events.clone(),
+                },
+                metadata,
+                &mut application,
+            )
+            .await;
+
+            assert_eq!(startup.sync.anchor.height, Height::new(1));
+            assert_eq!(startup.sync.anchor.digest, block.digest());
+            assert_eq!(startup.sync.databases.committed_targets().await, 1);
+            assert_eq!(startup.skip_finalized_until, Some(Height::new(1)));
+            assert_eq!(startup.replayed_finalized_after, Some(Height::zero()),);
+            assert_eq!(startup.sync_metadata.sync_height(), Some(Height::zero()));
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    ReplayEvent::Rewind(0),
+                    ReplayEvent::ApplicationApply(1),
+                    ReplayEvent::DatabaseApply(1),
+                    ReplayEvent::Finalized(1),
+                ],
+            );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "marshal must retain every finalized block after the replay base")]
+    fn startup_replay_rejects_archived_gap() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let base = TestBlock::new(2, 2);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut application = ReplayApp {
+                events: events.clone(),
+                mismatch_at: None,
+            };
+            let _ = replay_databases_from_base::<deterministic::Context, ReplayApp, _, _>(
+                &context,
+                ReplayConfig {
+                    opened_at: 2,
+                    events,
+                },
+                &mut application,
+                base,
+                Height::new(4),
+                |_| async { None },
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "marshal must retain the durable replay base block")]
+    fn startup_replay_rejects_missing_base() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (fixture, _) =
+                marshal_with_chain(context.child("fixture"), "syncer-replay-missing-base", 0).await;
+            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                "syncer-replay-missing-base",
+            )
+            .await
+            .set_complete(Height::new(2))
+            .await;
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut application = ReplayApp {
+                events: events.clone(),
+                mismatch_at: None,
+            };
+
+            let _ = recover_databases_from_marshal::<
+                deterministic::Context,
+                ReplayApp,
+                TestScheme,
+                TestVariant,
+            >(
+                &context,
+                &fixture.mailbox,
+                ReplayConfig {
+                    opened_at: 2,
+                    events,
+                },
+                metadata,
+                &mut application,
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "archived replay blocks must have contiguous parents")]
+    fn startup_replay_rejects_parent_mismatch() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut application = ReplayApp {
+                events: events.clone(),
+                mismatch_at: None,
+            };
+            let wrong_child = TestBlock::new(3, 3);
+            let _ = replay_databases_from_base::<deterministic::Context, ReplayApp, _, _>(
+                &context,
+                ReplayConfig {
+                    opened_at: 2,
+                    events,
+                },
+                &mut application,
+                TestBlock::new(2, 2),
+                Height::new(3),
+                move |_| {
+                    let wrong_child = wrong_child.clone();
+                    async move { Some(wrong_child) }
+                },
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "replayed database batches must match block sync targets")]
+    fn startup_replay_rejects_target_mismatch_before_database_apply() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let base = Height::new(1);
+            let (fixture, _) =
+                marshal_with_chain(context.child("fixture"), "syncer-replay-mismatch", 3).await;
+            let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                &context,
+                "syncer-replay-mismatch",
+            )
+            .await
+            .set_complete(base)
+            .await;
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut application = ReplayApp {
+                events: events.clone(),
+                mismatch_at: Some(Height::new(2)),
+            };
+
+            let _ = recover_databases_from_marshal::<
+                deterministic::Context,
+                ReplayApp,
+                TestScheme,
+                TestVariant,
+            >(
+                &context,
+                &fixture.mailbox,
+                ReplayConfig {
+                    opened_at: base.get(),
+                    events,
+                },
+                metadata,
+                &mut application,
+            )
+            .await;
+        });
+    }
+
     #[test]
     fn resolved_floor_covers_durable_marshal_progress() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
@@ -451,18 +917,23 @@ mod tests {
                 &context,
                 "syncer-floor-install",
             )
+            .await
+            .set_complete(Height::new(2))
             .await;
-            let startup = init_databases_from_marshal::<
+            let mut application = WedgeApp;
+            let startup = recover_databases_from_marshal::<
                 deterministic::Context,
                 WedgeApp,
                 TestScheme,
                 TestVariant,
-            >(&context, &marshal, 2, metadata)
+            >(&context, &marshal, 2, metadata, &mut application)
             .await;
 
             assert_eq!(startup.sync.anchor.height, Height::new(2));
             assert_eq!(startup.sync.databases.committed_targets().await, 2);
             assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
+            assert_eq!(startup.replayed_finalized_after, None);
+            assert_eq!(startup.sync_metadata.sync_height(), Some(Height::new(2)));
         });
     }
 
