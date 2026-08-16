@@ -2118,7 +2118,7 @@ where
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2153,6 +2153,35 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+
+        // Callers without a supplied prefetch (the plain merkleize; staged paths overlap
+        // the gather with update resolution instead) gather the committed-prefix
+        // candidates here and overlap their read with the emit phase below, mirroring the
+        // ordered path. Steps bound: one per staged update and per mutation on a key alive
+        // in the snapshot, plus one for the commit. The undercount from ancestor-resolved
+        // writes is safe (the raise falls back to the live scan when the prefix runs out).
+        let inline = if prefetched.is_none() {
+            let steps_bound = staged_updates.len()
+                + mutations
+                    .keys()
+                    .filter(|key| db.snapshot.get(key).next().is_some())
+                    .count()
+                + 1;
+            let scan_from = m.base_inactivity_floor_loc;
+            let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+            let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
+            let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
+            Some((locs, next_scan))
+        } else {
+            None
+        };
+        let raw: Vec<u64> = inline
+            .as_ref()
+            .map(|(locs, _)| locs.iter().map(|loc| **loc).collect())
+            .unwrap_or_default();
+        let read = db.log.read_many_sharded(&raw);
+
+        let emit = async {
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
@@ -2278,6 +2307,28 @@ where
             active_keys_delta += 1;
         }
 
+            Ok::<_, crate::qmdb::Error<F>>((
+                ops,
+                diff,
+                superseded_locs,
+                active_keys_delta,
+                user_steps,
+            ))
+        };
+
+        // The prefetch read's misses resolve from disk while the emit phase runs.
+        let (shards, emitted) = futures::join!(read, emit);
+        let (ops, diff, superseded_locs, active_keys_delta, user_steps) = emitted?;
+        let shards = shards?;
+        let prefetched = match inline {
+            Some((locs, next_scan)) if !locs.is_empty() => Some(PrefetchedCandidates {
+                locs,
+                shards,
+                next_scan,
+            }),
+            _ => prefetched,
+        };
+
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish_pending(
             ops,
@@ -2365,7 +2416,7 @@ where
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<PendingMerkleize<F, H, update::Ordered<K, V>, S>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2373,6 +2424,28 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+
+        // Overlap the emit phase below with a committed-prefix candidate prefetch for the
+        // floor raise (parity with the unordered path's `resolve_updates_prefetched`; see
+        // [`PrefetchedCandidates`]). Steps bound: every staged update is location-resolved
+        // and consumes a step, as does each mutation on a key alive in the snapshot, plus
+        // one for the commit. Predecessor rewrites also consume steps but are unknowable
+        // before emission; the undercount is safe (the raise falls back to the live scan
+        // when the prefetched prefix runs out).
+        let steps_bound = staged_updates.len()
+            + mutations
+                .keys()
+                .filter(|key| db.snapshot.get(key).next().is_some())
+                .count()
+            + 1;
+        let scan_from = m.base_inactivity_floor_loc;
+        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+        let mut prefetch_locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
+        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut prefetch_locs);
+        let raw: Vec<u64> = prefetch_locs.iter().map(|loc| **loc).collect();
+        let read = db.log.read_many_sharded(&raw);
+
+        let emit = async {
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
@@ -2719,6 +2792,29 @@ where
             .filter_map(|(_, entry)| entry.base_old_loc())
             .collect();
 
+            Ok::<_, crate::qmdb::Error<F>>((
+                ops,
+                diff,
+                superseded_locs,
+                active_keys_delta,
+                user_steps,
+            ))
+        };
+
+        // The prefetch read's misses resolve from disk while the emit phase runs.
+        let (shards, emitted) = futures::join!(read, emit);
+        let (ops, diff, superseded_locs, active_keys_delta, user_steps) = emitted?;
+        let shards = shards?;
+        let prefetched = if prefetch_locs.is_empty() {
+            None
+        } else {
+            Some(PrefetchedCandidates {
+                locs: prefetch_locs,
+                shards,
+                next_scan,
+            })
+        };
+
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish_pending(
             ops,
@@ -2727,7 +2823,7 @@ where
             active_keys_delta,
             user_steps,
             metadata,
-            None,
+            prefetched,
             fill_candidates,
             db,
         )
