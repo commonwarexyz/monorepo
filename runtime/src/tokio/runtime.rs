@@ -8,7 +8,7 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
+    StreamOf, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -732,14 +732,7 @@ impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
-            .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
+            .stack_size(self.executor.thread_stack_size)
             .build()
             .expect("failed to create Tokio Rayon thread pool");
         Rayon::with_pool(Arc::new(pool))
@@ -923,10 +916,11 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Strategizer as _, Stream,
+        Supervisor as _, telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
+    use commonware_parallel::Strategy as _;
     use std::{
         self,
         collections::HashMap,
@@ -1035,6 +1029,27 @@ mod tests {
         assert_eq!(panicked, !matches!(root_exit, RootExit::Return));
     }
 
+    fn run_with_returned_strategy(retain: bool) -> Option<Rayon> {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (strategy_tx, strategy_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let strategy = Runner::new(cfg).start(move |context| async move {
+                let strategy = context.strategy(NZUsize!(2));
+                strategy.spawn(|_| ()).await;
+                retain.then_some(strategy)
+            });
+            strategy_tx.send(strategy).unwrap();
+        });
+
+        let strategy = strategy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start did not return after the strategy completed work");
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        strategy
+    }
+
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
         let cfg = Config::new().with_worker_threads(8);
@@ -1133,6 +1148,43 @@ mod tests {
             !returned_early,
             "a returned Context kept the Tokio runtime alive after Runner::start"
         );
+    }
+
+    #[test]
+    fn test_runner_returns_strategy_after_pool_work() {
+        assert!(run_with_returned_strategy(false).is_none());
+
+        let strategy = run_with_returned_strategy(true).unwrap();
+        assert_eq!(futures::executor::block_on(strategy.spawn(|_| 42)), 42);
+    }
+
+    #[test]
+    fn test_runner_resumes_strategy_panic_payload_after_pool_work() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (strategy_tx, strategy_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let result: std::thread::Result<()> =
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Runner::new(cfg).start(move |context| async move {
+                        let strategy = context.strategy(NZUsize!(2));
+                        strategy.spawn(|_| ()).await;
+                        std::panic::panic_any(strategy);
+                    });
+                }));
+            let strategy = result
+                .expect_err("Runner::start did not resume the root panic")
+                .downcast::<Rayon>()
+                .expect("Runner::start changed the root panic payload");
+            strategy_tx.send(*strategy).unwrap();
+        });
+
+        let strategy = strategy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start did not resume the strategy panic payload");
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(futures::executor::block_on(strategy.spawn(|_| 42)), 42);
     }
 
     #[test]

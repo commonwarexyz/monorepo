@@ -42,7 +42,7 @@
 //! });
 //! ```
 
-pub use crate::storage::faulty::{Config as FaultConfig, PartialWriteMode};
+pub use crate::storage::faulty::{Config as FaultConfig, PartialWriteMode, WriteConfig};
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use crate::{
@@ -1932,7 +1932,8 @@ mod tests {
     #[test]
     fn test_recover_retained_successful_resize() {
         let cfg = deterministic::Config::default()
-            .with_storage_fault_config(FaultConfig::default().resize(0.0, 1.0));
+            .with_seed(83)
+            .with_storage_fault_config(FaultConfig::default().resize(0.5));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
                 let (blob, _) = context.open("crash_resize", b"blob").await.unwrap();
@@ -1957,9 +1958,10 @@ mod tests {
         fn run(seed: u64) -> (Vec<u8>, Digest) {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
-                .with_storage_fault_config(
-                    FaultConfig::default().write(0.0, (PartialWriteMode::Subset, 0.5)),
-                );
+                .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
+                    failure_rate: 0.0,
+                    mode: PartialWriteMode::Subset(0.5),
+                }));
             let (_, checkpoint) =
                 deterministic::Runner::new(cfg).start_and_recover(|context| async move {
                     let (blob, _) = context.open("crash_epoch", b"blob").await.unwrap();
@@ -2451,7 +2453,10 @@ mod tests {
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
                     open_rate: Some(0.5),
-                    write_rate: Some((0.3, (PartialWriteMode::Prefix, 0.0))),
+                    write_rate: Some(WriteConfig {
+                        failure_rate: 0.3,
+                        mode: PartialWriteMode::Subset(0.0),
+                    }),
                     sync_rate: Some(0.2),
                     ..Default::default()
                 });

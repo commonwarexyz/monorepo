@@ -30,9 +30,9 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. The torn-write settings
-//! (`write_retention_frequency`, `partial_resize_rate`) cut a write or truncation short, leaving
-//! the half-finished bytes a real crash would.
+//! The operation phase runs under write/sync/resize fault injection. `write_retention_frequency`
+//! independently selects which bytes survive a failed or unsynchronized write, while
+//! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
 //!
@@ -202,15 +202,12 @@ impl Params {
     /// The fault config applied during the operation phase of each cycle.
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
-            write_rate: Some((
-                self.write_rate,
-                (
-                    deterministic::PartialWriteMode::Prefix,
-                    self.write_retention_frequency,
-                ),
-            )),
+            write_rate: Some(deterministic::WriteConfig {
+                failure_rate: self.write_rate,
+                mode: deterministic::PartialWriteMode::Subset(self.write_retention_frequency),
+            }),
             sync_rate: Some(self.sync_rate),
-            resize_rate: Some((self.resize_rate, 0.0)),
+            resize_rate: Some(self.resize_rate),
             partial_resize_rate: Some(self.partial_resize_rate),
             ..Default::default()
         }

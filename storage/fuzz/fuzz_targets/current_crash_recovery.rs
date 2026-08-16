@@ -229,10 +229,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let fault_cfg = ctx.storage_fault_config();
             *fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some((
-                    write_failure_rate,
-                    (deterministic::PartialWriteMode::Prefix, 0.0),
-                )),
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: write_failure_rate,
+                    mode: deterministic::PartialWriteMode::Subset(0.0),
+                }),
                 ..Default::default()
             };
 
