@@ -734,6 +734,15 @@ where
         Ok((self, handle))
     }
 
+    /// Re-arm the automatic floor prefetch under `context`'s supervision. See
+    /// [`any::Db::set_floor_prefetch_context`](crate::qmdb::any::db::Db::set_floor_prefetch_context).
+    pub fn set_floor_prefetch_context(&mut self, context: E)
+    where
+        E: commonware_runtime::Spawner + 'static,
+    {
+        self.any.set_floor_prefetch_context(context);
+    }
+
     /// Return a future that warms caches for up to `max_items` operations starting at the
     /// inactivity floor, or None when none of that range is prefetchable. See
     /// [`any::Db::start_floor_prefetch`](crate::qmdb::any::db::Db::start_floor_prefetch).

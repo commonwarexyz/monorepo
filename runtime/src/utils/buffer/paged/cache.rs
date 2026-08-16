@@ -154,6 +154,9 @@ pub struct CacheRef {
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
 
+    /// Maximum number of pages the cache holds.
+    capacity: usize,
+
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
 }
@@ -184,6 +187,7 @@ impl CacheRef {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
+            capacity: capacity.get(),
             pool,
         }
     }
@@ -203,6 +207,12 @@ impl CacheRef {
     #[inline]
     pub const fn page_size(&self) -> u64 {
         self.page_size
+    }
+
+    /// The maximum number of pages this cache holds.
+    #[inline]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Returns the storage buffer pool associated with this cache.

@@ -203,6 +203,9 @@ where
 
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
+    // Built from the pristine init context: its node is never spawn-consumed (unlike the
+    // snapshot context, whose subtree the parallel snapshot build aborts on completion).
+    let floor_prefetch_spawn = db::warm_spawner(context.child("floor_prefetch"));
     let metrics = Metrics::new(context);
     db::Db::init_from_log(
         snapshot_context,
@@ -213,6 +216,7 @@ where
         cfg.init_buffer,
         cfg.init_cache_size,
         metrics,
+        floor_prefetch_spawn,
     )
     .await
 }

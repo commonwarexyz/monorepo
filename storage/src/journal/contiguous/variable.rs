@@ -450,8 +450,8 @@ async fn prefetch_ranges<B: RBlob>(
     off_oldest: u64,
     off_sealed: Vec<Sealed<B>>,
     off_ipb: u64,
+    mut budget: u64,
 ) {
-    const CHUNK: u64 = 1 << 20;
     const OFFSET_SIZE: u64 = size_of::<u64>() as u64;
 
     // Warm the offsets entries for the whole range first: position reads (and sync
@@ -474,13 +474,8 @@ async fn prefetch_ranges<B: RBlob>(
                 (end.min(next) - blob_start_pos) * OFFSET_SIZE
             })
             .min(sealed.size());
-        let mut at = from;
-        while at < to {
-            let len = (to - at).min(CHUNK) as usize;
-            if sealed.read_at(at, len).await.is_err() {
-                break;
-            }
-            at += len as u64;
+        if !super::warm_range(sealed, from, to, &mut budget).await {
+            return;
         }
     }
 
@@ -508,18 +503,12 @@ async fn prefetch_ranges<B: RBlob>(
         let end_off = if seg_end == next_blob_pos {
             sealed.size()
         } else {
-            match read_offset(&off_sealed, off_oldest, off_ipb, seg_end).await {
-                Some(off) => off,
-                None => sealed.size(),
-            }
+            read_offset(&off_sealed, off_oldest, off_ipb, seg_end)
+                .await
+                .unwrap_or_else(|| sealed.size())
         };
-        let mut at = start_off;
-        while at < end_off {
-            let len = (end_off - at).min(CHUNK) as usize;
-            if sealed.read_at(at, len).await.is_err() {
-                break;
-            }
-            at += len as u64;
+        if !super::warm_range(sealed, start_off, end_off, &mut budget).await {
+            return;
         }
     }
 }
@@ -1630,23 +1619,22 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
-    /// Begin warming the page cache for up to `max_items` items starting at position
-    /// `start`, returning the detached task's handle. Only items in sealed blobs are
-    /// covered (for both the data and offsets journals): tail items are served by write
-    /// buffers. Returns None when nothing in the range is prefetchable. Reads are best
-    /// effort: failures are ignored, and a concurrent prune invalidates them harmlessly.
+    /// Return a future that warms the page cache for up to `max_items` items starting at
+    /// position `start`, or None when nothing in the range is prefetchable. Only items in
+    /// sealed blobs are covered (for both the data and offsets journals): tail items are
+    /// served by write buffers. Reads are best effort: failures end the pass, and a
+    /// concurrent prune invalidates them harmlessly.
     pub(crate) fn start_prefetch(
         &self,
         start: u64,
         max_items: u64,
     ) -> Option<impl Future<Output = ()> + Send + 'static> {
         let items_per_blob = self.items_per_blob.get();
-        let (data_oldest, data_sealed) = self.blobs.sealed_parts();
-        if data_sealed.is_empty() {
+        let (data_oldest, data_len) = self.blobs.sealed_bounds();
+        if data_len == 0 {
             return None;
         }
-        let sealed_end =
-            blob_first_position(data_oldest + data_sealed.len() as u64, items_per_blob).ok()?;
+        let sealed_end = blob_first_position(data_oldest + data_len as u64, items_per_blob).ok()?;
         let start = start.max(self.bounds.start);
         let end = start
             .checked_add(max_items)?
@@ -1655,7 +1643,20 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         if start >= end {
             return None;
         }
-        let (off_oldest, off_sealed, off_ipb) = self.offsets.sealed_parts();
+
+        // Clone only the blob handles the clamped range intersects. The offsets range
+        // includes the entry at `end`, read when a segment stops short of a blob boundary.
+        let first_blob = position_to_blob(start, items_per_blob);
+        let last_blob = position_to_blob(end - 1, items_per_blob);
+        let (data_oldest, data_sealed) = self.blobs.sealed_range(first_blob..last_blob + 1);
+        let (_, _, off_ipb) = self.offsets.sealed_geometry();
+        let (off_oldest, off_sealed) = self
+            .offsets
+            .sealed_range(position_to_blob(start, off_ipb)..position_to_blob(end, off_ipb) + 1);
+
+        // Cap the warmed bytes at a fraction of the page cache so a large window cannot
+        // evict its own critical prefix (warming runs floor-first and stops at the budget,
+        // keeping the scan's start resident).
         Some(prefetch_ranges(
             start,
             end,
@@ -1665,6 +1666,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             off_oldest,
             off_sealed,
             off_ipb,
+            self.blobs.prefetch_budget(),
         ))
     }
 
@@ -2450,11 +2452,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((self, position))
     }
 
-    /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends and prunes.
-    ///
-    /// If the journal later rewinds into the returned reader's range, subsequent reads
-    /// from that range may observe unspecified contents.
     /// Return a future that warms the page cache for up to `max_items` items starting at
     /// position `start`, or None when nothing in the range is prefetchable. Only items in
     /// sealed blobs are covered. The future is owned and best effort: the caller chooses
@@ -2468,7 +2465,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.0.start_prefetch(start, max_items)
     }
 
-    /// Capture an owned snapshot reader, sealing the tail first.
+    /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
+    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    ///
+    /// If the journal later rewinds into the returned reader's range, subsequent reads
+    /// from that range may observe unspecified contents.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
