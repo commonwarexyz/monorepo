@@ -501,6 +501,35 @@ pub(crate) mod test {
                 (db, _) = db.apply_batch(batch).await.unwrap();
             }
             assert!(db.floor_prefetch_target > 0);
+            let target = db.floor_prefetch_target;
+
+            // Deleting the last active keys snaps the floor to the tip without scanning:
+            // the jump must not poison the estimator.
+            let mut batch = db.new_batch();
+            for i in 0..3u64 {
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                batch = batch.write(key, None);
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.active_keys, 0);
+            assert_eq!(
+                db.floor_prefetch_target, target,
+                "delete-all must not update the estimator"
+            );
+
+            // Refilling resumes normal scan-based updates from the sane estimate.
+            let key = Sha256::hash(&[&7u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&8u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            assert!(db.floor_prefetch_target <= target.max(4));
+
             let db = db.commit().await.unwrap();
             db.destroy().await.unwrap();
         });
