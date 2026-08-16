@@ -117,22 +117,24 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         }
     }
 
-    /// A runtime context providing storage, timing, and metrics capabilities.
+    /// A runtime context providing storage, timing, task spawning, and metrics capabilities.
     ///
-    /// This is a convenience alias for the trait bound `BufferPooler + Storage + Clock + Metrics`
-    /// that appears on nearly every type in this crate.
+    /// This is a convenience alias for the trait bound `BufferPooler + Storage + Clock +
+    /// Metrics + Spawner` that appears on nearly every type in this crate.
     pub trait Context:
         commonware_runtime::BufferPooler
         + commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics
+        + commonware_runtime::Spawner
     {
     }
     impl<
         T: commonware_runtime::BufferPooler
             + commonware_runtime::Storage
             + commonware_runtime::Clock
-            + commonware_runtime::Metrics,
+            + commonware_runtime::Metrics
+            + commonware_runtime::Spawner,
     > Context for T
     {
     }
