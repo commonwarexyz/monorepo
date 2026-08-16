@@ -147,7 +147,7 @@ use crate::{
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Writer},
+    buffer::paged::{CacheRef, Sealed, Writer},
 };
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
@@ -375,6 +375,13 @@ pub(super) struct Inner<E: Context, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
+    /// Owned handles to the sealed history plus this journal's items-per-blob geometry,
+    /// for sealed-prefix prefetch by wrapping journals.
+    pub(super) fn sealed_parts(&self) -> (u64, Vec<Sealed<E::Blob>>, u64) {
+        let (oldest, sealed) = self.blobs.sealed_parts();
+        (oldest, sealed, self.items_per_blob.get())
+    }
+
     /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
     /// time, which would otherwise divide by zero in the chunk math.
     pub const CHUNK_SIZE: NonZeroUsize = match NonZeroUsize::new(A::SIZE) {

@@ -35,7 +35,7 @@ use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Replay, Writer},
+    buffer::paged::{CacheRef, Replay, Sealed, Writer},
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -415,6 +415,113 @@ struct Inner<E: Context, V: Codec> {
     /// only ever takes this joint value: a one-sided size could exceed the other journal's
     /// surviving data after a crash, which init rejects as corruption.
     barrier: Barrier,
+}
+
+/// Read one fixed-size offset entry for `pos` from the offsets journal's sealed blobs.
+async fn read_offset<B: RBlob>(
+    off_sealed: &[Sealed<B>],
+    off_oldest: u64,
+    off_ipb: u64,
+    pos: u64,
+) -> Option<u64> {
+    let blob = position_to_blob(pos, off_ipb);
+    let idx = usize::try_from(blob.checked_sub(off_oldest)?).ok()?;
+    let sealed = off_sealed.get(idx)?;
+    let within = pos - blob_first_position(blob, off_ipb).ok()?;
+    let buf = sealed
+        .read_at(within * size_of::<u64>() as u64, size_of::<u64>())
+        .await
+        .ok()?;
+    let mut bytes = [0u8; size_of::<u64>()];
+    bytes.copy_from_slice(buf.coalesce().as_ref());
+    Some(u64::from_be_bytes(bytes))
+}
+
+/// Read the byte ranges holding positions `[start, end)` from sealed data blobs through
+/// the page cache, resolving each blob segment's byte boundaries from the offsets
+/// journal's sealed blobs. Best effort: unreadable pieces are skipped.
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_ranges<B: RBlob>(
+    start: u64,
+    end: u64,
+    items_per_blob: u64,
+    data_oldest: u64,
+    data_sealed: Vec<Sealed<B>>,
+    off_oldest: u64,
+    off_sealed: Vec<Sealed<B>>,
+    off_ipb: u64,
+) {
+    const CHUNK: u64 = 1 << 20;
+    const OFFSET_SIZE: u64 = size_of::<u64>() as u64;
+
+    // Warm the offsets entries for the whole range first: position reads (and sync
+    // probes) resolve through them before touching data. Entries are fixed-size, so the
+    // byte ranges need no reads to compute.
+    for blob in position_to_blob(start, off_ipb)..=position_to_blob(end - 1, off_ipb) {
+        let Some(sealed) = blob
+            .checked_sub(off_oldest)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .and_then(|idx| off_sealed.get(idx))
+        else {
+            continue;
+        };
+        let Ok(blob_start_pos) = blob_first_position(blob, off_ipb) else {
+            continue;
+        };
+        let from = (start.max(blob_start_pos) - blob_start_pos) * OFFSET_SIZE;
+        let to = blob_first_position(blob + 1, off_ipb)
+            .map_or(sealed.size(), |next| {
+                (end.min(next) - blob_start_pos) * OFFSET_SIZE
+            })
+            .min(sealed.size());
+        let mut at = from;
+        while at < to {
+            let len = (to - at).min(CHUNK) as usize;
+            if sealed.read_at(at, len).await.is_err() {
+                break;
+            }
+            at += len as u64;
+        }
+    }
+
+    let first_blob = position_to_blob(start, items_per_blob);
+    let last_blob = position_to_blob(end - 1, items_per_blob);
+    for blob in first_blob..=last_blob {
+        let Some(sealed) = blob
+            .checked_sub(data_oldest)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .and_then(|idx| data_sealed.get(idx))
+        else {
+            continue;
+        };
+        let (Ok(blob_start_pos), Ok(next_blob_pos)) = (
+            blob_first_position(blob, items_per_blob),
+            blob_first_position(blob + 1, items_per_blob),
+        ) else {
+            continue;
+        };
+        let seg_start = start.max(blob_start_pos);
+        let seg_end = end.min(next_blob_pos);
+        let Some(start_off) = read_offset(&off_sealed, off_oldest, off_ipb, seg_start).await else {
+            continue;
+        };
+        let end_off = if seg_end == next_blob_pos {
+            sealed.size()
+        } else {
+            match read_offset(&off_sealed, off_oldest, off_ipb, seg_end).await {
+                Some(off) => off,
+                None => sealed.size(),
+            }
+        };
+        let mut at = start_off;
+        while at < end_off {
+            let len = (end_off - at).min(CHUNK) as usize;
+            if sealed.read_at(at, len).await.is_err() {
+                break;
+            }
+            at += len as u64;
+        }
+    }
 }
 
 /// A reader over a variable journal.
@@ -1523,6 +1630,44 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
+    /// Begin warming the page cache for up to `max_items` items starting at position
+    /// `start`, returning the detached task's handle. Only items in sealed blobs are
+    /// covered (for both the data and offsets journals): tail items are served by write
+    /// buffers. Returns None when nothing in the range is prefetchable. Reads are best
+    /// effort: failures are ignored, and a concurrent prune invalidates them harmlessly.
+    pub(crate) fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        let items_per_blob = self.items_per_blob.get();
+        let (data_oldest, data_sealed) = self.blobs.sealed_parts();
+        if data_sealed.is_empty() {
+            return None;
+        }
+        let sealed_end =
+            blob_first_position(data_oldest + data_sealed.len() as u64, items_per_blob).ok()?;
+        let start = start.max(self.bounds.start);
+        let end = start
+            .checked_add(max_items)?
+            .min(self.bounds.end)
+            .min(sealed_end);
+        if start >= end {
+            return None;
+        }
+        let (off_oldest, off_sealed, off_ipb) = self.offsets.sealed_parts();
+        Some(prefetch_ranges(
+            start,
+            end,
+            items_per_blob,
+            data_oldest,
+            data_sealed,
+            off_oldest,
+            off_sealed,
+            off_ipb,
+        ))
+    }
+
     /// A reader borrowing the journal's live state.
     fn reader(&self) -> Reader<'_, E, V> {
         Reader {
@@ -2310,6 +2455,20 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// If the journal later rewinds into the returned reader's range, subsequent reads
     /// from that range may observe unspecified contents.
+    /// Return a future that warms the page cache for up to `max_items` items starting at
+    /// position `start`, or None when nothing in the range is prefetchable. Only items in
+    /// sealed blobs are covered. The future is owned and best effort: the caller chooses
+    /// where to run it, failures are swallowed, and a concurrent prune invalidates the
+    /// work harmlessly.
+    pub fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        self.0.start_prefetch(start, max_items)
+    }
+
+    /// Capture an owned snapshot reader, sealing the tail first.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -2419,6 +2578,15 @@ impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
+    fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        Self::start_prefetch(self, start, max_items)
+            .map(|fut| Box::pin(fut) as futures::future::BoxFuture<'static, ()>)
+    }
+
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
@@ -7797,6 +7965,68 @@ mod tests {
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_start_prefetch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections span several pages so init's backward page scan (which warms each
+            // blob's last valid page) leaves earlier pages cold.
+            let cfg = Config {
+                partition: "prefetch".into(),
+                items_per_section: NZU64!(50),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // An empty journal has nothing to prefetch.
+            assert!(journal.start_prefetch(0, 10).is_none());
+
+            // Fill three sections plus a partial tail, then persist and reopen with a
+            // fresh page cache so sealed items are cold.
+            for i in 0..160u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(64)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+
+            // Early sealed items are cold: the sync probe declines.
+            assert!(journal.try_read_sync(0).is_none());
+            assert!(journal.try_read_sync(60).is_none());
+
+            // Prefetch a range spanning two sealed sections and drive it to completion.
+            let fut = journal
+                .start_prefetch(0, 100)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+
+            // The prefetched range is now served synchronously from the page cache, with
+            // the correct contents.
+            for i in 0..100u64 {
+                assert_eq!(journal.try_read_sync(i), Some(i * 100), "position {i}");
+            }
+
+            // A range entirely in the tail blob is not prefetchable.
+            assert!(journal.start_prefetch(150, 10).is_none());
+
+            // Clamping: a range starting past the end yields nothing.
+            assert!(journal.start_prefetch(200, 10).is_none());
 
             journal.destroy().await.unwrap();
         });

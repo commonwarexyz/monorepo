@@ -258,6 +258,12 @@ impl<E: Context> Writable<E> {
         }
     }
 
+    /// Owned handles to the sealed history: the first sealed blob's index and a clone of
+    /// every sealed blob handle. Empty when no blob has been sealed yet.
+    pub(super) fn sealed_parts(&self) -> (u64, Vec<Sealed<E::Blob>>) {
+        (self.oldest_blob_index, self.sealed.clone())
+    }
+
     /// Capture owned blob handles for a snapshot reader.
     pub(super) async fn snapshot(&mut self) -> Result<Blobs<'static, E::Blob>, Error> {
         let sealed = match &self.sealed_snapshot {

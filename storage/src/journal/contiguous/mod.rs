@@ -13,7 +13,7 @@
 
 use super::Error;
 use commonware_runtime::{Handle, ReadOptions};
-use futures::{Stream, StreamExt as _, stream};
+use futures::{Stream, StreamExt as _, future::BoxFuture, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
@@ -188,6 +188,15 @@ pub trait Contiguous: Send + Sync {
     /// that require I/O, fail to decode, or fall outside `bounds()` decline to `None`. The
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
+
+    /// Return a future that warms caches for up to `max_items` items starting at `start`,
+    /// without reading them into the caller, or None when the implementation cannot
+    /// prefetch any of the range. The future is owned and best effort: the caller chooses
+    /// where to run it, and it may cover only part of the range.
+    fn start_prefetch(&self, start: u64, max_items: u64) -> Option<BoxFuture<'static, ()>> {
+        let _ = (start, max_items);
+        None
+    }
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
