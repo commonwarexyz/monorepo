@@ -3109,9 +3109,27 @@ where
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
+        let prior_floor = self.inactivity_floor_loc;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.last_commit_loc = batch.bounds.tip.size - 1;
         self.root = batch.root();
+
+        // Warm the next floor raise's candidate window: its scan starts at the new floor
+        // and reads cold regions of the log on large databases. The window tracks the
+        // observed per-batch floor advance, with headroom for heavier batches.
+        let advance = (*self.inactivity_floor_loc).saturating_sub(*prior_floor);
+        if advance > 0 {
+            let prior = self.floor_prefetch_target;
+            let target = if prior == 0 {
+                advance
+            } else {
+                prior - prior / 4 + advance / 4
+            };
+            self.floor_prefetch_target = target;
+            if let Some(fut) = self.start_floor_prefetch(target.saturating_mul(2)) {
+                drop(self.context.child("warm").spawn(|_| fut));
+            }
+        }
 
         // Return range of operations that were written to the log.
         let end_loc = self.last_commit_loc + 1;

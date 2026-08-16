@@ -99,6 +99,14 @@ pub struct Db<
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
 
+    /// Runtime handle for detached best-effort work armed by [`Self::apply_batch`]
+    /// (floor prefetch).
+    pub(crate) context: E,
+
+    /// Adaptive floor-prefetch window: an EWMA of the per-batch inactivity-floor advance,
+    /// in operations. Zero until the first advance is observed.
+    pub(crate) floor_prefetch_target: u64,
+
     /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
     /// persisted. A hint for floor-raise scans; merkleization re-verifies each candidate
     /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
@@ -734,7 +742,7 @@ where
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
-        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
+        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap, prefetch_context) = {
             let bounds = log.bounds();
             let last_commit_loc = Location::new(
                 bounds
@@ -745,6 +753,9 @@ where
             let inactivity_floor_loc =
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
                     .await?;
+
+            // Retained for detached best-effort work armed by apply_batch (floor prefetch).
+            let prefetch_context = context.child("floor_prefetch");
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index
@@ -786,7 +797,13 @@ where
                 }
             }
 
-            (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
+            (
+                last_commit_loc,
+                inactivity_floor_loc,
+                active_keys,
+                bitmap,
+                prefetch_context,
+            )
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
@@ -809,6 +826,8 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
+            context: prefetch_context,
+            floor_prefetch_target: 0,
             bitmap,
             metrics,
             _update: core::marker::PhantomData,

@@ -417,6 +417,30 @@ pub(crate) mod test {
         });
     }
 
+    /// Applying a batch that advances the floor arms the adaptive prefetch window.
+    #[test_traced]
+    fn test_apply_batch_arms_floor_prefetch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+            assert_eq!(db.floor_prefetch_target, 0);
+            for i in 0..3u64 {
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash(&[&(i + 100).to_be_bytes()]);
+                let batch = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+            assert!(db.floor_prefetch_target > 0);
+            let db = db.commit().await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
     #[test_traced]
     fn test_get_many_fused_sharded_matches_get() {

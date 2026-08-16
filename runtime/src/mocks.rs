@@ -406,6 +406,40 @@ impl State {
 /// second argument).
 macro_rules! forward_context {
     ($wrapper:ident, $field:ident) => {
+        impl<E: Spawner> Spawner for $wrapper<E> {
+            fn shared(mut self, blocking: bool) -> Self {
+                self.inner = self.inner.shared(blocking);
+                self
+            }
+
+            fn dedicated(mut self) -> Self {
+                self.inner = self.inner.dedicated();
+                self
+            }
+
+            fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+            where
+                F: FnOnce(Self) -> Fut + Send + 'static,
+                Fut: Future<Output = T> + Send + 'static,
+                T: Send + 'static,
+            {
+                let $field = self.$field;
+                self.inner.spawn(move |inner| f(Self { inner, $field }))
+            }
+
+            async fn stop(
+                self,
+                value: i32,
+                timeout: Option<std::time::Duration>,
+            ) -> Result<(), Error> {
+                self.inner.stop(value, timeout).await
+            }
+
+            fn stopped(&self) -> Signal {
+                self.inner.stopped()
+            }
+        }
+
         impl<E: Supervisor> Supervisor for $wrapper<E> {
             fn name(&self) -> Name {
                 self.inner.name()
@@ -690,36 +724,6 @@ pub struct DelayedSyncContext<E> {
 }
 
 forward_context!(DelayedSyncContext, pending);
-
-impl<E: Spawner> Spawner for DelayedSyncContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
-        self
-    }
-
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
-        self
-    }
-
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let pending = self.pending;
-        self.inner.spawn(move |inner| f(Self { inner, pending }))
-    }
-
-    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
-        self.inner.stop(value, timeout).await
-    }
-
-    fn stopped(&self) -> Signal {
-        self.inner.stopped()
-    }
-}
 
 impl<E: Storage> Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
