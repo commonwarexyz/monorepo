@@ -3158,18 +3158,23 @@ where
 
         // Warm the next floor raise's candidate window: its scan starts at the new floor
         // and reads cold regions of the log on large databases. The window tracks the
-        // observed per-batch floor advance, with headroom for heavier batches.
+        // observed per-batch floor advance, with headroom for heavier batches. The
+        // prior-floor guard skips non-scan jumps (a fresh database's first commit moves
+        // the floor without scanning, which would poison the estimate).
         let advance = (*self.inactivity_floor_loc).saturating_sub(*prior_floor);
-        if advance > 0 {
+        if advance > 0 && *prior_floor > 0 {
             let prior = self.floor_prefetch_target;
-            let target = if prior == 0 {
+            let smoothed = if prior == 0 {
                 advance
             } else {
                 prior - prior / 4 + advance / 4
             };
-            self.floor_prefetch_target = target;
-            if let Some(fut) = self.start_floor_prefetch(target.saturating_mul(2)) {
-                drop(self.context.child("warm").spawn(|_| fut));
+            self.floor_prefetch_target = smoothed;
+            // Cover at least the latest observed span: a smoothed estimate alone lags a
+            // step increase in batch size, leaving the next scan partially cold.
+            let window = smoothed.max(advance).saturating_mul(2);
+            if let Some(fut) = self.start_floor_prefetch(window) {
+                (self.floor_prefetch_spawn)(fut);
             }
         }
 

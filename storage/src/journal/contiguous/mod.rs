@@ -39,6 +39,40 @@ fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob:
     remaining_space.min(remaining as u64) as usize
 }
 
+/// Read `[from, to)` from `sealed` in concurrently issued chunks, charging `budget` per
+/// byte. Returns false when the budget is exhausted or a read fails (both end the
+/// prefetch). Chunk reads run a few at a time: the paged read path fetches faulted pages
+/// one await at a time, so concurrency across chunks is what keeps device queues busy.
+async fn warm_range<B: commonware_runtime::Blob>(
+    sealed: &commonware_runtime::buffer::paged::Sealed<B>,
+    from: u64,
+    to: u64,
+    budget: &mut u64,
+) -> bool {
+    const CHUNK: u64 = 1 << 18;
+    const CONCURRENCY: usize = 8;
+
+    // Charge the whole clamped range up front so concurrent chunks need no shared state.
+    let to = to.min(from.saturating_add(*budget));
+    if to <= from {
+        return *budget > 0;
+    }
+    let exhausted = *budget <= to - from;
+    *budget -= to - from;
+
+    let chunks = (from..to).step_by(CHUNK as usize).map(|at| {
+        let len = (to - at).min(CHUNK) as usize;
+        async move { sealed.read_at(at, len).await.map(|_| ()) }
+    });
+    use futures::stream::TryStreamExt as _;
+    let ok = futures::stream::iter(chunks)
+        .buffer_unordered(CONCURRENCY)
+        .try_collect::<Vec<()>>()
+        .await
+        .is_ok();
+    ok && !exhausted
+}
+
 /// Return the blob containing `position`.
 ///
 /// # Examples

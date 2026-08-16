@@ -152,6 +152,10 @@ where
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
     let snapshot_context = context.child("any_snapshot");
+    // Built from the pristine context: its node is never spawn-consumed. The sync driver
+    // task typically hands the finished database off; the long-lived owner re-arms with
+    // set_floor_prefetch_context.
+    let floor_prefetch_spawn = crate::qmdb::any::db::warm_spawner(context.child("floor_prefetch"));
     let any_metrics = AnyMetrics::new(context.child("any"));
     let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
         snapshot_context,
@@ -162,6 +166,7 @@ where
         init_buffer,
         cache_size,
         any_metrics,
+        floor_prefetch_spawn,
     )
     .await?;
 

@@ -351,6 +351,41 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
+/// Warm the byte ranges holding item positions `[start, end)` from sealed fixed-size
+/// blobs through the page cache. Best effort: the first failed read ends the pass.
+async fn prefetch_ranges<B: RBlob>(
+    start: u64,
+    end: u64,
+    items_per_blob: u64,
+    item_size: u64,
+    oldest: u64,
+    sealed: Vec<Sealed<B>>,
+    mut budget: u64,
+) {
+    for blob in super::position_to_blob(start, items_per_blob)
+        ..=super::position_to_blob(end - 1, items_per_blob)
+    {
+        let Some(handle) = blob
+            .checked_sub(oldest)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .and_then(|idx| sealed.get(idx))
+        else {
+            continue;
+        };
+        let (Ok(blob_start_pos), Ok(next_blob_pos)) = (
+            super::blob_first_position(blob, items_per_blob),
+            super::blob_first_position(blob + 1, items_per_blob),
+        ) else {
+            continue;
+        };
+        let from = (start.max(blob_start_pos) - blob_start_pos) * item_size;
+        let to = ((end.min(next_blob_pos) - blob_start_pos) * item_size).min(handle.size());
+        if !super::warm_range(handle, from, to, &mut budget).await {
+            return;
+        }
+    }
+}
+
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 pub(super) struct Inner<E: Context, A> {
     /// The blobs that comprise the journal.
@@ -375,11 +410,54 @@ pub(super) struct Inner<E: Context, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
-    /// Owned handles to the sealed history plus this journal's items-per-blob geometry,
-    /// for sealed-prefix prefetch by wrapping journals.
-    pub(super) fn sealed_parts(&self) -> (u64, Vec<Sealed<E::Blob>>, u64) {
-        let (oldest, sealed) = self.blobs.sealed_parts();
-        (oldest, sealed, self.items_per_blob.get())
+    /// Sealed-history bounds plus this journal's items-per-blob geometry, for
+    /// sealed-prefix prefetch by wrapping journals.
+    pub(super) fn sealed_geometry(&self) -> (u64, usize, u64) {
+        let (oldest, len) = self.blobs.sealed_bounds();
+        (oldest, len, self.items_per_blob.get())
+    }
+
+    /// Owned handles for the sealed blobs whose indices fall in `range`. See
+    /// [`Writable::sealed_range`].
+    pub(super) fn sealed_range(&self, range: std::ops::Range<u64>) -> (u64, Vec<Sealed<E::Blob>>) {
+        self.blobs.sealed_range(range)
+    }
+
+    /// Begin warming the page cache for up to `max_items` items starting at position
+    /// `start`, or None when nothing in the range is prefetchable. Only items in sealed
+    /// blobs are covered: tail items are served by the write buffer. Item byte offsets are
+    /// arithmetic (fixed-size entries), so no index reads are needed. The returned future
+    /// is owned and best effort.
+    pub(crate) fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        let (oldest, len, items_per_blob) = self.sealed_geometry();
+        if len == 0 {
+            return None;
+        }
+        let sealed_end = super::blob_first_position(oldest + len as u64, items_per_blob).ok()?;
+        let start = start.max(self.bounds.start);
+        let end = start
+            .checked_add(max_items)?
+            .min(self.bounds.end)
+            .min(sealed_end);
+        if start >= end {
+            return None;
+        }
+        let first_blob = super::position_to_blob(start, items_per_blob);
+        let last_blob = super::position_to_blob(end - 1, items_per_blob);
+        let (oldest, sealed) = self.sealed_range(first_blob..last_blob + 1);
+        Some(prefetch_ranges::<E::Blob>(
+            start,
+            end,
+            items_per_blob,
+            Self::CHUNK_SIZE_U64,
+            oldest,
+            sealed,
+            self.blobs.prefetch_budget(),
+        ))
     }
 
     /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
@@ -1245,6 +1323,18 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
+    /// Return a future that warms the page cache for up to `max_items` items starting at
+    /// position `start`, or None when nothing in the range is prefetchable. Only items in
+    /// sealed blobs are covered. The future is owned and best effort: the caller chooses
+    /// where to run it.
+    pub fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<impl Future<Output = ()> + Send + 'static> {
+        self.0.start_prefetch(start, max_items)
+    }
+
     /// Durably persists the current state of the structure.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it. Use
@@ -1675,6 +1765,15 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
+    fn start_prefetch(
+        &self,
+        start: u64,
+        max_items: u64,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        Self::start_prefetch(self, start, max_items)
+            .map(|fut| Box::pin(fut) as futures::future::BoxFuture<'static, ()>)
+    }
+
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
@@ -5804,6 +5903,101 @@ mod tests {
             }
             assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_start_prefetch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections span several pages so init's backward page scan (which warms each
+            // blob's last valid page) leaves earlier pages cold. The cache is sized so the
+            // prefetch byte budget (a quarter of it) covers the requested range.
+            let cfg = Config {
+                partition: "prefetch".into(),
+                items_per_blob: NZU64!(25),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // An empty journal has nothing to prefetch.
+            assert!(journal.start_prefetch(0, 10).is_none());
+
+            // Fill three sections plus a partial tail, then persist and reopen so sealed
+            // items are cold.
+            for i in 0..80u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+
+            // Early sealed items are cold: the sync probe declines.
+            assert!(journal.try_read_sync(0).is_none());
+            assert!(journal.try_read_sync(30).is_none());
+
+            // Prefetch a range spanning two sealed sections and drive it to completion.
+            let fut = journal
+                .start_prefetch(0, 50)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+
+            // The prefetched range is now served synchronously from the page cache, with
+            // the correct contents.
+            for i in 0..50u64 {
+                assert_eq!(
+                    journal.try_read_sync(i),
+                    Some(test_digest(i)),
+                    "position {i}"
+                );
+            }
+
+            // A range entirely in the tail blob is not prefetchable.
+            assert!(journal.start_prefetch(75, 10).is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The prefetch byte budget (a quarter of the page cache) bounds warming so it cannot
+    /// evict its own critical prefix: the range's start warms, the tail past the budget
+    /// stays cold.
+    #[test_traced]
+    fn test_fixed_start_prefetch_budget() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // The default test cache is 3 pages of 44 bytes: a 33-byte budget, under one
+            // page of digests.
+            let cfg = test_cfg(&context, NZU64!(50));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..80u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.try_read_sync(0).is_none());
+
+            let fut = journal
+                .start_prefetch(0, 50)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+
+            // The budget covers the first page: position 0 is warm, position 10 (well past
+            // the budget) stays cold.
+            assert_eq!(journal.try_read_sync(0), Some(test_digest(0)));
+            assert!(journal.try_read_sync(10).is_none());
 
             journal.destroy().await.unwrap();
         });

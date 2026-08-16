@@ -24,6 +24,22 @@ use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::future::BoxFuture;
+
+/// Spawns a detached best-effort warming task (see the floor prefetch armed by
+/// [`Db::apply_batch`]). Built at init, where the runtime's spawner is available.
+///
+/// Warming tasks are supervised children of the captured context. If the task that owned
+/// that context exits, later spawns are silent no-ops (mandatory supervision aborts the
+/// subtree); [`Db::set_floor_prefetch_context`] re-arms under a live context.
+pub(crate) type WarmSpawner = Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
+
+/// Build a [`WarmSpawner`] whose tasks are supervised children of `context`.
+pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
+    let context = context.child("floor_prefetch");
+    Box::new(move |fut| {
+        drop(context.child("warm").spawn(move |_| fut));
+    })
+}
 use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
@@ -99,9 +115,8 @@ pub struct Db<
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
 
-    /// Runtime handle for detached best-effort work armed by [`Self::apply_batch`]
-    /// (floor prefetch).
-    pub(crate) context: E,
+    /// Spawns detached best-effort work armed by [`Self::apply_batch`] (floor prefetch).
+    pub(crate) floor_prefetch_spawn: WarmSpawner,
 
     /// Adaptive floor-prefetch window: an EWMA of the per-batch inactivity-floor advance,
     /// in operations. Zero until the first advance is observed.
@@ -721,6 +736,12 @@ where
     ///
     /// # Panics
     ///
+    /// `floor_prefetch_spawn` must be built (see [`warm_spawner`]) from a context whose
+    /// node is never spawn-consumed, and whose owning task outlives the database;
+    /// otherwise its spawns become silent no-ops (mandatory supervision).
+    ///
+    /// # Panics
+    ///
     /// Panics if the last operation is not a commit floor operation. Empty logs are handled
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
     #[allow(clippy::too_many_arguments)]
@@ -733,16 +754,17 @@ where
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,
+        floor_prefetch_spawn: WarmSpawner,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
-        E: Spawner,
+        E: Spawner + 'static,
         I: crate::qmdb::SnapshotBuild<F>,
         C: 'static,
     {
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
-        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap, prefetch_context) = {
+        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
             let last_commit_loc = Location::new(
                 bounds
@@ -753,9 +775,6 @@ where
             let inactivity_floor_loc =
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
                     .await?;
-
-            // Retained for detached best-effort work armed by apply_batch (floor prefetch).
-            let prefetch_context = context.child("floor_prefetch");
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index
@@ -797,13 +816,7 @@ where
                 }
             }
 
-            (
-                last_commit_loc,
-                inactivity_floor_loc,
-                active_keys,
-                bitmap,
-                prefetch_context,
-            )
+            (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
@@ -826,7 +839,7 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
-            context: prefetch_context,
+            floor_prefetch_spawn,
             floor_prefetch_target: 0,
             bitmap,
             metrics,
@@ -836,7 +849,19 @@ where
         Ok(db)
     }
 
-    /// Sync all database state to disk.
+    /// Re-arm the automatic floor prefetch under `context`'s supervision.
+    ///
+    /// Prefetch tasks are supervised children of the context captured at init. If the
+    /// initializing task has exited (for example, the database was built on a setup or
+    /// sync task and handed to a long-lived owner), those spawns become silent no-ops. The
+    /// long-lived owner calls this once to adopt the prefetch under its own context.
+    pub fn set_floor_prefetch_context(&mut self, context: E)
+    where
+        E: Spawner + 'static,
+    {
+        self.floor_prefetch_spawn = warm_spawner(context);
+    }
+
     /// Return a future that warms caches for up to `max_items` operations starting at the
     /// inactivity floor, or None when none of that range is prefetchable. Floor-raise
     /// candidate scans begin at the floor, so running this ahead of the next merkleize
@@ -848,6 +873,7 @@ where
             .start_prefetch(*self.inactivity_floor_loc, max_items)
     }
 
+    /// Sync all database state to disk.
     #[tracing::instrument(
         name = "qmdb.any.db.sync",
         level = "info",

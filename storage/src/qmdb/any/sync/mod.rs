@@ -100,6 +100,10 @@ where
     )
     .await?;
     let snapshot_context = context.child("snapshot");
+    // Built from the pristine context: its node is never spawn-consumed. The sync driver
+    // task typically hands the finished database off; the long-lived owner re-arms with
+    // set_floor_prefetch_context.
+    let floor_prefetch_spawn = crate::qmdb::any::db::warm_spawner(context.child("floor_prefetch"));
     let metrics = Metrics::new(context);
     let db = Db::init_from_log(
         snapshot_context,
@@ -110,6 +114,7 @@ where
         init_buffer,
         cache_size,
         metrics,
+        floor_prefetch_spawn,
     )
     .await?;
 
