@@ -452,33 +452,10 @@ async fn prefetch_ranges<B: RBlob>(
     off_ipb: u64,
     mut budget: u64,
 ) {
-    const OFFSET_SIZE: u64 = size_of::<u64>() as u64;
-
-    // Warm the offsets entries for the whole range first: position reads (and sync
-    // probes) resolve through them before touching data. Entries are fixed-size, so the
-    // byte ranges need no reads to compute.
-    for blob in position_to_blob(start, off_ipb)..=position_to_blob(end - 1, off_ipb) {
-        let Some(sealed) = blob
-            .checked_sub(off_oldest)
-            .and_then(|idx| usize::try_from(idx).ok())
-            .and_then(|idx| off_sealed.get(idx))
-        else {
-            continue;
-        };
-        let Ok(blob_start_pos) = blob_first_position(blob, off_ipb) else {
-            continue;
-        };
-        let from = (start.max(blob_start_pos) - blob_start_pos) * OFFSET_SIZE;
-        let to = blob_first_position(blob + 1, off_ipb)
-            .map_or(sealed.size(), |next| {
-                (end.min(next) - blob_start_pos) * OFFSET_SIZE
-            })
-            .min(sealed.size());
-        if !super::warm_range(sealed, from, to, &mut budget).await {
-            return;
-        }
-    }
-
+    // Interleave per data segment: warm the segment's offsets entries, then its data
+    // bytes. Position reads (and sync probes) resolve through offsets before data, and
+    // interleaving means budget exhaustion leaves a fully resident prefix of items
+    // (offsets and data) instead of offsets-only coverage of the whole window.
     let first_blob = position_to_blob(start, items_per_blob);
     let last_blob = position_to_blob(end - 1, items_per_blob);
     for blob in first_blob..=last_blob {
@@ -497,6 +474,27 @@ async fn prefetch_ranges<B: RBlob>(
         };
         let seg_start = start.max(blob_start_pos);
         let seg_end = end.min(next_blob_pos);
+
+        // Offsets entries for [seg_start, seg_end]: the entry at an interior seg_end
+        // resolves the segment's end byte.
+        let off_last = if seg_end == next_blob_pos {
+            seg_end - 1
+        } else {
+            seg_end
+        };
+        if !warm_offsets(
+            &off_sealed,
+            off_oldest,
+            off_ipb,
+            seg_start,
+            off_last,
+            &mut budget,
+        )
+        .await
+        {
+            return;
+        }
+
         let Some(start_off) = read_offset(&off_sealed, off_oldest, off_ipb, seg_start).await else {
             continue;
         };
@@ -511,6 +509,40 @@ async fn prefetch_ranges<B: RBlob>(
             return;
         }
     }
+}
+
+/// Warm the offsets entries for positions `[from_pos, to_pos]` (inclusive) across their
+/// sealed blobs. Entries are fixed-size, so the byte ranges need no reads to compute.
+async fn warm_offsets<B: RBlob>(
+    off_sealed: &[Sealed<B>],
+    off_oldest: u64,
+    off_ipb: u64,
+    from_pos: u64,
+    to_pos: u64,
+    budget: &mut u64,
+) -> bool {
+    const OFFSET_SIZE: u64 = size_of::<u64>() as u64;
+    for blob in position_to_blob(from_pos, off_ipb)..=position_to_blob(to_pos, off_ipb) {
+        let Some(sealed) = blob
+            .checked_sub(off_oldest)
+            .and_then(|idx| usize::try_from(idx).ok())
+            .and_then(|idx| off_sealed.get(idx))
+        else {
+            continue;
+        };
+        let Ok(blob_start_pos) = blob_first_position(blob, off_ipb) else {
+            continue;
+        };
+        let seg_from = from_pos.max(blob_start_pos);
+        let seg_to =
+            blob_first_position(blob + 1, off_ipb).map_or(to_pos, |next| to_pos.min(next - 1));
+        let from = (seg_from - blob_start_pos) * OFFSET_SIZE;
+        let to = ((seg_to - blob_start_pos + 1) * OFFSET_SIZE).min(sealed.size());
+        if !super::warm_range(sealed, from, to, budget).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// A reader over a variable journal.
@@ -8028,6 +8060,55 @@ mod tests {
 
             // Clamping: a range starting past the end yields nothing.
             assert!(journal.start_prefetch(200, 10).is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A budget smaller than the window still leaves a fully resident prefix: offsets and
+    /// data warm interleaved per segment, so early items serve sync probes while items
+    /// past the budget stay cold.
+    #[test_traced]
+    fn test_variable_start_prefetch_budget() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // 16 pages of 101 bytes: a ~404-byte budget against a 50-item window whose
+            // first segment alone (30 offsets entries plus ~270 data bytes) exceeds it.
+            // Sections span several pages so init's backward scan leaves early pages cold.
+            let cfg = Config {
+                partition: "prefetch-budget".into(),
+                items_per_section: NZU64!(30),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.try_read_sync(0).is_none());
+
+            let fut = journal
+                .start_prefetch(0, 50)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+
+            // The prefix is fully resident (offsets and data); the window's tail past the
+            // budget stays cold.
+            assert_eq!(journal.try_read_sync(0), Some(0));
+            assert!(journal.try_read_sync(45).is_none());
 
             journal.destroy().await.unwrap();
         });

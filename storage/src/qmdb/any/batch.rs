@@ -3116,11 +3116,12 @@ where
 
         // Warm the next floor raise's candidate window: its scan starts at the new floor
         // and reads cold regions of the log on large databases. The window tracks the
-        // observed per-batch floor advance, with headroom for heavier batches. The
-        // prior-floor guard skips non-scan jumps (a fresh database's first commit moves
-        // the floor without scanning, which would poison the estimate).
+        // observed per-batch floor advance, with headroom for heavier batches. The guards
+        // skip non-scan jumps, which would poison the estimate: a fresh database's first
+        // commit moves the floor without scanning (prior floor zero), and deleting the
+        // last active key snaps the floor to the tip without scanning (no active keys).
         let advance = (*self.inactivity_floor_loc).saturating_sub(*prior_floor);
-        if advance > 0 && *prior_floor > 0 {
+        if advance > 0 && *prior_floor > 0 && batch.total_active_keys > 0 {
             let prior = self.floor_prefetch_target;
             let smoothed = if prior == 0 {
                 advance

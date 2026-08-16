@@ -412,7 +412,7 @@ pub(super) struct Inner<E: Context, A> {
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Sealed-history bounds plus this journal's items-per-blob geometry, for
     /// sealed-prefix prefetch by wrapping journals.
-    pub(super) fn sealed_geometry(&self) -> (u64, usize, u64) {
+    pub(super) const fn sealed_geometry(&self) -> (u64, usize, u64) {
         let (oldest, len) = self.blobs.sealed_bounds();
         (oldest, len, self.items_per_blob.get())
     }
