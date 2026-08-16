@@ -605,6 +605,59 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
     A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
     R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {
+    start_engine_with_floor::<P, EC, A, R>(
+        context,
+        oracle,
+        validator,
+        scheme,
+        elector,
+        automaton,
+        relay,
+        mailbox,
+        Floor::Genesis(genesis),
+        partition,
+        forwarding,
+        vote,
+        certificate,
+        resolver,
+    );
+}
+
+/// Like [`start_engine`], but starts the Simplex engine from an explicit floor.
+///
+/// A [`Floor::Finalized`] floor lets a cluster begin consensus above a
+/// prefabricated finalization instead of genesis, so a scripted marshal prefix
+/// can drive nodes to an interesting state before the engine takes over.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    validator: PublicKeyOf<P>,
+    scheme: SchemeOf<P>,
+    elector: EC,
+    automaton: A,
+    relay: R,
+    mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
+    floor: Floor<SchemeOf<P>, Sha256Digest>,
+    partition: String,
+    forwarding: commonware_consensus::simplex::ForwardingPolicy,
+    vote: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+) where
+    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
+    R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
+{
     let engine = Engine::new(
         context.child("engine"),
         config::Config {
@@ -617,7 +670,7 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
             partition,
             mailbox_size: NZUsize!(1024),
             epoch: Epoch::zero(),
-            floor: Floor::Genesis(genesis),
+            floor,
             leader_timeout: LEADER_TIMEOUT,
             certification_timeout: CERTIFICATION_TIMEOUT,
             timeout_retry: Duration::from_secs(10),

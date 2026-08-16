@@ -32,12 +32,12 @@
 
 use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 
-mod app;
+pub(crate) mod app;
 mod block_disrupter;
 mod coding_disrupter;
 pub(crate) mod coding_stack;
 mod input;
-pub(super) mod invariants;
+pub(crate) mod invariants;
 mod runner;
 mod scenario;
 pub(crate) mod twins;

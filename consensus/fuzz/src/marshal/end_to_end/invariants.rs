@@ -346,7 +346,7 @@ pub(super) fn check_certificate_backfill_retry<P: commonware_cryptography::Publi
 }
 
 /// Run block-ordering and agreement invariants.
-pub(super) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
+pub(crate) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
     honest_apps: &[(usize, AuditedApplication<D, P>)],
     genesis: Sha256Digest,
     stack: Option<&str>,
@@ -359,7 +359,7 @@ pub(super) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
 }
 
 /// Run block-ordering and parent-linkage invariants for one node.
-pub(super) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
+pub(crate) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
     idx: usize,
     app: &AuditedApplication<D, P>,
     genesis: Sha256Digest,
@@ -373,7 +373,7 @@ pub(super) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
 ///
 /// [`check_in_order`] runs first and guarantees that after exact duplicate
 /// deliveries are collapsed, the by-height snapshot is one contiguous chain.
-fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
+pub(crate) fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
     idx: usize,
     blocks: &AuditedBlocks<D, P>,
     genesis: Sha256Digest,
@@ -519,7 +519,7 @@ fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], s
 ///
 /// This detects conflicting finalization, fork divergence, and recovery that
 /// delivers a different block at an already observed height.
-fn agreement<B: Block<Digest = Sha256Digest>>(
+pub(crate) fn agreement<B: Block<Digest = Sha256Digest>>(
     honest_apps: &[(usize, Application<B>)],
     stack: &str,
 ) {
