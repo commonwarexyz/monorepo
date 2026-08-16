@@ -734,6 +734,16 @@ where
         Ok((self, handle))
     }
 
+    /// Return a future that warms caches for up to `max_items` operations starting at the
+    /// inactivity floor, or None when none of that range is prefetchable. See
+    /// [`any::Db::start_floor_prefetch`](crate::qmdb::any::db::Db::start_floor_prefetch).
+    pub fn start_floor_prefetch(
+        &self,
+        max_items: u64,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        self.any.start_floor_prefetch(max_items)
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]

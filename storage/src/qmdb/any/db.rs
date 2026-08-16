@@ -23,6 +23,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
+use futures::future::BoxFuture;
 use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
@@ -817,6 +818,17 @@ where
     }
 
     /// Sync all database state to disk.
+    /// Return a future that warms caches for up to `max_items` operations starting at the
+    /// inactivity floor, or None when none of that range is prefetchable. Floor-raise
+    /// candidate scans begin at the floor, so running this ahead of the next merkleize
+    /// keeps their reads warm. The future is owned and best effort: the caller chooses
+    /// where to run it.
+    pub fn start_floor_prefetch(&self, max_items: u64) -> Option<BoxFuture<'static, ()>> {
+        use crate::journal::contiguous::Contiguous as _;
+        self.log
+            .start_prefetch(*self.inactivity_floor_loc, max_items)
+    }
+
     #[tracing::instrument(
         name = "qmdb.any.db.sync",
         level = "info",
