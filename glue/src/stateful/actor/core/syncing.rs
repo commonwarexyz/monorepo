@@ -323,8 +323,8 @@ where
             self.pruning,
         );
 
-        // Serving must not wait for the next finalization, so the synced state
-        // alone publishes as the first capture.
+        // Publish now so serving does not wait for the first post-sync
+        // finalization.
         processor
             .publish_snapshot(&mut self.snapshot_publisher)
             .await;
@@ -374,9 +374,8 @@ where
         self.sync_metadata = self.sync_metadata.set_complete(completed_height).await;
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;
-            // The published snapshot was captured before this prune. Republish so
-            // serving stops pinning the pruned state. Every handoff barrier was
-            // awaited above, so the capture is already durable.
+            // Republish so serving stops pinning the pruned state. Every handoff
+            // barrier was awaited above, so the fresh capture is already durable.
             processor
                 .publish_snapshot(&mut self.snapshot_publisher)
                 .await;

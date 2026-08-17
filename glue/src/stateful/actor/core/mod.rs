@@ -262,7 +262,7 @@ where
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self) {
+    async fn start_from_marshal(mut self) {
         let (marshal, _) = self.marshal;
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
@@ -279,17 +279,18 @@ where
         let _ = metrics.sync_done.try_set(1);
         let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
 
-        // The recovered state alone must publish before the loop starts, so
-        // serving begins before the next finalization.
-        let mut snapshot_publisher = self.snapshot_publisher;
-        processor.publish_snapshot(&mut snapshot_publisher).await;
+        // Publish now so serving does not wait for the first post-restart
+        // finalization.
+        processor
+            .publish_snapshot(&mut self.snapshot_publisher)
+            .await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
             processor,
-            snapshot_publisher,
+            snapshot_publisher: self.snapshot_publisher,
             deferred_verifications: Vec::new(),
             skip_finalized_until,
         }

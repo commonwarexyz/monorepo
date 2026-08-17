@@ -690,13 +690,11 @@ where
 
     /// Capture a snapshot of the database set's applied state and publish it
     /// at the processed height.
-    ///
-    /// A future factory: the future captures a clone of the set rather than
-    /// `&self`, so it stays `Send` without requiring `Application: Sync`.
     pub(super) fn publish_snapshot<'p>(
         &self,
         publisher: &'p mut Publisher<SnapshotsOf<A::Databases, E>>,
     ) -> impl Future<Output = ()> + Send + 'p {
+        // Clones the set so the future is `Send` without `A: Sync`.
         let databases = self.execution.databases.clone();
         let height = self.execution.last_processed().height;
         async move {
