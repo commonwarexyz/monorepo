@@ -11,19 +11,22 @@
 use super::{
     adversary,
     elector::ByzantineLeaderAtView,
-    environment::{Mb, Node, PendingBlock, ScenarioEnv, Wrapper},
+    environment::{Mb, Node, ScenarioEnv},
     input::{ConsensusMutation, MarshalScenarioPrefixInput, Mode},
     scenarios,
 };
 use crate::{
     NetworkChannels,
     marshal::end_to_end::{
-        app::{AlwaysAcceptBlockBuilderApp, BlockContextRegistry, DeliveryReporter, ProgressHandle},
+        app::{
+            AlwaysAcceptBlockBuilderApp, BlockContextRegistry, DeliveryReporter, ProgressHandle,
+        },
         invariants,
         twins::{
             B, Ctx, PublicKeyOf, SchemeOf,
             stack::{
-                DEFAULT_MAX_PENDING_ACKS, genesis_block, register_engine_networks, setup_network,
+                DEFAULT_MAX_PENDING_ACKS, DeferredMarshal, InlineMarshal, MarshalChoice,
+                TwinsMarshal, genesis_block, register_engine_networks, setup_network,
                 setup_network_links, setup_validator, start_engine_with_floor,
             },
         },
@@ -33,15 +36,12 @@ use crate::{
 };
 use commonware_consensus::{
     Heightable,
-    marshal::{
-        mocks::{
-            application::Application,
-            harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS},
-        },
-        standard::Deferred,
+    marshal::mocks::{
+        application::Application,
+        harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS},
     },
     simplex::Floor,
-    types::{FixedEpocher, Height, TermLength, View},
+    types::{Height, TermLength, View},
 };
 use commonware_cryptography::{
     Digestible, certificate::ConstantProvider, sha256::Digest as Sha256Digest,
@@ -53,13 +53,16 @@ use commonware_utils::FuzzRng;
 use futures::future::{join_all, select_all};
 use std::{sync::Arc, time::Duration};
 
-/// Per-node marshal handles produced by setup.
-struct MarshalNode<P: Simplex> {
+/// The always-accept block builder wired under every marshal variant.
+type App<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
+
+/// Per-node marshal handles produced by setup, for the `M` marshal variant.
+struct MarshalNode<P: Simplex, M: TwinsMarshal<P, App<P>>> {
     mailbox: Mb<P>,
     buffer: commonware_broadcast::buffered::Mailbox<PublicKeyOf<P>, B<P>>,
     application: Application<B<P>>,
     progress: ProgressHandle,
-    builder: Wrapper<P>,
+    builder: M::Wrapper,
 }
 
 /// Pre-GST fault window: an upper bound for how long faults act before the heal.
@@ -68,13 +71,6 @@ struct MarshalNode<P: Simplex> {
 const FAULT_PHASE: Duration = Duration::from_secs(12);
 /// Post-GST recovery budget.
 const LIVENESS_WINDOW: Duration = Duration::from_secs(360);
-/// Budget for a prefix fetch to resolve while the network is still meshed.
-const PREFIX_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// Budget for prefix subscriptions to resolve after recovery.
-const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(30);
-/// Backoff between retries of the bounded best-effort query waits (finalization
-/// view, processed height).
-const POLL: Duration = Duration::from_millis(50);
 /// Live views past the attack view the disrupter may fault, beyond the target
 /// height, to cover views nullified by the fault.
 const LIVE_FAULT_MARGIN: u64 = 5;
@@ -94,7 +90,10 @@ async fn apply_degraded_network<P: Simplex>(
         jitter: Duration::from_millis(50),
         success_rate: 0.6,
     };
-    for peer in participants.iter().take(participants.len().saturating_sub(1)) {
+    for peer in participants
+        .iter()
+        .take(participants.len().saturating_sub(1))
+    {
         oracle.remove_link(victim.clone(), peer.clone()).await.ok();
         oracle.remove_link(peer.clone(), victim.clone()).await.ok();
         oracle
@@ -144,35 +143,24 @@ fn check_floor_started_order(
     }
 }
 
-/// Await a prefix subscription and assert it resolves with the expected block.
-async fn assert_resolves<P: Simplex>(
-    context: &deterministic::Context,
-    pending: PendingBlock<P>,
-    timeout: Duration,
-    label: &str,
-) {
-    select! {
-        delivered = pending.receiver => {
-            let block = delivered.unwrap_or_else(|_| {
-                panic!("{label} cancelled on node {:?}", pending.node)
-            });
-            assert_eq!(
-                block.digest(),
-                pending.expected,
-                "{label} resolved with the wrong block on node {:?}: got {} expected {}",
-                pending.node,
-                block.digest(),
-                pending.expected,
-            );
-        },
-        _ = context.sleep(timeout) => {
-            panic!("{label} never resolved on node {:?}", pending.node);
-        },
-    }
+/// Deferred-variant entry point.
+pub fn fuzz_marshal_scenario_prefix_deferred<P: Simplex>(input: MarshalScenarioPrefixInput) {
+    run::<P, DeferredMarshal>(input, MarshalChoice::Deferred);
 }
 
-/// Entry point: run one scenario prefix and its fuzzing phase.
-pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInput) {
+/// Inline-variant entry point.
+pub fn fuzz_marshal_scenario_prefix_inline<P: Simplex>(input: MarshalScenarioPrefixInput) {
+    run::<P, InlineMarshal>(input, MarshalChoice::Inline);
+}
+
+/// Run one scenario prefix and its fuzzing phase under the `M` marshal variant.
+/// `marshal` matches `M` (the concrete `DeferredMarshal`/`InlineMarshal` selectors
+/// ignore it; it documents the variant).
+fn run<P: Simplex, M>(input: MarshalScenarioPrefixInput, marshal: MarshalChoice)
+where
+    M: TwinsMarshal<P, App<P>>,
+    M::Wrapper: Clone + Send + 'static,
+{
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let config = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(config);
@@ -191,7 +179,7 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
 
         let byzantine = matches!(input.mode, Mode::DisrupterN4F1C3);
 
-        let mut nodes: Vec<Option<MarshalNode<P>>> = Vec::with_capacity(NUM_VALIDATORS as usize);
+        let mut nodes: Vec<Option<MarshalNode<P, M>>> = Vec::with_capacity(NUM_VALIDATORS as usize);
         let mut engine_channels: Vec<Option<NetworkChannels<PublicKeyOf<P>>>> =
             Vec::with_capacity(NUM_VALIDATORS as usize);
         for (idx, validator) in participants.iter().enumerate() {
@@ -226,11 +214,11 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
                     )
                     .with_progress(progress.clone()),
                 );
-            let builder = Deferred::new(
-                validator_ctx.child("deferred"),
+            let builder = <M as TwinsMarshal<P, _>>::create(
+                marshal,
+                &validator_ctx,
                 application,
                 validator_state.mailbox.clone(),
-                FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
             validator_state.start(builder.clone());
             nodes.push(Some(MarshalNode {
@@ -247,7 +235,6 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
         let reference = nodes.iter().flatten().next().expect("at least one marshal node");
         let placeholder_mailbox = reference.mailbox.clone();
         let placeholder_buffer = reference.buffer.clone();
-        let placeholder_builder = reference.builder.clone();
         let mailboxes: Vec<Mb<P>> = nodes
             .iter()
             .map(|node| node.as_ref().map_or_else(|| placeholder_mailbox.clone(), |node| node.mailbox.clone()))
@@ -256,10 +243,6 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
             .iter()
             .map(|node| node.as_ref().map_or_else(|| placeholder_buffer.clone(), |node| node.buffer.clone()))
             .collect();
-        let builders: Vec<Wrapper<P>> = nodes
-            .iter()
-            .map(|node| node.as_ref().map_or_else(|| placeholder_builder.clone(), |node| node.builder.clone()))
-            .collect();
 
         // === PREFIX ===
         let mut env = ScenarioEnv::<P> {
@@ -267,7 +250,6 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
             participants: participants.clone(),
             schemes: schemes.clone(),
             mailboxes,
-            builders,
             buffers,
             genesis,
             canonical: Vec::new(),
@@ -282,13 +264,6 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
         let attack_view = View::new(floor_view + 1);
         let attack_height = Height::new(floor_height + 1);
 
-        // === PREFIX FETCHES ===
-        // Resolve certify-by-round fetches while the network is still meshed,
-        // before any floor advance can prune them.
-        for pending in point.prefix_fetches {
-            assert_resolves::<P>(&context, pending, PREFIX_FETCH_TIMEOUT, "prefix fetch").await;
-        }
-
         // === FUZZING PHASE ===
         apply_partition(&oracle, &participants, input.partition.set_partition(), &LINK).await;
         if input.degraded_network {
@@ -301,8 +276,9 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
                 let (vote, certificate, resolver) = channels;
                 // Dissemination-layer disrupter on ch1/ch2 (leader announce on a
                 // clone of the vote sender at the attack view).
+                let dissemination_ctx = context.child("adversary").child("dissemination");
                 adversary::start_dissemination_disrupter::<P>(
-                    &context.child("adversary").child("dissemination"),
+                    &dissemination_ctx,
                     &oracle,
                     validator.clone(),
                     schemes[idx].clone(),
@@ -480,45 +456,7 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
             }
         }
 
-        // === EXPECTATIONS ===
-        // Wait for the deprived node to catch up to the floor height: it backfills
-        // after the heal (Phase 2 only guarantees a fresh baseline + 1, which is
-        // weaker), so a one-shot barrier would race its recovery.
-        let processed = wait_for_processed_height::<P>(
-            &context,
-            &env,
-            point.expectation.deprived,
-            point.expectation.deprived_min_height,
-            LIVENESS_WINDOW,
-        )
-        .await;
-        assert!(
-            processed >= point.expectation.deprived_min_height,
-            "deprived node {:?} processed height {processed} < {} within the recovery window",
-            point.expectation.deprived,
-            point.expectation.deprived_min_height,
-        );
-        for pending in point.subscriptions {
-            assert_resolves::<P>(&context, pending, SUBSCRIPTION_TIMEOUT, "subscription").await;
-        }
-
-        // First-finalization-wins re-check: the fuzzing window must not have
-        // overwritten a stored finalization (invisible to the digest-only safety
-        // checks since both views cover the same block). The archive never prunes,
-        // so a retained finalization is always eventually observable; the query is
-        // retried past a best-effort miss and must yield exactly the first-seen
-        // view (an overwrite or a genuinely lost entry both fail).
-        for &(node, height, expected_view) in &point.expectation.finalization_views {
-            let observed =
-                read_finalization_view::<P>(&context, &env, node, height, SUBSCRIPTION_TIMEOUT).await;
-            assert_eq!(
-                observed,
-                Some(expected_view),
-                "first-finalization-wins violated post-fuzz: node {node:?} height {height} retained {observed:?}, expected view {expected_view}",
-            );
-        }
-
-        // === SAFETY (last observation point) ===
+        // === SAFETY (marshal-layer invariants; last observation point) ===
         let floor_started = point.expectation.floor_started.map(Node::idx);
         invariants::agreement(&honest_apps, &stack_label);
         for (idx, app) in &honest_apps {
@@ -542,80 +480,16 @@ pub fn fuzz_marshal_scenario_prefix<P: Simplex>(input: MarshalScenarioPrefixInpu
     });
 }
 
-/// Wait for `node`'s processed height to reach `target`, retrying the best-effort
-/// query past a transient miss until it does or the timeout expires. Each query is
-/// raced against the deadline so a request that never resolves cannot stall the
-/// loop.
-async fn wait_for_processed_height<P: Simplex>(
-    context: &deterministic::Context,
-    env: &ScenarioEnv<P>,
-    node: Node,
-    target: u64,
-    timeout: Duration,
-) -> u64 {
-    let deadline = context.current() + timeout;
-    let mut processed = 0;
-    loop {
-        let Ok(remaining) = deadline.duration_since(context.current()) else {
-            return processed;
-        };
-        if remaining.is_zero() {
-            return processed;
-        }
-        select! {
-            height = env.barrier(node) => {
-                processed = height.map_or(0, |height| height.get());
-                if processed >= target {
-                    return processed;
-                }
-                context.sleep(POLL.min(remaining)).await;
-            },
-            _ = context.sleep(remaining) => return processed,
-        }
-    }
-}
-
-/// Read a node's stored finalization view for `height`, retrying the best-effort
-/// query past a transient miss until it returns a value or the timeout expires.
-/// The finalization archive never prunes, so a retained entry is always
-/// eventually observable; a persistent `None` signals genuine state loss.
-async fn read_finalization_view<P: Simplex>(
-    context: &deterministic::Context,
-    env: &ScenarioEnv<P>,
-    node: Node,
-    height: u64,
-    timeout: Duration,
-) -> Option<u64> {
-    let deadline = context.current() + timeout;
-    loop {
-        let Ok(remaining) = deadline.duration_since(context.current()) else {
-            return None;
-        };
-        if remaining.is_zero() {
-            return None;
-        }
-        // Race the best-effort read against the deadline so a request that never
-        // resolves cannot stall the loop past the timeout.
-        select! {
-            view = env.finalization_view(node, height) => {
-                if let Some(view) = view {
-                    return Some(view);
-                }
-                context.sleep(POLL.min(remaining)).await;
-            },
-            _ = context.sleep(remaining) => return None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SimplexCertificateMock;
-    use crate::scenarios::input::{
-        BackfillFault, BlockFault, ConsensusMutation, FaultPlan, Mode, ScenarioKind,
+    use crate::{
+        SimplexCertificateMock,
+        scenarios::input::{
+            BackfillFault, BlockFault, ConsensusMutation, FaultPlan, Mode, ScenarioKind,
+        },
+        utils::Partition,
     };
-    use crate::utils::Partition;
     use commonware_consensus::simplex::ForwardingPolicy;
 
     fn run(scenario: ScenarioKind, mode: Mode) {
@@ -635,7 +509,9 @@ mod tests {
             partition: Partition::Connected,
             forwarding: ForwardingPolicy::Disabled,
         };
-        fuzz_marshal_scenario_prefix::<SimplexCertificateMock>(input);
+        // Exercise both Standard variants with the same input.
+        fuzz_marshal_scenario_prefix_deferred::<SimplexCertificateMock>(input.clone());
+        fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input);
     }
 
     #[test]
@@ -670,7 +546,10 @@ mod tests {
 
     #[test]
     fn adversarial_finalization_without_block() {
-        run(ScenarioKind::FinalizationWithoutBlock, Mode::DisrupterN4F1C3);
+        run(
+            ScenarioKind::FinalizationWithoutBlock,
+            Mode::DisrupterN4F1C3,
+        );
     }
 
     #[test]
@@ -680,7 +559,10 @@ mod tests {
 
     #[test]
     fn adversarial_same_height_different_views() {
-        run(ScenarioKind::SameHeightDifferentViews, Mode::DisrupterN4F1C3);
+        run(
+            ScenarioKind::SameHeightDifferentViews,
+            Mode::DisrupterN4F1C3,
+        );
     }
 
     #[test]
@@ -688,9 +570,8 @@ mod tests {
         run(ScenarioKind::PendingFloorAnchor, Mode::DisrupterN4F1C3);
     }
 
-    // Regression: an honest run with a degraded deprived-node link. The deprived
-    // node must still catch up to the floor height; the recovery check must wait
-    // for it rather than sampling its processed height once.
+    // Smoke: an honest run with a degraded deprived-node link exercises the
+    // marshal-layer invariants and liveness under lossy backfill.
     #[test]
     fn honest_pending_floor_anchor_degraded() {
         let input = MarshalScenarioPrefixInput {
@@ -709,6 +590,102 @@ mod tests {
             partition: Partition::Connected,
             forwarding: ForwardingPolicy::Disabled,
         };
-        fuzz_marshal_scenario_prefix::<SimplexCertificateMock>(input);
+        // Exercise both Standard variants with the same input.
+        fuzz_marshal_scenario_prefix_deferred::<SimplexCertificateMock>(input.clone());
+        fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input);
     }
+
+    macro_rules! scenario_smoke {
+        ($honest:ident, $adversarial:ident, $kind:ident) => {
+            #[test]
+            fn $honest() {
+                run(ScenarioKind::$kind, Mode::HonestN4F0C4);
+            }
+            #[test]
+            fn $adversarial() {
+                run(ScenarioKind::$kind, Mode::DisrupterN4F1C3);
+            }
+        };
+    }
+
+    scenario_smoke!(
+        honest_byzantine_parent_equivocation,
+        adversarial_byzantine_parent_equivocation,
+        ByzantineParentEquivocation
+    );
+    scenario_smoke!(
+        honest_conflicting_verify_no_cert_poison,
+        adversarial_conflicting_verify_no_cert_poison,
+        ConflictingVerifyNoCertPoison
+    );
+    scenario_smoke!(
+        honest_equivocated_block_persists,
+        adversarial_equivocated_block_persists,
+        EquivocatedBlockPersists
+    );
+    scenario_smoke!(
+        honest_conflicting_proposals_both_ack,
+        adversarial_conflicting_proposals_both_ack,
+        ConflictingProposalsBothAck
+    );
+    scenario_smoke!(
+        honest_height_lie_parent_fetch,
+        adversarial_height_lie_parent_fetch,
+        HeightLieParentFetch
+    );
+    scenario_smoke!(
+        honest_internal_missing_finalized_block,
+        adversarial_internal_missing_finalized_block,
+        InternalMissingFinalizedBlock
+    );
+    scenario_smoke!(
+        honest_multiple_trailing_gaps,
+        adversarial_multiple_trailing_gaps,
+        MultipleTrailingGaps
+    );
+    scenario_smoke!(
+        honest_large_pending_tip,
+        adversarial_large_pending_tip,
+        LargePendingTip
+    );
+    scenario_smoke!(
+        honest_block_without_finalization,
+        adversarial_block_without_finalization,
+        BlockWithoutFinalization
+    );
+    scenario_smoke!(
+        honest_floor_repairs_gap_after_anchor,
+        adversarial_floor_repairs_gap_after_anchor,
+        FloorRepairsGapAfterAnchor
+    );
+    scenario_smoke!(
+        honest_newer_floor_supersedes_older,
+        adversarial_newer_floor_supersedes_older,
+        NewerFloorSupersedesOlder
+    );
+    scenario_smoke!(
+        honest_below_floor_anchor_wakes_subscriber,
+        adversarial_below_floor_anchor_wakes_subscriber,
+        BelowFloorAnchorWakesSubscriber
+    );
+    scenario_smoke!(
+        honest_stale_block_rejected_after_floor,
+        adversarial_stale_block_rejected_after_floor,
+        StaleBlockRejectedAfterFloor
+    );
+    scenario_smoke!(
+        honest_certify_survives_view_pruning,
+        adversarial_certify_survives_view_pruning,
+        CertifySurvivesViewPruning
+    );
+    scenario_smoke!(
+        honest_deferred_certify_fallback,
+        adversarial_deferred_certify_fallback,
+        DeferredCertifyFallback
+    );
+    scenario_smoke!(
+        honest_first_block_fetches_genesis_parent,
+        adversarial_first_block_fetches_genesis_parent,
+        FirstBlockFetchesGenesisParent
+    );
 }

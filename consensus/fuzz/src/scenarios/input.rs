@@ -32,6 +32,22 @@ pub enum ScenarioKind {
     SubscribeBeforeBlock,
     SameHeightDifferentViews,
     PendingFloorAnchor,
+    ByzantineParentEquivocation,
+    ConflictingVerifyNoCertPoison,
+    EquivocatedBlockPersists,
+    ConflictingProposalsBothAck,
+    HeightLieParentFetch,
+    InternalMissingFinalizedBlock,
+    MultipleTrailingGaps,
+    LargePendingTip,
+    BlockWithoutFinalization,
+    FloorRepairsGapAfterAnchor,
+    NewerFloorSupersedesOlder,
+    BelowFloorAnchorWakesSubscriber,
+    StaleBlockRejectedAfterFloor,
+    CertifySurvivesViewPruning,
+    DeferredCertifyFallback,
+    FirstBlockFetchesGenesisParent,
 }
 
 /// The fuzzing-phase configuration after the prefix.

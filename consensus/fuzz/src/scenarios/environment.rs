@@ -3,54 +3,29 @@
 //!
 //! The verbs act directly on the marshal mailboxes below the consensus engine,
 //! so a scenario can build a canonical chain, fabricate quorum certificates over
-//! a chosen signer subset, report them, open subscriptions, and install floors
-//! without a running engine. The prefix stops at a chosen semantic point and
-//! hands back a [`FuzzPoint`] describing the certified floor the engines then
-//! start from plus the state the fuzzing phase must reconcile.
+//! a chosen signer subset, report them, and install floors without a running
+//! engine. The prefix stops at a chosen semantic point and hands back a
+//! [`FuzzPoint`] describing the certified floor the engines then start from.
 
 use crate::{
-    marshal::end_to_end::{
-        app::AlwaysAcceptBlockBuilderApp,
-        twins::{B, Ctx, PublicKeyOf, SchemeOf},
-    },
+    marshal::end_to_end::twins::{B, Ctx, PublicKeyOf, SchemeOf},
     simplex::Simplex,
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton as _, CertifiableAutomaton as _, Heightable, Reporter as _,
-    marshal::{
-        core::{DigestFallback, Mailbox},
-        standard::{Deferred, Standard},
-    },
+    Heightable, Reporter as _,
+    marshal::{core::Mailbox, standard::Standard},
     simplex::types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
-    types::{Epoch, FixedEpocher, Height, Round, View},
+    types::{Epoch, Height, Round, View},
 };
-use commonware_cryptography::{Digestible, Sha256};
-use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_macros::select;
+use commonware_cryptography::{Digestible, Sha256, sha256::Digest as Sha256Digest};
 use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, deterministic};
-use commonware_utils::channel::oneshot;
 use std::{sync::Arc, time::Duration};
 
 /// Marshal mailbox for the standard variant over the mock block.
 pub(crate) type Mb<P> = Mailbox<SchemeOf<P>, Standard<B<P>>>;
-
-/// Bounded wait for the real automaton certify to resolve, so a broken
-/// certify -> notarized-fetch path fails clearly instead of hanging.
-const CERTIFY_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The concrete `Deferred` marshal automaton the scenario setup builds, over the
-/// always-accept block builder. Lets a scenario drive the real `verify`/`certify`
-/// automaton path rather than the raw mailbox.
-pub(crate) type Wrapper<P> = Deferred<
-    deterministic::Context,
-    SchemeOf<P>,
-    AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>,
-    B<P>,
-    FixedEpocher,
->;
 
 /// A validator of the four-node cluster, addressed by its participant index.
 ///
@@ -85,9 +60,6 @@ pub(crate) struct ScenarioEnv<P: Simplex> {
     pub(crate) participants: Vec<PublicKeyOf<P>>,
     pub(crate) schemes: Vec<SchemeOf<P>>,
     pub(crate) mailboxes: Vec<Mb<P>>,
-    /// One automaton wrapper per node (placeholder for the marshal-less
-    /// adversary slot), for scenarios that drive the real verify/certify path.
-    pub(crate) builders: Vec<Wrapper<P>>,
     #[allow(dead_code)]
     pub(crate) buffers: Vec<buffered::Mailbox<PublicKeyOf<P>, B<P>>>,
     pub(crate) genesis: B<P>,
@@ -131,7 +103,13 @@ impl<P: Simplex> ScenarioEnv<P> {
         view: u64,
         height: Height,
     ) -> B<P> {
-        self.build_block(leader, view, parent.context.round.view(), parent.digest(), height)
+        self.build_block(
+            leader,
+            view,
+            parent.context.round.view(),
+            parent.digest(),
+            height,
+        )
     }
 
     fn build_block(
@@ -171,44 +149,6 @@ impl<P: Simplex> ScenarioEnv<P> {
             "certified must be durable: node={:?} view={view}",
             node,
         );
-    }
-
-    /// Drive the real automaton's optimistic verify on `node` for a block it does
-    /// not yet hold, registering the certification gate. The returned receiver
-    /// must be kept alive until after [`Self::automaton_certify`] resolves, so the
-    /// gate stays open and certify takes the existing-task (hint-notarized) path.
-    pub(crate) async fn automaton_verify_hold(
-        &self,
-        node: Node,
-        context: Ctx<P>,
-        digest: Sha256Digest,
-    ) -> oneshot::Receiver<bool> {
-        let mut builder = self.builders[node.idx()].clone();
-        builder.verify(context, digest).await
-    }
-
-    /// Invoke the real automaton's certify on `node`, returning whether it
-    /// resolved true. Certify itself issues the notarized fetch, so this drives
-    /// the candidate repair rather than the scenario nudging it by hand.
-    pub(crate) async fn automaton_certify(
-        &self,
-        node: Node,
-        view: u64,
-        digest: Sha256Digest,
-    ) -> bool {
-        let mut builder = self.builders[node.idx()].clone();
-        let receiver = builder.certify(Self::round(view), digest).await;
-        select! {
-            result = receiver => result.unwrap_or(false),
-            _ = self.context.sleep(CERTIFY_TIMEOUT) => {
-                panic!("certify never resolved on node {node:?} at view {view}: notarized fetch stalled");
-            },
-        }
-    }
-
-    /// Whether `node` holds the block for `digest` in local marshal storage.
-    pub(crate) async fn get_block(&self, node: Node, digest: Sha256Digest) -> Option<B<P>> {
-        self.mailboxes[node.idx()].get_block(&digest).await
     }
 
     /// Build a notarization over `block`, reading its view and parent view from
@@ -307,29 +247,22 @@ impl<P: Simplex> ScenarioEnv<P> {
     }
 
     /// Install a finalization as the marshal floor on `node`.
-    pub(crate) fn set_floor(&self, node: Node, finalization: Finalization<SchemeOf<P>, Sha256Digest>) {
+    pub(crate) fn set_floor(
+        &self,
+        node: Node,
+        finalization: Finalization<SchemeOf<P>, Sha256Digest>,
+    ) {
         self.mailboxes[node.idx()].set_floor(finalization);
-    }
-
-    /// Open a wait-only digest subscription on `node`; the receiver must be held
-    /// until the fuzzing phase or the subscription is cancelled.
-    pub(crate) fn subscribe(&self, node: Node, digest: Sha256Digest) -> oneshot::Receiver<Arc<B<P>>> {
-        self.mailboxes[node.idx()].subscribe_by_digest(digest, DigestFallback::Wait)
     }
 
     /// Gossip `block` from `from` to `to` through the broadcast buffer.
     pub(crate) fn broadcast(&self, from: Node, to: &[Node], block: &B<P>) {
-        let recipients =
-            Recipients::Some(to.iter().map(|node| self.participants[node.idx()].clone()).collect());
+        let recipients = Recipients::Some(
+            to.iter()
+                .map(|node| self.participants[node.idx()].clone())
+                .collect(),
+        );
         let _ = self.buffers[from.idx()].broadcast_shared(recipients, Arc::new(block.clone()));
-    }
-
-    /// The view of the finalization `node` has stored for `height`, if any.
-    pub(crate) async fn finalization_view(&self, node: Node, height: u64) -> Option<u64> {
-        self.mailboxes[node.idx()]
-            .get_finalization(Height::new(height))
-            .await
-            .map(|finalization| finalization.round().view().get())
     }
 
     /// FIFO barrier: a round-trip that flushes prior fire-and-forget messages so
@@ -344,46 +277,21 @@ impl<P: Simplex> ScenarioEnv<P> {
     }
 }
 
-/// A subscription opened in the prefix that must resolve with a specific block.
-pub(crate) struct PendingBlock<P: Simplex> {
-    pub(crate) node: Node,
-    /// The digest the resolved block must have.
-    pub(crate) expected: Sha256Digest,
-    pub(crate) receiver: oneshot::Receiver<Arc<B<P>>>,
-}
-
 /// The state the prefix leaves for the fuzzing phase.
 pub(crate) struct FuzzPoint<P: Simplex> {
     /// The canonical tip finalization every honest engine starts from.
     pub(crate) floor: Finalization<SchemeOf<P>, Sha256Digest>,
-    /// The canonical chain the deprived node must reconstruct.
+    /// The canonical chain the honest nodes reconstruct.
     pub(crate) canonical: Vec<B<P>>,
-    /// Fetches that must resolve, with the correct block, before the engines
-    /// start (so a later floor advance cannot prune them first).
-    pub(crate) prefix_fetches: Vec<PendingBlock<P>>,
-    /// Subscriptions that must resolve, with the correct block, after the
-    /// fuzzing window.
-    pub(crate) subscriptions: Vec<PendingBlock<P>>,
-    /// Per-scenario recovery expectations.
+    /// Per-scenario invariant-selection hints.
     pub(crate) expectation: Expectation,
 }
 
-/// What the fuzzing phase must observe for the scenario to be considered
-/// recovered.
+/// Scenario shape that selects which safety invariant applies.
 pub(crate) struct Expectation {
     /// A node whose marshal floor was advanced in the prefix, so its delivery
     /// begins at the floor height rather than height 1. It is still checked for
     /// cross-node agreement and parent linkage; only the genesis-rooted
     /// in-order rule is replaced with a floor-aware one.
     pub(crate) floor_started: Option<Node>,
-    /// The deprived node whose processed height must catch up.
-    pub(crate) deprived: Node,
-    /// The height the deprived node must reach after the fuzzing window.
-    pub(crate) deprived_min_height: u64,
-    /// Per-node finalization-view re-checks after the fuzzing window:
-    /// `(node, height, expected_view)`. The immutable finalization archive never
-    /// prunes, so `node` must retain exactly the view it finalized first; the
-    /// re-check reads it reliably and requires `Some(expected_view)`, so both an
-    /// overwrite to the losing view and a lost/absent entry fail.
-    pub(crate) finalization_views: Vec<(Node, u64, u64)>,
 }

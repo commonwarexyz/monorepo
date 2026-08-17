@@ -194,53 +194,59 @@ async fn disseminate<P: Simplex>(
         B::<P>::new::<Sha256>(block_context, floor_digest, attack_height, timestamp)
     };
 
-    context.child("disseminate").spawn(move |context| async move {
-        context.sleep(DISSEMINATE_DELAY).await;
+    context
+        .child("disseminate")
+        .spawn(move |context| async move {
+            context.sleep(DISSEMINATE_DELAY).await;
 
-        let announce = |sender: &mut Sender<PublicKeyOf<P>, deterministic::Context>,
-                        block: &B<P>,
-                        to: Recipients<PublicKeyOf<P>>| {
-            let proposal = Proposal::new(round, floor_view, block.digest());
-            if let Some(vote) = Notarize::sign(&scheme, proposal) {
-                let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
-                let _ = sender.send(to, message, true);
-            }
-        };
+            let announce = |sender: &mut Sender<PublicKeyOf<P>, deterministic::Context>,
+                            block: &B<P>,
+                            to: Recipients<PublicKeyOf<P>>| {
+                let proposal = Proposal::new(round, floor_view, block.digest());
+                if let Some(vote) = Notarize::sign(&scheme, proposal) {
+                    let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
+                    let _ = sender.send(to, message, true);
+                }
+            };
 
-        match fault {
-            BlockFault::Omit => {
-                let block = build(0);
-                announce(&mut vote_sender, &block, Recipients::Some(honest.clone()));
-            }
-            BlockFault::Partition => {
-                // Gossip to every honest node but the last, yet notarize to all,
-                // so the excluded node must certify by round and fetch the block.
-                let block = build(0);
-                let served = if honest.len() > 1 {
-                    honest[..honest.len() - 1].to_vec()
-                } else {
-                    honest.clone()
-                };
-                mailbox.broadcast_shared(Recipients::Some(served), Arc::new(block.clone()));
-                announce(&mut vote_sender, &block, Recipients::Some(honest.clone()));
-            }
-            BlockFault::Equivocate => {
-                let (first, rest) = honest.split_at(1.min(honest.len()));
-                let block_a = build(0);
-                let block_b = build(1);
-                if !first.is_empty() {
-                    mailbox
-                        .broadcast_shared(Recipients::Some(first.to_vec()), Arc::new(block_a.clone()));
-                    announce(&mut vote_sender, &block_a, Recipients::Some(first.to_vec()));
+            match fault {
+                BlockFault::Omit => {
+                    let block = build(0);
+                    announce(&mut vote_sender, &block, Recipients::Some(honest.clone()));
                 }
-                if !rest.is_empty() {
-                    mailbox
-                        .broadcast_shared(Recipients::Some(rest.to_vec()), Arc::new(block_b.clone()));
-                    announce(&mut vote_sender, &block_b, Recipients::Some(rest.to_vec()));
+                BlockFault::Partition => {
+                    // Gossip to every honest node but the last, yet notarize to all,
+                    // so the excluded node must certify by round and fetch the block.
+                    let block = build(0);
+                    let served = if honest.len() > 1 {
+                        honest[..honest.len() - 1].to_vec()
+                    } else {
+                        honest.clone()
+                    };
+                    mailbox.broadcast_shared(Recipients::Some(served), Arc::new(block.clone()));
+                    announce(&mut vote_sender, &block, Recipients::Some(honest.clone()));
+                }
+                BlockFault::Equivocate => {
+                    let (first, rest) = honest.split_at(1.min(honest.len()));
+                    let block_a = build(0);
+                    let block_b = build(1);
+                    if !first.is_empty() {
+                        mailbox.broadcast_shared(
+                            Recipients::Some(first.to_vec()),
+                            Arc::new(block_a.clone()),
+                        );
+                        announce(&mut vote_sender, &block_a, Recipients::Some(first.to_vec()));
+                    }
+                    if !rest.is_empty() {
+                        mailbox.broadcast_shared(
+                            Recipients::Some(rest.to_vec()),
+                            Arc::new(block_b.clone()),
+                        );
+                        announce(&mut vote_sender, &block_b, Recipients::Some(rest.to_vec()));
+                    }
                 }
             }
-        }
-    });
+        });
 }
 
 /// Byzantine marshal-backfill responder on channel 1.

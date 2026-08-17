@@ -85,9 +85,12 @@ impl ProgressHandle {
             return;
         }
         progress.latest = height;
-        progress
-            .subscribers
-            .retain(|tx| !matches!(tx.try_send(height), Err(mpsc::error::TrySendError::Closed(_))));
+        progress.subscribers.retain(|tx| {
+            !matches!(
+                tx.try_send(height),
+                Err(mpsc::error::TrySendError::Closed(_))
+            )
+        });
     }
 }
 

@@ -4,11 +4,11 @@
 mod fuzz {
     use commonware_consensus_fuzz::{
         SimplexCertificateMock,
-        scenarios::{MarshalScenarioPrefixInput, fuzz_marshal_scenario_prefix},
+        scenarios::{MarshalScenarioPrefixInput, fuzz_marshal_scenario_prefix_inline},
     };
     use libfuzzer_sys::fuzz_target;
 
     fuzz_target!(|input: MarshalScenarioPrefixInput| {
-        fuzz_marshal_scenario_prefix::<SimplexCertificateMock>(input);
+        fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input);
     });
 }

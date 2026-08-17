@@ -66,7 +66,11 @@ impl<S: Strategy> Strategy for LiveScope<S> {
         )
     }
 
-    fn proposal_with_view(&self, proposal: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
+    fn proposal_with_view(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
         self.inner.proposal_with_view(proposal, view)
     }
 

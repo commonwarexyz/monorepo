@@ -17,11 +17,11 @@ pub(crate) mod mallory;
 pub mod marshal;
 pub mod network;
 #[cfg(feature = "mocks")]
-pub mod scenarios;
-#[cfg(feature = "mocks")]
 pub mod ordered_broadcast;
 #[cfg(feature = "mocks")]
 pub mod ordered_broadcast_certificate_mock;
+#[cfg(feature = "mocks")]
+pub mod scenarios;
 pub mod simplex;
 pub(crate) mod simplex_audit;
 #[cfg(feature = "mocks")]
