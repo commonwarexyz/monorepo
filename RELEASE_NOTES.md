@@ -1,5 +1,31 @@
 # Release Notes
 
+## v2026.7.1
+
+### Crash Recovery
+
+Runtime storage now recovers a blob whose initial header write was interrupted.
+The tokio and io_uring backends reset a partial header to a valid empty blob,
+and io_uring makes the new file and its directory entries durable before
+starting the header write ([#4256]).
+
+Simplex now re-adds a validator's persisted nullify vote to the in-memory
+batcher after a restart and on timeout retries. Validators that restart after
+their votes became durable but before a nullification certificate circulated
+can reconstruct the certificate and resume consensus instead of stalling
+([#4275]).
+
+### Marshal Shutdown
+
+Marshal now exits cleanly when application shutdown drops an in-flight
+acknowledgement instead of panicking. The unacknowledged finalized block does
+not advance the processed floor, so it is delivered to the application again
+after restart ([#4420]).
+
+[#4256]: https://github.com/commonwarexyz/monorepo/pull/4256
+[#4275]: https://github.com/commonwarexyz/monorepo/pull/4275
+[#4420]: https://github.com/commonwarexyz/monorepo/pull/4420
+
 ## v2026.7.0
 
 ### Staged Batch Updates in QMDB
