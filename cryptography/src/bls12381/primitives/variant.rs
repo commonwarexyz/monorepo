@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use commonware_macros::stability;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Space};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Participant;
@@ -20,26 +21,6 @@ use core::{
     hash::Hash,
 };
 use rand_core::CryptoRng;
-
-#[cfg(test)]
-std::thread_local! {
-    static FINAL_EXPONENTIATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_final_exponentiations() {
-    FINAL_EXPONENTIATIONS.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn final_exponentiations() -> usize {
-    FINAL_EXPONENTIATIONS.get()
-}
-
-#[cfg(test)]
-pub(crate) fn record_final_exponentiation() {
-    FINAL_EXPONENTIATIONS.set(FINAL_EXPONENTIATIONS.get() + 1);
-}
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
@@ -88,6 +69,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// Verifies `signature` against pairings of corresponding public keys and message hashes.
     ///
     /// Implementations must reject empty inputs and inputs with different lengths.
+    #[stability(ALPHA)]
     fn verify_pairing_product(
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -185,6 +167,7 @@ impl Variant for MinPk {
         Ok(())
     }
 
+    #[stability(ALPHA)]
     fn verify_pairing_product(
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -207,8 +190,6 @@ impl Variant for MinPk {
 
         let mut result = blst_fp12::default();
         let ptr = &raw mut result;
-        #[cfg(test)]
-        record_final_exponentiation();
         // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
         unsafe {
             blst_miller_loop(ptr, &p2_affine, &p1_affine);
@@ -311,6 +292,7 @@ impl Variant for MinSig {
         Ok(())
     }
 
+    #[stability(ALPHA)]
     fn verify_pairing_product(
         publics: &[Self::Public],
         hms: &[Self::Signature],
@@ -333,8 +315,6 @@ impl Variant for MinSig {
 
         let mut result = blst_fp12::default();
         let ptr = &raw mut result;
-        #[cfg(test)]
-        record_final_exponentiation();
         // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
         unsafe {
             blst_miller_loop(ptr, &p2_affine, &p1_affine);

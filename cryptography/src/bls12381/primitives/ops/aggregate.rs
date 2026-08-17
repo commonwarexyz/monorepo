@@ -6,90 +6,19 @@
 //! # Security Considerations
 //!
 //! Combining signatures or verifying an aggregate does not establish that each input signature is
-//! valid. Use [`aggregate_signatures`] to verify untrusted signatures before combining them, or
-//! [`batch`](super::batch) to verify an existing set individually.
+//! valid. Use [`batch`](super::batch) to verify independently supplied signatures.
 //! Aggregating signatures from multiple public keys over the same message additionally requires a
 //! verified proof of possession (PoP) for every public key.
 
-#[stability(ALPHA)]
-use super::verify_message;
 use super::{
     super::{Error, variant::Variant},
     hash_with_namespace,
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_macros::stability;
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
-#[stability(ALPHA)]
-use hashbrown::HashSet;
-
-#[stability(ALPHA)]
-pub(super) type TranscriptEntry<'a, V> = (<V as Variant>::Public, &'a [u8], &'a [u8]);
-
-/// Coalesces public keys attributed to identical `(namespace, message)` pairs.
-#[stability(ALPHA)]
-pub(super) fn group_entries<'a, V: Variant>(
-    mut entries: Vec<TranscriptEntry<'a, V>>,
-) -> Vec<TranscriptEntry<'a, V>> {
-    entries.sort_unstable_by(|left, right| (left.1, left.2).cmp(&(right.1, right.2)));
-    entries.dedup_by(|next, current| {
-        if (next.1, next.2) != (current.1, current.2) {
-            return false;
-        }
-        current.0 += &next.0;
-        true
-    });
-    entries
-}
-
-#[stability(ALPHA)]
-pub(super) fn group_transcript<'a, V: Variant>(
-    transcript: impl IntoIterator<Item = TranscriptEntry<'a, V>>,
-) -> Result<Vec<TranscriptEntry<'a, V>>, Error> {
-    let transcript: Vec<_> = transcript.into_iter().collect();
-    if transcript.is_empty() {
-        return Err(Error::InvalidSignature);
-    }
-
-    let mut publics = HashSet::with_capacity(transcript.len());
-    for (public, _, _) in &transcript {
-        if public == &V::Public::zero() || !publics.insert(*public) {
-            return Err(Error::InvalidSignature);
-        }
-    }
-
-    let transcript = group_entries::<V>(transcript);
-    if transcript
-        .iter()
-        .any(|(public, _, _)| public == &V::Public::zero())
-    {
-        return Err(Error::InvalidSignature);
-    }
-    Ok(transcript)
-}
-
-#[stability(ALPHA)]
-pub(crate) fn verify_transcript_inner<'a, V: Variant>(
-    transcript: impl IntoIterator<Item = TranscriptEntry<'a, V>>,
-    signature: &Signature<V>,
-    strategy: &impl Strategy,
-) -> Result<(), Error> {
-    if signature.inner() == &V::Signature::zero() {
-        return Err(Error::InvalidSignature);
-    }
-
-    let groups = group_transcript::<V>(transcript)?;
-    let terms = strategy.map_collect_vec(groups, |(public, namespace, message)| {
-        let message = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
-        (public, message)
-    });
-    let (publics, messages): (Vec<_>, Vec<_>) = terms.into_iter().unzip();
-    V::verify_pairing_product(&publics, &messages, signature.inner(), strategy)
-}
 
 /// An aggregated public key from multiple individual public keys.
 ///
@@ -305,39 +234,6 @@ where
     s
 }
 
-/// Verifies untrusted signatures individually before combining them.
-///
-/// Each entry attributes an exact `(namespace, message)` pair and signature to one public key.
-/// Public keys must be unique and non-zero, and the input must not be empty.
-///
-/// # Security
-///
-/// Every public key must be group-checked and have a verified proof of possession (PoP). This
-/// function verifies signatures, but not PoPs. Accepting a public key without a verified PoP can
-/// enable rogue-key attacks when the resulting aggregate is verified.
-#[stability(ALPHA)]
-pub fn aggregate_signatures<'a, V: Variant>(
-    entries: impl IntoIterator<Item = (&'a V::Public, &'a [u8], &'a [u8], &'a V::Signature)>,
-    strategy: &impl Strategy,
-) -> Result<Signature<V>, Error> {
-    let entries: Vec<_> = entries.into_iter().collect();
-    group_transcript::<V>(
-        entries
-            .iter()
-            .map(|(public, namespace, message, _)| (**public, *namespace, *message)),
-    )?;
-
-    strategy.try_map_collect_vec(entries.iter(), |(public, namespace, message, signature)| {
-        verify_message::<V>(public, namespace, message, signature)
-    })?;
-
-    let signature = combine_signatures::<V, _>(entries.iter().map(|entry| entry.3));
-    if signature.inner() == &V::Signature::zero() {
-        return Err(Error::InvalidSignature);
-    }
-    Ok(signature)
-}
-
 /// Combines multiple messages into a single message hash.
 ///
 /// # Warning
@@ -409,33 +305,6 @@ pub fn verify_same_signer<V: Variant>(
     V::verify(public, message.inner(), signature.inner())
 }
 
-/// Verifies an aggregate signature over an exact attributed transcript.
-///
-/// Each transcript entry contains one public key and its exact `(namespace, message)` pair. Public
-/// keys must be unique and non-zero, and the transcript must not be empty. Repeated
-/// `(namespace, message)` pairs are allowed and are grouped so each distinct pair requires only one
-/// hash and one pairing.
-///
-/// # Security
-///
-/// Every public key must be group-checked and have a verified proof of possession (PoP). This
-/// function verifies the aggregate equation, but not PoPs. Accepting a public key without a verified
-/// PoP enables rogue-key attacks.
-#[stability(ALPHA)]
-pub fn verify_transcript<'a, V: Variant>(
-    transcript: impl IntoIterator<Item = (&'a V::Public, &'a [u8], &'a [u8])>,
-    signature: &Signature<V>,
-    strategy: &impl Strategy,
-) -> Result<(), Error> {
-    verify_transcript_inner::<V>(
-        transcript
-            .into_iter()
-            .map(|(public, namespace, message)| (*public, namespace, message)),
-        signature,
-        strategy,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -445,35 +314,12 @@ mod tests {
     use crate::bls12381::primitives::{
         Error,
         group::{G1_MESSAGE, G2_MESSAGE},
-        variant::{MinPk, MinSig, final_exponentiations, reset_final_exponentiations},
+        variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_math::algebra::CryptoGroup;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{NZUsize, test_rng, union_unique};
-    use core::iter::empty;
-
-    type SignedEntry<V> = (
-        <V as Variant>::Public,
-        &'static [u8],
-        &'static [u8],
-        <V as Variant>::Signature,
-    );
-
-    fn signed_entries<V: Variant>(
-        messages: &[(&'static [u8], &'static [u8])],
-    ) -> Vec<SignedEntry<V>> {
-        let mut rng = test_rng();
-        messages
-            .iter()
-            .map(|&(namespace, message)| {
-                let (private, public) = keypair::<_, V>(&mut rng);
-                let signature = sign_message::<V>(&private, namespace, message);
-                (public, namespace, message, signature)
-            })
-            .collect()
-    }
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
@@ -672,227 +518,6 @@ mod tests {
     fn test_aggregate_verify_same_signer_correct() {
         aggregate_verify_same_signer_correct::<MinPk>();
         aggregate_verify_same_signer_correct::<MinSig>();
-    }
-
-    fn aggregate_transcript_valid<V: Variant>() {
-        let entries = signed_entries::<V>(&[
-            (b"vote", b"same"),
-            (b"finalize", b"other"),
-            (b"vote", b"same"),
-            (b"vote", b"other"),
-        ]);
-        let aggregate = aggregate_signatures::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, signature)| {
-                    (public, *namespace, *message, signature)
-                }),
-            &Sequential,
-        )
-        .expect("individually valid signatures should aggregate");
-
-        verify_transcript::<V>(
-            entries
-                .iter()
-                .rev()
-                .map(|(public, namespace, message, _)| (public, *namespace, *message)),
-            &aggregate,
-            &Sequential,
-        )
-        .expect("mixed and repeated-message transcript should verify");
-
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        verify_transcript::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, _)| (public, *namespace, *message)),
-            &aggregate,
-            &parallel,
-        )
-        .expect("transcript should verify in parallel");
-    }
-
-    #[test]
-    fn test_aggregate_transcript_valid() {
-        aggregate_transcript_valid::<MinPk>();
-        aggregate_transcript_valid::<MinSig>();
-    }
-
-    fn aggregate_transcript_uses_one_final_exponentiation<V: Variant>() {
-        let entries = signed_entries::<V>(&[
-            (b"vote", b"same"),
-            (b"finalize", b"other"),
-            (b"vote", b"same"),
-            (b"vote", b"other"),
-        ]);
-        let aggregate = aggregate_signatures::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, signature)| {
-                    (public, *namespace, *message, signature)
-                }),
-            &Sequential,
-        )
-        .unwrap();
-
-        reset_final_exponentiations();
-        verify_transcript::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, _)| (public, *namespace, *message)),
-            &aggregate,
-            &Sequential,
-        )
-        .unwrap();
-        assert_eq!(final_exponentiations(), 1);
-
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        reset_final_exponentiations();
-        verify_transcript::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, _)| (public, *namespace, *message)),
-            &aggregate,
-            &parallel,
-        )
-        .unwrap();
-        assert_eq!(final_exponentiations(), 1);
-    }
-
-    #[test]
-    fn test_aggregate_transcript_uses_one_final_exponentiation() {
-        aggregate_transcript_uses_one_final_exponentiation::<MinPk>();
-        aggregate_transcript_uses_one_final_exponentiation::<MinSig>();
-    }
-
-    fn aggregate_transcript_rejects_mutation<V: Variant>() {
-        let entries = signed_entries::<V>(&[(b"namespace", b"first"), (b"namespace", b"second")]);
-        let aggregate = aggregate_signatures::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, signature)| {
-                    (public, *namespace, *message, signature)
-                }),
-            &Sequential,
-        )
-        .unwrap();
-        let mut transcript: Vec<_> = entries
-            .iter()
-            .map(|(public, namespace, message, _)| (public, *namespace, *message))
-            .collect();
-
-        transcript[0].2 = b"mutated";
-        assert!(
-            verify_transcript::<V>(transcript.iter().copied(), &aggregate, &Sequential).is_err()
-        );
-
-        transcript[0].2 = entries[0].2;
-        transcript[0].1 = b"mutated";
-        assert!(
-            verify_transcript::<V>(transcript.iter().copied(), &aggregate, &Sequential).is_err()
-        );
-
-        transcript[0].1 = entries[0].1;
-        let mut corrupted = aggregate;
-        corrupted.add(&V::Signature::generator());
-        assert!(
-            verify_transcript::<V>(transcript.iter().copied(), &corrupted, &Sequential).is_err()
-        );
-    }
-
-    #[test]
-    fn test_aggregate_transcript_rejects_mutation() {
-        aggregate_transcript_rejects_mutation::<MinPk>();
-        aggregate_transcript_rejects_mutation::<MinSig>();
-    }
-
-    fn aggregate_transcript_rejects_invalid_keys<V: Variant>() {
-        let mut rng = test_rng();
-        let (private, public) = keypair::<_, V>(&mut rng);
-        let first = sign_message::<V>(&private, b"namespace", b"first");
-        let second = sign_message::<V>(&private, b"namespace", b"second");
-        let aggregate = combine_signatures::<V, _>([&first, &second]);
-
-        assert!(
-            verify_transcript::<V>(
-                [
-                    (&public, b"namespace".as_slice(), b"first".as_slice()),
-                    (&public, b"namespace".as_slice(), b"second".as_slice()),
-                ],
-                &aggregate,
-                &Sequential,
-            )
-            .is_err()
-        );
-
-        let zero = V::Public::zero();
-        assert!(
-            verify_transcript::<V>(
-                [(&zero, b"namespace".as_slice(), b"first".as_slice())],
-                &aggregate,
-                &Sequential,
-            )
-            .is_err()
-        );
-        assert!(
-            verify_transcript::<V>(
-                empty::<(&V::Public, &[u8], &[u8])>(),
-                &aggregate,
-                &Sequential,
-            )
-            .is_err()
-        );
-        assert!(
-            verify_transcript::<V>(
-                [(&public, b"namespace".as_slice(), b"first".as_slice())],
-                &Signature::zero(),
-                &Sequential,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_aggregate_transcript_rejects_invalid_keys() {
-        aggregate_transcript_rejects_invalid_keys::<MinPk>();
-        aggregate_transcript_rejects_invalid_keys::<MinSig>();
-    }
-
-    fn aggregate_signatures_rejects_invalid_assembly<V: Variant>() {
-        let entries = signed_entries::<V>(&[(b"namespace", b"first"), (b"namespace", b"second")]);
-        let raw = combine_signatures::<V, _>([&entries[1].3, &entries[0].3]);
-        verify_transcript::<V>(
-            entries
-                .iter()
-                .map(|(public, namespace, message, _)| (public, *namespace, *message)),
-            &raw,
-            &Sequential,
-        )
-        .expect("the aggregate equation cannot prove each input was attributed correctly");
-
-        assert!(
-            aggregate_signatures::<V>(
-                [
-                    (&entries[0].0, entries[0].1, entries[0].2, &entries[1].3),
-                    (&entries[1].0, entries[1].1, entries[1].2, &entries[0].3),
-                ],
-                &Sequential,
-            )
-            .is_err()
-        );
-        assert!(
-            aggregate_signatures::<V>(
-                empty::<(&V::Public, &[u8], &[u8], &V::Signature)>(),
-                &Sequential,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_aggregate_signatures_rejects_invalid_assembly() {
-        aggregate_signatures_rejects_invalid_assembly::<MinPk>();
-        aggregate_signatures_rejects_invalid_assembly::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]

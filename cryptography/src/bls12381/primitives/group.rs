@@ -94,8 +94,6 @@ impl PairingProduct {
 
     fn verify(mut self) -> bool {
         self.commit();
-        #[cfg(test)]
-        super::variant::record_final_exponentiation();
         self.pairing.finalverify(None)
     }
 }
