@@ -105,15 +105,11 @@ const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
 pub mod current;
-mod gate;
 pub mod immutable;
 pub mod keyless;
+pub mod live;
 pub mod p2p;
 pub mod snapshot;
-
-// Aliased because `Reader` is still taken by the `Shared`-based reader. Once
-// that is deleted, this becomes `Reader`.
-pub use gate::{Closed, Gate, Reader as GateReader};
 
 /// A database shared across tasks.
 ///
