@@ -33,9 +33,11 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Replay, Sealed, Writer},
+    buffer::paged::{CacheRef, Replay, Writer},
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -418,6 +420,7 @@ struct Inner<E: Context, V: Codec> {
 }
 
 /// Read one fixed-size offset entry for `pos` from the offsets journal's sealed blobs.
+#[commonware_macros::stability(ALPHA)]
 async fn read_offset<B: RBlob>(
     off_sealed: &[Sealed<B>],
     off_oldest: u64,
@@ -441,7 +444,8 @@ async fn read_offset<B: RBlob>(
 
 /// Read the byte ranges holding positions `[start, end)` from sealed data blobs through
 /// the page cache, resolving each blob segment's byte boundaries from the offsets
-/// journal's sealed blobs. Best effort: unreadable pieces are skipped.
+/// journal's sealed blobs. Best effort: the first failed read ends the pass.
+#[commonware_macros::stability(ALPHA)]
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_ranges<B: RBlob>(
     start: u64,
@@ -527,6 +531,7 @@ async fn prefetch_ranges<B: RBlob>(
 
 /// Warm the offsets entries for positions `[from_pos, to_pos]` (inclusive) across their
 /// sealed blobs. Entries are fixed-size, so the byte ranges need no reads to compute.
+#[commonware_macros::stability(ALPHA)]
 async fn warm_offsets<B: RBlob>(
     off_sealed: &[Sealed<B>],
     off_oldest: u64,
@@ -1672,6 +1677,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// sealed blobs are covered (for both the data and offsets journals): tail items are
     /// served by write buffers. Reads are best effort: failures end the pass, and a
     /// concurrent prune invalidates them harmlessly.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn start_prefetch(
         &self,
         start: u64,
@@ -2506,8 +2512,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Return a future that warms the page cache for up to `max_items` items starting at
     /// position `start`, or None when nothing in the range is prefetchable. Only items in
     /// sealed blobs are covered. The future is owned and best effort: the caller chooses
-    /// where to run it, failures are swallowed, and a concurrent prune invalidates the
-    /// work harmlessly.
+    /// where to run it, the first failed read ends the pass, and a concurrent prune
+    /// invalidates the work harmlessly.
+    #[commonware_macros::stability(ALPHA)]
     pub fn start_prefetch(
         &self,
         start: u64,
@@ -2630,6 +2637,7 @@ impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
+    #[commonware_macros::stability(ALPHA)]
     fn start_prefetch(
         &self,
         start: u64,

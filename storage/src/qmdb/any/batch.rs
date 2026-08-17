@@ -400,6 +400,8 @@ where
     /// Location of this batch's CommitFloor operation (the tip is one past it).
     pub(crate) commit_loc: Location<F>,
     pub(crate) floor: Location<F>,
+    /// This batch's own scanned floor advance (zero when the raise snapped).
+    scan_advance: u64,
     /// Operations this batch appends, including the CommitFloor.
     pub(crate) batch_len: usize,
 }
@@ -426,6 +428,7 @@ where
                 tip: Commitment::new(self.commit_loc + 1, root),
                 ancestors: self.ancestors,
                 inactivity_floor: self.floor,
+                scan_advance: self.scan_advance,
             },
         }))
     }
@@ -1140,6 +1143,9 @@ where
         let total_steps = user_steps + 1;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
         let mut floor = self.base_inactivity_floor_loc;
+        // Whether the raise snapped to the tip without scanning; a snap's floor movement
+        // is excluded from the prefetch estimator sample.
+        let mut snapped = false;
 
         // Key-sort the diff as one job on the strategy: candidate classification (after the
         // first floor-raise read below) is the earliest consumer that needs it sorted, so the
@@ -1353,6 +1359,7 @@ where
         } else {
             // DB is empty after this batch; raise floor to tip.
             floor = self.base_state.size + ops.len() as u64;
+            snapped = true;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
 
@@ -1448,6 +1455,11 @@ where
             commit_loc,
             floor,
             batch_len,
+            scan_advance: if snapped {
+                0
+            } else {
+                (*floor).saturating_sub(*self.base_inactivity_floor_loc)
+            },
         })
     }
 }
@@ -3109,19 +3121,18 @@ where
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
-        let prior_floor = self.inactivity_floor_loc;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.last_commit_loc = batch.bounds.tip.size - 1;
         self.root = batch.root();
 
         // Warm the next floor raise's candidate window: its scan starts at the new floor
         // and reads cold regions of the log on large databases. The window tracks the
-        // observed per-batch floor advance, with headroom for heavier batches. The guards
-        // skip non-scan jumps, which would poison the estimate: a fresh database's first
-        // commit moves the floor without scanning (prior floor zero), and deleting the
-        // last active key snaps the floor to the tip without scanning (no active keys).
-        let advance = (*self.inactivity_floor_loc).saturating_sub(*prior_floor);
-        if advance > 0 && *prior_floor > 0 && batch.total_active_keys > 0 {
+        // applied batch's own scanned floor advance, the per-merkleize quantity the next
+        // raise repeats. Snap-to-tip floor jumps (a fresh database's first commit, an
+        // emptied database anywhere in the applied chain) sample as zero by construction,
+        // so they never poison the estimate.
+        let advance = batch.bounds.scan_advance;
+        if advance > 0 {
             let prior = self.floor_prefetch_target;
             let smoothed = if prior == 0 {
                 advance

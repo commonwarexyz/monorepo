@@ -260,18 +260,21 @@ impl<E: Context> Writable<E> {
 
     /// Byte cap for one prefetch pass: a quarter of the page cache, so warming can never
     /// evict its own critical prefix.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn prefetch_budget(&self) -> u64 {
         let cache = self.tail.cache_ref();
         cache.capacity() as u64 * cache.page_size() / 4
     }
 
     /// Bounds of the sealed history: the first sealed blob's index and the sealed count.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn sealed_bounds(&self) -> (u64, usize) {
         (self.oldest_blob_index, self.sealed.len())
     }
 
     /// Owned handles for the sealed blobs whose indices fall in `range`, clamped to the
     /// sealed history: the first cloned blob's index and its handles.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn sealed_range(&self, range: std::ops::Range<u64>) -> (u64, Vec<Sealed<E::Blob>>) {
         let lo = range.start.max(self.oldest_blob_index);
         let hi = range

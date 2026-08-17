@@ -145,9 +145,11 @@ use crate::{
     },
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Sealed, Writer},
+    buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
@@ -346,6 +348,7 @@ pub struct Config {
 
 /// Warm the byte ranges holding item positions `[start, end)` from sealed fixed-size
 /// blobs through the page cache. Best effort: the first failed read ends the pass.
+#[commonware_macros::stability(ALPHA)]
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_ranges<B: RBlob>(
     start: u64,
@@ -409,6 +412,7 @@ pub(super) struct Inner<E: Context, A> {
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Sealed-history bounds plus this journal's items-per-blob geometry, for
     /// sealed-prefix prefetch by wrapping journals.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) const fn sealed_geometry(&self) -> (u64, usize, u64, u64) {
         let (oldest, len) = self.blobs.sealed_bounds();
         (oldest, len, self.items_per_blob.get(), self.bounds.start)
@@ -416,6 +420,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// Owned handles for the sealed blobs whose indices fall in `range`. See
     /// [`Writable::sealed_range`].
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn sealed_range(&self, range: std::ops::Range<u64>) -> (u64, Vec<Sealed<E::Blob>>) {
         self.blobs.sealed_range(range)
     }
@@ -425,6 +430,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// blobs are covered: tail items are served by the write buffer. Item byte offsets are
     /// arithmetic (fixed-size entries), so no index reads are needed. The returned future
     /// is owned and best effort.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn start_prefetch(
         &self,
         start: u64,
@@ -1326,6 +1332,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// position `start`, or None when nothing in the range is prefetchable. Only items in
     /// sealed blobs are covered. The future is owned and best effort: the caller chooses
     /// where to run it.
+    #[commonware_macros::stability(ALPHA)]
     pub fn start_prefetch(
         &self,
         start: u64,
@@ -1766,6 +1773,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
+    #[commonware_macros::stability(ALPHA)]
     fn start_prefetch(
         &self,
         start: u64,

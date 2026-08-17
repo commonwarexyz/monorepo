@@ -43,6 +43,7 @@ fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob:
 /// byte. Returns false when the budget is exhausted or a read fails (both end the
 /// prefetch). Chunk reads run a few at a time: the paged read path fetches faulted pages
 /// one await at a time, so concurrency across chunks is what keeps device queues busy.
+#[commonware_macros::stability(ALPHA)]
 async fn warm_range<B: commonware_runtime::Blob>(
     sealed: &commonware_runtime::buffer::paged::Sealed<B>,
     from: u64,
