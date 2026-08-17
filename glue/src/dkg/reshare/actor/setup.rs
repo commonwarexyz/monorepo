@@ -90,6 +90,11 @@ fn state_sync_skips_inclusion_prefix(
         == EpochPhase::Late
 }
 
+/// Selects the first height setup may process.
+///
+/// State sync never starts below its certified floor. Otherwise, an existing
+/// ceremony restarts at its epoch boundary, and a fresh setup resumes after
+/// Marshal's processed height.
 fn startup_height(
     epocher: &FixedEpocher,
     current_epoch: Option<Epoch>,

@@ -172,6 +172,7 @@ pub(crate) type TestActor = orchestrator::Actor<
     TestElector,
     TestStrategy,
 >;
+
 pub(crate) type TestReshareActor = reshare::Actor<
     deterministic::Context,
     TestBlock,
