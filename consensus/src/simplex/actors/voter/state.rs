@@ -1413,12 +1413,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// before the certificate that unlocks the view exists.
     ///
     /// `None` when `view` does not start a term or the elector does not elect
-    /// ahead (see [`Elector::speculate`]).
+    /// early (see [`Elector::elect_early`]).
     fn handoff_leader(&self, view: View) -> Option<Participant> {
         if !view.is_term_start(self.term_length()) {
             return None;
         }
-        self.elector.speculate(Rnd::new(self.epoch, view))
+        self.elector.elect_early(Rnd::new(self.epoch, view))
     }
 
     /// Returns true when a pipelined handoff may build on `parent`: `parent`
@@ -1511,8 +1511,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
 
         // Crossing a term boundary requires our notarize vote for the outgoing
-        // view. Receiving its proposal is not enough to speculate the incoming
-        // leader.
+        // view. Receiving its proposal is not enough to elect the incoming
+        // leader early.
         if !self
             .views
             .get(&view)
@@ -1521,7 +1521,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
 
-        // Stamp the speculative leader once so repeated proposal, vote, and
+        // Stamp the early-elected leader once so repeated proposal, vote, and
         // replay events remain idempotent.
         if let Some(leader) = self.handoff_leader(next)
             && !self.leader_is_set(next)
