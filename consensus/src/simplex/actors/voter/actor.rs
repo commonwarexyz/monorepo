@@ -1082,19 +1082,23 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop any pending items if we have moved past their view (work
-                // for optimistic future views is kept). This runs before the
-                // waiters are rebuilt, so a verification completion cannot be
-                // polled after another branch exits its view. A view is exited
-                // only on successful certification, nullification, or finalization.
-                // Nullification does not cancel certification work for the
-                // exited view, so the automaton must tolerate a dropped verify
-                // receiver while certify still wants the result.
-                if let Some(ref pp) = pending_propose
-                    && pp.view() < self.state.current_view()
-                {
+                // Drop work after exiting its view while retaining optimistic
+                // future work. Proposal construction also captures ancestry, so
+                // replace it once that ancestry is invalid and another parent is
+                // available. This runs before rebuilding waiters, preventing a
+                // stale completion from being polled after the state transition.
+                if pending_propose.as_ref().is_some_and(|pp| {
+                    pp.view() < self.state.current_view()
+                        || self.state.supersede_proposal_request(&pp.0)
+                }) {
                     pending_propose = None;
                 }
+
+                // A view is exited only on successful certification,
+                // nullification, or finalization. Nullification does not cancel
+                // certification work for the exited view, so the automaton must
+                // tolerate a dropped verify receiver while certify still wants
+                // the result.
                 if let Some(ref pv) = pending_verify
                     && pv.view() < self.state.current_view()
                 {

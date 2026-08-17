@@ -956,9 +956,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if !self
             .find_parent(context.view())
             .is_ok_and(|parent| parent == context.parent)
-            && !self
-                .parent_payload(&proposal)
-                .is_ok_and(|payload| payload == context.parent.1)
+            && !self.captured_parent_valid(context)
         {
             // The build latch covers one asynchronous request. An invalid
             // result leaves the slot empty, so release it for a new context.
@@ -971,6 +969,34 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // The captured ancestry passed one of the validity paths, so the
         // proposal can enter the round as locally verified.
         self.record_proposed(proposal)
+    }
+
+    /// Releases a proposal's build latch when its captured ancestry is invalid
+    /// and a replacement parent is available. Returns true when the caller
+    /// should drop the pending receiver.
+    pub fn supersede_proposal_request(&mut self, context: &Context<D, S::PublicKey>) -> bool {
+        let Ok(preferred) = self.find_parent(context.view()) else {
+            return false;
+        };
+        if preferred == context.parent || self.captured_parent_valid(context) {
+            return false;
+        }
+        let Some(round) = self.views.get_mut(&context.view()) else {
+            return false;
+        };
+        round.clear_proposal_request();
+        true
+    }
+
+    /// Returns whether a captured parent remains valid ancestry independent of
+    /// the currently preferred parent.
+    fn captured_parent_valid(&self, context: &Context<D, S::PublicKey>) -> bool {
+        let view = context.view();
+        let parent = context.parent.0;
+        self.validate_parent_span(view, parent).is_ok()
+            && self
+                .ancestry_payload_for_child(view, parent)
+                .is_some_and(|payload| *payload == context.parent.1)
     }
 
     /// Records a proposal without applying ancestry checks.
@@ -1627,8 +1653,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// - It is certified (or finalized, which implies certification).
     /// - All views between it and the proposal view have been nullified.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Result<D, ParentPayloadError> {
-        self.validate_parent_span(proposal)?;
         let (view, parent) = (proposal.view(), proposal.parent);
+        self.validate_parent_span(view, parent)?;
 
         // May return `None` if the parent view is not yet either:
         // - notarized and certified
@@ -1665,7 +1691,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Intra-term views share the structural rules (the nullification check
         // is trivially satisfied once contiguity holds).
-        self.validate_parent_span(proposal)?;
+        self.validate_parent_span(view, parent)?;
 
         if self.explicit_parent_ready(view) {
             return Ok(());
@@ -1697,8 +1723,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Validates the structural link between a proposal and its parent view.
-    fn validate_parent_span(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
-        let (view, parent) = (proposal.view(), proposal.parent);
+    fn validate_parent_span(&self, view: View, parent: View) -> Result<(), ParentPayloadError> {
         Self::ensure_parent_precedes(view, parent)?;
 
         // Ignore any requests for outdated parent views.
@@ -3455,11 +3480,19 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([44u8; 32]),
             );
+            let expected_leader = state.term_leader(View::new(6)).expect("term leader").key;
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
-                Verify::Resolve { proposal, view, kind: Kind::Notarization, .. }
-                    if proposal == View::new(6) && view == View::new(2)
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(2)
+                        && target == expected_leader
             ));
 
             // The round deduplicates the request while it is outstanding.
@@ -6849,6 +6882,7 @@ mod tests {
             assert!(state.certified(View::new(5), true).is_some());
             let ours = fetch_proposal(6, 4, 66);
             assert_eq!(state.parent_payload(&ours), Ok(certified.payload));
+            assert!(!state.supersede_proposal_request(&ctx));
             assert!(state.proposed(&ctx, ours.payload));
             let notarize = state
                 .construct_notarize(View::new(6))
@@ -7027,11 +7061,19 @@ mod tests {
             // A validator that receives the pipelined proposal early still
             // waits for the tip's certification before verifying it.
             let child = fetch_proposal(6, 5, 66);
+            let expected_leader = state.term_leader(View::new(6)).expect("term leader").key;
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
-                Verify::Resolve { proposal, view, kind: Kind::Notarization, .. }
-                    if proposal == View::new(6) && view == View::new(5)
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(5)
+                        && target == expected_leader
             ));
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
