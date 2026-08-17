@@ -21,7 +21,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
-use commonware_utils::bitmap;
+use commonware_utils::{bitmap, sync::Mutex};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::future::BoxFuture;
 
@@ -33,6 +33,14 @@ use futures::future::BoxFuture;
 /// subtree); [`Db::set_floor_prefetch_context`] re-arms under a live context.
 pub(crate) type WarmSpawner = Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
+/// Coalesced single-flight state for the warming task.
+struct WarmState {
+    /// A warming pass is running.
+    running: bool,
+    /// The newest stashed request, drained by the running pass.
+    pending: Option<BoxFuture<'static, ()>>,
+}
+
 /// Build a [`WarmSpawner`] whose tasks are supervised children of `context`.
 ///
 /// At most one warming pass runs at a time. The newest request stashed while a pass runs
@@ -40,38 +48,53 @@ pub(crate) type WarmSpawner = Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 /// active pass is still warmed rather than dropped. Requests stashed while a pass is
 /// aborted mid-flight are picked up by the next arm.
 pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
-    /// Clears the runner flag when the pass finishes or is aborted mid-flight.
-    struct InFlight(Arc<AtomicBool>);
+    /// Marks the pass not-running if it is aborted mid-flight. Disarmed on voluntary
+    /// release, so a successor's claim is never erased by this guard's drop.
+    struct InFlight(Option<Arc<Mutex<WarmState>>>);
+    impl InFlight {
+        fn disarm(&mut self) {
+            self.0 = None;
+        }
+    }
     impl Drop for InFlight {
         fn drop(&mut self) {
-            self.0.store(false, Ordering::Release);
+            if let Some(state) = self.0.take() {
+                state.lock().running = false;
+            }
         }
     }
 
     let context = context.child("floor_prefetch");
-    let in_flight = Arc::new(AtomicBool::new(false));
-    let pending: Arc<Mutex<Option<BoxFuture<'static, ()>>>> = Arc::new(Mutex::new(None));
+    let state = Arc::new(Mutex::new(WarmState {
+        running: false,
+        pending: None,
+    }));
     Box::new(move |fut| {
-        // Stash the newest request, then try to claim the runner slot. A stash that
-        // lands while the runner winds down is either drained by it or claimed by this
-        // arm's swap.
-        *lock(&pending) = Some(fut);
-        if in_flight.swap(true, Ordering::AcqRel) {
-            return;
+        // Stash the newest request and claim the runner slot in one critical section.
+        {
+            let mut state = state.lock();
+            state.pending = Some(fut);
+            if state.running {
+                return;
+            }
+            state.running = true;
         }
-        let guard = InFlight(Arc::clone(&in_flight));
-        let flag = Arc::clone(&in_flight);
-        let pending = Arc::clone(&pending);
+        let mut guard = InFlight(Some(Arc::clone(&state)));
+        let state = Arc::clone(&state);
         drop(context.child("warm").spawn(move |_| async move {
-            let _guard = guard;
             loop {
-                let Some(fut) = lock(&pending).take() else {
-                    // Release the slot, then recheck: a request stashed between the
-                    // take and the release must not strand until the next arm.
-                    flag.store(false, Ordering::Release);
-                    if lock(&pending).is_some() && !flag.swap(true, Ordering::AcqRel) {
-                        continue;
+                // Take the next request or release the slot, atomically: a stash landing
+                // after the release claims the slot itself.
+                let next = {
+                    let mut state = state.lock();
+                    let next = state.pending.take();
+                    if next.is_none() {
+                        state.running = false;
                     }
+                    next
+                };
+                let Some(fut) = next else {
+                    guard.disarm();
                     break;
                 };
                 fut.await;
@@ -79,18 +102,7 @@ pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
         }));
     })
 }
-
-/// Lock a poison-tolerant mutex: a panicked warming pass must not wedge later arms.
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
