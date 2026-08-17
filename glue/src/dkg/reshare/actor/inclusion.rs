@@ -157,6 +157,10 @@ where
         let Some(request) = self.request.as_mut() else {
             return Poll::Pending;
         };
+
+        // Response-channel liveness bounds this speculative scan. Receiver
+        // cancellation completes the coordinator so the actor can discard the
+        // request and advance the queue.
         if request.response.poll_closed(cx).is_ready() {
             return Poll::Ready(None);
         }
@@ -525,6 +529,9 @@ where
     V: BlsVariant,
     C: Signer,
 {
+    // Dealer logs can appear only from the midpoint onward. Durable storage owns
+    // any finalized part of that window. The adjacent finalized digest anchors
+    // the remaining ancestry to the same chain.
     let midpoint = scan
         .epocher
         .midpoint(scan.epoch)
@@ -844,6 +851,11 @@ where
 
                         let done = block.height() == bounds.last();
                         if done {
+                            // The final block fixes one canonical log snapshot for
+                            // durable epoch state and all canonical responses.
+                            // Preserve a cached artifact because admitted
+                            // speculative completion may replace the one-entry
+                            // cache with another view.
                             let canonical_logs = Arc::new(store.logs(epoch));
                             let cached = work
                                 .artifacts
@@ -1108,6 +1120,9 @@ where
                 return;
             }
 
+            // Materializing a log view transfers this response to the sole
+            // verification task. Later requests remain lazy until that waiter
+            // completes.
             assert!(work.waiter.is_none(), "materialized waiter already active");
             work.waiter = Some(request.response);
             self.start_verification(&mut work.verification, epoch, info, store, logs);
@@ -1194,6 +1209,9 @@ where
         store: &Store<E, SS, V, C::PublicKey, B::Directory>,
         log_map: &PendingLogs<V, C::PublicKey>,
     ) -> VerificationTask<V, C, T> {
+        // Continuous reshare reconstructs players from the committed epoch. A
+        // missing current epoch is valid only in one-shot DKG, whose configured
+        // participants provide the player set.
         let current = store.current();
         let dkg_participants = if current.is_none() {
             self.dkg_participants()
@@ -1253,6 +1271,9 @@ where
             return cached.artifact.clone();
         }
 
+        // Continuous reshare carries current and lookahead committees from
+        // durable epoch state. One-shot DKG uses its configured participants and
+        // has no lookahead committee to query.
         let current = store.current();
         let dkg_participants = if current.is_none() {
             self.dkg_participants()
@@ -1289,6 +1310,10 @@ where
             Set::default()
         };
 
+        // Successful ceremonies install their new output. Reshare failure
+        // carries the current output and retained share, while DKG failure has no
+        // artifact. Every emitted artifact binds a directory to its exact
+        // participant union.
         let artifact = match (ceremony, current) {
             (Some(ceremony), Some(current)) => {
                 let next_epoch = epoch.next();

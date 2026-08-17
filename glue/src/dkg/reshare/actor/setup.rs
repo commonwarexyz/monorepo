@@ -139,6 +139,9 @@ where
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
+        // Reconcile the epoch hint with Marshal progress and the certified
+        // state-sync floor. The floor remains authoritative while Marshal has
+        // not yet recorded its block as processed.
         let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let processed = if state_sync_floor.is_some() || current_epoch.is_none() {
             self.marshal.get_processed_height().await
@@ -152,6 +155,10 @@ where
             .expect("epocher must know of block height");
         let epoch = bounds.epoch();
 
+        // Resolve canonical metadata for the selected epoch and determine whether
+        // its public inclusion history is complete. Durable state takes
+        // precedence over recovered state-sync metadata. Without either source,
+        // participation requires the finalized boundary block.
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
@@ -171,6 +178,9 @@ where
             );
         }
 
+        // Every metadata source crosses a persistence or consensus boundary.
+        // Validate participant and inclusion-window limits before constructing
+        // protocol state.
         let participants = info.participants();
         let round = epoch.get();
         participants
@@ -180,6 +190,9 @@ where
             .validate_epoch_capacity(self.blocks_per_epoch, Some(&info.output))
             .expect("boundary epoch must have enough dealer-log slots");
 
+        // Establish the epoch's share and seed before entering either operating
+        // mode. Setup persists an uncommitted epoch before registering its scheme,
+        // then prunes only after the selected epoch is durable.
         let share = self.recovered_share(store, &info).await;
         let seed = store
             .seed_or_random(epoch, self.context.as_present_mut())
@@ -190,6 +203,9 @@ where
         }
         store.prune(epoch.previous().unwrap_or(epoch)).await;
 
+        // A late state-sync floor omits public dealer-log history required by
+        // local dealer and player actors. Preserve the selected epoch state,
+        // then follow its finalized outcome without participating.
         if follow {
             return Some(Setup::Follow);
         }
@@ -290,6 +306,9 @@ where
         )
         .expect("epoch participants must produce valid round info");
 
+        // Reshare dealers need the prior private share, while epoch-zero DKG has
+        // no prior output. Player construction depends only on membership in the
+        // new player set.
         let public_key = self.signer.public_key();
         let has_prior_share = previous.is_none() || share.is_some();
         let dealer = if participants.dealers.position(&public_key).is_some() && has_prior_share {

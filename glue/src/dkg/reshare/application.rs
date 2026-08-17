@@ -228,6 +228,9 @@ where
                     }
                 }
                 response @ (EpochInfoResponse::Pending | EpochInfoResponse::Following) => {
+                    // Pending or follower state provides no stable validity
+                    // verdict. Keep the request unresolved so consensus
+                    // cancellation owns termination.
                     debug!(
                         following = matches!(response, EpochInfoResponse::Following),
                         "verification pending: final block epoch info cannot be derived locally"

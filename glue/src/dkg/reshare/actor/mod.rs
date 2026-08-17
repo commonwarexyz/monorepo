@@ -421,6 +421,11 @@ where
                 recovered_epoch,
             )
             .await;
+
+        // Install the recovered epoch scheme, then materialize the certified
+        // floor commitment and retain its height with the epoch metadata. Setup
+        // uses that bound to decide whether the public dealer-log window is
+        // replayable.
         let mut state_sync = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
