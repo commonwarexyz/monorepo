@@ -88,8 +88,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock, Metrics, Quota, ReadOptions, Runner, Spawner, Storage, Supervisor as _,
-        deterministic,
+        BufferPooler, Clock, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
+        Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, next_pending_sync},
         reschedule,
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
