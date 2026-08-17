@@ -4,16 +4,15 @@ use crate::dkg::{
     reshare::{
         Actor, EpochInfoResponse, Message,
         actor::Mode,
+        mailbox::LogReservation,
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
     types::{EpochInfo, EpochOutcome, Participants, Payload},
 };
+use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
-    marshal::{
-        ancestry::{Ancestry as _, BoxedAncestry},
-        core::Variant as MarshalVariant,
-    },
+    marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
@@ -60,14 +59,13 @@ type ArtifactScanTask<'a, V, P> = OptionFuture<BoxFuture<'a, Option<PendingLogs<
 /// Shared ownership of one log view across verification and artifact assembly.
 type LogView<V, P> = Arc<PendingLogs<V, P>>;
 
-/// An unmaterialized boundary-artifact request anchored to its boundary parent.
+/// An unmaterialized boundary-artifact request.
 struct ArtifactRequest<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
 {
-    parent: B::Digest,
     span: Span,
     ancestry: BoxedAncestry<B>,
     response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
@@ -107,6 +105,7 @@ where
     V: BlsVariant,
     C: Signer,
 {
+    /// Scans a cloned ancestry while retaining the untouched request for restart.
     fn start(
         &mut self,
         scan: PendingLogScan<'a, V, C::PublicKey, B::Digest>,
@@ -118,7 +117,7 @@ where
             parent: &request.span,
             "dkg.reshare.actor.inclusion.epoch_info"
         );
-        let task = pending_logs(scan, request.parent, request.ancestry.clone(), shutdown)
+        let task = pending_logs(scan, request.ancestry.clone(), shutdown)
             .instrument(process)
             .boxed();
         self.request = Some(request);
@@ -170,9 +169,8 @@ where
 
 /// Lazy artifact requests in admission order.
 ///
-/// A parent digest commits the complete ancestry that contributes pending
-/// dealer logs. Keeping the streams lazy prevents queued views from expanding
-/// into full dealer-log maps while the sole verifier is occupied.
+/// Keeping the streams lazy prevents queued views from expanding into full
+/// dealer-log maps while the sole verifier is occupied.
 struct ArtifactRequests<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -204,13 +202,11 @@ where
     /// Retains a request without consuming its ancestry stream.
     fn push(
         &mut self,
-        parent: B::Digest,
         span: Span,
         ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     ) {
         self.inner.push_back(ArtifactRequest {
-            parent,
             span,
             ancestry,
             response,
@@ -232,23 +228,14 @@ where
         None
     }
 
-    /// Rejects live noncanonical requests and returns live canonical responses.
-    fn drain_canonical(
-        &mut self,
-        parent: &B::Digest,
-    ) -> Vec<oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>> {
-        let mut responses = Vec::new();
+    /// Returns a non-verdict for requests still unmaterialized at finalization.
+    fn drain_pending(&mut self) {
         for request in self.inner.drain(..) {
             if request.response.is_closed() {
                 continue;
             }
-            if request.parent == *parent {
-                responses.push(request.response);
-            } else {
-                let _ = request.response.send_lossy(EpochInfoResponse::Unavailable);
-            }
+            let _ = request.response.send_lossy(EpochInfoResponse::Pending);
         }
-        responses
     }
 }
 
@@ -332,7 +319,6 @@ impl<V: BlsVariant, C: Signer> Drop for Verification<V, C> {
     fn drop(&mut self) {
         // Dropping a runtime handle does not stop its task. Abort explicitly so
         // work that has not begun polling cannot outlive the inclusion phase.
-        // Synchronous crypto already executing in a poll may still finish.
         if let Some(task) = self.task.as_ref() {
             task.abort();
         }
@@ -520,7 +506,6 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
 /// finalized logs plus valid pending ancestry logs.
 async fn pending_logs<B, V, C>(
     scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
-    parent: B::Digest,
     mut ancestry: impl Stream<Item = Arc<B>> + Send + Unpin,
     mut shutdown: signal::Signal,
 ) -> Option<PendingLogs<V, C::PublicKey>>
@@ -544,19 +529,55 @@ where
         .finalized_tip
         .filter(|tip| tip.height.next() == first_pending)
         .map(|tip| tip.digest);
-    let Some(mut expected_height) = scan.final_height.previous() else {
+    let Some(mut cursor_height) = scan.final_height.previous() else {
         return Some(PendingLogs::new());
     };
 
-    // Walk backward from the boundary parent through every inclusion block not
-    // already reflected in durable storage. The expected height, digest, and
-    // finalized anchor prove that the pending and durable segments form one
-    // contiguous chain.
-    let mut expected_digest = parent;
+    // Verification includes the final candidate, while proposal begins at its
+    // parent. Resolve either shape inside the actor-selected scan so fetching an
+    // unavailable parent cannot hold the mailbox loop.
+    let first = select! {
+        _ = &mut shutdown => return None,
+        block = ancestry.next() => block,
+    };
+    let Some(first) = first else {
+        warn!(
+            epoch = ?scan.epoch,
+            ?cursor_height,
+            "epoch info ancestry ended before yielding a boundary block"
+        );
+        return None;
+    };
+    let block = if first.height() == scan.final_height {
+        let parent = select! {
+            _ = &mut shutdown => return None,
+            block = ancestry.next() => block,
+        };
+        let Some(parent) = parent else {
+            warn!(
+                epoch = ?scan.epoch,
+                ?cursor_height,
+                "epoch info ancestry ended before yielding the boundary parent"
+            );
+            return None;
+        };
+        parent
+    } else {
+        first
+    };
+
+    // Ancestry owns parent-chain continuity. Consume only the inclusion blocks
+    // not already reflected in durable storage, while retaining the lower
+    // digest needed to compare the stream with the actor's finalized prefix.
+    let mut attachment = block.digest();
     let mut blocks = Vec::new();
-    if first_pending <= expected_height {
-        let mut allow_final = true;
-        loop {
+    if first_pending <= cursor_height {
+        attachment = block.parent();
+        blocks.push(block);
+        while cursor_height > first_pending {
+            cursor_height = cursor_height
+                .previous()
+                .expect("pending dealer-log ancestry must remain above genesis");
             let block = select! {
                 _ = &mut shutdown => return None,
                 block = ancestry.next() => block,
@@ -564,45 +585,19 @@ where
             let Some(block) = block else {
                 warn!(
                     epoch = ?scan.epoch,
-                    ?expected_height,
+                    ?cursor_height,
                     "epoch info ancestry ended before covering pending dealer logs"
                 );
                 return None;
             };
-            let height = block.height();
-
-            // Verification includes the final block itself, while proposal starts
-            // at its parent. Both forms must commit to the same parent chain.
-            if allow_final && height == scan.final_height && block.parent() == expected_digest {
-                allow_final = false;
-                continue;
-            }
-
-            // The pending window is valid only as a height-by-height digest chain.
-            // Rejecting its first mismatch prevents omitted or substituted logs.
-            allow_final = false;
-            if height != expected_height || block.digest() != expected_digest {
-                warn!(
-                    epoch = ?scan.epoch,
-                    ?height,
-                    ?expected_height,
-                    "epoch info ancestry is not contiguous"
-                );
-                return None;
-            }
-
-            expected_digest = block.parent();
+            attachment = block.parent();
             blocks.push(block);
-            if height == first_pending {
-                break;
-            }
-            expected_height = height
-                .previous()
-                .expect("pending dealer-log ancestry must remain above genesis");
         }
     }
 
-    if anchor.is_some_and(|digest| digest != expected_digest) {
+    // Stream continuity does not identify which fork finalization selected
+    // after the request was admitted, so this attachment remains actor-owned.
+    if anchor.is_some_and(|digest| digest != attachment) {
         warn!(
             epoch = ?scan.epoch,
             "epoch info ancestry is detached from finalized prefix"
@@ -705,21 +700,6 @@ where
                     .await;
                 advance = Some(std::future::ready(())).into();
             },
-            pending = &mut scan => {
-                let request = scan
-                    .take_request()
-                    .expect("completed artifact scan must own a request");
-                self.complete_artifact_scan(
-                    epoch,
-                    info,
-                    store,
-                    request,
-                    pending,
-                    &mut work,
-                )
-                .await;
-                advance = Some(std::future::ready(())).into();
-            },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return ControlFlow::Break(());
@@ -731,30 +711,14 @@ where
                     release,
                     response,
                 } => {
-                    let process = info_span!(
-                        parent: &span,
-                        "dkg.reshare.actor.inclusion.next_log",
-                        height = height.traced()
+                    Self::handle_next_log(
+                        dealer.as_deref(),
+                        &mut served_at,
+                        span,
+                        height,
+                        release,
+                        response,
                     );
-                    process.in_scope(|| {
-                        let payload = served_at
-                            .is_none()
-                            .then(|| {
-                                dealer
-                                    .as_ref()
-                                    .and_then(|dealer| dealer.finalized())
-                                    .map(Payload::DealerLog)
-                            })
-                            .flatten();
-                        let has_payload = payload.is_some();
-                        let reservation = payload
-                            .map(|payload| crate::dkg::reshare::mailbox::LogReservation::new(
-                                height, payload, release,
-                            ));
-                        if response.send_lossy(reservation) && has_payload {
-                            served_at = Some(height);
-                        }
-                    });
                 }
                 Message::ReleaseLog { height } => {
                     if served_at == Some(height)
@@ -771,30 +735,7 @@ where
                     response,
                 } => {
                     if !response.is_closed() {
-                        // Proposal ancestry starts at the final block's parent,
-                        // while verification ancestry starts at the final block.
-                        // Normalize both to the parent digest that commits the
-                        // complete pre-boundary view.
-                        let final_height = self
-                            .epocher
-                            .last(epoch)
-                            .expect("epocher must know final epoch height");
-                        let Some(head) = ancestry.peek() else {
-                            let _ = response.send_lossy(EpochInfoResponse::Unavailable);
-                            continue;
-                        };
-                        let parent = if head.height() == final_height {
-                            Some(head.parent())
-                        } else if final_height.previous() == Some(head.height()) {
-                            Some(head.digest())
-                        } else {
-                            None
-                        };
-                        let Some(parent) = parent else {
-                            let _ = response.send_lossy(EpochInfoResponse::Unavailable);
-                            continue;
-                        };
-                        work.requests.push(parent, span, ancestry, response);
+                        work.requests.push(span, ancestry, response);
                         if advance.is_none() {
                             self.advance_artifact_requests(
                                 epoch,
@@ -851,83 +792,12 @@ where
 
                         let done = block.height() == bounds.last();
                         if done {
-                            // The final block fixes one canonical log snapshot for
-                            // durable epoch state and all canonical responses.
-                            // Preserve a cached artifact because admitted
-                            // speculative completion may replace the one-entry
-                            // cache with another view.
-                            let canonical_logs = Arc::new(store.logs(epoch));
-                            let cached = work
-                                .artifacts
-                                .get(canonical_logs.as_ref())
-                                .map(|cached| cached.artifact.clone());
-
-                            // A verification admitted before finalization owns a
-                            // stable application verdict. Publish that bounded
-                            // work before reconstructing the canonical artifact.
-                            if work.verification.task.is_some() {
-                                let completed = (&mut work.verification.task)
-                                    .await
-                                    .expect("verification task failed");
-                                self.complete_verification(epoch, store, &mut work, completed)
-                                    .await;
-                            }
-
-                            let cached = cached.or_else(|| {
-                                work.artifacts
-                                    .get(canonical_logs.as_ref())
-                                    .map(|cached| cached.artifact.clone())
-                            });
-                            let artifact = if let Some(cached) = cached {
-                                cached
-                            } else {
-                                if work
-                                    .verification
-                                    .ready(canonical_logs.as_ref())
-                                    .is_none()
-                                {
-                                    self.start_verification(
-                                        &mut work.verification,
-                                        epoch,
-                                        info,
-                                        store,
-                                        canonical_logs.clone(),
-                                    );
-                                    let completed = (&mut work.verification.task)
-                                        .await
-                                        .expect("verification task failed");
-                                    work.verification.task = None.into();
-                                    assert_eq!(
-                                        completed.logs.as_ref(),
-                                        canonical_logs.as_ref(),
-                                        "canonical verification returned a different view"
-                                    );
-                                    work.verification
-                                        .retain(completed, canonical_logs.as_ref());
-                                }
-                                let ceremony = work
-                                    .verification
-                                    .ready(canonical_logs.as_ref())
-                                    .expect("final verification must be cached");
-                                self.artifact(
-                                    epoch,
-                                    store,
-                                    canonical_logs.clone(),
-                                    ceremony,
-                                    &mut work.artifacts,
-                                )
-                                .await
-                            };
-                            let responses = work.requests.drain_canonical(&block.parent());
-                            let result = self.artifact_response(artifact.as_ref());
-                            for response in responses {
-                                let _ = response.send_lossy(result.clone());
-                            }
-                            self.handle_finalized_epoch_info(
+                            self.complete_epoch_artifact(
                                 epoch,
+                                info,
                                 store,
-                                artifact.as_ref(),
-                                block.payload(),
+                                &mut work,
+                                block.as_ref(),
                             )
                             .await;
                         }
@@ -937,11 +807,11 @@ where
                             digest: block.digest(),
                         });
 
-                        // Re-offer our dealer log if finalization reached the height
-                        // we served it into without the log landing on-chain. When
-                        // our log does finalize, observe_dealer_log above clears it
-                        // via clear_finalized, so a still-present finalized log here
-                        // means the proposal we served into lost the view.
+                        // Re-offer our dealer log if finalization reached the height we
+                        // served it into without the log landing on-chain. When our log
+                        // does finalize, observe_dealer_log above clears it via
+                        // clear_finalized, so a still-present finalized log here means
+                        // the proposal we served into lost the view.
                         if served_at.is_some_and(|served| block.height() >= served)
                             && dealer
                                 .as_ref()
@@ -962,6 +832,24 @@ where
                 }
                 }
             },
+            // Mailbox traffic precedes speculative scan completion. An admitted
+            // finalization must re-anchor a ready scan before that scan can
+            // publish an artifact from a losing view.
+            pending = &mut scan => {
+                let request = scan
+                    .take_request()
+                    .expect("completed artifact scan must own a request");
+                self.complete_artifact_scan(
+                    epoch,
+                    info,
+                    store,
+                    request,
+                    pending,
+                    &mut work,
+                )
+                .await;
+                advance = Some(std::future::ready(())).into();
+            },
             _ = &mut advance => {
                 advance = None.into();
                 self.advance_artifact_requests(
@@ -975,6 +863,111 @@ where
         };
 
         ControlFlow::Break(())
+    }
+
+    /// Offers the finalized local dealer log and records its height after delivery.
+    fn handle_next_log(
+        dealer: Option<&Dealer<V, C>>,
+        served_at: &mut Option<Height>,
+        span: Span,
+        height: Height,
+        release: ActorSender<Message<B, V, C, A>>,
+        response: oneshot::Sender<Option<LogReservation<B, V, C, A>>>,
+    ) {
+        let process = info_span!(
+            parent: &span,
+            "dkg.reshare.actor.inclusion.next_log",
+            height = height.traced()
+        );
+        process.in_scope(|| {
+            let payload = served_at
+                .is_none()
+                .then(|| {
+                    dealer
+                        .and_then(|dealer| dealer.finalized())
+                        .map(Payload::DealerLog)
+                })
+                .flatten();
+            let has_payload = payload.is_some();
+            let reservation = payload.map(|payload| LogReservation::new(height, payload, release));
+            if response.send_lossy(reservation) && has_payload {
+                *served_at = Some(height);
+            }
+        });
+    }
+
+    /// Derives, publishes, and persists the canonical boundary artifact.
+    async fn complete_epoch_artifact(
+        &mut self,
+        epoch: Epoch,
+        info: &Info<V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        work: &mut ArtifactWork<B, V, C>,
+        block: &B,
+    ) {
+        // The final block fixes one canonical log snapshot for durable epoch
+        // state. Preserve a cached artifact because admitted speculative
+        // completion may replace the one-entry cache with another view.
+        let canonical_logs = Arc::new(store.logs(epoch));
+        let cached = work
+            .artifacts
+            .get(canonical_logs.as_ref())
+            .map(|cached| cached.artifact.clone());
+
+        // A verification admitted before finalization owns a stable application
+        // verdict. Publish that bounded work before reconstructing the canonical
+        // artifact.
+        if work.verification.task.is_some() {
+            let completed = (&mut work.verification.task)
+                .await
+                .expect("verification task failed");
+            self.complete_verification(epoch, store, work, completed)
+                .await;
+        }
+
+        let cached = cached.or_else(|| {
+            work.artifacts
+                .get(canonical_logs.as_ref())
+                .map(|cached| cached.artifact.clone())
+        });
+        let artifact = if let Some(cached) = cached {
+            cached
+        } else {
+            if work.verification.ready(canonical_logs.as_ref()).is_none() {
+                self.start_verification(
+                    &mut work.verification,
+                    epoch,
+                    info,
+                    store,
+                    canonical_logs.clone(),
+                );
+                let completed = (&mut work.verification.task)
+                    .await
+                    .expect("verification task failed");
+                work.verification.task = None.into();
+                assert_eq!(
+                    completed.logs.as_ref(),
+                    canonical_logs.as_ref(),
+                    "canonical verification returned a different view"
+                );
+                work.verification.retain(completed, canonical_logs.as_ref());
+            }
+            let ceremony = work
+                .verification
+                .ready(canonical_logs.as_ref())
+                .expect("final verification must be cached");
+            self.artifact(
+                epoch,
+                store,
+                canonical_logs.clone(),
+                ceremony,
+                &mut work.artifacts,
+            )
+            .await
+        };
+        work.requests.drain_pending();
+        self.handle_finalized_epoch_info(epoch, store, artifact.as_ref(), block.payload())
+            .await;
     }
 
     /// Starts the oldest live ancestry scan when the verifier is idle.
@@ -1253,12 +1246,12 @@ where
 
     /// Assembles final epoch information from an already verified ceremony.
     ///
-    /// Participant policy, transport directory, and retained-share storage are
-    /// consulted here, while building or finalizing the boundary block, rather
-    /// than by speculative verification. Results are cached only for the exact
-    /// effective log set. A failed reshare carries the prior output and retained
-    /// local share into a failure artifact; a failed one-shot DKG produces no
-    /// artifact.
+    /// Crypto verification is side-effect-free. This actor-local assembly may
+    /// consult participant policy, transport directory, and retained-share
+    /// storage for speculative boundary requests or canonical finalization.
+    /// Results are cached only for the exact effective log set. A failed reshare
+    /// carries the prior output and retained local share into a failure artifact.
+    /// A failed one-shot DKG produces no artifact.
     async fn artifact(
         &mut self,
         epoch: Epoch,
@@ -1528,7 +1521,7 @@ mod tests {
     use commonware_cryptography::{
         Digestible as _, Signer,
         bls12381::{
-            dkg::feldman_desmedt::{Dealer as CryptoDealer, Verdict},
+            dkg::feldman_desmedt::{Dealer as CryptoDealer, SignedDealerLog, Verdict},
             primitives::sharing::Mode as SharingMode,
         },
         ed25519::{PrivateKey, PublicKey},
@@ -1539,7 +1532,7 @@ mod tests {
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-        ordered::Set, sequence::Unit, test_rng,
+        ordered::Set, sequence::Unit, sync::Mutex, test_rng,
     };
     use futures::{FutureExt, stream};
     use std::{
@@ -1555,6 +1548,20 @@ mod tests {
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestArtifacts = ArtifactCache<TestBlsVariant, PrivateKey, Unit>;
     type TestRequests = ArtifactRequests<TestBlock, TestBlsVariant, PrivateKey>;
+    type TestInclusionMailbox = crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey>;
+    type TestInclusionStore =
+        Store<deterministic::Context, MemorySecretStore, TestBlsVariant, PublicKey>;
+
+    /// Owns every resource that must remain live while an inclusion test runs.
+    struct InclusionHarness {
+        _network: Network<deterministic::Context, PublicKey>,
+        actor: mocks::TestReshareActor,
+        mailbox: TestInclusionMailbox,
+        store: TestInclusionStore,
+        info: Info<TestBlsVariant, PublicKey>,
+        signed_log: SignedDealerLog<TestBlsVariant, PrivateKey>,
+        public_key: PublicKey,
+    }
 
     #[derive(Clone)]
     struct StalledAncestry;
@@ -1570,6 +1577,58 @@ mod tests {
     impl marshal::ancestry::Ancestry<TestBlock> for StalledAncestry {
         fn peek(&self) -> Option<&TestBlock> {
             None
+        }
+    }
+
+    /// Hides its head while a gate delays stream materialization.
+    #[derive(Clone)]
+    struct GatedAncestry {
+        blocks: VecDeque<Arc<TestBlock>>,
+        gate: futures::future::Shared<oneshot::Receiver<()>>,
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        released: bool,
+    }
+
+    impl GatedAncestry {
+        fn new(
+            blocks: impl IntoIterator<Item = Arc<TestBlock>>,
+            gate: oneshot::Receiver<()>,
+        ) -> (Self, oneshot::Receiver<()>) {
+            let (started, observed) = oneshot::channel();
+            (
+                Self {
+                    blocks: blocks.into_iter().collect(),
+                    gate: gate.shared(),
+                    started: Arc::new(Mutex::new(Some(started))),
+                    released: false,
+                },
+                observed,
+            )
+        }
+    }
+
+    impl futures::Stream for GatedAncestry {
+        type Item = Arc<TestBlock>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            if !self.released {
+                if self.gate.poll_unpin(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                self.released = true;
+            }
+            Poll::Ready(self.blocks.pop_front())
+        }
+    }
+
+    impl marshal::ancestry::Ancestry<TestBlock> for GatedAncestry {
+        fn peek(&self) -> Option<&TestBlock> {
+            self.released
+                .then(|| self.blocks.front().map(Arc::as_ref))
+                .flatten()
         }
     }
 
@@ -1629,6 +1688,135 @@ mod tests {
         BTreeMap::from([(public_key, log)])
     }
 
+    /// Builds a singleton inclusion actor with one authenticated local dealer log.
+    async fn setup_inclusion_harness(
+        context: &mut deterministic::Context,
+        partition_prefix: &str,
+        blocks_per_epoch: NonZeroU64,
+    ) -> InclusionHarness {
+        let signer = PrivateKey::from_seed(0);
+        let public_key = signer.public_key();
+        let participants = Set::from_iter_dedup([public_key.clone()]);
+        let info = Info::new::<N3f1>(
+            TEST_NAMESPACE,
+            0,
+            None,
+            SharingMode::NonZeroCounter,
+            participants.clone(),
+            participants.clone(),
+        )
+        .expect("valid singleton info");
+        let secret_store = MemorySecretStore::default();
+        let mut store = Store::init(
+            context.child("store"),
+            &format!("{partition_prefix}-store"),
+            NZU32!(16),
+            secret_store.clone(),
+        )
+        .await;
+
+        // Complete self-dealing so ancestry fixtures can carry a fully
+        // authenticated log without depending on the actor's dealing phase.
+        let seed = store.seed_or_random(Epoch::zero(), test_rng()).await;
+        let mut dealer = store
+            .create_dealer::<PrivateKey, N3f1>(
+                Epoch::zero(),
+                signer.clone(),
+                info.clone(),
+                None,
+                seed,
+            )
+            .expect("dealer");
+        let mut player = store
+            .create_player::<PrivateKey, N3f1>(Epoch::zero(), signer.clone(), info.clone())
+            .expect("player");
+        let (recipient, public, private) =
+            dealer.shares_to_distribute().next().expect("self dealing");
+        assert_eq!(recipient, public_key);
+        let Verdict::Valid(ack) = player
+            .handle(
+                &mut store,
+                Epoch::zero(),
+                public_key.clone(),
+                public,
+                private,
+            )
+            .await
+        else {
+            panic!("valid self dealing");
+        };
+        assert!(matches!(
+            dealer
+                .handle(&mut store, Epoch::zero(), public_key.clone(), ack)
+                .await,
+            Verdict::Valid(())
+        ));
+        assert!(dealer.finalize::<N3f1>());
+        let signed_log = dealer.finalized().expect("signed dealer log");
+
+        // The inclusion actor is driven directly by its mailbox. Its marshal
+        // handle remains readable but has no running actor, while the simulated
+        // network stays alive for the manager and blocker handles it owns.
+        let fixture = mocks::scheme_fixture_n(context, 1);
+        let marshal = mocks::closed_marshal_mailbox(
+            context.child("marshal"),
+            &signer,
+            fixture.schemes[0].clone(),
+            partition_prefix,
+            blocks_per_epoch,
+        )
+        .await;
+        let (network, oracle) = Network::new_with_peers(
+            context.child("network"),
+            NetworkConfig {
+                max_size: 1024,
+                max_peers_per_set: NZUsize!(participants.len()),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            },
+            vec![public_key.clone()],
+        )
+        .await;
+        let (fence, _gate) = Fence::new(Epoch::zero());
+        let (actor, mailbox) = mocks::TestReshareActor::new_dkg(
+            context.child("actor"),
+            Config {
+                signer,
+                manager: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                participants_provider: mocks::StaticParticipants(participants.clone()),
+                secret_store,
+                strategy: Sequential,
+                registrar: mocks::MockConsumer::default(),
+                marshal,
+                state_sync: StateSyncPlan::disabled(),
+                fence,
+                namespace: TEST_NAMESPACE,
+                sharing_mode: SharingMode::NonZeroCounter,
+                mailbox_size: NZUsize!(16),
+                partition_prefix: partition_prefix.into(),
+                max_participants: NZU32!(16),
+                blocks_per_epoch,
+                batch_verifier: PhantomData,
+            },
+            DkgConfig {
+                participants,
+                directory: Unit,
+                completion: Box::new(|_| {}),
+            },
+        );
+
+        InclusionHarness {
+            _network: network,
+            actor,
+            mailbox,
+            store,
+            info,
+            signed_log,
+            public_key,
+        }
+    }
+
     #[test]
     fn dropping_verification_aborts_active_task() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1670,116 +1858,21 @@ mod tests {
     }
 
     #[test]
-    fn unanchored_or_stalled_ancestry_does_not_block_finalization() {
+    fn unanchored_or_delayed_ancestry_does_not_block_finalization() {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let signer = PrivateKey::from_seed(0);
-            let public_key = signer.public_key();
-            let participants = Set::from_iter_dedup([public_key.clone()]);
-            let info = Info::new::<N3f1>(
-                TEST_NAMESPACE,
-                0,
-                None,
-                SharingMode::NonZeroCounter,
-                participants.clone(),
-                participants.clone(),
-            )
-            .expect("valid singleton info");
-            let secret_store = MemorySecretStore::default();
-            let mut store = Store::init(
-                context.child("store"),
-                "inclusion-actor-store",
-                NZU32!(16),
-                secret_store.clone(),
-            )
-            .await;
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                signed_log,
+                public_key,
+            } = setup_inclusion_harness(&mut context, "inclusion-actor", NZU64!(6)).await;
 
-            let seed = store.seed_or_random(Epoch::zero(), test_rng()).await;
-            let mut dealer = store
-                .create_dealer::<PrivateKey, N3f1>(
-                    Epoch::zero(),
-                    signer.clone(),
-                    info.clone(),
-                    None,
-                    seed,
-                )
-                .expect("dealer");
-            let mut player = store
-                .create_player::<PrivateKey, N3f1>(Epoch::zero(), signer.clone(), info.clone())
-                .expect("player");
-            let (recipient, public, private) =
-                dealer.shares_to_distribute().next().expect("self dealing");
-            assert_eq!(recipient, public_key);
-            let Verdict::Valid(ack) = player
-                .handle(
-                    &mut store,
-                    Epoch::zero(),
-                    public_key.clone(),
-                    public,
-                    private,
-                )
-                .await
-            else {
-                panic!("valid self dealing");
-            };
-            assert!(matches!(
-                dealer
-                    .handle(&mut store, Epoch::zero(), public_key.clone(), ack)
-                    .await,
-                Verdict::Valid(())
-            ));
-            assert!(dealer.finalize::<N3f1>());
-            let signed_log = dealer.finalized().expect("signed dealer log");
-
-            let fixture = mocks::scheme_fixture_n(&mut context, 1);
-            let marshal = mocks::closed_marshal_mailbox(
-                context.child("marshal"),
-                &signer,
-                fixture.schemes[0].clone(),
-                "inclusion-actor",
-                NZU64!(6),
-            )
-            .await;
-            let (_network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: 1024,
-                    max_peers_per_set: NZUsize!(participants.len()),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                vec![public_key.clone()],
-            )
-            .await;
-            let (fence, _gate) = Fence::new(Epoch::zero());
-            let (mut actor, mut mailbox) = mocks::TestReshareActor::new_dkg(
-                context.child("actor"),
-                Config {
-                    signer: signer.clone(),
-                    manager: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    participants_provider: mocks::StaticParticipants(participants.clone()),
-                    secret_store,
-                    strategy: Sequential,
-                    registrar: mocks::MockConsumer::default(),
-                    marshal,
-                    state_sync: StateSyncPlan::disabled(),
-                    fence,
-                    namespace: TEST_NAMESPACE,
-                    sharing_mode: SharingMode::NonZeroCounter,
-                    mailbox_size: NZUsize!(16),
-                    partition_prefix: "inclusion-actor".into(),
-                    max_participants: NZU32!(16),
-                    blocks_per_epoch: NZU64!(6),
-                    batch_verifier: PhantomData,
-                },
-                DkgConfig {
-                    participants: participants.clone(),
-                    directory: Unit,
-                    completion: Box::new(|_| {}),
-                },
-            );
-
+            // Build canonical and detached histories over the same pre-midpoint
+            // prefix. Only the detached midpoint carries the dealer log.
             let genesis = mocks::genesis_block(public_key);
             let common_parent = TestBlock::new::<Sha256>(
                 genesis.context().clone(),
@@ -1799,12 +1892,12 @@ mod tests {
                 Height::new(3),
                 3,
             ));
-            let canonical_four = TestBlock::new::<Sha256>(
+            let canonical_four = Arc::new(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(4),
                 4,
-            );
+            ));
             let final_block = Arc::new(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_four.digest(),
@@ -1830,16 +1923,10 @@ mod tests {
                 Height::new(4),
                 7,
             ));
-            let detached_final = Arc::new(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                detached_four.digest(),
-                Height::new(5),
-                8,
-            ));
-
+            // Admit the detached boundary request before the actor starts. It
+            // must wait until finalized reporting establishes an exact anchor.
             let mut detached_mailbox = mailbox.clone();
             let detached = detached_mailbox.epoch_info(marshal::ancestry::from_iter([
-                detached_final,
                 detached_four,
                 detached_midpoint,
             ]));
@@ -1852,12 +1939,23 @@ mod tests {
                     .await;
                 (result, store)
             });
+
+            // A verification candidate without its parent is truncated before
+            // the actor can reconstruct the boundary view.
+            let mut malformed_mailbox = mailbox.clone();
+            let malformed =
+                malformed_mailbox.epoch_info(marshal::ancestry::from_iter([final_block.clone()]));
+            futures::pin_mut!(malformed);
+            assert!(malformed.as_mut().now_or_never().is_none());
+
             context.sleep(Duration::from_millis(1)).await;
             assert!(
                 detached.as_mut().now_or_never().is_none(),
                 "unanchored ancestry completed before the canonical prefix arrived"
             );
 
+            // Finalizing the canonical midpoint establishes the conflicting
+            // anchor and resolves the detached request as unavailable.
             let (midpoint_ack, midpoint_waiter) = Exact::handle();
             assert_eq!(
                 mailbox.report(marshal::Update::<TestBlock, Exact>::Block(
@@ -1870,40 +1968,224 @@ mod tests {
                 .await
                 .expect("canonical midpoint should be acknowledged");
             assert!(matches!(detached.await, EpochInfoResponse::Unavailable));
+            assert!(matches!(malformed.await, EpochInfoResponse::Unavailable));
 
+            // The actor owns the request while its selected scan waits for the
+            // parent, so finalized reporting must remain independent.
+            let (release, gate) = oneshot::channel();
+            let (ancestry, ancestry_started) = GatedAncestry::new([canonical_four.clone()], gate);
             let mut canonical_mailbox = mailbox.clone();
-            let canonical = canonical_mailbox.epoch_info(marshal::ancestry::with_prefix(
-                [final_block.clone()],
-                StalledAncestry,
-            ));
+            let canonical = canonical_mailbox.epoch_info(ancestry);
             futures::pin_mut!(canonical);
             assert!(canonical.as_mut().now_or_never().is_none());
+            ancestry_started
+                .await
+                .expect("request should await the delayed parent");
 
             let (parent_ack, parent_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(Arc::new(canonical_four), parent_ack,)),
+                mailbox.report(marshal::Update::Block(canonical_four.clone(), parent_ack)),
                 Feedback::Ok
             );
+            parent_waiter
+                .await
+                .expect("canonical parent should be acknowledged");
+            assert!(canonical.as_mut().now_or_never().is_none());
+
+            // Once the ancestry yields the canonical parent, the actor can
+            // answer from the finalized state without walking any farther.
+            release.send(()).expect("ancestry should still be waiting");
+            let response = select! {
+                response = canonical.as_mut() => response,
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("delayed ancestry did not resume");
+                },
+            };
+            assert!(matches!(response, EpochInfoResponse::Available(None)));
+
+            // Finalization cannot classify an ancestry that has not yielded its
+            // parent. Leave that verification pending instead of blocking the
+            // reporter or manufacturing a stable verdict.
+            let (terminal_release, terminal_gate) = oneshot::channel();
+            let (terminal_ancestry, terminal_started) =
+                GatedAncestry::new([canonical_four.clone()], terminal_gate);
+            let mut terminal_mailbox = mailbox.clone();
+            let terminal = terminal_mailbox.epoch_info(terminal_ancestry);
+            futures::pin_mut!(terminal);
+            assert!(terminal.as_mut().now_or_never().is_none());
+            terminal_started
+                .await
+                .expect("terminal ancestry scan should start");
 
             let (final_ack, final_waiter) = Exact::handle();
             assert_eq!(
                 mailbox.report(marshal::Update::Block(final_block, final_ack)),
                 Feedback::Ok
             );
-
-            let response = select! {
-                response = canonical.as_mut() => response,
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("stalled ancestry blocked finalized reports");
-                },
-            };
-            assert!(matches!(response, EpochInfoResponse::Available(None)));
-            parent_waiter
-                .await
-                .expect("canonical parent should be acknowledged");
             final_waiter
                 .await
                 .expect("final block should be acknowledged");
+            assert!(matches!(terminal.await, EpochInfoResponse::Pending));
+            assert!(terminal_release.send(()).is_err());
+            let (result, store) = inclusion.await.expect("inclusion should finish");
+            assert!(result.is_continue());
+            assert!(store.current().is_none());
+        });
+    }
+
+    #[test]
+    fn ready_scan_yields_to_admitted_finalization() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                signed_log,
+                public_key,
+            } = setup_inclusion_harness(&mut context, "ready-scan", NZU64!(8)).await;
+
+            // Build canonical and competing inclusion histories. Only the
+            // competing history carries a valid dealer log.
+            let genesis = mocks::genesis_block(public_key);
+            let common_parent = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(1),
+                1,
+            );
+            let canonical_two = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                common_parent.digest(),
+                Height::new(2),
+                2,
+            );
+            let canonical_three = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                canonical_two.digest(),
+                Height::new(3),
+                3,
+            );
+            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                canonical_three.digest(),
+                Height::new(4),
+                4,
+            ));
+            let canonical_five = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                canonical_midpoint.digest(),
+                Height::new(5),
+                5,
+            ));
+            let canonical_six = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                canonical_five.digest(),
+                Height::new(6),
+                6,
+            ));
+            let canonical_final = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                canonical_six.digest(),
+                Height::new(7),
+                7,
+            ));
+            let losing_five = Arc::new(
+                TestBlock::new::<Sha256>(
+                    genesis.context().clone(),
+                    canonical_midpoint.digest(),
+                    Height::new(5),
+                    8,
+                )
+                .with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    Payload::DealerLog(signed_log),
+                ),
+            );
+            let losing_six = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                losing_five.digest(),
+                Height::new(6),
+                9,
+            ));
+
+            // Establish the midpoint before requesting speculative boundary
+            // artifacts so scans can anchor to the canonical durable prefix.
+            let inclusion = context.child("inclusion").spawn(|_| async move {
+                let result = actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await;
+                (result, store)
+            });
+            let (midpoint_ack, midpoint_waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::<TestBlock, Exact>::Block(
+                    canonical_midpoint,
+                    midpoint_ack,
+                )),
+                Feedback::Ok
+            );
+            midpoint_waiter
+                .await
+                .expect("canonical midpoint should be acknowledged");
+
+            // Prime the exact losing-view cache, then hold a second scan of that
+            // view at its first stream poll.
+            let mut prime_mailbox = mailbox.clone();
+            let primed = prime_mailbox
+                .epoch_info(marshal::ancestry::from_iter([
+                    losing_six.clone(),
+                    losing_five.clone(),
+                ]))
+                .await;
+            assert!(matches!(
+                primed,
+                EpochInfoResponse::Available(Some(Payload::EpochInfo(_)))
+            ));
+
+            let (release, gate) = oneshot::channel();
+            let (tail, scan_started) = GatedAncestry::new([losing_five], gate);
+            let ancestry = marshal::ancestry::with_prefix([losing_six], tail);
+            let mut raced_mailbox = mailbox.clone();
+            let raced = raced_mailbox.epoch_info(ancestry);
+            futures::pin_mut!(raced);
+            assert!(raced.as_mut().now_or_never().is_none());
+            scan_started.await.expect("scan should start");
+            assert!(raced.as_mut().now_or_never().is_none());
+
+            // Make the canonical finalization and the stale scan ready in the
+            // same scheduler turn. Finalization must invalidate the unmaterialized
+            // scan before its cached losing-view result can escape.
+            let (five_ack, five_waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(canonical_five, five_ack)),
+                Feedback::Ok
+            );
+            release.send(()).expect("scan should still be active");
+            five_waiter
+                .await
+                .expect("canonical inclusion block should be acknowledged");
+            assert!(matches!(raced.await, EpochInfoResponse::Unavailable));
+
+            let (six_ack, six_waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(canonical_six, six_ack)),
+                Feedback::Ok
+            );
+            six_waiter
+                .await
+                .expect("canonical parent should be acknowledged");
+
+            let (final_ack, final_waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(canonical_final, final_ack)),
+                Feedback::Ok
+            );
+            final_waiter
+                .await
+                .expect("canonical final block should be acknowledged");
             let (result, store) = inclusion.await.expect("inclusion should finish");
             assert!(result.is_continue());
             assert!(store.current().is_none());
@@ -1947,9 +2229,7 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let (response, receiver) = oneshot::channel::<TestResponse>();
-            let parent = mocks::genesis_block(signers()[0].public_key()).digest();
             let request = ArtifactRequest {
-                parent,
                 span: Span::none(),
                 ancestry: BoxedAncestry::new(StalledAncestry),
                 response,
@@ -1970,12 +2250,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let info = info();
-            let pending = pending_logs(
-                scan(&info),
-                mocks::genesis_block(signers()[0].public_key()).digest(),
-                StalledAncestry,
-                context.stopped(),
-            );
+            let pending = pending_logs(scan(&info), StalledAncestry, context.stopped());
             futures::pin_mut!(pending);
             assert!(pending.as_mut().now_or_never().is_none());
 
@@ -2013,7 +2288,6 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let parent = block_six.digest();
             let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
@@ -2024,7 +2298,7 @@ mod tests {
             };
 
             assert!(
-                pending_logs(scan, parent, ancestry, context.stopped())
+                pending_logs(scan, ancestry, context.stopped())
                     .await
                     .is_none()
             );
@@ -2055,7 +2329,6 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let parent = block_six.digest();
             let ancestry = Box::pin(
                 stream::iter([Arc::new(block_six), Arc::new(block_five)]).chain(stream::pending()),
             );
@@ -2071,9 +2344,102 @@ mod tests {
             };
 
             assert!(
-                pending_logs(scan, parent, ancestry, context.stopped())
+                pending_logs(scan, ancestry, context.stopped())
                     .now_or_never()
                     .is_some_and(|logs| logs.is_some_and(|logs| logs.is_empty()))
+            );
+        });
+    }
+
+    #[test]
+    fn pending_logs_authenticates_a_fully_finalized_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let info = info();
+            let genesis = mocks::genesis_block(signers()[0].public_key());
+            let canonical = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(6),
+                6,
+            ));
+            let detached = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(6),
+                7,
+            ));
+            assert_ne!(canonical.digest(), detached.digest());
+
+            let scan = |digest| PendingLogScan {
+                epoch: Epoch::zero(),
+                info: &info,
+                epocher: FixedEpocher::new(NZU64!(8)),
+                finalized_tip: Some(FinalizedTip {
+                    height: Height::new(6),
+                    digest,
+                }),
+                final_height: Height::new(7),
+            };
+
+            assert!(
+                pending_logs(
+                    scan(canonical.digest()),
+                    Box::pin(stream::iter([canonical.clone()])),
+                    context.stopped(),
+                )
+                .await
+                .is_some_and(|logs| logs.is_empty())
+            );
+            assert!(
+                pending_logs(
+                    scan(canonical.digest()),
+                    Box::pin(stream::iter([detached])),
+                    context.stopped(),
+                )
+                .await
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn pending_logs_accepts_verification_candidate_before_parent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let info = info();
+            let genesis = mocks::genesis_block(signers()[0].public_key());
+            let canonical = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(6),
+                6,
+            ));
+            let candidate = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                canonical.digest(),
+                Height::new(7),
+                7,
+            ));
+            let scan = PendingLogScan {
+                epoch: Epoch::zero(),
+                info: &info,
+                epocher: FixedEpocher::new(NZU64!(8)),
+                finalized_tip: Some(FinalizedTip {
+                    height: Height::new(6),
+                    digest: canonical.digest(),
+                }),
+                final_height: Height::new(7),
+            };
+
+            assert!(
+                pending_logs(
+                    scan,
+                    Box::pin(stream::iter([candidate, canonical])),
+                    context.stopped(),
+                )
+                .await
+                .is_some_and(|logs| logs.is_empty())
             );
         });
     }
@@ -2109,7 +2475,6 @@ mod tests {
                 Height::new(6),
                 7,
             );
-            let parent = block_six.digest();
             let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
@@ -2123,7 +2488,7 @@ mod tests {
             };
 
             assert!(
-                pending_logs(scan, parent, ancestry, context.stopped())
+                pending_logs(scan, ancestry, context.stopped())
                     .await
                     .is_none()
             );
@@ -2175,10 +2540,9 @@ mod tests {
 
     #[test]
     fn canceled_request_is_not_selected() {
-        let parent = mocks::genesis_block(signers()[0].public_key()).digest();
         let (response_tx, response_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
-        requests.push(parent, Span::none(), empty_ancestry(), response_tx);
+        requests.push(Span::none(), empty_ancestry(), response_tx);
         drop(response_rx);
 
         assert!(requests.pop().is_none());
@@ -2186,39 +2550,34 @@ mod tests {
 
     #[test]
     fn requests_are_selected_in_arrival_order() {
-        let genesis = mocks::genesis_block(signers()[0].public_key());
-        let first = genesis.digest();
-        let second =
-            TestBlock::new::<Sha256>(genesis.context().clone(), first, Height::new(1), 1).digest();
-        let (earlier, later) = if first < second {
-            (second, first)
-        } else {
-            (first, second)
-        };
-        let (earlier_tx, _earlier_rx) = oneshot::channel();
-        let (later_tx, _later_rx) = oneshot::channel();
+        let (earlier_tx, earlier_rx) = oneshot::channel();
+        let (later_tx, later_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
-        requests.push(earlier, Span::none(), empty_ancestry(), earlier_tx);
-        requests.push(later, Span::none(), empty_ancestry(), later_tx);
+        requests.push(Span::none(), empty_ancestry(), earlier_tx);
+        requests.push(Span::none(), empty_ancestry(), later_tx);
 
-        assert_eq!(requests.pop().map(|request| request.parent), Some(earlier));
+        requests
+            .pop()
+            .expect("earlier request")
+            .response
+            .send_lossy(EpochInfoResponse::Pending);
+        assert!(matches!(
+            earlier_rx.now_or_never(),
+            Some(Ok(EpochInfoResponse::Pending))
+        ));
+        assert!(later_rx.now_or_never().is_none());
     }
 
     #[test]
-    fn draining_canonical_responds_to_noncanonical_request() {
-        let genesis = mocks::genesis_block(signers()[0].public_key());
-        let canonical = genesis.digest();
-        let noncanonical =
-            TestBlock::new::<Sha256>(genesis.context().clone(), canonical, Height::new(1), 1)
-                .digest();
+    fn draining_unmaterialized_requests_returns_pending() {
         let (response_tx, response_rx) = oneshot::channel::<TestResponse>();
         let mut requests = TestRequests::default();
-        requests.push(noncanonical, Span::none(), empty_ancestry(), response_tx);
+        requests.push(Span::none(), empty_ancestry(), response_tx);
 
-        assert!(requests.drain_canonical(&canonical).is_empty());
+        requests.drain_pending();
         assert!(matches!(
             response_rx.now_or_never(),
-            Some(Ok(EpochInfoResponse::Unavailable))
+            Some(Ok(EpochInfoResponse::Pending))
         ));
     }
 }
