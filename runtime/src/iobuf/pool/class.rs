@@ -810,7 +810,7 @@ impl Drop for TlsSizeClassCaches {
     }
 }
 
-/// Access to the calling thread's local [`super::BufferPool`] caches.
+/// Access to the calling thread's local [`BufferPool`](super::BufferPool) caches.
 ///
 /// This type hides the TLS layout used by pooled allocation and return. The
 /// main TLS key owns the registry. It has a destructor, so thread exit drops
