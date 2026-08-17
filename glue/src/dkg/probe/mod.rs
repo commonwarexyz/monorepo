@@ -267,8 +267,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
-        sequence::Unit,
+        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, Probability, TestRng, channel::oneshot,
+        ordered::Set, sequence::Unit,
     };
     use std::{num::NonZeroU64, time::Duration};
 
@@ -279,7 +279,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
 
     struct Harness {

@@ -98,7 +98,7 @@ mod tests {
         deterministic::{self, Context},
     };
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        NZU16, NZU64, NZUsize, Probability,
         channel::{fallible::OneshotExt, oneshot},
     };
     use futures::future::join_all;
@@ -203,7 +203,7 @@ mod tests {
     const RELIABLE_LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
 
     async fn initialize_simulation<S: certificate::Scheme>(
@@ -576,7 +576,7 @@ mod tests {
             let delayed_link = Link {
                 latency: Duration::from_millis(50),
                 jitter: Duration::from_millis(40),
-                success_rate: 0.5,
+                success_rate: Probability!(1, 2),
             };
             link_participants(
                 &mut oracle,
@@ -1026,7 +1026,7 @@ mod tests {
             let delayed_link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: 0.98,
+                success_rate: Probability!(49, 50),
             };
 
             let (mut oracle, mut registrations) =

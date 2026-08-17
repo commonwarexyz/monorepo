@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, Probability, channel::mpsc::Receiver};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -100,7 +100,7 @@ async fn setup_degraded_network<E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: Probability!(3, 5),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
@@ -269,7 +269,7 @@ async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
     link_peers(
         &mut oracle,
@@ -542,7 +542,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: 1.0,
+                success_rate: Probability::ONE,
             }),
             input.partition.filter(),
         )

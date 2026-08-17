@@ -801,7 +801,7 @@ mod tests {
         Blob, BufMut, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, release_pending_syncs},
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, Probability};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -1385,7 +1385,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
+                resize_rate: Some(Probability::ONE),
                 ..Default::default()
             };
 
@@ -1447,7 +1447,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                resize_rate: Some(1.0),
+                resize_rate: Some(Probability::ONE),
                 ..Default::default()
             };
 

@@ -2,7 +2,10 @@
 
 use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::BoxDynRng};
 use bytes::Buf;
-use commonware_utils::sync::{AsyncMutex, Mutex, RwLock};
+use commonware_utils::{
+    Probability,
+    sync::{AsyncMutex, Mutex, RwLock},
+};
 use futures::{FutureExt as _, future::Shared};
 use rand::RngExt as _;
 use std::{
@@ -41,53 +44,49 @@ pub enum PartialWriteMode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WriteConfig {
     /// Probability that `write_at` returns an injected failure.
-    pub failure_rate: f64,
+    pub failure_rate: Probability,
 
     /// Probability used by the selected mode when retaining submitted bytes.
-    pub retention_rate: f64,
+    pub retention_rate: Probability,
 
     /// Arrangement of bytes retained by the simulated storage device.
     pub mode: PartialWriteMode,
 }
 
 /// Configuration for deterministic storage fault injection.
-///
-/// Each rate is interpreted as a probability. Values that are `NaN` or at or below 0.0 never
-/// trigger, while values at or above 1.0 always trigger.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     /// Failure rate for `open_versioned` operations.
-    pub open_rate: Option<f64>,
+    pub open_rate: Option<Probability>,
 
     /// Failure rate for `read_at` operations.
-    pub read_rate: Option<f64>,
+    pub read_rate: Option<Probability>,
 
     /// Failure and byte-retention configuration for `write_at` operations.
     pub write_rate: Option<WriteConfig>,
 
     /// Failure rate for `sync` operations.
-    pub sync_rate: Option<f64>,
+    pub sync_rate: Option<Probability>,
 
     /// Failure rate for `resize` operations and probability that a successful unsynchronized
     /// resize survives a simulated crash.
-    pub resize_rate: Option<f64>,
+    pub resize_rate: Option<Probability>,
 
     /// Probability that a resize failure is partial (resized to an intermediate
     /// size before failure) rather than a complete failure (size unchanged).
     /// Only applies when `resize_rate` triggers a failure.
-    /// Value from 0.0 (always complete failure) to 1.0 (always partial resize).
-    pub partial_resize_rate: Option<f64>,
+    pub partial_resize_rate: Option<Probability>,
 
     /// Failure rate for `remove` operations.
-    pub remove_rate: Option<f64>,
+    pub remove_rate: Option<Probability>,
 
     /// Failure rate for `scan` operations.
-    pub scan_rate: Option<f64>,
+    pub scan_rate: Option<Probability>,
 }
 
 impl Config {
     /// Get the failure rate for an operation type.
-    fn rate_for(&self, op: Op) -> f64 {
+    fn rate_for(&self, op: Op) -> Probability {
         match op {
             Op::Open => self.open_rate,
             Op::Read => self.read_rate,
@@ -97,17 +96,17 @@ impl Config {
             Op::Remove => self.remove_rate,
             Op::Scan => self.scan_rate,
         }
-        .unwrap_or(0.0)
+        .unwrap_or(Probability::ZERO)
     }
 
     /// Set the open failure rate.
-    pub const fn open(mut self, rate: f64) -> Self {
+    pub const fn open(mut self, rate: Probability) -> Self {
         self.open_rate = Some(rate);
         self
     }
 
     /// Set the read failure rate.
-    pub const fn read(mut self, rate: f64) -> Self {
+    pub const fn read(mut self, rate: Probability) -> Self {
         self.read_rate = Some(rate);
         self
     }
@@ -119,31 +118,31 @@ impl Config {
     }
 
     /// Set the sync failure rate.
-    pub const fn sync(mut self, rate: f64) -> Self {
+    pub const fn sync(mut self, rate: Probability) -> Self {
         self.sync_rate = Some(rate);
         self
     }
 
     /// Set the resize failure and crash-retention rate.
-    pub const fn resize(mut self, rate: f64) -> Self {
+    pub const fn resize(mut self, rate: Probability) -> Self {
         self.resize_rate = Some(rate);
         self
     }
 
     /// Set the partial resize rate (probability of partial vs complete resize failure).
-    pub const fn partial_resize(mut self, rate: f64) -> Self {
+    pub const fn partial_resize(mut self, rate: Probability) -> Self {
         self.partial_resize_rate = Some(rate);
         self
     }
 
     /// Set the remove failure rate.
-    pub const fn remove(mut self, rate: f64) -> Self {
+    pub const fn remove(mut self, rate: Probability) -> Self {
         self.remove_rate = Some(rate);
         self
     }
 
     /// Set the scan failure rate.
-    pub const fn scan(mut self, rate: f64) -> Self {
+    pub const fn scan(mut self, rate: Probability) -> Self {
         self.scan_rate = Some(rate);
         self
     }
@@ -194,13 +193,13 @@ impl PendingSync {
 /// Retention choices belong to the issued write and are shared by fragments created by later
 /// durability barriers.
 struct PendingWriteRetention {
-    policy: (PartialWriteMode, f64),
+    policy: (PartialWriteMode, Probability),
     len: usize,
     selected: OnceLock<Vec<bool>>,
 }
 
 impl PendingWriteRetention {
-    const fn new(policy: (PartialWriteMode, f64), len: usize) -> Self {
+    const fn new(policy: (PartialWriteMode, Probability), len: usize) -> Self {
         Self {
             policy,
             len,
@@ -273,41 +272,34 @@ fn resolve_pending_sync<B>(
 impl Oracle {
     /// Check if a fault should be injected for the given operation.
     fn should_fail(&self, op: Op) -> bool {
-        self.roll(Some(self.config.read().rate_for(op)))
+        self.roll(self.config.read().rate_for(op))
     }
 
     /// Check if a write fault should be injected.
     /// Reads config once to avoid nested lock acquisition.
-    fn check_write_fault(&self) -> (bool, Option<(PartialWriteMode, f64)>) {
+    fn check_write_fault(&self) -> (bool, Option<(PartialWriteMode, Probability)>) {
         let config = self.config.read();
-        let fail = self.roll(Some(config.rate_for(Op::Write)));
+        let fail = self.roll(config.rate_for(Op::Write));
         let retention = config
             .write_rate
             .map(|config| (config.mode, config.retention_rate))
-            .filter(|(_, retention_rate)| *retention_rate > 0.0);
+            .filter(|(_, retention_rate)| !retention_rate.is_zero());
         (fail, retention)
     }
 
     /// Check if a resize fault should be injected and snapshot its crash outcome.
     /// Reads config once to avoid nested lock acquisition.
-    fn check_resize_fault(&self) -> (bool, Option<f64>, bool) {
+    fn check_resize_fault(&self) -> (bool, Option<Probability>, bool) {
         let config = self.config.read();
         let failure_rate = config.rate_for(Op::Resize);
-        let fail = self.roll(Some(failure_rate));
-        let retain = !fail && self.roll(Some(failure_rate));
+        let fail = self.roll(failure_rate);
+        let retain = !fail && self.roll(failure_rate);
         (fail, config.partial_resize_rate, retain)
     }
 
     /// Check if an event should occur based on a probability rate.
-    fn roll(&self, rate: Option<f64>) -> bool {
-        let rate = rate.unwrap_or(0.0);
-        if rate <= 0.0 || rate.is_nan() {
-            return false;
-        }
-        if rate >= 1.0 {
-            return true;
-        }
-        self.rng.lock().random::<f64>() < rate
+    fn roll(&self, rate: Probability) -> bool {
+        rate.sample(&mut **self.rng.lock())
     }
 
     /// Generate a random value strictly between `from` and `to`, or None if not possible.
@@ -326,33 +318,28 @@ impl Oracle {
     fn retained_bytes(
         &self,
         len: usize,
-        (mode, retention_rate): (PartialWriteMode, f64),
+        (mode, retention_rate): (PartialWriteMode, Probability),
     ) -> Vec<bool> {
-        if retention_rate <= 0.0 || retention_rate.is_nan() {
-            return vec![false; len];
-        }
-        if retention_rate >= 1.0 {
-            return vec![true; len];
-        }
-
         let mut rng = self.rng.lock();
         match mode {
             PartialWriteMode::Prefix => {
                 let mut positions = vec![false; len];
                 let retained = (0..len)
-                    .take_while(|_| rng.random_bool(retention_rate))
+                    .take_while(|_| retention_rate.sample(&mut **rng))
                     .count();
                 positions[..retained].fill(true);
                 positions
             }
-            PartialWriteMode::Subset => (0..len).map(|_| rng.random_bool(retention_rate)).collect(),
+            PartialWriteMode::Subset => (0..len)
+                .map(|_| retention_rate.sample(&mut **rng))
+                .collect(),
         }
     }
 
     /// Try to generate a partial operation target. Returns Some if both the rate
     /// check passes and an intermediate value exists between `from` and `to`.
-    fn try_partial(&self, rate: Option<f64>, from: u64, to: u64) -> Option<u64> {
-        if self.roll(rate) {
+    fn try_partial(&self, rate: Option<Probability>, from: u64, to: u64) -> Option<u64> {
+        if rate.is_some_and(|rate| self.roll(rate)) {
             self.random_between(from, to)
         } else {
             None
@@ -567,7 +554,12 @@ impl<B: crate::Blob> Blob<B> {
         }
     }
 
-    fn record_pending(&self, offset: u64, bufs: IoBufs, retention: (PartialWriteMode, f64)) {
+    fn record_pending(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        retention: (PartialWriteMode, Probability),
+    ) {
         if bufs.is_empty() {
             return;
         }
@@ -676,7 +668,7 @@ impl<B: crate::Blob> Blob<B> {
         }
         if follows_resize {
             let retention = Arc::new(PendingWriteRetention::new(
-                (PartialWriteMode::Prefix, 1.0),
+                (PartialWriteMode::Prefix, Probability::ONE),
                 durable.remaining(),
             ));
             retained.push(PendingMutation::Write {
@@ -967,8 +959,8 @@ mod tests {
     #[tokio::test]
     async fn test_start_sync_returns_before_backing_completion() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (inner, _) = h.inner.open("partition", b"start-sync").await.unwrap();
@@ -1007,8 +999,8 @@ mod tests {
 
     async fn run_overlapping_barrier(start: bool) {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (inner, _) = h.inner.open("partition", b"overlap").await.unwrap();
@@ -1070,7 +1062,10 @@ mod tests {
                     retention,
                     ..
                 } => {
-                    assert_eq!(retention.policy, (PartialWriteMode::Prefix, 1.0));
+                    assert_eq!(
+                        retention.policy,
+                        (PartialWriteMode::Prefix, Probability::ONE)
+                    );
                     blob.inner
                         .retain_crash_write(offset, bufs, || true)
                         .unwrap();
@@ -1087,8 +1082,8 @@ mod tests {
     #[tokio::test]
     async fn test_completed_backing_write_cannot_record_after_later_full_sync() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (inner, _) = h.inner.open("partition", b"late-record").await.unwrap();
@@ -1144,7 +1139,10 @@ mod tests {
             else {
                 panic!("write test recorded a resize");
             };
-            assert_eq!(retention.policy, (PartialWriteMode::Prefix, 1.0));
+            assert_eq!(
+                retention.policy,
+                (PartialWriteMode::Prefix, Probability::ONE)
+            );
             blob.inner
                 .retain_crash_write(offset, bufs, || true)
                 .unwrap();
@@ -1160,8 +1158,8 @@ mod tests {
         let h = Harness::with_seed(
             seed,
             Config::default().write(WriteConfig {
-                failure_rate: 0.0,
-                retention_rate: 0.5,
+                failure_rate: Probability::ZERO,
+                retention_rate: Probability!(1, 2),
                 mode: PartialWriteMode::Subset,
             }),
         );
@@ -1174,8 +1172,8 @@ mod tests {
         {
             let mut config = h.config.write();
             config.write_rate = Some(WriteConfig {
-                failure_rate: 1.0,
-                retention_rate: 0.5,
+                failure_rate: Probability::ONE,
+                retention_rate: Probability!(1, 2),
                 mode: PartialWriteMode::Subset,
             });
         }
@@ -1200,8 +1198,8 @@ mod tests {
         let h = Harness::with_seed(
             seed,
             Config::default().write(WriteConfig {
-                failure_rate: 0.0,
-                retention_rate: 0.5,
+                failure_rate: Probability::ZERO,
+                retention_rate: Probability!(1, 2),
                 mode: PartialWriteMode::Subset,
             }),
         );
@@ -1230,8 +1228,8 @@ mod tests {
     #[tokio::test]
     async fn test_reopened_sync_clears_prior_handle_crash_writes() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1259,8 +1257,8 @@ mod tests {
     #[tokio::test]
     async fn test_dropped_completed_start_sync_clears_the_crash_epoch() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1276,8 +1274,8 @@ mod tests {
         drop(completion);
 
         h.config.write().write_rate = Some(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         });
         blob.write_at(5, b"later", WriteOptions::default())
@@ -1296,8 +1294,8 @@ mod tests {
     #[tokio::test]
     async fn test_sync_write_does_not_barrier_disjoint_pending_write() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1319,8 +1317,8 @@ mod tests {
     #[tokio::test]
     async fn test_sync_write_retires_only_overlapping_pending_bytes() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1355,8 +1353,8 @@ mod tests {
             let h = Harness::with_seed(
                 seed,
                 Config::default().write(WriteConfig {
-                    failure_rate: 0.0,
-                    retention_rate: 0.5,
+                    failure_rate: Probability::ZERO,
+                    retention_rate: Probability!(1, 2),
                     mode: PartialWriteMode::Prefix,
                 }),
             );
@@ -1386,11 +1384,11 @@ mod tests {
             83,
             Config::default()
                 .write(WriteConfig {
-                    failure_rate: 0.0,
-                    retention_rate: 1.0,
+                    failure_rate: Probability::ZERO,
+                    retention_rate: Probability::ONE,
                     mode: PartialWriteMode::Prefix,
                 })
-                .resize(0.5),
+                .resize(Probability!(1, 2)),
         );
         let (write_then_resize, _) = h.storage.open("partition", b"first").await.unwrap();
         write_then_resize
@@ -1423,7 +1421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_sync_write_replays_after_retained_resize() {
-        let h = Harness::with_seed(83, Config::default().resize(0.5));
+        let h = Harness::with_seed(83, Config::default().resize(Probability!(1, 2)));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
             .await
@@ -1432,8 +1430,8 @@ mod tests {
         {
             let mut config = h.config.write();
             config.write_rate = Some(WriteConfig {
-                failure_rate: 1.0,
-                retention_rate: 0.5,
+                failure_rate: Probability::ONE,
+                retention_rate: Probability!(1, 2),
                 mode: PartialWriteMode::Subset,
             });
         }
@@ -1469,7 +1467,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_preissued_sync_write_survives_failed_partial_resize() {
-        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(
+            Config::default()
+                .resize(Probability::ONE)
+                .partial_resize(Probability::ONE),
+        );
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
             .await
@@ -1511,8 +1513,8 @@ mod tests {
     async fn test_partial_sync_write_retires_each_persisted_range() {
         for partial_write_mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
             let h = Harness::new(Config::default().write(WriteConfig {
-                failure_rate: 0.0,
-                retention_rate: 1.0,
+                failure_rate: Probability::ZERO,
+                retention_rate: Probability::ONE,
                 mode: PartialWriteMode::Prefix,
             }));
             let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1525,8 +1527,8 @@ mod tests {
             {
                 let mut config = h.config.write();
                 config.write_rate = Some(WriteConfig {
-                    failure_rate: 1.0,
-                    retention_rate: 0.5,
+                    failure_rate: Probability::ONE,
+                    retention_rate: Probability!(1, 2),
                     mode: partial_write_mode,
                 });
             }
@@ -1573,34 +1575,21 @@ mod tests {
     }
 
     #[test]
-    fn test_write_retention_rate_matches_fault_rate_bounds() {
-        let h = Harness::new(Config::default());
-        for (retention_rate, expected) in [
-            (f64::NEG_INFINITY, false),
-            (-1.0, false),
-            (0.0, false),
-            (f64::NAN, false),
-            (1.0, true),
-            (2.0, true),
-            (f64::INFINITY, true),
-        ] {
-            assert_eq!(h.storage.ctx.roll(Some(retention_rate)), expected);
-            for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
-                assert_eq!(
-                    h.storage.ctx.retained_bytes(4, (mode, retention_rate)),
-                    [expected; 4]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_nan_fault_rate_does_not_consume_randomness() {
+    fn test_probability_endpoints_do_not_consume_randomness() {
         let expected = Harness::with_seed(0, Config::default());
         let expected = expected.storage.ctx.rng.lock().random::<u64>();
 
         let h = Harness::with_seed(0, Config::default());
-        assert!(!h.storage.ctx.roll(Some(f64::NAN)));
+        for (probability, outcome) in [(Probability::ZERO, false), (Probability::ONE, true)] {
+            assert_eq!(h.storage.ctx.roll(probability), outcome);
+            for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
+                assert_eq!(
+                    h.storage.ctx.retained_bytes(4, (mode, probability)),
+                    [outcome; 4]
+                );
+            }
+        }
+
         assert_eq!(h.storage.ctx.rng.lock().random::<u64>(), expected);
     }
 
@@ -1613,7 +1602,7 @@ mod tests {
             let retained = h
                 .storage
                 .ctx
-                .retained_bytes(4, (PartialWriteMode::Prefix, 0.5));
+                .retained_bytes(4, (PartialWriteMode::Prefix, Probability!(1, 2)));
             let prefix_len = retained.iter().take_while(|&&keep| keep).count();
             assert!(retained[prefix_len..].iter().all(|&keep| !keep));
             observed[prefix_len] = true;
@@ -1623,7 +1612,7 @@ mod tests {
         assert!(
             h.storage
                 .ctx
-                .retained_bytes(0, (PartialWriteMode::Prefix, 0.5))
+                .retained_bytes(0, (PartialWriteMode::Prefix, Probability!(1, 2)))
                 .is_empty()
         );
     }
@@ -1631,8 +1620,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_rejects_offset_overflow_before_retention() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 1.0,
-            retention_rate: 0.5,
+            failure_rate: Probability::ONE,
+            retention_rate: Probability!(1, 2),
             mode: PartialWriteMode::Subset,
         }));
         let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
@@ -1648,8 +1637,8 @@ mod tests {
     #[tokio::test]
     async fn test_failed_write_can_retain_every_byte() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 1.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ONE,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
@@ -1665,7 +1654,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_sync_always_fails() {
-        let h = Harness::new(Config::default().sync(1.0));
+        let h = Harness::new(Config::default().sync(Probability::ONE));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec(), WriteOptions::default())
@@ -1680,11 +1669,11 @@ mod tests {
         let h = Harness::new(
             Config::default()
                 .write(WriteConfig {
-                    failure_rate: 0.0,
-                    retention_rate: 1.0,
+                    failure_rate: Probability::ZERO,
+                    retention_rate: Probability::ONE,
                     mode: PartialWriteMode::Prefix,
                 })
-                .sync(1.0),
+                .sync(Probability::ONE),
         );
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1700,8 +1689,8 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_write_always_fails() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 1.0,
-            retention_rate: 0.0,
+            failure_rate: Probability::ONE,
+            retention_rate: Probability::ZERO,
             mode: PartialWriteMode::Prefix,
         }));
 
@@ -1717,8 +1706,8 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_write_at_sync_write_always_fails() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 1.0,
-            retention_rate: 0.0,
+            failure_rate: Probability::ONE,
+            retention_rate: Probability::ZERO,
             mode: PartialWriteMode::Prefix,
         }));
 
@@ -1732,7 +1721,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_write_at_sync_failure_is_not_durable() {
-        let h = Harness::new(Config::default().sync(1.0));
+        let h = Harness::new(Config::default().sync(Probability::ONE));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
@@ -1747,7 +1736,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_empty_write_at_sync_does_not_sync_prior_write() {
-        let h = Harness::new(Config::default().sync(1.0));
+        let h = Harness::new(Config::default().sync(Probability::ONE));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec(), WriteOptions::default())
@@ -1765,8 +1754,8 @@ mod tests {
     #[tokio::test]
     async fn test_empty_unsynced_write_does_not_create_crash_debt() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1788,14 +1777,14 @@ mod tests {
         blob.sync().await.unwrap();
 
         // Enable read faults
-        h.config.write().read_rate = Some(1.0);
+        h.config.write().read_rate = Some(Probability::ONE);
 
         assert!(matches!(blob.read_at(0, 4).await, Err(Error::Io(_))));
     }
 
     #[tokio::test]
     async fn test_faulty_storage_open_always_fails() {
-        let h = Harness::new(Config::default().open(1.0));
+        let h = Harness::new(Config::default().open(Probability::ONE));
 
         assert!(matches!(
             h.storage.open("partition", b"test").await,
@@ -1816,7 +1805,7 @@ mod tests {
         drop(blob);
 
         // Enable remove faults
-        h.config.write().remove_rate = Some(1.0);
+        h.config.write().remove_rate = Some(Probability::ONE);
 
         assert!(matches!(
             h.storage.remove("partition", Some(b"test")).await,
@@ -1839,7 +1828,7 @@ mod tests {
         }
 
         // Enable scan faults
-        h.config.write().scan_rate = Some(1.0);
+        h.config.write().scan_rate = Some(Probability::ONE);
 
         assert!(matches!(
             h.storage.scan("partition").await,
@@ -1849,7 +1838,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_determinism() {
-        async fn run_ops(seed: u64, rate: f64) -> Vec<bool> {
+        async fn run_ops(seed: u64, rate: Probability) -> Vec<bool> {
             let h = Harness::with_seed(seed, Config::default().open(rate));
             let mut results = Vec::new();
             for i in 0..20 {
@@ -1859,11 +1848,11 @@ mod tests {
             results
         }
 
-        let results1 = run_ops(42, 0.5).await;
-        let results2 = run_ops(42, 0.5).await;
+        let results1 = run_ops(42, Probability!(1, 2)).await;
+        let results2 = run_ops(42, Probability!(1, 2)).await;
         assert_eq!(results1, results2, "Same seed should produce same results");
 
-        let results3 = run_ops(999, 0.5).await;
+        let results3 = run_ops(999, Probability!(1, 2)).await;
         assert_ne!(
             results1, results3,
             "Different seeds should produce different results"
@@ -1873,19 +1862,19 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_rate_for() {
         let config = Config::default()
-            .open(0.1)
+            .open(Probability!(1, 10))
             .write(WriteConfig {
-                failure_rate: 0.3,
-                retention_rate: 0.4,
+                failure_rate: Probability!(3, 10),
+                retention_rate: Probability!(2, 5),
                 mode: PartialWriteMode::Subset,
             })
-            .resize(0.7)
-            .sync(0.9);
+            .resize(Probability!(7, 10))
+            .sync(Probability!(9, 10));
 
-        assert!((config.rate_for(Op::Open) - 0.1).abs() < f64::EPSILON);
-        assert!((config.rate_for(Op::Write) - 0.3).abs() < f64::EPSILON);
-        assert!((config.rate_for(Op::Resize) - 0.7).abs() < f64::EPSILON);
-        assert!((config.rate_for(Op::Sync) - 0.9).abs() < f64::EPSILON);
+        assert_eq!(config.rate_for(Op::Open), Probability!(1, 10));
+        assert_eq!(config.rate_for(Op::Write), Probability!(3, 10));
+        assert_eq!(config.rate_for(Op::Resize), Probability!(7, 10));
+        assert_eq!(config.rate_for(Op::Sync), Probability!(9, 10));
     }
 
     #[tokio::test]
@@ -1895,18 +1884,18 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.sync().await.unwrap();
 
-        h.config.write().sync_rate = Some(1.0);
+        h.config.write().sync_rate = Some(Probability::ONE);
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
 
-        h.config.write().sync_rate = Some(0.0);
+        h.config.write().sync_rate = Some(Probability::ZERO);
         blob.sync().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_write_retention_is_snapshotted_and_replayed_in_order() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -1922,8 +1911,8 @@ mod tests {
             .await
             .unwrap();
         h.config.write().write_rate = Some(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         });
         blob.write_at(1, b"XY", WriteOptions::default())
@@ -1972,8 +1961,8 @@ mod tests {
                 let h = Harness::with_seed(
                     seed,
                     Config::default().write(WriteConfig {
-                        failure_rate: 0.0,
-                        retention_rate: 0.5,
+                        failure_rate: Probability::ZERO,
+                        retention_rate: Probability!(1, 2),
                         mode: PartialWriteMode::Subset,
                     }),
                 );
@@ -1987,8 +1976,8 @@ mod tests {
                 {
                     let mut config = h.config.write();
                     config.write_rate = Some(WriteConfig {
-                        failure_rate: 1.0,
-                        retention_rate: 0.5,
+                        failure_rate: Probability::ONE,
+                        retention_rate: Probability!(1, 2),
                         mode: partial_write_mode,
                     });
                 }
@@ -2017,8 +2006,8 @@ mod tests {
             let h = Harness::with_seed(
                 seed,
                 Config::default().write(WriteConfig {
-                    failure_rate: 0.0,
-                    retention_rate: 0.5,
+                    failure_rate: Probability::ZERO,
+                    retention_rate: Probability!(1, 2),
                     mode: PartialWriteMode::Subset,
                 }),
             );
@@ -2031,8 +2020,8 @@ mod tests {
                 .unwrap();
             {
                 let mut config = h.config.write();
-                config.resize_rate = Some(1.0);
-                config.partial_resize_rate = Some(1.0);
+                config.resize_rate = Some(Probability::ONE);
+                config.partial_resize_rate = Some(Probability::ONE);
             }
 
             assert!(blob.resize(8).await.is_err());
@@ -2050,8 +2039,8 @@ mod tests {
     #[tokio::test]
     async fn test_crash_journal_clears_only_after_completed_durability() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 0.0,
-            retention_rate: 1.0,
+            failure_rate: Probability::ZERO,
+            retention_rate: Probability::ONE,
             mode: PartialWriteMode::Prefix,
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -2060,7 +2049,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(h.storage.pending.lock().len(), 1);
-        h.config.write().sync_rate = Some(1.0);
+        h.config.write().sync_rate = Some(Probability::ONE);
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
         assert_eq!(h.storage.pending.lock().len(), 1);
 
@@ -2102,11 +2091,11 @@ mod tests {
         let h = Harness::new(
             Config::default()
                 .write(WriteConfig {
-                    failure_rate: 0.0,
-                    retention_rate: 1.0,
+                    failure_rate: Probability::ZERO,
+                    retention_rate: Probability::ONE,
                     mode: PartialWriteMode::Prefix,
                 })
-                .sync(1.0),
+                .sync(Probability::ONE),
         );
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         assert!(matches!(
@@ -2124,8 +2113,8 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_zero_write_retention_preserves_nothing() {
         let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: 1.0,
-            retention_rate: 0.0,
+            failure_rate: Probability::ONE,
+            retention_rate: Probability::ZERO,
             mode: PartialWriteMode::Prefix,
         }));
 
@@ -2172,15 +2161,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_faulty_storage_write_retention_rate_edges() {
+    async fn test_faulty_storage_write_retention_rate_endpoints() {
         for (retention_rate, expected) in [
-            (0.0, b"old".as_slice()),
-            (f64::NAN, b"old".as_slice()),
-            (1.0, b"new".as_slice()),
+            (Probability::ZERO, b"old".as_slice()),
+            (Probability::ONE, b"new".as_slice()),
         ] {
             for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
                 let failed = Harness::new(Config::default().write(WriteConfig {
-                    failure_rate: 1.0,
+                    failure_rate: Probability::ONE,
                     retention_rate,
                     mode,
                 }));
@@ -2189,7 +2177,7 @@ mod tests {
                     .await
                     .unwrap_err();
                 let (durable, len) = failed.inner.open("partition", b"failed").await.unwrap();
-                if retention_rate >= 1.0 {
+                if retention_rate.is_one() {
                     assert_eq!(len, 3);
                     assert_eq!(durable.read_at(0, 3).await.unwrap().coalesce(), expected);
                 } else {
@@ -2197,7 +2185,7 @@ mod tests {
                 }
 
                 let crashed = Harness::new(Config::default().write(WriteConfig {
-                    failure_rate: 0.0,
+                    failure_rate: Probability::ZERO,
                     retention_rate,
                     mode,
                 }));
@@ -2229,7 +2217,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_grow() {
-        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(
+            Config::default()
+                .resize(Probability::ONE)
+                .partial_resize(Probability::ONE),
+        );
 
         let (blob, initial_size) = h.storage.open("partition", b"test").await.unwrap();
         assert_eq!(initial_size, 0);
@@ -2257,8 +2249,8 @@ mod tests {
 
         {
             let mut cfg = h.config.write();
-            cfg.resize_rate = Some(1.0);
-            cfg.partial_resize_rate = Some(1.0);
+            cfg.resize_rate = Some(Probability::ONE);
+            cfg.partial_resize_rate = Some(Probability::ONE);
         }
 
         let target_size = 10u64;
@@ -2276,7 +2268,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_disabled() {
-        let h = Harness::new(Config::default().resize(1.0).partial_resize(0.0));
+        let h = Harness::new(
+            Config::default()
+                .resize(Probability::ONE)
+                .partial_resize(Probability::ZERO),
+        );
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(100).await;
@@ -2289,7 +2285,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_same_size() {
-        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(
+            Config::default()
+                .resize(Probability::ONE)
+                .partial_resize(Probability::ONE),
+        );
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(0).await;
@@ -2317,8 +2317,8 @@ mod tests {
 
         {
             let mut cfg = h.config.write();
-            cfg.resize_rate = Some(1.0);
-            cfg.partial_resize_rate = Some(1.0);
+            cfg.resize_rate = Some(Probability::ONE);
+            cfg.partial_resize_rate = Some(Probability::ONE);
         }
 
         let target_size = 10u64;
@@ -2336,7 +2336,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_one_byte_difference() {
-        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(
+            Config::default()
+                .resize(Probability::ONE)
+                .partial_resize(Probability::ONE),
+        );
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(1).await;

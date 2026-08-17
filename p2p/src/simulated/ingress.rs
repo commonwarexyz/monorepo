@@ -6,6 +6,7 @@ use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBuf, Quota};
 use commonware_utils::{
+    Probability,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Map,
 };
@@ -52,7 +53,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         sender: P,
         receiver: P,
         sampler: Normal<f64>,
-        success_rate: f64,
+        success_rate: Probability,
         result: oneshot::Sender<Result<(), Error>>,
     },
     RemoveLink {
@@ -138,8 +139,8 @@ pub struct Link {
     /// Standard deviation of the latency for the delivery of a message.
     pub jitter: Duration,
 
-    /// Probability of a message being delivered successfully (in range \[0,1\]).
-    pub success_rate: f64,
+    /// Probability of a message being delivered successfully.
+    pub success_rate: Probability,
 }
 
 /// Interface for modifying the simulated network.
@@ -230,9 +231,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
-        }
-        if config.success_rate < 0.0 || config.success_rate > 1.0 {
-            return Err(Error::InvalidSuccessRate(config.success_rate));
         }
 
         // Convert Duration to milliseconds as f64 for the Normal distribution

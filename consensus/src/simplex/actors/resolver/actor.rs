@@ -649,7 +649,9 @@ mod tests {
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
-    use commonware_utils::{NZU32, NZUsize, channel::oneshot, non_empty_vec, sync::Mutex};
+    use commonware_utils::{
+        NZU32, NZUsize, Probability, channel::oneshot, non_empty_vec, sync::Mutex,
+    };
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
@@ -831,7 +833,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: Probability::ONE,
             };
             oracle
                 .add_link(
@@ -1016,7 +1018,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: Probability::ONE,
             };
             oracle
                 .add_link(

@@ -169,7 +169,7 @@ mod test {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
+        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, Probability, TestRng,
         channel::oneshot, sync::Mutex, test_rng,
     };
     use std::{
@@ -185,7 +185,7 @@ mod test {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
     const PROBE_CHANNEL: u64 = 0;
     const BACKFILL_CHANNEL: u64 = 1;

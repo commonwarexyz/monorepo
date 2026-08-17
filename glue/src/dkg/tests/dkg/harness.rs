@@ -39,8 +39,8 @@ use commonware_runtime::{
     telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, sequence::Unit,
-    sync::Mutex, test_rng,
+    NZU32, NZU64, NZUsize, Participant, Probability, channel::oneshot, ordered::Set,
+    sequence::Unit, sync::Mutex, test_rng,
 };
 use futures::future::pending;
 use std::{
@@ -342,7 +342,7 @@ pub(super) fn good_link() -> Link {
     Link {
         latency: Duration::from_millis(20),
         jitter: Duration::from_millis(5),
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     }
 }
 

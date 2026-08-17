@@ -505,7 +505,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set};
+    use commonware_utils::{NZUsize, Probability, ordered::Set};
     use std::{
         num::NonZeroU32,
         time::{Duration, SystemTime},
@@ -514,7 +514,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
         jitter: Duration::from_millis(0),
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
     const CAPACITY: usize = 5usize;
 

@@ -55,7 +55,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{
-    Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+    Acknowledgement as _, NZU64, NZUsize, Probability, acknowledgement::Exact, channel::oneshot,
     non_empty_range, sync::Mutex,
 };
 use properties::{
@@ -156,7 +156,7 @@ fn state_sync_lossy_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.7,
+        success_rate: Probability!(7, 10),
     };
     run_state_sync_lossy(
         SingleDbEngine::new(NUM_VALIDATORS).with_state_sync(),
@@ -171,7 +171,7 @@ fn lossy_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.7,
+        success_rate: Probability!(7, 10),
     };
     run_lossy(SingleDbEngine::new(NUM_VALIDATORS), link.clone());
     run_lossy(MultiDbEngine::new(NUM_VALIDATORS), link);
@@ -290,7 +290,7 @@ where
 }
 
 fn storage_fault_config() -> deterministic::FaultConfig {
-    deterministic::FaultConfig::default().sync(0.01)
+    deterministic::FaultConfig::default().sync(Probability!(1, 100))
 }
 
 fn default_storage_fault_schedule<P>(restart_order: impl IntoIterator<Item = P>) -> Schedule<P>
@@ -493,7 +493,7 @@ where
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: 0.0,
+        success_rate: Probability::ZERO,
     };
 
     let mut schedule = Schedule::new();
@@ -598,7 +598,7 @@ where
         .link(Link {
             latency: Duration::from_millis(100),
             jitter: Duration::from_millis(5),
-            success_rate: 1.0,
+            success_rate: Probability::ONE,
         })
         .crash(Crash::Random {
             // A full-cluster crash discards all in-flight votes, and a
@@ -796,12 +796,12 @@ where
     let good_link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(5),
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: 0.0,
+        success_rate: Probability::ZERO,
     };
 
     // Build a schedule that kills all links to/from the isolated node at

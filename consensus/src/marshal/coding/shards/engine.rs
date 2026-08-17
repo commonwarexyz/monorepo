@@ -1899,7 +1899,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZUsize, Participant, Probability, channel::oneshot::error::TryRecvError,
+        ordered::Set,
     };
     use std::{
         future::Future,
@@ -1940,7 +1941,7 @@ mod tests {
     const DEFAULT_LINK: Link = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
 
     /// Rate limit quota for tests (effectively unlimited).

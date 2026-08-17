@@ -7,7 +7,7 @@ use commonware_p2p::{
     Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait, simulated,
 };
 use commonware_runtime::{Clock, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use std::{
@@ -58,7 +58,7 @@ enum Operation {
         latency_ms: u16,
         /// Latency jitter in milliseconds.
         jitter: u16,
-        /// Success rate (0-255 maps to 0.0-1.0).
+        /// Success rate as a numerator over 255.
         success_rate: u8,
     },
     /// Remove a network link between two peers.
@@ -279,12 +279,11 @@ fn fuzz(input: FuzzInput) {
                     let from_idx = (from_idx as usize) % peer_pks.len();
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
-                    // Create link with specified characteristics
-                    // success_rate is normalized from u8 (0-255) to f64 (0.0-1.0)
+                    // Create link with specified characteristics.
                     let link = simulated::Link {
                         latency: Duration::from_millis(latency_ms as u64),
                         jitter: Duration::from_millis(jitter as u64),
-                        success_rate: (success_rate as f64) / 255.0,
+                        success_rate: Probability!(u64::from(success_rate), u64::from(u8::MAX)),
                     };
                     let _ = oracle
                         .add_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone(), link)

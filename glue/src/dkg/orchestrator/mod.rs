@@ -107,8 +107,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        ordered::Set, sequence::Unit,
+        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, Probability, TestRng,
+        acknowledgement::Exact, ordered::Set, sequence::Unit,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -124,7 +124,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        success_rate: Probability::ONE,
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
