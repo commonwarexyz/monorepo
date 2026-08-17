@@ -90,6 +90,64 @@ impl Blob {
         result.map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_exact_at(
+        mut cache: Cache,
+        file: &File,
+        mut buf: &mut [u8],
+        mut offset: u64,
+    ) -> Result<(), Error> {
+        while !buf.is_empty() {
+            if !cache.is_disabled() {
+                file.read_exact_at(buf, offset)?;
+                return Ok(());
+            }
+
+            let iovec = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
+            };
+            // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
+            // writable slice borrowed for the duration of the syscall.
+            let ret = unsafe {
+                libc::preadv2(
+                    file.as_raw_fd(),
+                    &iovec,
+                    1,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                    libc::RWF_DONTCACHE,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if cache.retry_cached(&err, true) {
+                    continue;
+                }
+                return Err(err.into());
+            }
+
+            let bytes_read = ret as usize;
+            if bytes_read == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            let (_, unread) = buf.split_at_mut(bytes_read);
+            buf = unread;
+            offset = offset
+                .checked_add(bytes_read as u64)
+                .ok_or(Error::OffsetOverflow)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_exact_at(_: Cache, file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        file.read_exact_at(buf, offset)?;
+        Ok(())
+    }
+
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
         file.write_all_at(buf, offset)?;
         Ok(())
@@ -178,64 +236,6 @@ impl Blob {
                 .ok_or(Error::OffsetOverflow)?;
         }
 
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    fn read_exact_at(
-        mut cache: Cache,
-        file: &File,
-        mut buf: &mut [u8],
-        mut offset: u64,
-    ) -> Result<(), Error> {
-        while !buf.is_empty() {
-            if !cache.is_disabled() {
-                file.read_exact_at(buf, offset)?;
-                return Ok(());
-            }
-
-            let iovec = libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            };
-            // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
-            // writable slice borrowed for the duration of the syscall.
-            let ret = unsafe {
-                libc::preadv2(
-                    file.as_raw_fd(),
-                    &iovec,
-                    1,
-                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
-                    libc::RWF_DONTCACHE,
-                )
-            };
-            if ret < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                if cache.retry_cached(&err, true) {
-                    continue;
-                }
-                return Err(err.into());
-            }
-
-            let bytes_read = ret as usize;
-            if bytes_read == 0 {
-                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
-            }
-            let (_, unread) = buf.split_at_mut(bytes_read);
-            buf = unread;
-            offset = offset
-                .checked_add(bytes_read as u64)
-                .ok_or(Error::OffsetOverflow)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn read_exact_at(_: Cache, file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        file.read_exact_at(buf, offset)?;
         Ok(())
     }
 }
