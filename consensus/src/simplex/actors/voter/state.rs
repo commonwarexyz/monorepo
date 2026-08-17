@@ -698,8 +698,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // An optimistic view requires local evidence for its parent. A view
-        // outside the issuance window already has certified ancestry.
+        // Same-term optimistic views revalidate their parent here. Other
+        // proposals validate their captured ancestry before this call, and the
+        // actor constructs the vote before processing another state transition.
         if self.in_issuance_window(view) && !self.optimistic_parent_ready(view) {
             return None;
         }
