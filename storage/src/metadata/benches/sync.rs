@@ -1,9 +1,8 @@
-use super::utils::{Key, Policy, Val, get_modified_kvs, get_random_kvs, init, policies};
+use super::utils::{Key, Val, get_modified_kvs, get_random_kvs, init};
 use commonware_runtime::{
     Supervisor as _,
     benchmarks::{context, tokio},
 };
-use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
@@ -46,61 +45,49 @@ const fn shapes(modified: usize) -> &'static [Shape] {
 
 fn bench_sync(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    let mut rng = test_rng();
     for &num_keys in &[100, 1_000, 10_000] {
         for &modified in &[0, 1, 5, 25, 50, 75, 100] {
             let initial_kvs = get_random_kvs(num_keys);
 
             for &shape in shapes(modified) {
                 let modified_kvs = shape.mutations(&initial_kvs, modified);
-                for policy in policies(&mut rng) {
-                    let label = format!(
-                        "{}/keys={} modified={} shape={} write_options={}",
-                        module_path!(),
-                        num_keys,
-                        modified,
-                        shape.label(),
-                        policy.label()
-                    );
+                let label = format!(
+                    "{}/keys={} modified={} shape={}",
+                    module_path!(),
+                    num_keys,
+                    modified,
+                    shape.label()
+                );
 
-                    c.bench_function(&label, |b| {
-                        b.to_async(&runner).iter_custom(|iters| {
-                            let initial_kvs = initial_kvs.clone();
-                            let modified_kvs = modified_kvs.clone();
-                            async move {
-                                let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                let mut total = Duration::ZERO;
-                                for _ in 0..iters {
-                                    // Build a fresh store with cache-bypassing writes, then switch
-                                    // only the measured sync to the selected policy.
-                                    let (mut metadata, control) = init(
-                                        ctx.child("storage"),
-                                        Policy::DontCache,
-                                        Policy::DontCache,
-                                    )
-                                    .await;
-                                    for (key, value) in &initial_kvs {
-                                        metadata.put(key.clone(), value.clone());
-                                    }
-                                    metadata = metadata.sync().await.unwrap();
-                                    metadata = metadata.sync().await.unwrap();
-
-                                    control.set_write(matches!(policy, Policy::DontCache));
-                                    for (key, value) in &modified_kvs {
-                                        metadata.put(key.clone(), value.clone());
-                                    }
-
-                                    let start = Instant::now();
-                                    metadata = metadata.sync().await.unwrap();
-                                    total += start.elapsed();
-
-                                    metadata.destroy().await.unwrap();
+                c.bench_function(&label, |b| {
+                    b.to_async(&runner).iter_custom(|iters| {
+                        let initial_kvs = initial_kvs.clone();
+                        let modified_kvs = modified_kvs.clone();
+                        async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iters {
+                                let mut metadata = init(ctx.child("storage")).await;
+                                for (key, value) in &initial_kvs {
+                                    metadata.put(key.clone(), value.clone());
                                 }
-                                total
+                                metadata = metadata.sync().await.unwrap();
+                                metadata = metadata.sync().await.unwrap();
+
+                                for (key, value) in &modified_kvs {
+                                    metadata.put(key.clone(), value.clone());
+                                }
+
+                                let start = Instant::now();
+                                metadata = metadata.sync().await.unwrap();
+                                total += start.elapsed();
+
+                                metadata.destroy().await.unwrap();
                             }
-                        });
+                            total
+                        }
                     });
-                }
+                });
             }
         }
     }
