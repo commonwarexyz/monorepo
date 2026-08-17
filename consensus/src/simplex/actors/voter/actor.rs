@@ -1082,11 +1082,11 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop work after exiting its view while retaining optimistic
-                // future work. Proposal construction also captures ancestry, so
-                // replace it once that ancestry is invalid and another parent is
-                // available. This runs before rebuilding waiters, preventing a
-                // stale completion from being polled after the state transition.
+                // Drop a pending proposal request after its view exits. Retain
+                // requests for the current view and optimistic future views. Also
+                // drop a request when its captured ancestry is invalid and a
+                // replacement parent is available. Run these checks before
+                // rebuilding waiters so the actor cannot poll a stale completion.
                 if pending_propose.as_ref().is_some_and(|pp| {
                     pp.view() < self.state.current_view()
                         || self.state.supersede_proposal_request(&pp.0)

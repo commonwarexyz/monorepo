@@ -82,9 +82,9 @@ where
         self.requested_build = true;
     }
 
-    /// Clears the build request if no proposal was recorded meanwhile.
+    /// Clears the build request unless the slot already has a proposal.
     pub const fn clear_request(&mut self) {
-        // A learned proposal makes the slot terminal for local construction.
+        // A recorded proposal already prevents another local build.
         if self.proposal.is_some() {
             return;
         }

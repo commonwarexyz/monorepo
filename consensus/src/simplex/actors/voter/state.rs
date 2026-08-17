@@ -692,14 +692,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Check the cheap round-local eligibility before the ancestry gates
-        // below, which re-resolve parent payloads on every event otherwise.
+        // Check round-local eligibility before the ancestry check, which
+        // resolves the parent payload on every event.
         if !self.views.get(&view)?.can_construct_notarize() {
             return None;
         }
 
-        // Optimistic views wait for local evidence of their parent; anything
-        // outside the issuance window carries certified ancestry already.
+        // An optimistic view requires local evidence for its parent. A view
+        // outside the issuance window already has certified ancestry.
         if self.in_issuance_window(view) && !self.optimistic_parent_ready(view) {
             return None;
         }
@@ -947,27 +947,26 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// preferred for the view or is still valid ancestry for the completed
     /// proposal. Conflicting or invalidated ancestry is rejected.
     pub fn proposed(&mut self, context: &Context<D, S::PublicKey>, payload: D) -> bool {
-        // Reconstruct the proposal from the round and parent captured when the
-        // asynchronous build began.
         let proposal = Proposal::new(context.round, context.parent.0, payload);
 
-        // Parent preference can advance while the automaton builds without
-        // invalidating the captured fallback.
+        // Accept the captured parent if it is still preferred or remains valid
+        // ancestry.
         if !self
             .find_parent(context.view())
             .is_ok_and(|parent| parent == context.parent)
             && !self.captured_parent_valid(context)
         {
-            // The build latch covers one asynchronous request. An invalid
-            // result leaves the slot empty, so release it for a new context.
+            // The build latch covers one asynchronous request. If the slot
+            // remains empty, release the latch so the voter can request a new
+            // context.
             if let Some(round) = self.views.get_mut(&context.view()) {
                 round.clear_proposal_request();
             }
             return false;
         }
 
-        // The captured ancestry passed one of the validity paths, so the
-        // proposal can enter the round as locally verified.
+        // Record the proposal as locally verified after accepting its captured
+        // parent.
         self.record_proposed(proposal)
     }
 
@@ -1521,8 +1520,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
 
-        // Stamp the early-elected leader once so repeated proposal, vote, and
-        // replay events remain idempotent.
+        // Set the early leader once to keep proposal, vote, and replay handling
+        // idempotent.
         if let Some(leader) = self.handoff_leader(next)
             && !self.leader_is_set(next)
         {
@@ -6748,7 +6747,7 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_replay_restores_speculative_leader() {
+    fn pipelined_handoff_replay_restores_early_leader() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
@@ -6772,7 +6771,7 @@ mod tests {
             let local_vote = Notarize::sign(&schemes[3], tip.clone()).expect("local notarize vote");
             assert_eq!(state.leader_index(View::new(6)), None);
 
-            // Replaying the vote must restore both the speculative leader and
+            // Replaying the vote must restore both the early leader and
             // the outgoing tip as usable handoff ancestry.
             state.replay(&Artifact::Notarize(local_vote));
             assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));

@@ -3399,8 +3399,8 @@ mod tests {
         });
     }
 
-    /// A follower repairing a raw pipelined term-start proposal targets its
-    /// proposer, containing retries when the parent certificate never forms.
+    /// A follower requests a missing parent certificate from the term-start
+    /// proposer. Targeting one peer limits retries if the certificate never forms.
     #[test_traced]
     fn test_pipelined_handoff_parent_repair_targets_proposer() {
         let n = 5;
