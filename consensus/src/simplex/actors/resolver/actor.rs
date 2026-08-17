@@ -833,7 +833,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(
@@ -1018,7 +1018,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(

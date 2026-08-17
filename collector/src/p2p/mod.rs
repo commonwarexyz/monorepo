@@ -76,12 +76,12 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
     const LINK_SLOW: Link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::from_millis(1),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
 
     async fn setup_network_and_peers(

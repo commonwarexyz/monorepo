@@ -514,7 +514,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
         jitter: Duration::from_millis(0),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
     const CAPACITY: usize = 5usize;
 

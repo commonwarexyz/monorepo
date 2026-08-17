@@ -36,7 +36,7 @@ const DEFAULT_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 const DEFAULT_CHANNEL: u64 = 0;
 
 /// The success probability over all links (100%).
-const DEFAULT_SUCCESS_RATE: Probability = Probability::ONE;
+const DEFAULT_SUCCESS_RATE: Probability = Probability!(1.0);
 
 /// Returns a network configuration that accepts every supported application payload size.
 const fn network_config(max_peers_per_set: usize) -> Config {

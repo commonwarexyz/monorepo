@@ -88,7 +88,7 @@ pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
 pub const LINK: Link = Link {
     latency: Duration::from_millis(100),
     jitter: Duration::from_millis(1),
-    success_rate: Probability::ONE,
+    success_rate: Probability!(1.0),
 };
 pub const UNRELIABLE_LINK: Link = Link {
     latency: Duration::from_millis(200),

@@ -878,7 +878,7 @@ pub(crate) mod test {
             // across configs, never cached pages), so replay's first item forces a storage read,
             // and with far fewer ops than the routing batch size no batch reaches a worker, so
             // workers never read the log themselves.
-            context.storage_fault_config().write().read_rate = Some(Probability::ONE);
+            context.storage_fault_config().write().read_rate = Some(Probability!(1.0));
             let result = index
                 .build_snapshot(
                     context.child("build"),

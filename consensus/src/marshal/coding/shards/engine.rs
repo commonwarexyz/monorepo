@@ -1941,7 +1941,7 @@ mod tests {
     const DEFAULT_LINK: Link = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::ZERO,
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
 
     /// Rate limit quota for tests (effectively unlimited).

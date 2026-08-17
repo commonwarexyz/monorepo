@@ -279,7 +279,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
 
     struct Harness {

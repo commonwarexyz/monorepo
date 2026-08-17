@@ -2572,7 +2572,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -4949,7 +4949,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -9725,7 +9725,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await

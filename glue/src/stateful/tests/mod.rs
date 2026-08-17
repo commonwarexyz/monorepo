@@ -493,7 +493,7 @@ where
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: Probability::ZERO,
+        success_rate: Probability!(0.0),
     };
 
     let mut schedule = Schedule::new();
@@ -598,7 +598,7 @@ where
         .link(Link {
             latency: Duration::from_millis(100),
             jitter: Duration::from_millis(5),
-            success_rate: Probability::ONE,
+            success_rate: Probability!(1.0),
         })
         .crash(Crash::Random {
             // A full-cluster crash discards all in-flight votes, and a
@@ -796,12 +796,12 @@ where
     let good_link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(5),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: Probability::ZERO,
+        success_rate: Probability!(0.0),
     };
 
     // Build a schedule that kills all links to/from the isolated node at

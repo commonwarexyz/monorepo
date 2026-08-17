@@ -13,12 +13,6 @@ const SCALE: u128 = 1u128 << u64::BITS;
 pub struct Probability(u64);
 
 impl Probability {
-    /// A probability that never occurs.
-    pub const ZERO: Self = Self(0);
-
-    /// A probability that always occurs.
-    pub const ONE: Self = Self(u64::MAX);
-
     /// Creates a probability from `numerator / denominator`.
     ///
     /// Returns [`None`] if the denominator is zero or the numerator exceeds the denominator.
@@ -28,13 +22,13 @@ impl Probability {
         }
 
         if numerator == denominator {
-            return Some(Self::ONE);
+            return Some(Self(u64::MAX));
         }
 
         let threshold = ((numerator as u128) << u64::BITS) / denominator as u128;
 
         // A proper fraction with a `u64` denominator is at least 2^-64 below one, so its rounded
-        // threshold cannot collide with the sentinel reserved for `ONE`.
+        // threshold cannot collide with the sentinel reserved for probability one.
         debug_assert!(threshold < u64::MAX as u128);
         Some(Self(threshold as u64))
     }
@@ -49,7 +43,7 @@ impl Probability {
         let magnitude = bits & (u64::MAX >> 1);
 
         if magnitude == 0 {
-            return Some(Self::ZERO);
+            return Some(Self(0));
         }
         if bits != magnitude || magnitude > 1.0f64.to_bits() {
             return None;
@@ -74,7 +68,7 @@ impl Probability {
 
         let threshold = (significand as u128) << (exponent - SCALED_EXPONENT);
         if threshold == SCALE {
-            return Some(Self::ONE);
+            return Some(Self(u64::MAX));
         }
 
         debug_assert!(threshold < u64::MAX as u128);
@@ -83,12 +77,12 @@ impl Probability {
 
     /// Returns whether this probability never occurs.
     pub const fn is_zero(self) -> bool {
-        self.0 == Self::ZERO.0
+        self.0 == 0
     }
 
     /// Returns whether this probability always occurs.
     pub const fn is_one(self) -> bool {
-        self.0 == Self::ONE.0
+        self.0 == u64::MAX
     }
 
     /// Converts this probability to an `f64` in the inclusive range `[0, 1]`.
@@ -212,8 +206,11 @@ mod tests {
 
     #[test]
     fn construction() {
-        assert_eq!(Probability::new(0, u64::MAX), Some(Probability::ZERO));
-        assert_eq!(Probability::new(u64::MAX, u64::MAX), Some(Probability::ONE));
+        assert_eq!(Probability::new(0, u64::MAX), Some(Probability!(0.0)));
+        assert_eq!(
+            Probability::new(u64::MAX, u64::MAX),
+            Some(Probability!(1.0))
+        );
         assert_eq!(Probability!(1, 2), Probability!(2, 4));
         assert_eq!(Probability!(1, 2).as_f64(), 0.5);
         assert!(Probability::new(1, 0).is_none());
@@ -229,9 +226,9 @@ mod tests {
         assert_eq!(FROM_LITERAL.as_f64(), 0.98);
         assert_ne!(FROM_LITERAL, Probability!(49, 50));
         assert_eq!(Probability!(0.5), Probability!(1, 2));
-        assert_eq!(Probability::from_f64(0.0), Some(Probability::ZERO));
-        assert_eq!(Probability::from_f64(-0.0), Some(Probability::ZERO));
-        assert_eq!(Probability::from_f64(1.0), Some(Probability::ONE));
+        assert_eq!(Probability::from_f64(0.0), Some(Probability!(0.0)));
+        assert_eq!(Probability::from_f64(-0.0), Some(Probability!(0.0)));
+        assert_eq!(Probability::from_f64(1.0), Some(Probability!(1.0)));
         assert_eq!(
             Probability::from_f64(MINIMUM_INTERIOR),
             Some(Probability(1))
@@ -283,8 +280,8 @@ mod tests {
     #[test]
     fn sampling_uses_threshold_and_skips_endpoints() {
         let mut rng = CountingRng { value: 0, calls: 0 };
-        assert!(!Probability::ZERO.sample(&mut rng));
-        assert!(Probability::ONE.sample(&mut rng));
+        assert!(!Probability!(0.0).sample(&mut rng));
+        assert!(Probability!(1.0).sample(&mut rng));
         assert_eq!(rng.calls, 0);
 
         rng.value = (1u64 << 63) - 1;

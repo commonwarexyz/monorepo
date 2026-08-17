@@ -462,7 +462,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(10),
                         jitter: Duration::from_millis(1),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -474,7 +474,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(10),
                         jitter: Duration::from_millis(1),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -567,7 +567,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -647,7 +647,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -659,7 +659,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -722,7 +722,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -783,7 +783,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -795,7 +795,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -875,7 +875,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -887,7 +887,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -978,7 +978,7 @@ mod tests {
                     // No latency so it doesn't interfere with bandwidth delay calculation
                     latency: Duration::ZERO,
                     jitter: Duration::ZERO,
-                    success_rate: Probability::ONE,
+                    success_rate: Probability!(1.0),
                 },
             )
             .await
@@ -1161,7 +1161,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1173,7 +1173,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1294,7 +1294,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(50),
                         jitter: Duration::from_millis(40),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1361,7 +1361,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5_000),
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1382,7 +1382,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(1),
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1485,7 +1485,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1575,7 +1575,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1672,7 +1672,7 @@ mod tests {
                         Link {
                             latency: Duration::ZERO,
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1769,7 +1769,7 @@ mod tests {
                         Link {
                             latency: Duration::from_millis(1),
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -1915,7 +1915,7 @@ mod tests {
                         Link {
                             latency: Duration::from_millis(1),
                             jitter: Duration::ZERO,
-                            success_rate: Probability::ONE,
+                            success_rate: Probability!(1.0),
                         },
                     )
                     .await
@@ -2013,7 +2013,7 @@ mod tests {
                     Link {
                         latency: Duration::from_secs(1), // 1 second latency
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2104,7 +2104,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(1), // Small latency
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2195,7 +2195,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2274,7 +2274,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2679,7 +2679,7 @@ mod tests {
                                 Link {
                                     latency: Duration::from_millis(1),
                                     jitter: Duration::ZERO,
-                                    success_rate: Probability::ONE,
+                                    success_rate: Probability!(1.0),
                                 },
                             )
                             .await
@@ -2820,7 +2820,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(1),
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -3161,7 +3161,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -3229,7 +3229,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -3295,7 +3295,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())

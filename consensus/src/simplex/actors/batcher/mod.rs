@@ -173,7 +173,7 @@ mod tests {
                 Link {
                     latency,
                     jitter: Duration::from_millis(0),
-                    success_rate: Probability::ONE,
+                    success_rate: Probability!(1.0),
                 },
             )
             .await
@@ -1765,7 +1765,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(injector_pk.clone(), me.clone(), link)
@@ -1917,7 +1917,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut finalize_senders = Vec::new();
             for (i, participant) in participants
@@ -2518,7 +2518,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -2722,7 +2722,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -2889,7 +2889,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -3117,7 +3117,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -3330,7 +3330,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let injector_pk = PrivateKey::from_seed(3_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
@@ -3496,7 +3496,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -3705,7 +3705,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -3899,7 +3899,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -4086,7 +4086,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -4283,7 +4283,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let leader_pk = participants[1].clone();
             let (mut leader_sender, _leader_receiver) = oracle
@@ -4405,7 +4405,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let leader_pk = participants[1].clone();
             let (mut leader_sender, _leader_receiver) = oracle
@@ -4636,7 +4636,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut peer_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate().skip(1) {
@@ -5008,7 +5008,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let leader_pk = participants[1].clone();
             let (mut leader_sender, _leader_receiver) = oracle
@@ -5153,7 +5153,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let leader = Participant::new(1);
             let leader_pk = participants[usize::from(leader)].clone();
@@ -5318,7 +5318,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -5435,7 +5435,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -5808,7 +5808,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -5989,7 +5989,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let (mut peer_sender, _receiver) = oracle
                 .control(participants[1].clone())
@@ -6128,7 +6128,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let (mut peer_sender, _receiver) = oracle
                 .control(participants[1].clone())
@@ -6436,7 +6436,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             let mut participant_senders = Vec::new();
             for (i, pk) in participants.iter().enumerate() {
@@ -6658,7 +6658,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(sender_pk.clone(), me.clone(), link)
@@ -6851,7 +6851,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(sender_pk.clone(), me.clone(), link)

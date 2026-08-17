@@ -1646,7 +1646,7 @@ mod tests {
                     ingress::Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -1918,7 +1918,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(peer_a.clone(), twin.clone(), link.clone())
@@ -2005,7 +2005,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(peer_c.clone(), twin.clone(), link.clone())
@@ -2075,7 +2075,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(peer_c.clone(), twin.clone(), link.clone())
@@ -2306,7 +2306,7 @@ mod tests {
                     ingress::Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: Probability::ONE,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -2392,7 +2392,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(sender_pk.clone(), recipient_a.clone(), link.clone())
@@ -2480,7 +2480,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::ZERO,
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             for (a, b) in [(&pk1, &pk2), (&pk1, &pk3), (&pk2, &pk3)] {
                 oracle
@@ -2631,7 +2631,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::ZERO,
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             };
             oracle
                 .add_link(primary_1.clone(), secondary_0.clone(), link.clone())

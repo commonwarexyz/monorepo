@@ -177,7 +177,7 @@ mod tests {
     const RELIABLE_LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
 
     /// Register all participants with the network oracle.

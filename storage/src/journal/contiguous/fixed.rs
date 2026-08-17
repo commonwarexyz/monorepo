@@ -2105,8 +2105,8 @@ mod tests {
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: Probability::ONE,
-                    retention_rate: Probability::ZERO,
+                    failure_rate: Probability!(1.0),
+                    retention_rate: Probability!(0.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()
@@ -2232,7 +2232,7 @@ mod tests {
             // Regression: commit() must force a data sync before callers can rely on recovered
             // bytes beyond the persisted recovery watermark.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(Probability::ONE),
+                sync_rate: Some(Probability!(1.0)),
                 ..Default::default()
             };
             assert!(
@@ -3301,7 +3301,7 @@ mod tests {
             // Inject sync faults. If commit skipped the recovered tail sync, it would succeed
             // despite the fault.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(Probability::ONE),
+                sync_rate: Some(Probability!(1.0)),
                 ..Default::default()
             };
             assert!(

@@ -1919,7 +1919,7 @@ mod tests {
         let (stale_config, checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
                 let config = context.storage_fault_config();
-                *config.write() = FaultConfig::default().open(Probability::ONE);
+                *config.write() = FaultConfig::default().open(Probability!(1.0));
                 config
             });
         *stale_config.write() = FaultConfig::default();
@@ -1959,7 +1959,7 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
-                    failure_rate: Probability::ZERO,
+                    failure_rate: Probability!(0.0),
                     retention_rate: Probability!(0.5),
                     mode: PartialWriteMode::Subset,
                 }));
@@ -2336,7 +2336,7 @@ mod tests {
     fn test_storage_fault_injection_and_recovery() {
         // Phase 1: Run with 100% sync failure rate
         let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
-            sync_rate: Some(Probability::ONE),
+            sync_rate: Some(Probability!(1.0)),
             ..Default::default()
         });
 
@@ -2389,7 +2389,7 @@ mod tests {
 
             // Enable sync faults dynamically
             let storage_fault_cfg = ctx.storage_fault_config();
-            storage_fault_cfg.write().sync_rate = Some(Probability::ONE);
+            storage_fault_cfg.write().sync_rate = Some(Probability!(1.0));
 
             // Now sync should fail
             blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
@@ -2399,7 +2399,7 @@ mod tests {
             assert!(result.is_err(), "sync should fail with faults enabled");
 
             // Disable faults
-            storage_fault_cfg.write().sync_rate = Some(Probability::ZERO);
+            storage_fault_cfg.write().sync_rate = Some(Probability!(0.0));
 
             // Sync should succeed again
             blob.sync()
@@ -2456,7 +2456,7 @@ mod tests {
                     open_rate: Some(Probability!(0.5)),
                     write_rate: Some(WriteConfig {
                         failure_rate: Probability!(0.3),
-                        retention_rate: Probability::ZERO,
+                        retention_rate: Probability!(0.0),
                         mode: PartialWriteMode::Prefix,
                     }),
                     sync_rate: Some(Probability!(0.2)),

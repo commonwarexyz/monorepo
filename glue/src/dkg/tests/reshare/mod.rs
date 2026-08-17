@@ -483,7 +483,7 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary(#[case] network: Network
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     })
     .crash(Crash::ProcessedHeight {
         participant: delayed.clone(),

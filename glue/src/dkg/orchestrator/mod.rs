@@ -124,7 +124,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 

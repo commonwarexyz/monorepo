@@ -269,7 +269,7 @@ async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     };
     link_peers(
         &mut oracle,
@@ -542,7 +542,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: Probability::ONE,
+                success_rate: Probability!(1.0),
             }),
             input.partition.filter(),
         )

@@ -488,7 +488,7 @@ fn fuzz(input: FuzzInput) {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: write_failure_rate,
-                    retention_rate: Probability::ZERO,
+                    retention_rate: Probability!(0.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()

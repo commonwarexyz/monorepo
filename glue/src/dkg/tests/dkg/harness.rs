@@ -342,7 +342,7 @@ pub(super) fn good_link() -> Link {
     Link {
         latency: Duration::from_millis(20),
         jitter: Duration::from_millis(5),
-        success_rate: Probability::ONE,
+        success_rate: Probability!(1.0),
     }
 }
 
