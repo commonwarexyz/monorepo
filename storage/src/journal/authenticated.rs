@@ -2948,7 +2948,8 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
-            // Force backing I/O so the authenticated wrapper's forwarded policy is observable.
+            // Evict cached pages so the first replay item requires a backing read through the
+            // authenticated wrapper.
             page_cache.clear();
             let stream = journal
                 .replay(0, NZUsize!(100), ReadOptions::DONT_CACHE)
@@ -2960,6 +2961,7 @@ mod tests {
             assert_eq!(position, 0);
             assert_eq!(operation, create_operation::<mmr::Family>(0));
 
+            // The authenticated wrapper forwards DONT_CACHE unchanged to the backing journal.
             let reads = recordings.snapshot().reads;
             assert!(!reads.is_empty());
             assert!(

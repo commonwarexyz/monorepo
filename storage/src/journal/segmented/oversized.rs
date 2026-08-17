@@ -58,7 +58,7 @@ use super::{
 };
 use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{Error as RError, Handle};
+use commonware_runtime::{Error as RError, Handle, ReadOptions};
 use futures::future::try_join;
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -476,13 +476,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     ///
     /// Setup flushes the index journal's buffered pages so the reader observes every
     /// accepted write.
-    /// `read_options` is a best-effort policy for reads from the index journal.
+    /// Every backing index-journal read performed by the returned replay uses `read_options`,
+    /// including reads after advancing to another section.
     pub async fn replay(
         self,
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
-        read_options: commonware_runtime::ReadOptions,
+        read_options: ReadOptions,
     ) -> Result<Replay<E, I, V>, Error> {
         let index = self
             .index
@@ -1683,12 +1684,7 @@ mod tests {
 
             // An empty journal's reader is exhausted from the start
             let replay = oversized
-                .replay(
-                    0,
-                    0,
-                    NZUsize!(1024),
-                    commonware_runtime::ReadOptions::default(),
-                )
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to replay");
             let oversized = replay.finish().expect("failed to finish replay");
@@ -1716,12 +1712,7 @@ mod tests {
             // Evict the index page so replay must exercise the backing journal read.
             page_cache.clear();
             let mut replay = oversized
-                .replay(
-                    1,
-                    0,
-                    NZUsize!(1024),
-                    commonware_runtime::ReadOptions::DONT_CACHE,
-                )
+                .replay(1, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
                 .await
                 .expect("Failed to replay");
             recordings.clear();
@@ -1738,7 +1729,7 @@ mod tests {
             assert!(
                 reads
                     .iter()
-                    .all(|options| *options == commonware_runtime::ReadOptions::DONT_CACHE)
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
             );
 
             assert!(replay.next().await.is_none());
@@ -1767,12 +1758,7 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
             let replay = oversized
-                .replay(
-                    0,
-                    0,
-                    NZUsize!(1024),
-                    commonware_runtime::ReadOptions::default(),
-                )
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to replay");
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));

@@ -1,6 +1,6 @@
 use crate::{
-    ITEM_SIZE, ITEMS_PER_BLOB, ReplayPolicy, append_fixed_random_data, get_variable_journal,
-    replay_policies,
+    ITEM_SIZE, ITEMS_PER_BLOB, REPLAY_POLICIES, ReplayPolicy, append_fixed_random_data,
+    get_variable_journal,
 };
 use commonware_runtime::{
     Supervisor as _,
@@ -8,7 +8,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::journal::contiguous::{Contiguous as _, variable::Journal};
-use commonware_utils::{NZUsize, sequence::FixedBytes, test_rng};
+use commonware_utils::{NZUsize, sequence::FixedBytes};
 use criterion::{Criterion, criterion_group};
 use futures::{StreamExt, pin_mut};
 use std::{
@@ -45,12 +45,11 @@ async fn bench_run(
 /// Benchmark the replaying of items from a variable journal containing exactly that
 /// number of items.
 fn bench_variable_replay(c: &mut Criterion) {
-    let mut rng = test_rng();
     for items in [1_000, 10_000, 100_000, 500_000] {
         let cfg = Config::default();
         let runner = tokio::Runner::new(cfg.clone());
         for buffer in [16_384, 65_536, 1_048_576] {
-            for policy in replay_policies(&mut rng) {
+            for policy in REPLAY_POLICIES {
                 c.bench_function(
                     &format!(
                         "{}/items={} buffer={} size={} read_options={}",

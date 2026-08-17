@@ -192,8 +192,9 @@ pub trait Contiguous: Send + Sync {
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
     /// `buffer` controls the replay byte budget for each chunk.
-    /// `read_options` is a best-effort policy for reads from sealed blobs. Cache misses from the
-    /// live writable tip request [ReadOptions::DONT_CACHE] because the page cache retains them.
+    /// Every backing blob read from sealed history uses `read_options`. Backing reads from the live
+    /// writable tip instead use [ReadOptions::DONT_CACHE] on page-cache misses because the cache
+    /// retains the fetched pages.
     fn replay(
         &self,
         start_pos: u64,

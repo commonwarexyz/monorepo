@@ -657,7 +657,8 @@ mod tests {
         let v2_supported = AtomicBool::new(true);
         let v2_unsupported = AtomicBool::new(false);
 
-        // Use the single-buffer fast path only when no requested per-write flag can be applied.
+        // Normal caching, a rejected hint, and unavailable v2 support each leave no flag for
+        // this write.
         assert!(Blob::use_single_write(
             false,
             &Cache::Enabled,
@@ -673,10 +674,13 @@ mod tests {
             &Cache::Disabled(supported.clone()),
             &v2_unsupported
         ));
+        // A supported DONT_CACHE request needs the v2 path on Linux. Other platforms ignore the
+        // hint.
         assert_eq!(
             Blob::use_single_write(false, &Cache::Disabled(supported), &v2_supported),
             !cfg!(target_os = "linux")
         );
+        // SYNC always leaves the fast path so write_at can enforce durability.
         assert!(!Blob::use_single_write(
             true,
             &Cache::Enabled,
@@ -687,7 +691,7 @@ mod tests {
     #[test]
     fn test_unflagged_vectored_write_uses_legacy_path() {
         let mut legacy_calls = 0;
-        // With no operation or cache flag, vectored writes must bypass the v2 syscall family.
+        // Normal caching and no operation flag leave nothing for pwritev2 to apply.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Enabled,
             None::<Capabilities<'static>>,
@@ -707,6 +711,8 @@ mod tests {
         )
         .unwrap();
 
+        // One legacy submission consumes both buffers. The return stays true because no v2-only
+        // operation flag was requested.
         assert_eq!(legacy_calls, 1);
         assert!(v2_flags_applied);
     }
@@ -720,7 +726,7 @@ mod tests {
         let mut calls = 0;
         let mut attempts = Vec::new();
 
-        // EINTR retries the same suffix, while successful partial reads advance the offset.
+        // Inject EINTR, then completions of two and three bytes.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -746,8 +752,10 @@ mod tests {
         )
         .unwrap();
 
+        // EINTR repeats (7, 5). The two-byte completion makes the next attempt (9, 3).
         assert_eq!(attempts, [(7, 5), (7, 5), (9, 3)]);
         assert_eq!(&output, b"hello");
+        // Completing entirely through the hinted path leaves both shared capabilities enabled.
         assert!(dont_cache_supported.load(Ordering::Relaxed));
         assert!(v2_supported.load(Ordering::Relaxed));
     }
@@ -761,7 +769,7 @@ mod tests {
         let mut calls = 0;
         let mut fallback = None;
 
-        // After partial progress, an unsupported hint falls back only for the unread suffix.
+        // Complete "he", then reject DONT_CACHE on the three-byte remainder.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -776,6 +784,7 @@ mod tests {
                     Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
                 }
             },
+            // Cached FileExt fallback receives only the unread suffix at its advanced offset.
             |buf, offset| {
                 fallback = Some((offset, buf.len()));
                 buf.copy_from_slice(b"llo");
@@ -787,6 +796,7 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(fallback, Some((13, 3)));
         assert_eq!(&output, b"hello");
+        // EOPNOTSUPP disables the shared hint but leaves v2 available for operation flags.
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(v2_supported.load(Ordering::Relaxed));
     }
@@ -800,7 +810,7 @@ mod tests {
         let mut calls = 0;
         let mut fallback = None;
 
-        // ENOSYS falls back for the unread suffix and disables v2 for every clone.
+        // Complete "he", then inject ENOSYS while three bytes remain.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -815,6 +825,7 @@ mod tests {
                     Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
                 }
             },
+            // FileExt resumes with only the unread suffix at offset 19.
             |buf, offset| {
                 fallback = Some((offset, buf.len()));
                 buf.copy_from_slice(b"llo");
@@ -826,10 +837,12 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(fallback, Some((19, 3)));
         assert_eq!(&output, b"hello");
+        // ENOSYS disables both shared bits because cache bypass also depends on the v2 syscall
+        // family.
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(!v2_supported.load(Ordering::Relaxed));
 
-        // A sibling observes the shared downgrade without probing the absent syscall.
+        // A sibling sees the downgrade and goes directly to FileExt without probing preadv2.
         let mut sibling = [0u8; 1];
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
@@ -853,7 +866,8 @@ mod tests {
         let v2_supported = Arc::new(AtomicBool::new(true));
         let mut output = [0u8; 1];
 
-        // A zero-byte completion before the buffer is full is EOF, not a hint failure.
+        // A zero-byte completion with one byte still unread is exact-read EOF, not a capability
+        // failure.
         let err = Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -876,7 +890,8 @@ mod tests {
         let offset = i64::MAX as u64 + 1;
         let mut fallback = None;
 
-        // Offsets outside off_t never reach preadv2 or disable a supported capability.
+        // This initial offset is outside preadv2's off_t range, so FileExt receives the full
+        // request.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -893,6 +908,7 @@ mod tests {
 
         assert_eq!(fallback, Some((offset, 1)));
         assert_eq!(&output, b"x");
+        // A request-local offset limitation does not downgrade either shared capability.
         assert!(dont_cache_supported.load(Ordering::Relaxed));
         assert!(v2_supported.load(Ordering::Relaxed));
     }
@@ -906,7 +922,7 @@ mod tests {
         let mut fallback = None;
         let max_offset = libc::off_t::MAX as u64;
 
-        // If partial progress crosses off_t::MAX, only the unread suffix falls back.
+        // Complete one byte at off_t::MAX, making the next hinted offset unrepresentable.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -917,6 +933,7 @@ mod tests {
                 buf[0] = b'x';
                 Ok(1)
             },
+            // FileExt receives only the one-byte suffix at max_offset + 1.
             |buf, offset| {
                 fallback = Some((offset, buf.len()));
                 buf.copy_from_slice(b"y");
@@ -927,6 +944,7 @@ mod tests {
 
         assert_eq!(fallback, Some((max_offset + 1, 1)));
         assert_eq!(&output, b"xy");
+        // Crossing the syscall offset range does not downgrade either shared capability.
         assert!(dont_cache_supported.load(Ordering::Relaxed));
         assert!(v2_supported.load(Ordering::Relaxed));
     }
@@ -938,7 +956,7 @@ mod tests {
         let v2_supported = Arc::new(AtomicBool::new(true));
         let mut output = [];
 
-        // Empty reads return before offset conversion or capability probing.
+        // Use u64::MAX to prove the empty fast path runs before offset conversion or I/O dispatch.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -948,6 +966,7 @@ mod tests {
             |_, _| panic!("zero-length read must not fall back"),
         )
         .unwrap();
+        // Returning without a probe leaves both shared capabilities enabled.
         assert!(dont_cache_supported.load(Ordering::Relaxed));
         assert!(v2_supported.load(Ordering::Relaxed));
     }
@@ -960,7 +979,7 @@ mod tests {
         let mut v2_calls = 0;
         let mut legacy_calls = 0;
 
-        // ENOSYS switches to legacy I/O and preserves SYNC through a trailing barrier.
+        // Start with both capabilities enabled, then inject ENOSYS for DSYNC | DONT_CACHE.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -976,6 +995,8 @@ mod tests {
                 assert_eq!(flags, libc::RWF_DSYNC | libc::RWF_DONTCACHE);
                 Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
             },
+            // The failed v2 attempt made no progress, so legacy I/O retries the full write at
+            // offset 0.
             |_, _, offset| {
                 legacy_calls += 1;
                 assert_eq!(offset, 0);
@@ -987,11 +1008,14 @@ mod tests {
         assert_eq!(v2_calls, 1);
         assert_eq!(legacy_calls, 1);
         assert!(!v2_flags_applied);
+        // RWF_DSYNC was never applied. Production write_at must follow legacy success with
+        // sync_data.
         assert!(Blob::needs_trailing_sync(true, true, v2_flags_applied));
+        // ENOSYS clears both shared capability bits for every clone.
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(!v2_supported.load(Ordering::Relaxed));
 
-        // Later writes and sibling reads observe the shared downgrade without probing.
+        // A later flagged write sees the downgrade, skips v2, and still requires sync_data.
         let later_v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1017,6 +1041,7 @@ mod tests {
             later_v2_flags_applied
         ));
 
+        // The same downgrade sends a sibling hinted read directly to FileExt.
         let mut sibling = [0u8; 1];
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
@@ -1040,7 +1065,7 @@ mod tests {
         let v2_supported = Arc::new(AtomicBool::new(true));
         let mut flags = Vec::new();
 
-        // Rejecting DONT_CACHE retries the same v2 write with DSYNC only.
+        // Reject DSYNC | DONT_CACHE, then accept the same buffer and offset with DSYNC alone.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1066,8 +1091,10 @@ mod tests {
             flags,
             [libc::RWF_DSYNC | libc::RWF_DONTCACHE, libc::RWF_DSYNC]
         );
+        // Only the cache hint is removed. RWF_DSYNC succeeds, so no trailing sync is needed.
         assert!(v2_flags_applied);
         assert!(!Blob::needs_trailing_sync(true, true, v2_flags_applied));
+        // The hint downgrade is shared, while v2 remains available for operation flags.
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(v2_supported.load(Ordering::Relaxed));
     }
@@ -1080,7 +1107,7 @@ mod tests {
         let mut flags = Vec::new();
         let mut legacy_calls = 0;
 
-        // If DSYNC is also unsupported, legacy I/O plus a trailing sync preserves durability.
+        // Reject the combined flags first, then reject the DSYNC-only retry.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1094,6 +1121,8 @@ mod tests {
                 flags.push(submitted_flags);
                 Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
             },
+            // Neither failed attempt advances the write, so legacy I/O retries all five bytes at
+            // offset 0.
             |_, _, offset| {
                 legacy_calls += 1;
                 assert_eq!(offset, 0);
@@ -1108,7 +1137,9 @@ mod tests {
         );
         assert_eq!(legacy_calls, 1);
         assert!(!v2_flags_applied);
+        // RWF_DSYNC never succeeds, so write_at must follow legacy success with sync_data.
         assert!(Blob::needs_trailing_sync(true, true, v2_flags_applied));
+        // Rejecting the unhinted operation flag disables both shared capabilities.
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(!v2_supported.load(Ordering::Relaxed));
     }
@@ -1121,7 +1152,7 @@ mod tests {
         let mut flags = Vec::new();
         let mut legacy_calls = 0;
 
-        // A fresh SYNC-only failure must disable v2 and require a trailing sync.
+        // Keep normal caching while both shared capabilities are initially enabled.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Enabled,
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1131,10 +1162,12 @@ mod tests {
                 operation: Some(libc::RWF_DSYNC),
                 dont_cache: libc::RWF_DONTCACHE,
             },
+            // Reject the first DSYNC-only v2 submission. No cache-hint retry applies.
             |_, _, _, submitted_flags| {
                 flags.push(submitted_flags);
                 Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
             },
+            // With no completed bytes, legacy I/O retries the full write at offset 0.
             |_, _, offset| {
                 legacy_calls += 1;
                 assert_eq!(offset, 0);
@@ -1146,7 +1179,9 @@ mod tests {
         assert_eq!(flags, [libc::RWF_DSYNC]);
         assert_eq!(legacy_calls, 1);
         assert!(!v2_flags_applied);
+        // RWF_DSYNC was never applied, so write_at must call sync_data after legacy success.
         assert!(Blob::needs_trailing_sync(true, true, v2_flags_applied));
+        // The operation failure disables v2 and its dependent cache hint for every clone.
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(!v2_supported.load(Ordering::Relaxed));
     }

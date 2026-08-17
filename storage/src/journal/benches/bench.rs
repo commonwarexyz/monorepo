@@ -6,7 +6,7 @@ use commonware_storage::journal::contiguous::{
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
 use criterion::criterion_main;
-use rand::{Rng, seq::SliceRandom};
+use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
@@ -64,12 +64,7 @@ impl ReplayPolicy {
     }
 }
 
-/// Return both policies in a deterministic randomized registration order.
-fn replay_policies(rng: &mut impl Rng) -> [ReplayPolicy; 2] {
-    let mut policies = [ReplayPolicy::Default, ReplayPolicy::DontCache];
-    policies.shuffle(rng);
-    policies
-}
+const REPLAY_POLICIES: [ReplayPolicy; 2] = [ReplayPolicy::Default, ReplayPolicy::DontCache];
 
 /// Open and return a temp fixed journal with the given config parameters and items of size ITEM_SIZE.
 async fn get_fixed_journal<const ITEM_SIZE: usize>(

@@ -4101,10 +4101,14 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Loading the checkpoint retains encoded mirrors of both metadata blobs, so both
+            // reads request DONT_CACHE.
             let reads = recordings.snapshot().reads;
             assert!(reads.len() > 2);
             let (metadata_reads, recovery_reads) = reads.split_at(2);
             assert_eq!(metadata_reads, [ReadOptions::DONT_CACHE; 2]);
+            // Data-page validation uses the default options so alignment can reuse those pages
+            // during recovery.
             assert!(
                 recovery_reads
                     .iter()

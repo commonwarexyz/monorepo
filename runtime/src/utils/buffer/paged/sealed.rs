@@ -172,8 +172,8 @@ impl<B: Blob> Sealed<B> {
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
-    /// is not async. `read_options` is applied to every underlying blob read as a best-effort
-    /// policy.
+    /// is not async. Every underlying blob read performed by the returned replay uses
+    /// `read_options`, including refills after seeking.
     pub fn replay(
         &self,
         buffer_size: NonZeroUsize,

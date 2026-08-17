@@ -782,7 +782,8 @@ impl<B: Blob> Writer<B> {
     ///
     /// The returned replay can be used to sequentially read all pages from the blob while ensuring
     /// all data passes integrity verification. CRCs are validated but not included in the output.
-    /// `read_options` is applied to every underlying blob read as a best-effort policy.
+    /// Every underlying blob read performed by the returned replay uses `read_options`, including
+    /// refills after seeking.
     ///
     /// This is not a durable operation. Buffered data may be plainly written so the replay can
     /// read it, but callers must still use [`sync`](Self::sync) if that data must survive a crash.
@@ -1170,6 +1171,7 @@ mod tests {
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
 
+            // Prefix validation uses the default options so recovery can reuse the validated pages.
             recordings.clear();
             assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
             let reads = recordings.snapshot().reads;
@@ -1185,6 +1187,7 @@ mod tests {
                 .open("test_partition", b"prefix_clean")
                 .await
                 .unwrap();
+            // Reopening also validates the disk-authoritative tail with the default options.
             recordings.clear();
             let _recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -2824,12 +2827,13 @@ mod tests {
                 .replay(NZUsize!(physical_page_size), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
-            // Cross a page boundary to force two refills under the requested policy.
+            // Every refill uses the replay's read options, including the refill after crossing a
+            // page boundary.
             assert!(replay.ensure(1).await.unwrap());
             replay.advance(page_size);
             assert!(replay.ensure(1).await.unwrap());
 
-            // Seeking resets buffered state but must not reset the read policy.
+            // Seeking discards buffered pages but preserves the read options for the next refill.
             replay.seek_to(0).unwrap();
             assert!(replay.ensure(1).await.unwrap());
 
@@ -4280,7 +4284,8 @@ mod tests {
             let data = vec![7; PAGE_SIZE.get() as usize];
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
-            // A partial shrink reloads the retained prefix as the in-memory tip.
+            // The shrink retains the prefix in the in-memory tip, so its backing read requests
+            // DONT_CACHE.
             writer.resize(50).await.unwrap();
 
             assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE]);
