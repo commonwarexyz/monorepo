@@ -1933,8 +1933,36 @@ mod tests {
 
     #[test]
     fn test_recover_retained_successful_resize() {
+        #[derive(Default)]
+        struct RetainedResizeRng {
+            next: usize,
+        }
+
+        impl TryRng for RetainedResizeRng {
+            type Error = Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                panic!("retained resize should only sample u64 probabilities");
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                let sample = [u64::MAX, 0]
+                    .get(self.next)
+                    .copied()
+                    .expect("retained resize should consume exactly two samples");
+                self.next += 1;
+                Ok(sample)
+            }
+
+            fn try_fill_bytes(&mut self, _dst: &mut [u8]) -> Result<(), Self::Error> {
+                panic!("retained resize should only sample u64 probabilities");
+            }
+        }
+
+        impl TryCryptoRng for RetainedResizeRng {}
+
         let cfg = deterministic::Config::default()
-            .with_seed(83)
+            .with_rng(Box::new(RetainedResizeRng::default()))
             .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
                 failure_rate: Probability!(0.5),
                 partial_rate: Probability!(0.0),
