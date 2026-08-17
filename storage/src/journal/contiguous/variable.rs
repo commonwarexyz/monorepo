@@ -422,12 +422,14 @@ async fn read_offset<B: RBlob>(
     off_sealed: &[Sealed<B>],
     off_oldest: u64,
     off_ipb: u64,
+    off_start: u64,
     pos: u64,
 ) -> Option<u64> {
     let blob = position_to_blob(pos, off_ipb);
     let idx = usize::try_from(blob.checked_sub(off_oldest)?).ok()?;
     let sealed = off_sealed.get(idx)?;
-    let within = pos - blob_first_position(blob, off_ipb).ok()?;
+    // Entries in the oldest retained blob are relative to the first retained position.
+    let within = pos - super::first_in_blob(off_start, blob, off_ipb).ok()?;
     let buf = sealed
         .read_at(within * size_of::<u64>() as u64, size_of::<u64>())
         .await
@@ -450,6 +452,7 @@ async fn prefetch_ranges<B: RBlob>(
     off_oldest: u64,
     off_sealed: Vec<Sealed<B>>,
     off_ipb: u64,
+    off_start: u64,
     mut budget: u64,
 ) {
     // Interleave per data segment: warm the segment's offsets entries, then its data
@@ -475,38 +478,49 @@ async fn prefetch_ranges<B: RBlob>(
         let seg_start = start.max(blob_start_pos);
         let seg_end = end.min(next_blob_pos);
 
-        // Offsets entries for [seg_start, seg_end]: the entry at an interior seg_end
-        // resolves the segment's end byte.
-        let off_last = if seg_end == next_blob_pos {
-            seg_end - 1
-        } else {
-            seg_end
-        };
-        if !warm_offsets(
-            &off_sealed,
-            off_oldest,
-            off_ipb,
-            seg_start,
-            off_last,
-            &mut budget,
-        )
-        .await
-        {
-            return;
-        }
-
-        let Some(start_off) = read_offset(&off_sealed, off_oldest, off_ipb, seg_start).await else {
-            continue;
-        };
-        let end_off = if seg_end == next_blob_pos {
-            sealed.size()
-        } else {
-            read_offset(&off_sealed, off_oldest, off_ipb, seg_end)
-                .await
-                .unwrap_or_else(|| sealed.size())
-        };
-        if !super::warm_range(sealed, start_off, end_off, &mut budget).await {
-            return;
+        // Warm in bounded item batches, interleaving each batch's offsets entries with
+        // its data bytes: a budget smaller than one segment's offsets still leaves fully
+        // resident leading items. The batch size is derived from the budget so one
+        // batch's offsets consume at most a quarter of it, reserving the rest for data.
+        // The entry at an interior batch end resolves the batch's end byte.
+        let item_batch = (budget / 32).clamp(8, 1024);
+        let mut bstart = seg_start;
+        while bstart < seg_end {
+            let bend = bstart.saturating_add(item_batch).min(seg_end);
+            let off_last = if bend == next_blob_pos {
+                bend - 1
+            } else {
+                bend
+            };
+            if !warm_offsets(
+                &off_sealed,
+                off_oldest,
+                off_ipb,
+                off_start,
+                bstart,
+                off_last,
+                &mut budget,
+            )
+            .await
+            {
+                return;
+            }
+            let Some(start_off) =
+                read_offset(&off_sealed, off_oldest, off_ipb, off_start, bstart).await
+            else {
+                break;
+            };
+            let end_off = if bend == next_blob_pos {
+                sealed.size()
+            } else {
+                read_offset(&off_sealed, off_oldest, off_ipb, off_start, bend)
+                    .await
+                    .unwrap_or_else(|| sealed.size())
+            };
+            if !super::warm_range(sealed, start_off, end_off, &mut budget).await {
+                return;
+            }
+            bstart = bend;
         }
     }
 }
@@ -517,6 +531,7 @@ async fn warm_offsets<B: RBlob>(
     off_sealed: &[Sealed<B>],
     off_oldest: u64,
     off_ipb: u64,
+    off_start: u64,
     from_pos: u64,
     to_pos: u64,
     budget: &mut u64,
@@ -530,14 +545,15 @@ async fn warm_offsets<B: RBlob>(
         else {
             continue;
         };
-        let Ok(blob_start_pos) = blob_first_position(blob, off_ipb) else {
+        // Entries in the oldest retained blob are relative to the first retained position.
+        let Ok(blob_first) = super::first_in_blob(off_start, blob, off_ipb) else {
             continue;
         };
-        let seg_from = from_pos.max(blob_start_pos);
+        let seg_from = from_pos.max(blob_first);
         let seg_to =
             blob_first_position(blob + 1, off_ipb).map_or(to_pos, |next| to_pos.min(next - 1));
-        let from = (seg_from - blob_start_pos) * OFFSET_SIZE;
-        let to = ((seg_to - blob_start_pos + 1) * OFFSET_SIZE).min(sealed.size());
+        let from = (seg_from - blob_first) * OFFSET_SIZE;
+        let to = ((seg_to - blob_first + 1) * OFFSET_SIZE).min(sealed.size());
         if !super::warm_range(sealed, from, to, budget).await {
             return false;
         }
@@ -1669,7 +1685,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let sealed_end = blob_first_position(data_oldest + data_len as u64, items_per_blob).ok()?;
         let start = start.max(self.bounds.start);
         let end = start
-            .checked_add(max_items)?
+            .saturating_add(max_items)
             .min(self.bounds.end)
             .min(sealed_end);
         if start >= end {
@@ -1680,11 +1696,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // includes the entry at `end`, read when a segment stops short of a blob boundary.
         let first_blob = position_to_blob(start, items_per_blob);
         let last_blob = position_to_blob(end - 1, items_per_blob);
-        let (data_oldest, data_sealed) = self.blobs.sealed_range(first_blob..last_blob + 1);
-        let (_, _, off_ipb) = self.offsets.sealed_geometry();
-        let (off_oldest, off_sealed) = self
-            .offsets
-            .sealed_range(position_to_blob(start, off_ipb)..position_to_blob(end, off_ipb) + 1);
+        let (data_oldest, data_sealed) = self
+            .blobs
+            .sealed_range(first_blob..last_blob.saturating_add(1));
+        let (_, _, off_ipb, off_start) = self.offsets.sealed_geometry();
+        let (off_oldest, off_sealed) = self.offsets.sealed_range(
+            position_to_blob(start, off_ipb)..position_to_blob(end, off_ipb).saturating_add(1),
+        );
 
         // Cap the warmed bytes at a fraction of the page cache so a large window cannot
         // evict its own critical prefix (warming runs floor-first and stops at the budget,
@@ -1698,6 +1716,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             off_oldest,
             off_sealed,
             off_ipb,
+            off_start,
             self.blobs.prefetch_budget(),
         ))
     }
@@ -8072,12 +8091,13 @@ mod tests {
     fn test_variable_start_prefetch_budget() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // 16 pages of 101 bytes: a ~404-byte budget against a 50-item window whose
-            // first segment alone (30 offsets entries plus ~270 data bytes) exceeds it.
-            // Sections span several pages so init's backward scan leaves early pages cold.
+            // 16 pages of 101 bytes: a ~404-byte budget against a window whose single
+            // section's offsets alone (100 entries = 800 bytes) exceed it. Batch-level
+            // interleaving must still leave leading items fully resident. Sections span
+            // several pages so init's backward scan leaves early pages cold.
             let cfg = Config {
                 partition: "prefetch-budget".into(),
-                items_per_section: NZU64!(30),
+                items_per_section: NZU64!(100),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16)),
@@ -8109,6 +8129,49 @@ mod tests {
             // budget stays cold.
             assert_eq!(journal.try_read_sync(0), Some(0));
             assert!(journal.try_read_sync(45).is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Prefetch offsets math respects a mid-blob retained boundary from init_at_size.
+    #[test_traced]
+    fn test_variable_start_prefetch_unaligned_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prefetch-unaligned".into(),
+                items_per_section: NZU64!(25),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 7..80u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.try_read_sync(7).is_none());
+
+            let fut = journal
+                .start_prefetch(7, 43)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+            for i in 7..50u64 {
+                assert_eq!(journal.try_read_sync(i), Some(i * 100), "position {i}");
+            }
 
             journal.destroy().await.unwrap();
         });

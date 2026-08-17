@@ -173,13 +173,6 @@ pub struct PreparedAppend<A> {
     _marker: PhantomData<A>,
 }
 
-/// Return the first retained logical position in `blob`.
-#[inline]
-fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
-    let start = super::blob_first_position(blob, items_per_blob)?;
-    Ok(pruning_boundary.max(start))
-}
-
 /// Build a replay stream over the retained blob range.
 ///
 /// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
@@ -210,7 +203,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         for blob in start_blob..=end_blob {
             // The oldest retained blob may begin after its natural blob boundary when pruning
             // kept only a suffix.
-            let blob_first = first_in_blob(bounds.start, blob, items_per_blob)?;
+            let blob_first = super::first_in_blob(bounds.start, blob, items_per_blob)?;
             let first_pos = if blob == start_blob {
                 start_pos
             } else {
@@ -353,9 +346,11 @@ pub struct Config {
 
 /// Warm the byte ranges holding item positions `[start, end)` from sealed fixed-size
 /// blobs through the page cache. Best effort: the first failed read ends the pass.
+#[allow(clippy::too_many_arguments)]
 async fn prefetch_ranges<B: RBlob>(
     start: u64,
     end: u64,
+    retained_start: u64,
     items_per_blob: u64,
     item_size: u64,
     oldest: u64,
@@ -372,14 +367,16 @@ async fn prefetch_ranges<B: RBlob>(
         else {
             continue;
         };
-        let (Ok(blob_start_pos), Ok(next_blob_pos)) = (
-            super::blob_first_position(blob, items_per_blob),
+        // The oldest retained blob stores its first retained item at physical offset
+        // zero, so offsets are relative to the first retained position, not the grid.
+        let (Ok(blob_first), Ok(next_blob_pos)) = (
+            super::first_in_blob(retained_start, blob, items_per_blob),
             super::blob_first_position(blob + 1, items_per_blob),
         ) else {
             continue;
         };
-        let from = (start.max(blob_start_pos) - blob_start_pos) * item_size;
-        let to = ((end.min(next_blob_pos) - blob_start_pos) * item_size).min(handle.size());
+        let from = (start.max(blob_first) - blob_first) * item_size;
+        let to = ((end.min(next_blob_pos) - blob_first) * item_size).min(handle.size());
         if !super::warm_range(handle, from, to, &mut budget).await {
             return;
         }
@@ -412,9 +409,9 @@ pub(super) struct Inner<E: Context, A> {
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Sealed-history bounds plus this journal's items-per-blob geometry, for
     /// sealed-prefix prefetch by wrapping journals.
-    pub(super) const fn sealed_geometry(&self) -> (u64, usize, u64) {
+    pub(super) const fn sealed_geometry(&self) -> (u64, usize, u64, u64) {
         let (oldest, len) = self.blobs.sealed_bounds();
-        (oldest, len, self.items_per_blob.get())
+        (oldest, len, self.items_per_blob.get(), self.bounds.start)
     }
 
     /// Owned handles for the sealed blobs whose indices fall in `range`. See
@@ -433,14 +430,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         start: u64,
         max_items: u64,
     ) -> Option<impl Future<Output = ()> + Send + 'static> {
-        let (oldest, len, items_per_blob) = self.sealed_geometry();
+        let (oldest, len, items_per_blob, _) = self.sealed_geometry();
         if len == 0 {
             return None;
         }
         let sealed_end = super::blob_first_position(oldest + len as u64, items_per_blob).ok()?;
         let start = start.max(self.bounds.start);
         let end = start
-            .checked_add(max_items)?
+            .saturating_add(max_items)
             .min(self.bounds.end)
             .min(sealed_end);
         if start >= end {
@@ -448,10 +445,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
         let first_blob = super::position_to_blob(start, items_per_blob);
         let last_blob = super::position_to_blob(end - 1, items_per_blob);
-        let (oldest, sealed) = self.sealed_range(first_blob..last_blob + 1);
+        let (oldest, sealed) = self.sealed_range(first_blob..last_blob.saturating_add(1));
         Some(prefetch_ranges::<E::Blob>(
             start,
             end,
+            self.bounds.start,
             items_per_blob,
             Self::CHUNK_SIZE_U64,
             oldest,
@@ -723,7 +721,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             }
             // Legacy journals have no watermark. Under the old rollover-sync invariant, all
             // non-tail blobs are durable; only the tail may have unfsynced data.
-            None => first_in_blob(
+            None => super::first_in_blob(
                 pruning_boundary,
                 super::position_to_blob(size, items_per_blob),
                 items_per_blob,
@@ -1132,7 +1130,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
 
         let blob = super::position_to_blob(size, self.items_per_blob.get());
-        let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
+        let pos_in_blob =
+            size - super::first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
         let byte_offset = Self::items_to_bytes(pos_in_blob)?;
 
         // Persist a lowered recovery watermark before blob state moves backward.
@@ -1503,7 +1502,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     fn locate_group(&self, group: &[u64]) -> Result<(u64, Vec<u64>), Error> {
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(group[0], items_per_blob);
-        let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
+        let first_position = super::first_in_blob(self.bounds.start, blob, items_per_blob)?;
         let offsets = group
             .iter()
             .map(|&pos| Inner::<E, A>::items_to_bytes(pos - first_position))
@@ -1579,7 +1578,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         self.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(pos, items_per_blob);
-        let pos_in_blob = pos - first_in_blob(self.bounds.start, blob, items_per_blob)?;
+        let pos_in_blob = pos - super::first_in_blob(self.bounds.start, blob, items_per_blob)?;
         let offset = Inner::<E, A>::items_to_bytes(pos_in_blob)?;
         let blob = self
             .blobs
@@ -6000,6 +5999,49 @@ mod tests {
             // the budget) stays cold.
             assert_eq!(journal.try_read_sync(0), Some(test_digest(0)));
             assert!(journal.try_read_sync(10).is_none());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Prefetch byte math respects a mid-blob retained boundary: an init_at_size journal
+    /// stores the oldest blob's first retained item at physical offset zero.
+    #[test_traced]
+    fn test_fixed_start_prefetch_unaligned_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prefetch-unaligned".into(),
+                items_per_blob: NZU64!(25),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(2048),
+            };
+            // Start mid-blob: position 7 with 25 items per blob.
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 7..80u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.try_read_sync(7).is_none());
+
+            let fut = journal
+                .start_prefetch(7, 43)
+                .expect("sealed range must be prefetchable");
+            fut.await;
+            for i in 7..50u64 {
+                assert_eq!(
+                    journal.try_read_sync(i),
+                    Some(test_digest(i)),
+                    "position {i}"
+                );
+            }
 
             journal.destroy().await.unwrap();
         });
