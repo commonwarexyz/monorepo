@@ -6,6 +6,8 @@ use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwor
 use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
+#[cfg(feature = "dial9")]
+use crate::tokio::dial9::{self, Config as Dial9Config};
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
     Spawner as _, StreamOf, Supervisor as _, child_label,
@@ -177,6 +179,12 @@ pub struct Config {
 
     /// Explicit buffer pool configuration for storage I/O, if provided.
     storage_buffer_pool_cfg: Option<BufferPoolConfig>,
+
+    /// dial9 trace recording configuration, if provided.
+    ///
+    /// See [crate::tokio::dial9].
+    #[cfg(feature = "dial9")]
+    dial9_cfg: Option<Dial9Config>,
 }
 
 impl Config {
@@ -195,6 +203,8 @@ impl Config {
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
+            #[cfg(feature = "dial9")]
+            dial9_cfg: None,
         }
     }
 
@@ -262,6 +272,12 @@ impl Config {
     /// See [Config]
     pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = Some(cfg);
+        self
+    }
+    /// See [Config]
+    #[cfg(feature = "dial9")]
+    pub fn with_dial9(mut self, cfg: Dial9Config) -> Self {
+        self.dial9_cfg = Some(cfg);
         self
     }
 
@@ -342,6 +358,9 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+    /// Whether tasks should be spawned with dial9 wake-event tracking.
+    #[cfg(feature = "dial9")]
+    traced: bool,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -376,16 +395,40 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
-        let mut builder = Builder::new_multi_thread();
-        builder
-            .worker_threads(self.cfg.worker_threads)
-            .max_blocking_threads(self.cfg.max_blocking_threads)
-            .thread_stack_size(self.cfg.thread_stack_size)
-            .enable_all();
-        if let Some(global_queue_interval) = self.cfg.global_queue_interval {
-            builder.global_queue_interval(global_queue_interval);
+        let configure = |builder: &mut Builder| {
+            builder
+                .worker_threads(self.cfg.worker_threads)
+                .max_blocking_threads(self.cfg.max_blocking_threads)
+                .thread_stack_size(self.cfg.thread_stack_size)
+                .enable_all();
+            if let Some(global_queue_interval) = self.cfg.global_queue_interval {
+                builder.global_queue_interval(global_queue_interval);
+            }
+        };
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "dial9")] {
+                // When dial9 is configured, the runtime must be built through it
+                // so its hooks are installed on the builder.
+                #[allow(clippy::option_if_let_else)]
+                let (dial9_recorder, runtime) = match &self.cfg.dial9_cfg {
+                    Some(dial9_cfg) => {
+                        let (recorder, runtime) = dial9::attach(dial9_cfg, configure)
+                            .expect("failed to create Tokio runtime");
+                        (Some((recorder, dial9_cfg.shutdown_timeout())), runtime)
+                    }
+                    None => {
+                        let mut builder = Builder::new_multi_thread();
+                        configure(&mut builder);
+                        let runtime = builder.build().expect("failed to create Tokio runtime");
+                        (None, runtime)
+                    }
+                };
+            } else {
+                let mut builder = Builder::new_multi_thread();
+                configure(&mut builder);
+                let runtime = builder.build().expect("failed to create Tokio runtime");
+            }
         }
-        let runtime = builder.build().expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
@@ -496,6 +539,10 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
+            #[cfg(feature = "dial9")]
+            traced: dial9_recorder
+                .as_ref()
+                .is_some_and(|(recorder, _)| dial9::traced(recorder)),
         });
 
         // Get metrics
@@ -517,6 +564,14 @@ impl crate::Runner for Runner {
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
+
+        // Release the runtime (dropping it flushes worker-local trace buffers)
+        // before draining the trace pipeline.
+        #[cfg(feature = "dial9")]
+        if let Some((recorder, timeout)) = dial9_recorder {
+            drop(executor);
+            recorder.graceful_shutdown(timeout);
+        }
 
         output
     }
@@ -571,6 +626,10 @@ impl crate::Spawner for Context {
         self
     }
 
+    // Propagate the caller's location into tokio's spawn so tools built on the
+    // runtime hooks (e.g. dial9) record the application's spawn site rather
+    // than this function.
+    #[track_caller]
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -617,7 +676,20 @@ impl crate::Spawner for Context {
                 }
             });
         } else {
-            executor.runtime.spawn(f);
+            // Dedicated and shared tasks run under `block_on` on non-worker
+            // threads, outside any tokio task, so only async tasks are
+            // wrapped with dial9 wake-event tracking.
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "dial9")] {
+                    if executor.traced {
+                        dial9::spawn(executor.runtime.handle(), f);
+                    } else {
+                        executor.runtime.spawn(f);
+                    }
+                } else {
+                    executor.runtime.spawn(f);
+                }
+            }
         }
 
         // Register the task on the parent

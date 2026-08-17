@@ -61,6 +61,7 @@ axum.workspace = true
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 crossbeam-queue = { workspace = true, optional = true }
+dial9 = { workspace = true, features = ["tokio", "cpu-profiling"], optional = true }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
@@ -80,6 +81,7 @@ arbitrary = [
 	"dep:commonware-conformance",
 ]
 bench = [ "dep:crossbeam-queue" ]
+dial9 = [ "dep:dial9" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 test-utils = []
