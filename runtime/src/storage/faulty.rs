@@ -301,7 +301,7 @@ impl Oracle {
     /// Check if an event should occur based on a probability rate.
     fn roll(&self, rate: Option<f64>) -> bool {
         let rate = rate.unwrap_or(0.0);
-        if rate <= 0.0 {
+        if rate <= 0.0 || rate.is_nan() {
             return false;
         }
         if rate >= 1.0 {
@@ -1592,6 +1592,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_nan_fault_rate_does_not_consume_randomness() {
+        let expected = Harness::with_seed(0, Config::default());
+        let expected = expected.storage.ctx.rng.lock().random::<u64>();
+
+        let h = Harness::with_seed(0, Config::default());
+        assert!(!h.storage.ctx.roll(Some(f64::NAN)));
+        assert_eq!(h.storage.ctx.rng.lock().random::<u64>(), expected);
     }
 
     #[test]
