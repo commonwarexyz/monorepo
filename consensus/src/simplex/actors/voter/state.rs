@@ -684,58 +684,23 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.optimistic_ancestry_payload(parent).is_some()
     }
 
-    /// Returns true when `view`'s proposal does not rest on a pipelined
-    /// handoff, or when its cross-term parent still has locally usable
-    /// ancestry.
-    ///
-    /// Mirrors [`Self::optimistic_parent_ready`] for the term-start proposal
-    /// a pipelined handoff builds on the outgoing term's uncertified final
-    /// view. Proposals verified through explicit ancestry pass unconditionally
-    /// (their parent is certified or finalized, and stays so).
-    fn handoff_parent_ready(&self, view: View) -> bool {
-        if self.handoff_leader(view).is_none() {
-            return true;
-        }
-        let Some(parent) = view.previous() else {
-            return true;
-        };
-        let Some(proposal) = self.views.get(&view).and_then(|round| round.proposal()) else {
-            return true;
-        };
-        if proposal.parent != parent {
-            return true;
-        }
-        if self.explicit_ancestry_payload(parent).is_some() {
-            return true;
-        }
-        self.handoff_ancestry_payload(parent).is_some()
-    }
-
-    /// Returns true when `view`'s parent evidence permits our notarize vote.
-    ///
-    /// Views inside the issuance window use the optimistic rule
-    /// ([`Self::optimistic_parent_ready`]). Views outside it carry certified
-    /// ancestry already. The exception is a pipelined-handoff proposal, which
-    /// waits for evidence of its cross-term parent
-    /// ([`Self::handoff_parent_ready`]).
-    fn notarize_parent_ready(&self, view: View) -> bool {
-        if self.in_issuance_window(view) {
-            return self.optimistic_parent_ready(view);
-        }
-        self.handoff_parent_ready(view)
-    }
-
     /// Construct a notarize vote for this view when we're ready to sign.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
+        // Certificates can create rounds arbitrarily far ahead. Do not vote
+        // until the view is admissible under this node's lookahead policy.
         if !self.admits_outbound(view) {
             return None;
         }
-        // Check cheap round-local eligibility first because the ancestry gate
-        // re-resolves parent payloads on every event.
+
+        // Check round-local eligibility before the ancestry check, which
+        // resolves the parent payload on every event.
         if !self.views.get(&view)?.can_construct_notarize() {
             return None;
         }
-        if !self.notarize_parent_ready(view) {
+
+        // An optimistic view requires local evidence for its parent. A view
+        // outside the issuance window already has certified ancestry.
+        if self.in_issuance_window(view) && !self.optimistic_parent_ready(view) {
             return None;
         }
         if !self.verification_matches(view) {
@@ -974,8 +939,65 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         None
     }
 
-    /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
+    /// Records a proposal built by the automaton if its captured parent remains
+    /// valid.
+    ///
+    /// Proposal construction is asynchronous, so parent evidence may change
+    /// while the automaton runs. The captured parent is accepted if it remains
+    /// preferred for the view or is still valid ancestry for the completed
+    /// proposal. Conflicting or invalidated ancestry is rejected.
+    pub fn proposed(&mut self, context: &Context<D, S::PublicKey>, payload: D) -> bool {
+        let proposal = Proposal::new(context.round, context.parent.0, payload);
+
+        // Reject the captured parent only when it is neither preferred nor valid
+        // ancestry.
+        if !self
+            .find_parent(context.view())
+            .is_ok_and(|parent| parent == context.parent)
+            && !self.captured_parent_valid(context)
+        {
+            // Rejection leaves the proposal slot empty, so allow the round to retry.
+            if let Some(round) = self.views.get_mut(&context.view()) {
+                round.clear_proposal_request();
+            }
+            return false;
+        }
+
+        // Record the proposal as locally verified after accepting its captured
+        // parent.
+        self.record_proposed(proposal)
+    }
+
+    /// Releases a proposal's build latch when its captured ancestry is invalid
+    /// and a replacement parent is available. Returns true when the caller
+    /// should drop the pending receiver.
+    pub fn supersede_proposal_request(&mut self, context: &Context<D, S::PublicKey>) -> bool {
+        let Ok(preferred) = self.find_parent(context.view()) else {
+            return false;
+        };
+        if preferred == context.parent || self.captured_parent_valid(context) {
+            return false;
+        }
+        let Some(round) = self.views.get_mut(&context.view()) else {
+            return false;
+        };
+        round.clear_proposal_request();
+        true
+    }
+
+    /// Returns whether a captured parent remains valid ancestry independent of
+    /// the currently preferred parent.
+    fn captured_parent_valid(&self, context: &Context<D, S::PublicKey>) -> bool {
+        let view = context.view();
+        let parent = context.parent.0;
+        self.validate_parent_span(view, parent).is_ok()
+            && self
+                .ancestry_payload_for_child(view, parent)
+                .is_some_and(|payload| *payload == context.parent.1)
+    }
+
+    /// Records a proposal without applying ancestry checks.
+    fn record_proposed(&mut self, proposal: Proposal<D>) -> bool {
         let now = self.context.current();
         self.views
             .get_mut(&proposal.view())
@@ -1331,10 +1353,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     //
     // The `*_parent_ready` predicates answer whether a view's immediate parent
     // is settled enough to act on. Certification and finalization require
-    // `explicit_parent_ready`. Notarize issuance uses `notarize_parent_ready`,
-    // which selects `optimistic_parent_ready` inside the issuance window and
-    // `handoff_parent_ready` outside it; both delegate to their ancestry
-    // resolver so issuance and proposal construction share one ancestry rule.
+    // `explicit_parent_ready`. Notarize issuance inside the optimistic window
+    // uses `optimistic_parent_ready`, which delegates to its ancestry resolver
+    // so issuance and proposal construction share one ancestry rule.
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
     /// proposal, the strongest form of ancestry.
@@ -1389,12 +1410,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// before the certificate that unlocks the view exists.
     ///
     /// `None` when `view` does not start a term or the elector does not elect
-    /// ahead (see [`Elector::elect_ahead`]).
+    /// early (see [`Elector::elect_early`]).
     fn handoff_leader(&self, view: View) -> Option<Participant> {
         if !view.is_term_start(self.term_length()) {
             return None;
         }
-        self.elector.elect_ahead(Rnd::new(self.epoch, view))
+        self.elector.elect_early(Rnd::new(self.epoch, view))
     }
 
     /// Returns true when a pipelined handoff may build on `parent`: `parent`
@@ -1472,17 +1493,33 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Pushes the optimistic frontier one view, so stable leaders can chain
-    /// proposals. Called when we sign a notarize vote or receive the leader's
-    /// proposal for a view.
+    /// proposals. Same-term successors can be prepared when we sign a
+    /// notarize vote or receive the leader's proposal.
     ///
-    /// At a term end, a pipelined handoff sets the incoming leader before the
-    /// certificate exists. This lets the leader propose across the boundary.
+    /// At a term end, only our notarize vote may prepare the incoming leader
+    /// before the certificate exists.
     fn prepare_optimistic_successor(&mut self, view: View) {
+        // Same-term successors inherit the current leader as soon as the
+        // optimistic issuance window reaches them.
         let next = view.next();
         if self.in_issuance_window(next) {
             self.inherit_leader(view, next);
             return;
         }
+
+        // Crossing a term boundary requires our notarize vote for the outgoing
+        // view. Receiving its proposal is not enough to elect the incoming
+        // leader early.
+        if !self
+            .views
+            .get(&view)
+            .is_some_and(|round| round.broadcast_notarize())
+        {
+            return;
+        }
+
+        // Set the early leader once to keep proposal, vote, and replay handling
+        // idempotent.
         if let Some(leader) = self.handoff_leader(next)
             && !self.leader_is_set(next)
         {
@@ -1613,8 +1650,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// - It is certified (or finalized, which implies certification).
     /// - All views between it and the proposal view have been nullified.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Result<D, ParentPayloadError> {
-        self.validate_parent_span(proposal)?;
         let (view, parent) = (proposal.view(), proposal.parent);
+        self.validate_parent_span(view, parent)?;
 
         // May return `None` if the parent view is not yet either:
         // - notarized and certified
@@ -1651,7 +1688,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Intra-term views share the structural rules (the nullification check
         // is trivially satisfied once contiguity holds).
-        self.validate_parent_span(proposal)?;
+        self.validate_parent_span(view, parent)?;
 
         if self.explicit_parent_ready(view) {
             return Ok(());
@@ -1683,8 +1720,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Validates the structural link between a proposal and its parent view.
-    fn validate_parent_span(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
-        let (view, parent) = (proposal.view(), proposal.parent);
+    fn validate_parent_span(&self, view: View, parent: View) -> Result<(), ParentPayloadError> {
         Self::ensure_parent_precedes(view, parent)?;
 
         // Ignore any requests for outdated parent views.
@@ -2001,7 +2037,7 @@ mod tests {
             Sha256Digest::from([payload; 32]),
         );
         state.create_round(View::new(1));
-        assert!(state.proposed(proposal.clone()));
+        assert!(state.record_proposed(proposal.clone()));
         assert!(state.construct_notarize(View::new(1)).is_some());
         proposal
     }
@@ -3441,11 +3477,19 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([44u8; 32]),
             );
+            let expected_leader = state.term_leader(View::new(6)).expect("term leader").key;
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
-                Verify::Resolve { proposal, view, kind: Kind::Notarization, .. }
-                    if proposal == View::new(6) && view == View::new(2)
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(2)
+                        && target == expected_leader
             ));
 
             // The round deduplicates the request while it is outstanding.
@@ -3837,7 +3881,7 @@ mod tests {
                 first_payload,
             );
             state.create_round(View::new(1));
-            assert!(state.proposed(first));
+            assert!(state.record_proposed(first));
 
             let second = Proposal::new(
                 Rnd::new(Epoch::new(9), View::new(2)),
@@ -4381,7 +4425,7 @@ mod tests {
                 child_context.parent.0,
                 Sha256Digest::from([119u8; 32]),
             );
-            assert!(state.proposed(child));
+            assert!(!state.proposed(&child_context, child.payload));
             assert!(
                 state.construct_notarize(View::new(2)).is_none(),
                 "failed-certified parent must block a locally proposed optimistic child"
@@ -4810,7 +4854,7 @@ mod tests {
                 Sha256Digest::from([112u8; 32]),
             );
             state.create_round(View::new(2));
-            assert!(state.proposed(view2));
+            assert!(state.record_proposed(view2));
             assert!(state.construct_notarize(View::new(2)).is_some());
             let conflicting_view2 = Proposal::new(
                 Rnd::new(Epoch::new(11), View::new(2)),
@@ -4854,7 +4898,7 @@ mod tests {
                 Sha256Digest::from([118u8; 32]),
             );
             state.create_round(View::new(2));
-            assert!(state.proposed(proposal_v2));
+            assert!(state.record_proposed(proposal_v2));
             assert!(state.construct_notarize(View::new(2)).is_none());
 
             let proposal_v1 = Proposal::new(
@@ -4863,7 +4907,7 @@ mod tests {
                 Sha256Digest::from([119u8; 32]),
             );
             state.create_round(View::new(1));
-            assert!(state.proposed(proposal_v1));
+            assert!(state.record_proposed(proposal_v1));
             assert!(state.construct_notarize(View::new(1)).is_some());
             assert!(state.construct_notarize(View::new(2)).is_some());
         });
@@ -5864,7 +5908,7 @@ mod tests {
             );
             state.set_genesis(test_genesis());
             state.create_round(View::new(1));
-            assert!(state.proposed(ancestor));
+            assert!(state.record_proposed(ancestor));
             let local_vote = state
                 .construct_notarize(View::new(1))
                 .expect("local notarize vote");
@@ -6645,6 +6689,7 @@ mod tests {
         assert!(state.set_proposal(View::new(5), tip.clone()));
         assert!(matches!(state.try_verify(), Verify::Ready(..)));
         assert!(state.verified(View::new(5)));
+        assert_eq!(state.leader_index(View::new(6)), None);
         assert!(state.construct_notarize(View::new(5)).is_some());
         (certified, tip)
     }
@@ -6675,7 +6720,7 @@ mod tests {
 
             // The built proposal broadcasts its notarize vote immediately.
             let ours = fetch_proposal(6, 5, 66);
-            assert!(state.proposed(ours.clone()));
+            assert!(state.proposed(&ctx, ours.payload));
             let notarize = state
                 .construct_notarize(View::new(6))
                 .expect("handoff proposal should notarize before the tip certifies");
@@ -6696,6 +6741,52 @@ mod tests {
             assert!(ready.iter().any(|p| p.round.view() == View::new(6)));
             assert!(state.certified(View::new(6), true).is_some());
             assert_eq!(state.current_view(), View::new(7));
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_replay_restores_early_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+
+            // Restore the certified anchor that precedes the outgoing vote in
+            // the journal.
+            let certified = fetch_proposal(4, 3, 64);
+            let notarization = build_notarization(&verifier, &schemes, &certified);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(4), true).is_some());
+            assert_eq!(state.current_view(), View::new(5));
+
+            // The outgoing vote is durable, but its derived incoming leader is
+            // absent before replay.
+            let tip = fetch_proposal(5, 4, 65);
+            let local_vote = Notarize::sign(&schemes[3], tip.clone()).expect("local notarize vote");
+            assert_eq!(state.leader_index(View::new(6)), None);
+
+            // Replaying the vote must restore both the early leader and
+            // the outgoing tip as usable handoff ancestry.
+            state.replay(&Artifact::Notarize(local_vote));
+            assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
+            let ctx = state
+                .try_propose()
+                .expect("replayed outgoing vote should restore the handoff");
+            assert_eq!(ctx.round.view(), View::new(6));
+            assert_eq!(ctx.parent, (View::new(5), tip.payload));
+
+            // Completing the recovered request must still produce the
+            // incoming term's notarize vote.
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&ctx, ours.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("recovered handoff proposal should be votable");
+            assert_eq!(notarize.proposal, ours);
         });
     }
 
@@ -6755,6 +6846,49 @@ mod tests {
     }
 
     #[test]
+    fn pipelined_handoff_keeps_valid_fallback_after_late_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+            let (certified, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            assert_eq!(state.certify_candidates().0, vec![tip]);
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(View::new(5), handle);
+
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+
+            let ctx = state
+                .try_propose()
+                .expect("term-start proposal should use the certified fallback");
+            assert_eq!(ctx.parent, (View::new(4), certified.payload));
+
+            // Late certification makes the outgoing tip preferred, but the
+            // captured fallback remains valid under the formed nullification.
+            assert!(state.certified(View::new(5), true).is_some());
+            let ours = fetch_proposal(6, 4, 66);
+            assert_eq!(state.parent_payload(&ours), Ok(certified.payload));
+            assert!(!state.supersede_proposal_request(&ctx));
+            assert!(state.proposed(&ctx, ours.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("still-valid fallback should remain votable");
+            assert_eq!(notarize.proposal, ours);
+        });
+    }
+
+    #[test]
     fn pipelined_handoff_withholds_notarize_after_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -6766,16 +6900,64 @@ mod tests {
             ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             prepare_term_boundary(&mut state, &verifier, &schemes);
 
-            assert!(state.try_propose().is_some());
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip");
             let ours = fetch_proposal(6, 5, 66);
-            assert!(state.proposed(ours));
 
-            // The tip's term is abandoned between building and voting: the
-            // vote must be withheld.
+            // The tip's term is abandoned while the application is building.
             let nullification =
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
             assert!(state.add_nullification(nullification));
+            assert!(!state.proposed(&ctx, ours.payload));
             assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_retries_after_parent_invalidation() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            // Prepare the outgoing tip and claim the incoming view's build on
+            // that speculative parent.
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+            let (certified, _) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let initial = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip");
+            assert_eq!(initial.parent.0, View::new(5));
+            assert!(state.try_propose().is_none());
+
+            // Abandoning the captured parent rejects the pending build. The
+            // incoming view must remain eligible to rebuild on certified ancestry.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert!(!state.proposed(&initial, fetch_proposal(6, 5, 66).payload));
+
+            // Re-resolving ancestry for the same incoming view selects the
+            // certified fallback and still permits only one pending build.
+            let retry = state
+                .try_propose()
+                .expect("rejected handoff should retry on certified ancestry");
+            assert_eq!(retry.round.view(), View::new(6));
+            assert_eq!(retry.parent, (View::new(4), certified.payload));
+            assert!(state.try_propose().is_none());
+
+            // Completing the replacement build produces a vote on the
+            // fallback branch.
+            let rebuilt = fetch_proposal(6, 4, 67);
+            assert!(state.proposed(&retry, rebuilt.payload));
+            let notarize = state
+                .construct_notarize(View::new(6))
+                .expect("rebuilt proposal should be votable");
+            assert_eq!(notarize.proposal, rebuilt);
         });
     }
 
@@ -6791,15 +6973,16 @@ mod tests {
             ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
-            assert!(state.try_propose().is_some());
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip");
             let ours = fetch_proposal(6, 5, 66);
-            assert!(state.proposed(ours));
 
-            // Local certification rejects the tip between building and
-            // voting: the vote must be withheld.
+            // Local certification rejects the tip while the application is building.
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
             assert!(state.add_notarization(tip_notarization).0);
             assert!(state.certified(View::new(5), false).is_some());
+            assert!(!state.proposed(&ctx, ours.payload));
             assert!(state.construct_notarize(View::new(6)).is_none());
         });
     }
@@ -6816,13 +6999,46 @@ mod tests {
             ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
             prepare_term_boundary(&mut state, &verifier, &schemes);
 
-            assert!(state.try_propose().is_some());
+            let ctx = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip");
             let ours = fetch_proposal(6, 5, 66);
-            assert!(state.proposed(ours));
 
-            // The outgoing leader equivocates on the tip between building and
-            // voting: the vote must be withheld.
+            // The outgoing leader equivocates while the application is building.
             assert!(!state.set_proposal(View::new(5), fetch_proposal(5, 4, 99)));
+            assert!(!state.proposed(&ctx, ours.payload));
+            assert!(state.construct_notarize(View::new(6)).is_none());
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_withholds_notarize_after_conflicting_parent_certificate() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            let proposal_context = state
+                .try_propose()
+                .expect("handoff proposal should use the outgoing tip");
+            assert_eq!(proposal_context.parent, (View::new(5), tip.payload));
+
+            // A certificate from the other three validators replaces the tip
+            // while our application is still building on the original payload.
+            let conflicting = fetch_proposal(5, 4, 99);
+            let notarization = build_notarization(&verifier, &schemes[..3], &conflicting);
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_some());
+            assert_eq!(state.current_view(), View::new(5));
+
+            let ours = fetch_proposal(6, 5, 66);
+            assert!(!state.proposed(&proposal_context, ours.payload));
             assert!(state.construct_notarize(View::new(6)).is_none());
         });
     }
@@ -6842,11 +7058,19 @@ mod tests {
             // A validator that receives the pipelined proposal early still
             // waits for the tip's certification before verifying it.
             let child = fetch_proposal(6, 5, 66);
+            let expected_leader = state.term_leader(View::new(6)).expect("term leader").key;
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
-                Verify::Resolve { proposal, view, kind: Kind::Notarization, .. }
-                    if proposal == View::new(6) && view == View::new(5)
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(5)
+                        && target == expected_leader
             ));
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);

@@ -18,7 +18,7 @@
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
 //! An elector can support pipelined handoffs when it can select a leader before the round's
-//! unlocking certificate exists. See [`Elector::elect_ahead`].
+//! unlocking certificate exists. See [`Elector::elect_early`].
 //!
 //! # Usage
 //!
@@ -240,7 +240,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Return `Some` only when the leader is derivable without a certificate:
     /// the result must equal [`Self::elect`] for every certificate that can
     /// unlock the round. Certificate-derived electors such as
-    /// [`RandomElector`] cannot elect ahead.
+    /// [`RandomElector`] cannot elect early.
     ///
     /// The voter may call this method several times per view. Electors should
     /// return a precomputed result.
@@ -249,8 +249,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// The default opts out.
     ///
     /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
-    fn elect_ahead(&self, round: Round) -> Option<Participant> {
-        let _ = round;
+    fn elect_early(&self, _round: Round) -> Option<Participant> {
         None
     }
 }
@@ -386,8 +385,8 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
         self.permutation[idx]
     }
 
-    fn elect_ahead(&self, round: Round) -> Option<Participant> {
-        // Round-robin election never reads the certificate, so electing ahead
+    fn elect_early(&self, round: Round) -> Option<Participant> {
+        // Round-robin election never reads the certificate, so electing early
         // is always consistent with `elect`.
         self.pipelined_handoff.then(|| self.elect(round, None))
     }
@@ -616,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn round_robin_elect_ahead_requires_optin_and_matches_elect() {
+    fn round_robin_elect_early_requires_optin_and_matches_elect() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let participants = Set::try_from_iter(participants).unwrap();
@@ -632,9 +631,9 @@ mod tests {
         for epoch in [0u64, 7] {
             for view in 1..=9u64 {
                 let round = Round::new(Epoch::new(epoch), View::new(view));
-                assert_eq!(opted_out.elect_ahead(round), None);
+                assert_eq!(opted_out.elect_early(round), None);
                 assert_eq!(
-                    opted_in.elect_ahead(round),
+                    opted_in.elect_early(round),
                     Some(opted_in.elect(round, None))
                 );
             }
