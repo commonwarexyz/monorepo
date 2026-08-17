@@ -1,8 +1,9 @@
 //! Finalized block and certificate storage, shared behind one lock.
 //!
-//! Answering a peer's backfill request means two storage reads. Doing that on the actor's loop
-//! stalls consensus behind a peer that is querying old data. Instead, marshal mutates and reads
-//! the storage through [Storage], while a backfill task answers peer requests through the reader.
+//! Answering a peer's backfill request means reading the archives. Doing that on the actor's
+//! loop stalls consensus behind a peer that is querying old data. Instead, marshal mutates and
+//! reads the storage through [Storage], while a backfill task answers peer requests through the
+//! reader: a height's finalized block and certificate, or a finalized block by commitment.
 //!
 //! The submission channel is bounded. A request that overflows is dropped. Peers can retry.
 
@@ -33,27 +34,35 @@ use tracing::{Span, debug, warn};
 /// A mutation panicked mid-write, destroying the stores.
 const POISONED: &str = "finalized stores poisoned";
 
-/// A peer's request for a finalized block.
-struct Request {
+/// A peer's request for finalized data.
+struct Request<Cm> {
     /// Span of the forwarding call.
     span: Span,
-    /// Height of the requested block.
-    height: Height,
+    /// What the peer asked for.
+    kind: Kind<Cm>,
     /// Where the encoded response is sent.
     response_tx: oneshot::Sender<Bytes>,
 }
 
+/// The request shapes peers use to fetch finalized data.
+enum Kind<Cm> {
+    /// The finalized block at a height, paired with its certificate.
+    Finalized(Height),
+    /// The finalized block with a commitment.
+    Block(Cm),
+}
+
 /// The certificate and block stores behind one lock.
-pub(super) struct Storage<C, B> {
+pub(super) struct Storage<C, B, Cm> {
     // The underlying block and certificate stores.
     inner: Arc<TracedAsyncRwLock<Option<(C, B)>>>,
     /// Requests to the backfill task.
-    submission_tx: mpsc::Sender<Request>,
+    submission_tx: mpsc::Sender<Request<Cm>>,
     /// Requests dropped because the submission channel was full.
     dropped: Counter,
 }
 
-impl<C, B> Storage<C, B> {
+impl<C, B, Cm> Storage<C, B, Cm> {
     /// Read guard over the certificate store.
     async fn finalizations(&self) -> AsyncRwLockReadGuard<'_, C> {
         AsyncRwLockReadGuard::map(self.inner.read().await, |slot| {
@@ -82,21 +91,33 @@ impl<C, B> Storage<C, B> {
         out
     }
 
-    /// Enqueue a request for a finalized block at `height`, which will be sent to `response_tx`.
-    /// If the submission channel is full, the request is dropped.
-    pub fn serve(&self, height: Height, response_tx: oneshot::Sender<Bytes>) {
+    /// Enqueue `kind` to the backfill task. If the submission channel is full, the
+    /// request is dropped and the requester sees a closed `response_tx`.
+    fn submit(&self, kind: Kind<Cm>, response_tx: oneshot::Sender<Bytes>) {
         let request = Request {
             span: Span::current(),
-            height,
+            kind,
             response_tx,
         };
         if self.submission_tx.try_send(request).is_err() {
             self.dropped.inc();
         }
     }
+
+    /// Enqueue a request for the finalized block at `height` and its certificate, which
+    /// will be sent to `response_tx`. If the submission channel is full, the request is dropped.
+    pub fn serve(&self, height: Height, response_tx: oneshot::Sender<Bytes>) {
+        self.submit(Kind::Finalized(height), response_tx)
+    }
+
+    /// Enqueue a request for the finalized block with `commitment`, which will be sent
+    /// to `response_tx`. If the submission channel is full, the request is dropped.
+    pub fn serve_block(&self, commitment: Cm, response_tx: oneshot::Sender<Bytes>) {
+        self.submit(Kind::Block(commitment), response_tx)
+    }
 }
 
-impl<C: Certificates, B: Blocks> Storage<C, B> {
+impl<C: Certificates, B: Blocks, Cm> Storage<C, B, Cm> {
     /// Store a finalized block and, when consensus supplied one, its certificate.
     pub async fn put(
         &self,
@@ -285,7 +306,7 @@ pub(super) fn new<E, V, C, B>(
     finalizations: C,
     blocks: B,
     capacity: NonZeroUsize,
-) -> Storage<C, B>
+) -> Storage<C, B, V::Commitment>
 where
     E: Spawner + RuntimeMetrics,
     V: Variant,
@@ -306,10 +327,7 @@ where
     };
     let metrics = Metrics {
         served: context.counter("served", "Backfill requests answered"),
-        missing: context.counter(
-            "missing",
-            "Backfill requests for a height either store lacks",
-        ),
+        missing: context.counter("missing", "Backfill requests for data that is not stored"),
         failed: context.counter("failed", "Backfill requests whose store read failed"),
         abandoned: context.counter(
             "abandoned",
@@ -324,7 +342,7 @@ where
 /// Serve backfill requests until every sender of `submission_rx` is dropped.
 async fn run<V, C, B>(
     reader: Reader<C, B>,
-    mut submission_rx: mpsc::Receiver<Request>,
+    mut submission_rx: mpsc::Receiver<Request<V::Commitment>>,
     metrics: Metrics,
 ) where
     V: Variant,
@@ -332,30 +350,40 @@ async fn run<V, C, B>(
     B: Blocks<Block = V::StoredBlock>,
 {
     while let Some(request) = submission_rx.recv().await {
-        serve::<V, _, _>(&reader, request, &metrics).await;
+        let Request {
+            span,
+            kind,
+            response_tx,
+        } = request;
+        if response_tx.is_closed() {
+            metrics.abandoned.inc();
+            continue;
+        }
+        match kind {
+            Kind::Finalized(height) => {
+                serve::<V, _, _>(&reader, span, height, response_tx, &metrics).await
+            }
+            Kind::Block(commitment) => {
+                serve_block::<V, _, _>(&reader, span, commitment, response_tx, &metrics).await
+            }
+        }
     }
 }
 
-/// Serve one request. A miss or a read failure drops the response, which the requester sees
-/// as a retryable error.
-#[tracing::instrument(name = "marshal.finalized.serve", level = "debug", parent = &request.span, skip_all, fields(height = request.height.traced()))]
-async fn serve<V, C, B>(reader: &Reader<C, B>, request: Request, metrics: &Metrics)
-where
+/// Serve one height-keyed request. A miss or a read failure drops the response, which the
+/// requester sees as a retryable error.
+#[tracing::instrument(name = "marshal.finalized.serve", level = "debug", parent = &span, skip_all, fields(height = height.traced()))]
+async fn serve<V, C, B>(
+    reader: &Reader<C, B>,
+    span: Span,
+    height: Height,
+    response_tx: oneshot::Sender<Bytes>,
+    metrics: &Metrics,
+) where
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
 {
-    let Request {
-        height,
-        response_tx,
-        ..
-    } = request;
-
-    if response_tx.is_closed() {
-        metrics.abandoned.inc();
-        return;
-    }
-
     // One guard across both reads so no mutation lands between them.
     let (finalization, block) = {
         let guard = reader.read().await;
@@ -400,6 +428,56 @@ where
     }
 }
 
+/// Serve one commitment-keyed request. A miss, a commitment mismatch, or a read failure drops
+/// the response, which the requester sees as a retryable error.
+#[tracing::instrument(name = "marshal.finalized.serve_block", level = "debug", parent = &span, skip_all, fields(commitment = %commitment))]
+async fn serve_block<V, C, B>(
+    reader: &Reader<C, B>,
+    span: Span,
+    commitment: V::Commitment,
+    response_tx: oneshot::Sender<Bytes>,
+    metrics: &Metrics,
+) where
+    V: Variant,
+    C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
+    B: Blocks<Block = V::StoredBlock>,
+{
+    let digest = V::commitment_to_inner(commitment);
+    let block = {
+        let guard = reader.read().await;
+        let (_, blocks) = &*guard;
+        blocks.get(ArchiveID::Key(&digest)).await
+    };
+
+    let block = match block {
+        Ok(Some(block)) => block,
+        Ok(None) => {
+            metrics.missing.inc();
+            debug!(%commitment, "block missing on serve");
+            return;
+        }
+        Err(err) => {
+            metrics.failed.inc();
+            warn!(%commitment, ?err, "failed to read block by commitment");
+            return;
+        }
+    };
+
+    // The archive is keyed by digest; confirm the full commitment matches.
+    if V::stored_commitment(&block) != commitment {
+        metrics.missing.inc();
+        debug!(%commitment, "commitment mismatch on serve");
+        return;
+    }
+
+    let block: V::Block = block.into();
+    if response_tx.send_lossy(block.encode()) {
+        metrics.served.inc();
+    } else {
+        metrics.abandoned.inc();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +489,7 @@ mod tests {
     fn storage(
         context: &deterministic::Context,
         capacity: usize,
-    ) -> (Storage<(), ()>, mpsc::Receiver<Request>) {
+    ) -> (Storage<(), (), ()>, mpsc::Receiver<Request<()>>) {
         let (submission_tx, submission_rx) = mpsc::channel(capacity);
         let storage = Storage {
             inner: Arc::new(TracedAsyncRwLock::new("test", None)),
@@ -432,7 +510,7 @@ mod tests {
             let (accepted, accepted_rx) = oneshot::channel();
             storage.serve(Height::new(1), accepted);
             let (dropped, dropped_rx) = oneshot::channel();
-            storage.serve(Height::new(2), dropped);
+            storage.serve_block((), dropped);
             assert!(dropped_rx.await.is_err());
             drop(accepted_rx);
 

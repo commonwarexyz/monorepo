@@ -7468,6 +7468,115 @@ mod tests {
         });
     }
 
+    /// A block-by-commitment backfill request that misses the buffer and cache must not
+    /// stall the actor loop: the backfill task reads the finalized archive while marshal
+    /// keeps answering unrelated mailbox messages.
+    #[test_traced("WARN")]
+    fn test_standard_paced_block_serve_does_not_block_mailbox() {
+        const READ_PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: "paced-block-serve".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+
+            // Syncs are instant, but every store read sleeps READ_PACE.
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "paced-block-serve", Duration::ZERO, READ_PACE)
+                    .await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "genesis dispatched",
+                || application.blocks().contains_key(&Height::zero()),
+            )
+            .await;
+
+            // Finalize a block so the mailbox has something to answer during the measurement.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Let the write settle: dispatch and the ack tail perform paced reads of their
+            // own, so wait them out and the backfill read is the only slow work in flight
+            // when the measurement starts.
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "height 1 dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            context.sleep(READ_PACE * 4).await;
+
+            // Ask for genesis by commitment: it is in neither the buffer nor the cache, so
+            // the request falls through to the finalized archive on the backfill task.
+            // (Genesis shares a prunable section with height 1, so the floor advance
+            // cannot have pruned it.) Meanwhile marshal must keep answering from its
+            // (unpaced) cache.
+            let (response, response_rx) = oneshot::channel();
+            resolver.enqueue(handler::Message::Produce {
+                key: handler::Key::Block(StandardHarness::commitment(&genesis)),
+                response,
+            });
+            context.sleep(Duration::from_millis(1)).await;
+            let requested_at = context.current();
+            let verified = mailbox.get_verified(round).await;
+            let elapsed = context
+                .current()
+                .duration_since(requested_at)
+                .expect("time went backwards");
+            assert_eq!(
+                verified.expect("verified block missing").digest(),
+                block.digest()
+            );
+            assert!(
+                elapsed < READ_PACE,
+                "get_verified queued behind the backfill read: took {elapsed:?}"
+            );
+
+            // The serve itself completes with the identical wire encoding.
+            let served = response_rx.await.expect("block must be served");
+            assert_eq!(served, genesis.encode());
+            let encoded = context.encode();
+            assert!(has_metric_value(&encoded, "served_total", 1));
+        });
+    }
+
     /// A flood of backfill requests must not stall writes: every request
     /// resolves, and a height finalized mid-flood is dispatched long before the
     /// flood alone would finish. Drops on a full submission channel are covered at the module boundary

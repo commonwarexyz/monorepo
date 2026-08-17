@@ -145,7 +145,7 @@ where
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
     // Finalized certificates and blocks, shared with the backfill task
-    storage: finalized::Storage<C, B>,
+    storage: finalized::Storage<C, B, V::Commitment>,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -1043,11 +1043,15 @@ where
     ) {
         match key {
             Key::Block(commitment) => {
-                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
-                    debug!(?commitment, "block missing on request");
+                if let Some(block) = self
+                    .find_recent_block_by_commitment(buffer, commitment)
+                    .await
+                {
+                    response.send_lossy(block.encode());
                     return;
-                };
-                response.send_lossy(block.encode());
+                }
+                // Old blocks live in the finalized archive; read it off the actor loop.
+                self.storage.serve_block(commitment, response);
             }
             Key::Finalized { height } => {
                 // Hand off to the backfill-serving task.
@@ -2088,24 +2092,23 @@ where
             .map(|stored| stored.into())
     }
 
-    /// Looks for a block in cache and finalized storage by full consensus commitment.
-    async fn find_block_in_storage_by_commitment(
+    /// Looks for a block in the buffer or the prunable cache by full consensus commitment.
+    ///
+    /// These are the in-memory tiers holding recent blocks; a miss means the block, if
+    /// stored at all, is in the finalized archive.
+    async fn find_recent_block_by_commitment<Buf: Buffer<V>>(
         &self,
+        buffer: &Buf,
         commitment: V::Commitment,
-    ) -> Option<V::Block> {
+    ) -> Option<Arc<V::Block>> {
+        if let Some(block) = buffer.find_by_commitment(commitment).await {
+            return Some(block);
+        }
         let digest = V::commitment_to_inner(commitment);
-        if let Some(block) = self
-            .cache
+        self.cache
             .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
             .await
-        {
-            return Some(block.into());
-        }
-
-        self.storage
-            .get_block_by_digest(digest)
-            .await
-            .and_then(|stored| (V::stored_commitment(&stored) == commitment).then(|| stored.into()))
+            .map(|block| Arc::new(block.into()))
     }
 
     /// Looks for a block anywhere in local storage using only the digest.
@@ -2132,11 +2135,16 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<Arc<V::Block>> {
-        if let Some(block) = buffer.find_by_commitment(commitment).await {
+        if let Some(block) = self
+            .find_recent_block_by_commitment(buffer, commitment)
+            .await
+        {
             return Some(block);
         }
-        self.find_block_in_storage_by_commitment(commitment)
+        self.storage
+            .get_block_by_digest(V::commitment_to_inner(commitment))
             .await
+            .and_then(|stored| (V::stored_commitment(&stored) == commitment).then(|| stored.into()))
             .map(Arc::new)
     }
 

@@ -92,7 +92,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
-    use commonware_codec::{Encode, FixedSize};
+    use commonware_codec::{DecodeExt as _, Encode, FixedSize};
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
@@ -105,6 +105,7 @@ mod tests {
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        telemetry::metrics::has_metric_value,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -730,6 +731,83 @@ mod tests {
                 marshal.get_finalization(height).await.is_none(),
                 "dishonest deliveries must not archive a finalization"
             );
+        });
+    }
+
+    /// A block-by-commitment backfill request whose digest maps to a stored block with a
+    /// different commitment must not be served.
+    #[test_traced("WARN")]
+    fn test_coding_block_serve_rejects_commitment_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (mut marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-serve-commitment-mismatch",
+                provider,
+                buffer,
+            )
+            .await;
+            let resolver_tx = resolver
+                .sender
+                .clone()
+                .expect("recording resolver should keep its sender");
+
+            // Finalize height 1 so its block reaches the finalized archive.
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let height = Height::new(1);
+            let block = CodingHarness::make_test_block(
+                Sha256::hash(&[b""]),
+                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                height,
+                1,
+                NUM_VALIDATORS as u16,
+            );
+            let commitment = block.commitment();
+            assert!(marshal.verified(round, block).await);
+            CodingHarness::report_finalization(
+                &mut marshal,
+                CodingHarness::make_finalization(
+                    Proposal {
+                        round,
+                        parent: View::zero(),
+                        payload: commitment,
+                    },
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            while marshal.get_block(height).await.is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Same block digest, different coding root: the digest-keyed archive lookup
+            // finds the block, and the serve must reject it instead of answering.
+            let mut raw = commitment.encode().to_vec();
+            raw[<Sha256 as Hasher>::Digest::SIZE] ^= 1;
+            let mismatched = Commitment::decode(&raw[..]).expect("commitment layout");
+            assert_ne!(mismatched, commitment);
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Produce {
+                        key: handler::Key::Block(mismatched),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.is_err(),
+                "a mismatched commitment must not be served"
+            );
+
+            let encoded = context.encode();
+            assert!(has_metric_value(&encoded, "missing_total", 1));
         });
     }
 
