@@ -2,8 +2,6 @@ use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, Writ
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
-#[cfg(target_os = "linux")]
-use std::io::ErrorKind;
 use std::{
     fs::File,
     io::IoSlice,
@@ -47,18 +45,6 @@ impl Cache {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Capabilities<'a> {
-    dont_cache_supported: &'a AtomicBool,
-    v2_supported: &'a AtomicBool,
-}
-
-#[derive(Clone, Copy)]
-struct SyscallFlags {
-    operation: Option<libc::c_int>,
-    dont_cache: libc::c_int,
-}
-
 #[derive(Clone)]
 pub struct Blob {
     partition: String,
@@ -70,10 +56,6 @@ pub struct Blob {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
-    /// Whether this handle can use the `preadv2` and `pwritev2` syscall family.
-    /// Cleared when the syscalls or required operation flags are unavailable so clones use
-    /// legacy positioned I/O directly.
-    v2_supported: Arc<AtomicBool>,
 }
 
 impl Blob {
@@ -91,23 +73,6 @@ impl Blob {
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
-            v2_supported: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    /// Stop using the v2 syscall family and cache hints for every clone of this handle.
-    fn disable_v2(capabilities: Capabilities<'_>) {
-        capabilities
-            .dont_cache_supported
-            .store(false, Ordering::Relaxed);
-        capabilities.v2_supported.store(false, Ordering::Relaxed);
-    }
-
-    fn syscall_result(ret: libc::ssize_t) -> std::io::Result<usize> {
-        if ret < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(ret as usize)
         }
     }
 
@@ -130,39 +95,22 @@ impl Blob {
         Ok(())
     }
 
-    fn use_single_write(sync: bool, cache: &Cache, v2_supported: &AtomicBool) -> bool {
-        !sync && (!cache.is_disabled() || !v2_supported.load(Ordering::Relaxed))
-    }
-
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
     /// `flags` apply to every submission, so callers must only pass durability flags when the
     /// write fits one submission. Hinted submissions carry `RWF_DONTCACHE` on Linux while the
     /// backend may support it. An EOPNOTSUPP disables the hint and retries normally.
-    fn write_vectored_at_with<'a, V2, Legacy>(
+    fn write_vectored_at(
         mut cache: Cache,
-        capabilities: impl Into<Option<Capabilities<'a>>>,
+        file: &File,
         mut offset: u64,
         mut bufs: IoBufs,
-        flags: SyscallFlags,
-        mut write_v2: V2,
-        mut write_legacy: Legacy,
-    ) -> Result<bool, Error>
-    where
-        V2: FnMut(
-            *const libc::iovec,
-            libc::c_int,
-            libc::off_t,
-            libc::c_int,
-        ) -> std::io::Result<usize>,
-        Legacy: FnMut(*const libc::iovec, libc::c_int, libc::off_t) -> std::io::Result<usize>,
-    {
-        let capabilities = capabilities.into();
+        flags: Option<libc::c_int>,
+    ) -> Result<(), Error> {
         assert!(
-            flags.operation.is_none() || bufs.chunk_count() <= IOVEC_BATCH_SIZE,
+            flags.is_none() || bufs.chunk_count() <= IOVEC_BATCH_SIZE,
             "durability flags on a multi-submission write serialize its batches"
         );
-        let mut v2_flags_applied = true;
 
         while bufs.has_remaining() {
             // Scratch sized to the write, so small vectored writes never initialize a
@@ -174,66 +122,53 @@ impl Blob {
                 "chunks_vectored should produce at least one slice when bufs has remaining"
             );
 
-            let syscall_offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
-            let iovecs = io_slices.as_ptr().cast::<libc::iovec>();
-            let iovec_count = io_slices_len as libc::c_int;
-            let attempted_v2 = cfg!(target_os = "linux")
-                && capabilities.is_some_and(|state| state.v2_supported.load(Ordering::Relaxed));
-            let attempted_dont_cache = attempted_v2 && cache.is_disabled();
-            let result = if attempted_v2 {
-                write_v2(
-                    iovecs,
-                    iovec_count,
-                    syscall_offset,
-                    flags.operation.unwrap_or(0)
-                        | if attempted_dont_cache {
-                            flags.dont_cache
-                        } else {
-                            0
-                        },
-                )
-            } else {
-                if flags.operation.is_some() {
-                    v2_flags_applied = false;
+            cfg_if! {
+                if #[cfg(target_os = "linux")] {
+                    let attempted_dont_cache = cache.is_disabled();
+                    // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                    // `io_slices` points to valid readable buffers held alive for this syscall.
+                    let ret = unsafe {
+                        libc::pwritev2(
+                            file.as_raw_fd(),
+                            io_slices.as_ptr().cast::<libc::iovec>(),
+                            io_slices_len as i32,
+                            offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                            flags.unwrap_or(0)
+                                | if attempted_dont_cache { libc::RWF_DONTCACHE } else { 0 },
+                        )
+                    };
+                } else {
+                    let _ = &cache;
+                    let attempted_dont_cache = false;
+                    assert!(flags.is_none(), "flags are only supported on Linux");
+
+                    // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                    // `io_slices` points to valid readable buffers held alive for this syscall.
+                    let ret = unsafe {
+                        libc::pwritev(
+                            file.as_raw_fd(),
+                            io_slices.as_ptr().cast::<libc::iovec>(),
+                            io_slices_len as i32,
+                            offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                        )
+                    };
                 }
-                write_legacy(iovecs, iovec_count, syscall_offset)
-            };
+            }
 
-            let bytes_written = match result {
-                Err(err) => {
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-
-                    if attempted_v2 && err.raw_os_error() == Some(libc::ENOSYS) {
-                        Self::disable_v2(capabilities.expect("v2 attempt requires capabilities"));
-                        if flags.operation.is_some() {
-                            v2_flags_applied = false;
-                        }
-                        continue;
-                    }
-
-                    // Retry normally and stop requesting an unsupported cache-bypass hint.
-                    if cache.retry_cached(&err, attempted_dont_cache) {
-                        continue;
-                    }
-
-                    // glibc maps an unavailable v2 syscall with nonzero flags from ENOSYS to
-                    // EOPNOTSUPP. Once no cache hint was attempted, that error belongs to the
-                    // operation flag or the syscall family itself. Legacy I/O plus the caller's
-                    // trailing sync preserves the requested durability in either case.
-                    if attempted_v2
-                        && flags.operation.is_some()
-                        && err.raw_os_error() == Some(libc::EOPNOTSUPP)
-                    {
-                        Self::disable_v2(capabilities.expect("v2 attempt requires capabilities"));
-                        v2_flags_applied = false;
-                        continue;
-                    }
-                    return Err(err.into());
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
                 }
-                Ok(bytes_written) => bytes_written,
-            };
+
+                // Retry normally and stop requesting an unsupported cache-bypass hint.
+                if cache.retry_cached(&err, attempted_dont_cache) {
+                    continue;
+                }
+                return Err(err.into());
+            }
+
+            let bytes_written = ret as usize;
             if bytes_written == 0 {
                 return Err(Error::WriteFailed);
             }
@@ -243,114 +178,51 @@ impl Blob {
                 .ok_or(Error::OffsetOverflow)?;
         }
 
-        Ok(v2_flags_applied)
-    }
-
-    fn write_vectored_at(
-        cache: Cache,
-        capabilities: Option<Capabilities<'_>>,
-        file: &File,
-        offset: u64,
-        bufs: IoBufs,
-        flags: Option<libc::c_int>,
-    ) -> Result<bool, Error> {
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                let fd = file.as_raw_fd();
-                let result = Self::write_vectored_at_with(
-                    cache,
-                    capabilities,
-                    offset,
-                    bufs,
-                    SyscallFlags {
-                        operation: flags,
-                        dont_cache: libc::RWF_DONTCACHE,
-                    },
-                    |iovecs, iovec_count, offset, flags| {
-                        // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                        // `write_vectored_at_with` passes an initialized, non-empty prefix bounded
-                        // by IOVEC_BATCH_SIZE. The borrowed file keeps `fd` valid, and its IoSlice
-                        // array and every referenced readable buffer remain alive for the call.
-                        let ret = unsafe {
-                            libc::pwritev2(fd, iovecs, iovec_count, offset, flags)
-                        };
-                        Self::syscall_result(ret)
-                    },
-                    |iovecs, iovec_count, offset| {
-                        // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                        // `write_vectored_at_with` passes an initialized, non-empty prefix bounded
-                        // by IOVEC_BATCH_SIZE. The borrowed file keeps `fd` valid, and its IoSlice
-                        // array and every referenced readable buffer remain alive for the call.
-                        let ret = unsafe { libc::pwritev(fd, iovecs, iovec_count, offset) };
-                        Self::syscall_result(ret)
-                    },
-                );
-            } else {
-                let fd = file.as_raw_fd();
-                let result = Self::write_vectored_at_with(
-                    cache,
-                    capabilities,
-                    offset,
-                    bufs,
-                    SyscallFlags {
-                        operation: flags,
-                        dont_cache: 0,
-                    },
-                    |_, _, _, _| unreachable!("v2 writes are Linux-only"),
-                    |iovecs, iovec_count, offset| {
-                        // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                        // `write_vectored_at_with` passes an initialized, non-empty prefix bounded
-                        // by IOVEC_BATCH_SIZE. The borrowed file keeps `fd` valid, and its IoSlice
-                        // array and every referenced readable buffer remain alive for the call.
-                        let ret = unsafe { libc::pwritev(fd, iovecs, iovec_count, offset) };
-                        Self::syscall_result(ret)
-                    },
-                );
-            }
-        }
-        result
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
-    fn read_exact_at_hinted_with<Read, Fallback>(
+    fn read_exact_at(
         mut cache: Cache,
-        capabilities: Capabilities<'_>,
+        file: &File,
         mut buf: &mut [u8],
         mut offset: u64,
-        mut read: Read,
-        mut fallback: Fallback,
-    ) -> Result<(), Error>
-    where
-        Read: FnMut(&mut [u8], libc::off_t) -> std::io::Result<usize>,
-        Fallback: FnMut(&mut [u8], u64) -> std::io::Result<()>,
-    {
+    ) -> Result<(), Error> {
         while !buf.is_empty() {
-            if !cache.is_disabled() || !capabilities.v2_supported.load(Ordering::Relaxed) {
-                return fallback(buf, offset).map_err(Into::into);
+            if !cache.is_disabled() {
+                file.read_exact_at(buf, offset)?;
+                return Ok(());
             }
-            let Ok(syscall_offset) = offset.try_into() else {
-                return fallback(buf, offset).map_err(Into::into);
-            };
 
-            let bytes_read = match read(buf, syscall_offset) {
-                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-                Err(err) if err.raw_os_error() == Some(libc::ENOSYS) => {
-                    Self::disable_v2(capabilities);
-                    return fallback(buf, offset).map_err(Into::into);
-                }
-                Err(err) if cache.retry_cached(&err, true) => {
-                    return fallback(buf, offset).map_err(Into::into);
-                }
-                Err(err) => return Err(err.into()),
-                Ok(0) => return Err(std::io::Error::from(ErrorKind::UnexpectedEof).into()),
-                Ok(bytes_read) => bytes_read,
+            let iovec = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
             };
-            if bytes_read > buf.len() {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    "preadv2 returned more bytes than requested",
+            // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
+            // writable slice borrowed for the duration of the syscall.
+            let ret = unsafe {
+                libc::preadv2(
+                    file.as_raw_fd(),
+                    &iovec,
+                    1,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                    libc::RWF_DONTCACHE,
                 )
-                .into());
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if cache.retry_cached(&err, true) {
+                    continue;
+                }
+                return Err(err.into());
+            }
+
+            let bytes_read = ret as usize;
+            if bytes_read == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
             let (_, unread) = buf.split_at_mut(bytes_read);
             buf = unread;
@@ -361,55 +233,10 @@ impl Blob {
         Ok(())
     }
 
-    fn read_exact_at(
-        cache: Cache,
-        capabilities: Option<Capabilities<'_>>,
-        file: &File,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> Result<(), Error> {
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                if !cache.is_disabled() {
-                    file.read_exact_at(buf, offset)?;
-                    return Ok(());
-                }
-                let capabilities = capabilities.expect("cache bypass requires capabilities");
-                if !capabilities.v2_supported.load(Ordering::Relaxed) {
-                    file.read_exact_at(buf, offset)?;
-                    return Ok(());
-                }
-                let fd = file.as_raw_fd();
-                Self::read_exact_at_hinted_with(
-                    cache,
-                    capabilities,
-                    buf,
-                    offset,
-                    |buf, offset| {
-                        let iovec = libc::iovec {
-                            iov_base: buf.as_mut_ptr().cast(),
-                            iov_len: buf.len(),
-                        };
-                        // SAFETY: `fd` is valid for this call. `iovec` describes the exclusive
-                        // writable slice borrowed for the duration of the syscall.
-                        let ret = unsafe {
-                            libc::preadv2(fd, &iovec, 1, offset, libc::RWF_DONTCACHE)
-                        };
-                        Self::syscall_result(ret)
-                    },
-                    |buf, offset| file.read_exact_at(buf, offset),
-                )
-            } else {
-                let _ = (cache, capabilities);
-                file.read_exact_at(buf, offset)?;
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    const fn needs_trailing_sync(sync: bool, fused: bool, v2_flags_applied: bool) -> bool {
-        sync && (!fused || !v2_flags_applied)
+    #[cfg(not(target_os = "linux"))]
+    fn read_exact_at(_: Cache, file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        file.read_exact_at(buf, offset)?;
+        Ok(())
     }
 }
 
@@ -442,29 +269,20 @@ impl crate::Blob for Blob {
         }
         let file = self.file.clone();
         let pool = self.pool.clone();
-        let capability_state = options
-            .contains(ReadOptions::DONT_CACHE)
-            .then(|| (self.dont_cache_supported.clone(), self.v2_supported.clone()));
-        let cache = match &capability_state {
-            Some((dont_cache_supported, _)) => Cache::Disabled(dont_cache_supported.clone()),
-            None => Cache::Enabled,
+        let cache = if options.contains(ReadOptions::DONT_CACHE) {
+            Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            Cache::Enabled
         };
         task::spawn_blocking(move || {
-            let capabilities =
-                capability_state
-                    .as_ref()
-                    .map(|(dont_cache_supported, v2_supported)| Capabilities {
-                        dont_cache_supported,
-                        v2_supported,
-                    });
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
-                Self::read_exact_at(cache, capabilities, &file, buf.as_mut(), offset)?;
+                Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
                 // SAFETY: `len` bytes are filled via read_exact_at below.
                 let mut temp = unsafe { pool.alloc_len(len) };
-                Self::read_exact_at(cache, capabilities, &file, temp.as_mut(), offset)?;
+                Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
             Ok(bufs)
@@ -490,54 +308,38 @@ impl crate::Blob for Blob {
 
         // Derive per-write policy from the requested options and cached backend support.
         let sync = options.contains(WriteOptions::SYNC);
-        let dont_cache = options.contains(WriteOptions::DONT_CACHE);
-        let cache = if dont_cache {
+        let cache = if options.contains(WriteOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
         } else {
             Cache::Enabled
         };
-        // Preserve the ordinary single-buffer path whenever no per-write flag can be applied.
-        let bufs = if Self::use_single_write(sync, &cache, &self.v2_supported) {
-            match bufs.try_into_single() {
-                Ok(buf) => {
-                    return task::spawn_blocking(move || {
-                        Self::write_single_at(&file, offset, buf.as_ref())
-                    })
-                    .await
-                    .map_err(|_| Error::WriteFailed)?;
-                }
-                Err(bufs) => bufs,
-            }
-        } else {
-            bufs
-        };
-        let capability_state = (cfg!(target_os = "linux") && (sync || cache.is_disabled()))
-            .then(|| (self.dont_cache_supported.clone(), self.v2_supported.clone()));
         let partition = sync.then(|| self.partition.clone());
         let name = sync.then(|| self.name.clone());
         task::spawn_blocking(move || {
-            let capabilities =
-                capability_state
-                    .as_ref()
-                    .map(|(dont_cache_supported, v2_supported)| Capabilities {
-                        dont_cache_supported,
-                        v2_supported,
-                    });
+            // Preserve the single-buffer fast path when no option requires per-write flags.
+            let bufs = if !sync && !cache.is_disabled() {
+                match bufs.try_into_single() {
+                    Ok(buf) => return Self::write_single_at(&file, offset, buf.as_ref()),
+                    Err(bufs) => bufs,
+                }
+            } else {
+                bufs
+            };
+
             cfg_if! {
                 if #[cfg(target_os = "linux")] {
                     // Fuse durability only when the write fits one submission. Fusing every batch
                     // would serialize the batches behind per-call durability waits. Plain batches
                     // stay pipelined and finish with one data sync.
                     let fused = sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
-                    let v2_flags_applied = Self::write_vectored_at(
+                    Self::write_vectored_at(
                         cache,
-                        capabilities,
                         &file,
                         offset,
                         bufs,
                         fused.then_some(libc::RWF_DSYNC),
                     )?;
-                    if Self::needs_trailing_sync(sync, fused, v2_flags_applied) {
+                    if sync && !fused {
                         file.sync_data().map_err(|e| {
                             Error::BlobSyncFailed(
                                 partition.expect("sync write has a partition"),
@@ -547,14 +349,7 @@ impl crate::Blob for Blob {
                         })?;
                     }
                 } else {
-                    Self::write_vectored_at(
-                        cache,
-                        capabilities,
-                        &file,
-                        offset,
-                        bufs,
-                        None,
-                    )?;
+                    Self::write_vectored_at(cache, &file, offset, bufs, None)?;
                     if sync {
                         Self::sync_inner(
                             &file,
@@ -614,17 +409,6 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    fn capabilities<'a>(
-        dont_cache_supported: &'a AtomicBool,
-        v2_supported: &'a AtomicBool,
-    ) -> Capabilities<'a> {
-        Capabilities {
-            dont_cache_supported,
-            v2_supported,
-        }
-    }
-
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_cache_bypass_is_ignored_off_linux() {
@@ -648,541 +432,5 @@ mod tests {
         assert!(!supported.load(Ordering::Relaxed));
         assert!(!sibling.is_disabled());
         assert!(!cache.retry_cached(&unsupported, true));
-    }
-
-    #[test]
-    fn test_single_write_uses_effective_cache_support() {
-        let supported = Arc::new(AtomicBool::new(true));
-        let unsupported = Arc::new(AtomicBool::new(false));
-        let v2_supported = AtomicBool::new(true);
-        let v2_unsupported = AtomicBool::new(false);
-
-        // Normal caching, a rejected hint, and unavailable v2 support each leave no flag for
-        // this write.
-        assert!(Blob::use_single_write(
-            false,
-            &Cache::Enabled,
-            &v2_supported
-        ));
-        assert!(Blob::use_single_write(
-            false,
-            &Cache::Disabled(unsupported),
-            &v2_supported
-        ));
-        assert!(Blob::use_single_write(
-            false,
-            &Cache::Disabled(supported.clone()),
-            &v2_unsupported
-        ));
-        // A supported DONT_CACHE request needs the v2 path on Linux. Other platforms ignore the
-        // hint.
-        assert_eq!(
-            Blob::use_single_write(false, &Cache::Disabled(supported), &v2_supported),
-            !cfg!(target_os = "linux")
-        );
-        // SYNC always leaves the fast path so write_at can enforce durability.
-        assert!(!Blob::use_single_write(
-            true,
-            &Cache::Enabled,
-            &v2_supported
-        ));
-    }
-
-    #[test]
-    fn test_unflagged_vectored_write_uses_legacy_path() {
-        let mut legacy_calls = 0;
-        // Normal caching and no operation flag leave nothing for pwritev2 to apply.
-        let v2_flags_applied = Blob::write_vectored_at_with(
-            Cache::Enabled,
-            None::<Capabilities<'static>>,
-            0,
-            IoBufs::from(vec![crate::IoBuf::from(b"he"), crate::IoBuf::from(b"llo")]),
-            SyscallFlags {
-                operation: None,
-                dont_cache: 0,
-            },
-            |_, _, _, _| panic!("unflagged write must not probe the v2 syscall"),
-            |_, iovec_count, offset| {
-                legacy_calls += 1;
-                assert_eq!(iovec_count, 2);
-                assert_eq!(offset, 0);
-                Ok(5)
-            },
-        )
-        .unwrap();
-
-        // One legacy submission consumes both buffers. The return stays true because no v2-only
-        // operation flag was requested.
-        assert_eq!(legacy_calls, 1);
-        assert!(v2_flags_applied);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_hinted_read_retries_eintr_and_advances_partial_reads() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [0u8; 5];
-        let mut calls = 0;
-        let mut attempts = Vec::new();
-
-        // Inject EINTR, then completions of two and three bytes.
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            7,
-            |buf, offset| {
-                calls += 1;
-                attempts.push((offset, buf.len()));
-                match calls {
-                    1 => Err(std::io::Error::from_raw_os_error(libc::EINTR)),
-                    2 => {
-                        buf[..2].copy_from_slice(b"he");
-                        Ok(2)
-                    }
-                    3 => {
-                        buf.copy_from_slice(b"llo");
-                        Ok(3)
-                    }
-                    _ => unreachable!("exact read completed in three attempts"),
-                }
-            },
-            |_, _| panic!("supported hinted read must not fall back"),
-        )
-        .unwrap();
-
-        // EINTR repeats (7, 5). The two-byte completion makes the next attempt (9, 3).
-        assert_eq!(attempts, [(7, 5), (7, 5), (9, 3)]);
-        assert_eq!(&output, b"hello");
-        // Completing entirely through the hinted path leaves both shared capabilities enabled.
-        assert!(dont_cache_supported.load(Ordering::Relaxed));
-        assert!(v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_hinted_read_eopnotsupp_falls_back_unread_suffix() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [0u8; 5];
-        let mut calls = 0;
-        let mut fallback = None;
-
-        // Complete "he", then reject DONT_CACHE on the three-byte remainder.
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            11,
-            |buf, _| {
-                calls += 1;
-                if calls == 1 {
-                    buf[..2].copy_from_slice(b"he");
-                    Ok(2)
-                } else {
-                    Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
-                }
-            },
-            // Cached FileExt fallback receives only the unread suffix at its advanced offset.
-            |buf, offset| {
-                fallback = Some((offset, buf.len()));
-                buf.copy_from_slice(b"llo");
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(calls, 2);
-        assert_eq!(fallback, Some((13, 3)));
-        assert_eq!(&output, b"hello");
-        // EOPNOTSUPP disables the shared hint but leaves v2 available for operation flags.
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_hinted_read_enosys_falls_back_unread_suffix_and_disables_v2() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [0u8; 5];
-        let mut calls = 0;
-        let mut fallback = None;
-
-        // Complete "he", then inject ENOSYS while three bytes remain.
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            17,
-            |buf, _| {
-                calls += 1;
-                if calls == 1 {
-                    buf[..2].copy_from_slice(b"he");
-                    Ok(2)
-                } else {
-                    Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
-                }
-            },
-            // FileExt resumes with only the unread suffix at offset 19.
-            |buf, offset| {
-                fallback = Some((offset, buf.len()));
-                buf.copy_from_slice(b"llo");
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(calls, 2);
-        assert_eq!(fallback, Some((19, 3)));
-        assert_eq!(&output, b"hello");
-        // ENOSYS disables both shared bits because cache bypass also depends on the v2 syscall
-        // family.
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(!v2_supported.load(Ordering::Relaxed));
-
-        // A sibling sees the downgrade and goes directly to FileExt without probing preadv2.
-        let mut sibling = [0u8; 1];
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut sibling,
-            0,
-            |_, _| panic!("sibling must not probe an absent syscall"),
-            |buf, _| {
-                buf.copy_from_slice(b"x");
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(&sibling, b"x");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_hinted_read_zero_is_unexpected_eof() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [0u8; 1];
-
-        // A zero-byte completion with one byte still unread is exact-read EOF, not a capability
-        // failure.
-        let err = Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            0,
-            |_, _| Ok(0),
-            |_, _| panic!("EOF is not a capability fallback"),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, Error::Io(err) if err.kind() == ErrorKind::UnexpectedEof));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_hinted_read_unrepresentable_offset_uses_fileext_fallback() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [0u8; 1];
-        let offset = i64::MAX as u64 + 1;
-        let mut fallback = None;
-
-        // This initial offset is outside preadv2's off_t range, so FileExt receives the full
-        // request.
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            offset,
-            |_, _| panic!("unrepresentable offset must not reach preadv2"),
-            |buf, fallback_offset| {
-                fallback = Some((fallback_offset, buf.len()));
-                buf.copy_from_slice(b"x");
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(fallback, Some((offset, 1)));
-        assert_eq!(&output, b"x");
-        // A request-local offset limitation does not downgrade either shared capability.
-        assert!(dont_cache_supported.load(Ordering::Relaxed));
-        assert!(v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_hinted_read_continuation_offset_uses_fileext_fallback() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [0u8; 2];
-        let mut fallback = None;
-        let max_offset = libc::off_t::MAX as u64;
-
-        // Complete one byte at off_t::MAX, making the next hinted offset unrepresentable.
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            max_offset,
-            |buf, offset| {
-                assert_eq!(offset, libc::off_t::MAX);
-                buf[0] = b'x';
-                Ok(1)
-            },
-            // FileExt receives only the one-byte suffix at max_offset + 1.
-            |buf, offset| {
-                fallback = Some((offset, buf.len()));
-                buf.copy_from_slice(b"y");
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(fallback, Some((max_offset + 1, 1)));
-        assert_eq!(&output, b"xy");
-        // Crossing the syscall offset range does not downgrade either shared capability.
-        assert!(dont_cache_supported.load(Ordering::Relaxed));
-        assert!(v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_zero_length_hinted_read_performs_no_work() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut output = [];
-
-        // Use u64::MAX to prove the empty fast path runs before offset conversion or I/O dispatch.
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut output,
-            u64::MAX,
-            |_, _| panic!("zero-length read must not issue I/O"),
-            |_, _| panic!("zero-length read must not fall back"),
-        )
-        .unwrap();
-        // Returning without a probe leaves both shared capabilities enabled.
-        assert!(dont_cache_supported.load(Ordering::Relaxed));
-        assert!(v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_write_enosys_uses_legacy_and_requires_trailing_sync() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut v2_calls = 0;
-        let mut legacy_calls = 0;
-
-        // Start with both capabilities enabled, then inject ENOSYS for DSYNC | DONT_CACHE.
-        let v2_flags_applied = Blob::write_vectored_at_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            0,
-            IoBufs::from(crate::IoBuf::from(b"hello")),
-            SyscallFlags {
-                operation: Some(libc::RWF_DSYNC),
-                dont_cache: libc::RWF_DONTCACHE,
-            },
-            |_, _, offset, flags| {
-                v2_calls += 1;
-                assert_eq!(offset, 0);
-                assert_eq!(flags, libc::RWF_DSYNC | libc::RWF_DONTCACHE);
-                Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
-            },
-            // The failed v2 attempt made no progress, so legacy I/O retries the full write at
-            // offset 0.
-            |_, _, offset| {
-                legacy_calls += 1;
-                assert_eq!(offset, 0);
-                Ok(5)
-            },
-        )
-        .unwrap();
-
-        assert_eq!(v2_calls, 1);
-        assert_eq!(legacy_calls, 1);
-        assert!(!v2_flags_applied);
-        // RWF_DSYNC was never applied. Production write_at must follow legacy success with
-        // sync_data.
-        assert!(Blob::needs_trailing_sync(true, true, v2_flags_applied));
-        // ENOSYS clears both shared capability bits for every clone.
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(!v2_supported.load(Ordering::Relaxed));
-
-        // A later flagged write sees the downgrade, skips v2, and still requires sync_data.
-        let later_v2_flags_applied = Blob::write_vectored_at_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            5,
-            IoBufs::from(crate::IoBuf::from(b"world")),
-            SyscallFlags {
-                operation: Some(libc::RWF_DSYNC),
-                dont_cache: libc::RWF_DONTCACHE,
-            },
-            |_, _, _, _| panic!("later write must not probe an absent syscall"),
-            |_, _, offset| {
-                legacy_calls += 1;
-                assert_eq!(offset, 5);
-                Ok(5)
-            },
-        )
-        .unwrap();
-        assert_eq!(legacy_calls, 2);
-        assert!(!later_v2_flags_applied);
-        assert!(Blob::needs_trailing_sync(
-            true,
-            true,
-            later_v2_flags_applied
-        ));
-
-        // The same downgrade sends a sibling hinted read directly to FileExt.
-        let mut sibling = [0u8; 1];
-        Blob::read_exact_at_hinted_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            &mut sibling,
-            0,
-            |_, _| panic!("sibling read must not probe an absent syscall"),
-            |buf, _| {
-                buf.copy_from_slice(b"x");
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(&sibling, b"x");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_write_eopnotsupp_retries_v2_with_dsync() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut flags = Vec::new();
-
-        // Reject DSYNC | DONT_CACHE, then accept the same buffer and offset with DSYNC alone.
-        let v2_flags_applied = Blob::write_vectored_at_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            0,
-            IoBufs::from(crate::IoBuf::from(b"hello")),
-            SyscallFlags {
-                operation: Some(libc::RWF_DSYNC),
-                dont_cache: libc::RWF_DONTCACHE,
-            },
-            |_, _, _, submitted_flags| {
-                flags.push(submitted_flags);
-                if flags.len() == 1 {
-                    Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
-                } else {
-                    Ok(5)
-                }
-            },
-            |_, _, _| panic!("EOPNOTSUPP must retain the v2 syscall"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            flags,
-            [libc::RWF_DSYNC | libc::RWF_DONTCACHE, libc::RWF_DSYNC]
-        );
-        // Only the cache hint is removed. RWF_DSYNC succeeds, so no trailing sync is needed.
-        assert!(v2_flags_applied);
-        assert!(!Blob::needs_trailing_sync(true, true, v2_flags_applied));
-        // The hint downgrade is shared, while v2 remains available for operation flags.
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_write_operation_eopnotsupp_uses_legacy_and_requires_trailing_sync() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut flags = Vec::new();
-        let mut legacy_calls = 0;
-
-        // Reject the combined flags first, then reject the DSYNC-only retry.
-        let v2_flags_applied = Blob::write_vectored_at_with(
-            Cache::Disabled(dont_cache_supported.clone()),
-            capabilities(&dont_cache_supported, &v2_supported),
-            0,
-            IoBufs::from(crate::IoBuf::from(b"hello")),
-            SyscallFlags {
-                operation: Some(libc::RWF_DSYNC),
-                dont_cache: libc::RWF_DONTCACHE,
-            },
-            |_, _, _, submitted_flags| {
-                flags.push(submitted_flags);
-                Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
-            },
-            // Neither failed attempt advances the write, so legacy I/O retries all five bytes at
-            // offset 0.
-            |_, _, offset| {
-                legacy_calls += 1;
-                assert_eq!(offset, 0);
-                Ok(5)
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            flags,
-            [libc::RWF_DSYNC | libc::RWF_DONTCACHE, libc::RWF_DSYNC]
-        );
-        assert_eq!(legacy_calls, 1);
-        assert!(!v2_flags_applied);
-        // RWF_DSYNC never succeeds, so write_at must follow legacy success with sync_data.
-        assert!(Blob::needs_trailing_sync(true, true, v2_flags_applied));
-        // Rejecting the unhinted operation flag disables both shared capabilities.
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(!v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_sync_only_eopnotsupp_uses_legacy_and_requires_trailing_sync() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let mut flags = Vec::new();
-        let mut legacy_calls = 0;
-
-        // Keep normal caching while both shared capabilities are initially enabled.
-        let v2_flags_applied = Blob::write_vectored_at_with(
-            Cache::Enabled,
-            capabilities(&dont_cache_supported, &v2_supported),
-            0,
-            IoBufs::from(crate::IoBuf::from(b"hello")),
-            SyscallFlags {
-                operation: Some(libc::RWF_DSYNC),
-                dont_cache: libc::RWF_DONTCACHE,
-            },
-            // Reject the first DSYNC-only v2 submission. No cache-hint retry applies.
-            |_, _, _, submitted_flags| {
-                flags.push(submitted_flags);
-                Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
-            },
-            // With no completed bytes, legacy I/O retries the full write at offset 0.
-            |_, _, offset| {
-                legacy_calls += 1;
-                assert_eq!(offset, 0);
-                Ok(5)
-            },
-        )
-        .unwrap();
-
-        assert_eq!(flags, [libc::RWF_DSYNC]);
-        assert_eq!(legacy_calls, 1);
-        assert!(!v2_flags_applied);
-        // RWF_DSYNC was never applied, so write_at must call sync_data after legacy success.
-        assert!(Blob::needs_trailing_sync(true, true, v2_flags_applied));
-        // The operation failure disables v2 and its dependent cache hint for every clone.
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(!v2_supported.load(Ordering::Relaxed));
     }
 }
