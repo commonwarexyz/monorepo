@@ -32,9 +32,7 @@
 //! Two invariants keep this sound. A batch handed to [`ManagedDb::finalize`]
 //! must not read through its own reader, because that call runs while the
 //! write side is held. And the set must outlive every batch, because dropping
-//! the [`Writer`] closes it and parks later reads. Both hold structurally today,
-//! because the set holds the [`Writer`] and every reader lives in a batch the
-//! set outlives.
+//! the [`Writer`] closes it and later reads return [`Closed`].
 //!
 //! # State Sync
 //!
@@ -199,8 +197,8 @@ pub trait Merkleized: Clone + Sized + Send + Sync {
 /// Mutating methods take the database by value and return it on success. If a mutating
 /// method returns an error, or its future is dropped before it finishes, the database is
 /// gone: state that was not yet durable is discarded, but everything already on disk stays
-/// recoverable. Behind a writer that leaves the database poisoned, so later reads park
-/// rather than observe a database that is missing.
+/// recoverable. Behind a writer that leaves the database poisoned, so later reads return
+/// [`Closed`] rather than observe a database that is missing.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
     type Unmerkleized: Unmerkleized<Merkleized = Self::Merkleized>;
