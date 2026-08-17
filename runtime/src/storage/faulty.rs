@@ -53,6 +53,18 @@ pub struct WriteConfig {
     pub mode: PartialWriteMode,
 }
 
+/// Fault configuration for `resize` operations and partial failure behavior.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResizeConfig {
+    /// Probability that `resize` returns an injected failure, also used independently as the
+    /// probability that a successful unsynchronized resize survives a simulated crash.
+    pub failure_rate: Probability,
+
+    /// Probability that an injected failure resizes to an intermediate size rather than leaving
+    /// the size unchanged.
+    pub partial_rate: Probability,
+}
+
 /// Configuration for deterministic storage fault injection.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -68,14 +80,8 @@ pub struct Config {
     /// Failure rate for `sync` operations.
     pub sync_rate: Option<Probability>,
 
-    /// Failure rate for `resize` operations and probability that a successful unsynchronized
-    /// resize survives a simulated crash.
-    pub resize_rate: Option<Probability>,
-
-    /// Probability that a resize failure is partial (resized to an intermediate
-    /// size before failure) rather than a complete failure (size unchanged).
-    /// Only applies when `resize_rate` triggers a failure.
-    pub partial_resize_rate: Option<Probability>,
+    /// Failure and partial-failure configuration for `resize` operations.
+    pub resize_rate: Option<ResizeConfig>,
 
     /// Failure rate for `remove` operations.
     pub remove_rate: Option<Probability>,
@@ -92,7 +98,7 @@ impl Config {
             Op::Read => self.read_rate,
             Op::Write => self.write_rate.map(|config| config.failure_rate),
             Op::Sync => self.sync_rate,
-            Op::Resize => self.resize_rate,
+            Op::Resize => self.resize_rate.map(|config| config.failure_rate),
             Op::Remove => self.remove_rate,
             Op::Scan => self.scan_rate,
         }
@@ -123,15 +129,9 @@ impl Config {
         self
     }
 
-    /// Set the resize failure and crash-retention rate.
-    pub const fn resize(mut self, rate: Probability) -> Self {
-        self.resize_rate = Some(rate);
-        self
-    }
-
-    /// Set the partial resize rate (probability of partial vs complete resize failure).
-    pub const fn partial_resize(mut self, rate: Probability) -> Self {
-        self.partial_resize_rate = Some(rate);
+    /// Set the resize fault configuration.
+    pub const fn resize(mut self, config: ResizeConfig) -> Self {
+        self.resize_rate = Some(config);
         self
     }
 
@@ -289,12 +289,15 @@ impl Oracle {
 
     /// Check if a resize fault should be injected and snapshot its crash outcome.
     /// Reads config once to avoid nested lock acquisition.
-    fn check_resize_fault(&self) -> (bool, Option<Probability>, bool) {
+    fn check_resize_fault(&self) -> (bool, Probability, bool) {
         let config = self.config.read();
+        let Some(resize_config) = config.resize_rate else {
+            return (false, Probability!(0.0), false);
+        };
         let failure_rate = config.rate_for(Op::Resize);
         let fail = self.roll(failure_rate);
         let retain = !fail && self.roll(failure_rate);
-        (fail, config.partial_resize_rate, retain)
+        (fail, resize_config.partial_rate, retain)
     }
 
     /// Check if an event should occur based on a probability rate.
@@ -338,8 +341,8 @@ impl Oracle {
 
     /// Try to generate a partial operation target. Returns Some if both the rate
     /// check passes and an intermediate value exists between `from` and `to`.
-    fn try_partial(&self, rate: Option<Probability>, from: u64, to: u64) -> Option<u64> {
-        if rate.is_some_and(|rate| self.roll(rate)) {
+    fn try_partial(&self, rate: Probability, from: u64, to: u64) -> Option<u64> {
+        if self.roll(rate) {
             self.random_between(from, to)
         } else {
             None
@@ -1388,7 +1391,10 @@ mod tests {
                     retention_rate: Probability!(1.0),
                     mode: PartialWriteMode::Prefix,
                 })
-                .resize(Probability!(0.5)),
+                .resize(ResizeConfig {
+                    failure_rate: Probability!(0.5),
+                    partial_rate: Probability!(0.0),
+                }),
         );
         let (write_then_resize, _) = h.storage.open("partition", b"first").await.unwrap();
         write_then_resize
@@ -1421,7 +1427,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_sync_write_replays_after_retained_resize() {
-        let h = Harness::with_seed(83, Config::default().resize(Probability!(0.5)));
+        let h = Harness::with_seed(
+            83,
+            Config::default().resize(ResizeConfig {
+                failure_rate: Probability!(0.5),
+                partial_rate: Probability!(0.0),
+            }),
+        );
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
             .await
@@ -1467,11 +1479,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_preissued_sync_write_survives_failed_partial_resize() {
-        let h = Harness::new(
-            Config::default()
-                .resize(Probability!(1.0))
-                .partial_resize(Probability!(1.0)),
-        );
+        let h = Harness::new(Config::default().resize(ResizeConfig {
+            failure_rate: Probability!(1.0),
+            partial_rate: Probability!(1.0),
+        }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
             .await
@@ -1868,7 +1879,10 @@ mod tests {
                 retention_rate: Probability!(0.4),
                 mode: PartialWriteMode::Subset,
             })
-            .resize(Probability!(0.7))
+            .resize(ResizeConfig {
+                failure_rate: Probability!(0.7),
+                partial_rate: Probability!(0.8),
+            })
             .sync(Probability!(0.9));
 
         assert_eq!(config.rate_for(Op::Open), Probability!(0.1));
@@ -2020,8 +2034,10 @@ mod tests {
                 .unwrap();
             {
                 let mut config = h.config.write();
-                config.resize_rate = Some(Probability!(1.0));
-                config.partial_resize_rate = Some(Probability!(1.0));
+                config.resize_rate = Some(ResizeConfig {
+                    failure_rate: Probability!(1.0),
+                    partial_rate: Probability!(1.0),
+                });
             }
 
             assert!(blob.resize(8).await.is_err());
@@ -2217,11 +2233,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_grow() {
-        let h = Harness::new(
-            Config::default()
-                .resize(Probability!(1.0))
-                .partial_resize(Probability!(1.0)),
-        );
+        let h = Harness::new(Config::default().resize(ResizeConfig {
+            failure_rate: Probability!(1.0),
+            partial_rate: Probability!(1.0),
+        }));
 
         let (blob, initial_size) = h.storage.open("partition", b"test").await.unwrap();
         assert_eq!(initial_size, 0);
@@ -2249,8 +2264,10 @@ mod tests {
 
         {
             let mut cfg = h.config.write();
-            cfg.resize_rate = Some(Probability!(1.0));
-            cfg.partial_resize_rate = Some(Probability!(1.0));
+            cfg.resize_rate = Some(ResizeConfig {
+                failure_rate: Probability!(1.0),
+                partial_rate: Probability!(1.0),
+            });
         }
 
         let target_size = 10u64;
@@ -2268,11 +2285,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_disabled() {
-        let h = Harness::new(
-            Config::default()
-                .resize(Probability!(1.0))
-                .partial_resize(Probability!(0.0)),
-        );
+        let h = Harness::new(Config::default().resize(ResizeConfig {
+            failure_rate: Probability!(1.0),
+            partial_rate: Probability!(0.0),
+        }));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(100).await;
@@ -2280,16 +2296,15 @@ mod tests {
         assert!(matches!(result, Err(Error::Io(_))));
 
         let (_, size) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(size, 0, "Expected no resize when partial_resize_rate is 0");
+        assert_eq!(size, 0, "Expected no resize when partial rate is 0");
     }
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_same_size() {
-        let h = Harness::new(
-            Config::default()
-                .resize(Probability!(1.0))
-                .partial_resize(Probability!(1.0)),
-        );
+        let h = Harness::new(Config::default().resize(ResizeConfig {
+            failure_rate: Probability!(1.0),
+            partial_rate: Probability!(1.0),
+        }));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(0).await;
@@ -2317,8 +2332,10 @@ mod tests {
 
         {
             let mut cfg = h.config.write();
-            cfg.resize_rate = Some(Probability!(1.0));
-            cfg.partial_resize_rate = Some(Probability!(1.0));
+            cfg.resize_rate = Some(ResizeConfig {
+                failure_rate: Probability!(1.0),
+                partial_rate: Probability!(1.0),
+            });
         }
 
         let target_size = 10u64;
@@ -2336,11 +2353,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_one_byte_difference() {
-        let h = Harness::new(
-            Config::default()
-                .resize(Probability!(1.0))
-                .partial_resize(Probability!(1.0)),
-        );
+        let h = Harness::new(Config::default().resize(ResizeConfig {
+            failure_rate: Probability!(1.0),
+            partial_rate: Probability!(1.0),
+        }));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(1).await;

@@ -208,8 +208,10 @@ impl Params {
                 mode: deterministic::PartialWriteMode::Prefix,
             }),
             sync_rate: Some(self.sync_rate),
-            resize_rate: Some(self.resize_rate),
-            partial_resize_rate: Some(self.partial_resize_rate),
+            resize_rate: Some(deterministic::ResizeConfig {
+                failure_rate: self.resize_rate,
+                partial_rate: self.partial_resize_rate,
+            }),
             ..Default::default()
         }
     }

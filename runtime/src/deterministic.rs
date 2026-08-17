@@ -42,7 +42,9 @@
 //! });
 //! ```
 
-pub use crate::storage::faulty::{Config as FaultConfig, PartialWriteMode, WriteConfig};
+pub use crate::storage::faulty::{
+    Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
+};
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use crate::{
@@ -1933,7 +1935,10 @@ mod tests {
     fn test_recover_retained_successful_resize() {
         let cfg = deterministic::Config::default()
             .with_seed(83)
-            .with_storage_fault_config(FaultConfig::default().resize(Probability!(0.5)));
+            .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
+                failure_rate: Probability!(0.5),
+                partial_rate: Probability!(0.0),
+            }));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
                 let (blob, _) = context.open("crash_resize", b"blob").await.unwrap();
