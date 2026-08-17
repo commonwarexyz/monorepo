@@ -8,6 +8,13 @@ const SCALE: u128 = 1u128 << u64::BITS;
 // Biased `f64` exponent where scaling by 2^64 leaves the 53-bit significand unshifted.
 const SCALED_EXPONENT: u64 = 1023 + 52 - 64;
 
+/// Error returned when an `f64` cannot be represented as a probability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "probability must be finite, within [0, 1], and exactly representable as a 64-bit threshold"
+)]
+pub struct InvalidProbability;
+
 /// A probability represented as a threshold over all possible `u64` samples.
 ///
 /// Ratios are rounded down to the nearest multiple of 2^-64. Sampling consumes one `u64` for
@@ -41,7 +48,7 @@ impl Probability {
     ///
     /// Returns [`None`] if `value` is not finite, is outside `[0, 1]`, or would require rounding.
     /// The exact IEEE-754 value is preserved rather than interpreting its source spelling as a
-    /// decimal ratio.
+    /// decimal ratio. Use [`TryFrom`] when const evaluation is not required.
     pub const fn from_f64(value: f64) -> Option<Self> {
         let bits = value.to_bits();
         let magnitude = bits & (u64::MAX >> 1);
@@ -71,6 +78,7 @@ impl Probability {
             return Some(Self(u64::MAX));
         }
 
+        // Exact one is handled above, so the narrowed threshold cannot use its reserved sentinel.
         assert!(threshold < u64::MAX as u128);
         Some(Self(threshold as u64))
     }
@@ -112,6 +120,14 @@ impl Probability {
     }
 }
 
+impl TryFrom<f64> for Probability {
+    type Error = InvalidProbability;
+
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        Self::from_f64(value).ok_or(InvalidProbability)
+    }
+}
+
 /// Creates a [`Probability`] from an integer ratio or an exactly representable `f64`.
 ///
 /// The two-argument form preserves the exact ratio. The one-argument form preserves the exact
@@ -121,7 +137,7 @@ impl Probability {
 /// # Panics
 ///
 /// The ratio expression form panics if its denominator is zero or its numerator exceeds the
-/// denominator. Use [`Probability::new`] or [`Probability::from_f64`] to validate untrusted values
+/// denominator. Use [`Probability::new`] or [`Probability::try_from`] to validate untrusted values
 /// without panicking.
 ///
 /// # Examples
@@ -226,6 +242,7 @@ mod tests {
         assert_eq!(FROM_LITERAL.as_f64(), 0.98);
         assert_ne!(FROM_LITERAL, Probability!(49, 50));
         assert_eq!(Probability!(0.5), Probability!(1, 2));
+        assert_eq!(Probability::try_from(0.5), Ok(Probability!(0.5)));
         assert_eq!(Probability::from_f64(0.0), Some(Probability!(0.0)));
         assert_eq!(Probability::from_f64(-0.0), Some(Probability!(0.0)));
         assert_eq!(Probability::from_f64(1.0), Some(Probability!(1.0)));
@@ -259,6 +276,7 @@ mod tests {
             f64::NEG_INFINITY,
         ] {
             assert!(Probability::from_f64(value).is_none());
+            assert_eq!(Probability::try_from(value), Err(InvalidProbability));
         }
     }
 
