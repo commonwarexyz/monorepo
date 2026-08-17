@@ -17,7 +17,10 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digestible;
 use commonware_runtime::{
     Handle, Metrics as RuntimeMetrics, Spawner,
-    telemetry::metrics::{Counter, MetricsExt as _},
+    telemetry::{
+        metrics::{Counter, MetricsExt as _},
+        traces::TracedExt as _,
+    },
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
@@ -335,7 +338,7 @@ async fn run<V, C, B>(
 
 /// Serve one request. A miss or a read failure drops the response, which the requester sees
 /// as a retryable error.
-#[tracing::instrument(name = "marshal.finalized.serve", level = "debug", parent = &request.span, skip_all, fields(height = %request.height))]
+#[tracing::instrument(name = "marshal.finalized.serve", level = "debug", parent = &request.span, skip_all, fields(height = request.height.traced()))]
 async fn serve<V, C, B>(reader: &Reader<C, B>, request: Request, metrics: &Metrics)
 where
     V: Variant,
