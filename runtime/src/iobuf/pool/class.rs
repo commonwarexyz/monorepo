@@ -558,7 +558,7 @@ impl TlsSizeClassCache {
         }
 
         // Refill larger caches to half capacity. That leaves room for future
-        // same-thread returns while still amortizing the global atomic scan
+        // same-thread returns while still amortizing the global stripe locks
         // over several future local pops.
         let mut entry = None;
         let take = self.capacity / 2;
@@ -654,13 +654,12 @@ impl TlsSizeClassCache {
     ///
     /// All entries in one cache belong to the same size class, so their slot
     /// leases own strong references represented by one shared token. Each
-    /// lease is consumed without being released, the whole batch parks with
-    /// one coalesced [`Freelist::put_batch`] (one atomic `fetch_or` per
-    /// touched bitmap word instead of one per entry), and the strong
-    /// references are released only after every buffer is parked. Parking
-    /// before releasing matters: if the public pool is already gone and these
-    /// leases are the last references, releasing first would drop the
-    /// freelist before the buffers returned to it.
+    /// lease is consumed without being released, then the whole batch parks
+    /// under its freelist stripe locks. The strong references are released
+    /// only after every buffer is parked. Parking before releasing matters: if
+    /// the public pool is already gone and these leases are the last
+    /// references, releasing first would drop the freelist before the buffers
+    /// returned to it.
     ///
     /// The caller must have already lowered `len` to at most `start`,
     /// transferring ownership of the entries in `start..end` to this function.
@@ -1090,8 +1089,8 @@ pub(super) mod tests {
     }
 
     /// Returns the number of global freelist stripes for tests.
-    pub fn get_global_num_words(class: &SizeClass) -> usize {
-        super::super::freelist::tests::num_words(&class.global)
+    pub fn get_global_num_stripes(class: &SizeClass) -> usize {
+        super::super::freelist::tests::num_stripes(&class.global)
     }
 
     /// Helper to get the number of free buffers parked in the current thread's
@@ -1562,7 +1561,7 @@ mod loom_tests {
 
     // Models the multi-entry TLS teardown edge without using OS thread-local
     // state, which loom cannot reset between model executions. Dropping the
-    // production cache takes each real pooled-owner lease, batch-parks both
+    // production cache takes each real pooled-slot lease, batch-parks both
     // slots, and only then releases the lease references. The final class-handle
     // release races that batch return, so either side may perform the final
     // SizeClass drop and reclaim the parked buffers.

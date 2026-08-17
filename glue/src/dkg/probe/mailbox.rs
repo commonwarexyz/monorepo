@@ -5,6 +5,7 @@ use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::scheme::Scheme,
 };
+use commonware_cryptography::Signer;
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
@@ -14,6 +15,7 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
 {
     /// Subscribe to the probe artifact.
     Subscribe {
@@ -33,6 +35,7 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
 {
     type Overflow = VecDeque<Self>;
 
@@ -48,6 +51,7 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
 {
     sender: Sender<Message<S, V>>,
 }
@@ -57,6 +61,7 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
 {
     pub(crate) const fn new(sender: Sender<Message<S, V>>) -> Self {
         Self { sender }

@@ -6,9 +6,9 @@
 //! A later startup removes the record after marshal's recovered epoch advances
 //! beyond the synced epoch.
 
-use crate::dkg::types::EpochInfo;
+use crate::dkg::{network::Directory, types::EpochInfo};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, Write};
 use commonware_consensus::{
     Epochable as _,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -25,7 +25,11 @@ use commonware_storage::{
     Context,
     metadata::{self, Metadata},
 };
-use commonware_utils::{fixed_bytes, sequence::FixedBytes, sync::AsyncMutex};
+use commonware_utils::{
+    fixed_bytes,
+    sequence::{FixedBytes, Unit},
+    sync::AsyncMutex,
+};
 use std::{fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
@@ -38,7 +42,7 @@ pub struct Config {
     /// Stable node-wide partition prefix.
     pub partition_prefix: String,
 
-    /// Maximum participants accepted in persisted epoch information.
+    /// Maximum entries accepted in each persisted participant set.
     pub max_participants: NonZeroU32,
 
     /// Maximum sharing mode version accepted in persisted epoch information.
@@ -53,24 +57,29 @@ pub struct Config {
 ///
 /// The probe fixes the floor and the epoch info atomically, so the info
 /// always describes the epoch containing the floor.
-pub struct StateSync<S, D, V>
+pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     /// Public information for the epoch containing the state-sync floor.
-    pub info: EpochInfo<V, S::PublicKey>,
+    ///
+    /// Carries the epoch's transport directory, so a state-synced node can
+    /// activate the epoch's peers without any application state.
+    pub info: EpochInfo<V, S::PublicKey, Dir>,
 
     /// Finalized floor selected for application state sync.
     pub floor: Finalization<S, D>,
 }
 
-impl<S, D, V> Clone for StateSync<S, D, V>
+impl<S, D, V, Dir> Clone for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -80,11 +89,12 @@ where
     }
 }
 
-impl<S, D, V> fmt::Debug for StateSync<S, D, V>
+impl<S, D, V, Dir> fmt::Debug for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -95,30 +105,33 @@ where
     }
 }
 
-impl<S, D, V> PartialEq for StateSync<S, D, V>
+impl<S, D, V, Dir> PartialEq for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.info == other.info && self.floor == other.floor
     }
 }
 
-impl<S, D, V> Eq for StateSync<S, D, V>
+impl<S, D, V, Dir> Eq for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
 }
 
-impl<S, D, V> Write for StateSync<S, D, V>
+impl<S, D, V, Dir> Write for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn write(&self, writer: &mut impl BufMut) {
         self.info.write(writer);
@@ -126,22 +139,24 @@ where
     }
 }
 
-impl<S, D, V> EncodeSize for StateSync<S, D, V>
+impl<S, D, V, Dir> EncodeSize for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn encode_size(&self) -> usize {
         self.info.encode_size() + self.floor.encode_size()
     }
 }
 
-impl<S, D, V> Read for StateSync<S, D, V>
+impl<S, D, V, Dir> Read for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
 
@@ -157,11 +172,12 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S, D, V> arbitrary::Arbitrary<'_> for StateSync<S, D, V>
+impl<S, D, V, Dir> arbitrary::Arbitrary<'_> for StateSync<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
     V: Variant,
+    Dir: Directory<S::PublicKey> + for<'a> arbitrary::Arbitrary<'a>,
     S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
     Output<V, S::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
@@ -192,18 +208,19 @@ where
     )
 }
 
-enum PlanState<S, D, V>
+enum PlanState<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     Pending {
-        candidate: Option<StateSync<S, D, V>>,
+        candidate: Option<StateSync<S, D, V, Dir>>,
         partition: String,
         codec_config: EpochInfoCodecConfig,
     },
-    Resolved(Option<StateSync<S, D, V>>),
+    Resolved(Option<StateSync<S, D, V, Dir>>),
 }
 
 /// Shared startup recovery plan for DKG actors.
@@ -212,20 +229,22 @@ where
 /// and before starting either DKG actor. Clones share the resolution decision,
 /// so both actors observe the same material while using one durable partition.
 /// Use [`Plan::disabled`] for deployments that never use application state sync.
-pub struct Plan<S, D, V>
+pub struct Plan<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
-    state: Arc<AsyncMutex<PlanState<S, D, V>>>,
+    state: Arc<AsyncMutex<PlanState<S, D, V, Dir>>>,
 }
 
-impl<S, D, V> Clone for Plan<S, D, V>
+impl<S, D, V, Dir> Clone for Plan<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -234,22 +253,24 @@ where
     }
 }
 
-impl<S, D, V> fmt::Debug for Plan<S, D, V>
+impl<S, D, V, Dir> fmt::Debug for Plan<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Plan").finish_non_exhaustive()
     }
 }
 
-impl<S, D, V> Plan<S, D, V>
+impl<S, D, V, Dir> Plan<S, D, V, Dir>
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     /// Initializes and durably records a DKG state-sync recovery candidate.
     ///
@@ -259,19 +280,21 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if storage cannot be loaded or synchronized, or if provided or
-    /// persisted material has mismatched artifact and floor epochs.
+    /// Panics if storage cannot be loaded or synchronized, if provided or
+    /// persisted material has mismatched artifact and floor epochs, or if
+    /// provided material violates the configured codec limits.
     pub async fn init<E: Context>(
         context: E,
         config: Config,
-        provided: Option<StateSync<S, D, V>>,
+        provided: Option<StateSync<S, D, V, Dir>>,
     ) -> Self {
+        let codec_config = (config.max_participants, config.max_supported_mode);
         if let Some(provided) = &provided {
-            assert_epoch(provided);
+            assert_provided(provided, codec_config);
         }
         let partition = format!("{}{STATE_SYNC_SUFFIX}", config.partition_prefix);
-        let codec_config = (config.max_participants, config.max_supported_mode);
-        let mut store = open_store::<E, S, D, V>(context, partition.clone(), codec_config).await;
+        let mut store =
+            open_store::<E, S, D, V, Dir>(context, partition.clone(), codec_config).await;
         if let Some(provided) = provided {
             store.put(STATE_SYNC_KEY, provided);
             store = store
@@ -305,7 +328,7 @@ where
         &self,
         context: E,
         recovered_epoch: Option<Epoch>,
-    ) -> Option<StateSync<S, D, V>> {
+    ) -> Option<StateSync<S, D, V, Dir>> {
         let mut state = self.state.lock().await;
         let (candidate, partition, codec_config) = match &*state {
             PlanState::Resolved(resolved) => return resolved.clone(),
@@ -325,7 +348,7 @@ where
             return Some(candidate);
         }
 
-        let mut store = open_store::<E, S, D, V>(context, partition, codec_config).await;
+        let mut store = open_store::<E, S, D, V, Dir>(context, partition, codec_config).await;
         store.remove(&STATE_SYNC_KEY);
         store
             .sync()
@@ -336,16 +359,17 @@ where
     }
 }
 
-async fn open_store<E, S, D, V>(
+async fn open_store<E, S, D, V, Dir>(
     context: E,
     partition: String,
     epoch_info_codec_config: EpochInfoCodecConfig,
-) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V>>
+) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V, Dir>>
 where
     E: Context,
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     Metadata::init(
         context,
@@ -361,11 +385,29 @@ where
     .expect("failed to load DKG state sync metadata")
 }
 
-fn assert_epoch<S, D, V>(state_sync: &StateSync<S, D, V>)
+fn assert_provided<S, D, V, Dir>(
+    state_sync: &StateSync<S, D, V, Dir>,
+    codec_config: EpochInfoCodecConfig,
+) where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    assert_epoch(state_sync);
+    StateSync::<S, D, V, Dir>::decode_cfg(
+        state_sync.encode(),
+        &(codec_config, S::certificate_codec_config_unbounded()),
+    )
+    .expect("provided state sync material must satisfy codec config");
+}
+
+fn assert_epoch<S, D, V, Dir>(state_sync: &StateSync<S, D, V, Dir>)
 where
     S: Scheme<D>,
     D: Digest,
     V: Variant,
+    Dir: Directory<S::PublicKey>,
 {
     assert!(
         state_sync.info.epoch == state_sync.floor.epoch(),
@@ -376,18 +418,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::{tests::mocks, types::EpochOutcome};
+    use crate::dkg::{network::Addresses, tests::mocks, types::EpochOutcome};
     use commonware_consensus::{
         simplex::types::{Finalize, Proposal},
         types::{Round, View},
     };
     use commonware_cryptography::{
-        Hasher as _, Sha256,
+        Hasher as _, Sha256, Signer as _,
         bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+        ed25519,
     };
+    use commonware_p2p::Address;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU32, TestRng, ordered::Set};
+    use std::net::SocketAddr;
 
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
@@ -419,6 +464,7 @@ mod tests {
                 output,
                 players: participants.clone(),
                 next_players: participants,
+                directory: Unit,
             },
             floor,
         }
@@ -557,6 +603,69 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "provided state sync material must satisfy codec config")]
+    fn oversized_provided_material_panics_at_init() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let provided = state_sync(&mut context, Epoch::new(2));
+            let mut config = config("oversized-provided");
+            config.max_participants = NZU32!(3);
+            let _ = TestPlan::init(context.child("init"), config, Some(provided)).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "provided state sync material must satisfy codec config")]
+    fn invalid_addressed_directory_panics_at_init() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let StateSync { info, floor } = state_sync(&mut context, Epoch::new(2));
+            let peers = info
+                .participants()
+                .tracked_peers()
+                .union()
+                .into_iter()
+                .chain([ed25519::PrivateKey::from_seed(10_000).public_key()]);
+            let directory = peers
+                .enumerate()
+                .map(|(index, peer)| {
+                    let socket = SocketAddr::from(([127, 0, 0, 1], index as u16 + 1));
+                    (peer, Address::Symmetric(socket))
+                })
+                .collect::<Addresses<_>>();
+            let EpochInfo {
+                outcome,
+                epoch,
+                output,
+                players,
+                next_players,
+                ..
+            } = info;
+            let invalid = StateSync {
+                info: EpochInfo {
+                    outcome,
+                    epoch,
+                    output,
+                    players,
+                    next_players,
+                    directory,
+                },
+                floor,
+            };
+
+            let _ = Plan::<
+                mocks::TestScheme,
+                mocks::TestDigest,
+                mocks::TestBlsVariant,
+                Addresses<mocks::TestPublicKey>,
+            >::init(
+                context.child("init"),
+                config("invalid-directory"),
+                Some(invalid),
+            )
+            .await;
+        });
+    }
+
+    #[test]
     fn disabled_resolves_none_without_storage() {
         deterministic::Runner::default().start(|context| async move {
             let plan = TestPlan::disabled();
@@ -568,10 +677,11 @@ mod tests {
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
     use super::*;
-    use crate::dkg::tests::mocks;
+    use crate::dkg::{network::Addresses, tests::mocks};
     use commonware_codec::conformance::CodecConformance;
 
     commonware_conformance::conformance_tests! {
         CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
+        CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
     }
 }

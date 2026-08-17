@@ -177,9 +177,7 @@ pub trait Contiguous: Send + Sync {
     fn read_many(
         &self,
         positions: &[u64],
-    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
-    where
-        Self::Item: Send;
+    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
 
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None`
     /// otherwise. Decode failures surface as `None` and the async read path reports the error.

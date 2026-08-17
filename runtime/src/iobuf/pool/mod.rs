@@ -8,8 +8,14 @@
 //! # Thread Safety
 //!
 //! [`BufferPool`] is `Send + Sync` and can be safely shared across threads.
-//! Allocation and deallocation use atomic counters together with a bounded
-//! lock-free global freelist plus per-thread caches.
+//! Allocation and deallocation use atomic counters together with a global
+//! freelist split across mutex-protected stripes, each with a fixed slot limit,
+//! plus per-thread caches.
+//!
+//! Global freelist operations use blocking mutexes. After a local cache miss or
+//! spill, an operation can wait for a stripe lock. A preempted lock holder can
+//! therefore delay the operation even when another stripe could provide or
+//! accept a buffer.
 //!
 //! # Pool Lifecycle
 //!
@@ -364,10 +370,11 @@ impl BufferPoolConfig {
 
     /// Returns a copy of this config with a new expected parallelism.
     ///
-    /// This controls the minimum global-freelist stripe count, and controls
-    /// thread-cache capacity when the thread-cache policy is automatic. The
-    /// automatic policy reserves about half of each class for the global
-    /// freelist and divides the remaining capacity across expected threads.
+    /// The global freelist derives its stripe count from this target and the
+    /// class capacity. This value also controls thread-cache capacity when the
+    /// thread-cache policy is automatic. The automatic policy reserves about
+    /// half of each class for the global freelist and divides the remaining
+    /// capacity across expected threads.
     pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.parallelism = parallelism;
         self
@@ -728,7 +735,7 @@ impl BufferPoolInner {
     ///
     /// Uses a three-tier strategy:
     /// 1. **Thread-local cache** (fast path): no atomics, no contention.
-    /// 2. **Global freelist**: atomic pop, then batch-refill the local cache
+    /// 2. **Global freelist**: striped pop, then batch-refill the local cache
     ///    when the local bin is large enough to amortize shared-queue traffic.
     /// 3. **New allocation**: reserve a slot in the global freelist, then
     ///    allocate from the heap.
@@ -1121,7 +1128,7 @@ impl BufferPool {
 mod tests {
     use super::{
         class::tests::{
-            get_global_created, get_global_len, get_global_num_words, get_local_len,
+            get_global_created, get_global_len, get_global_num_stripes, get_local_len,
             get_thread_cache_capacity,
         },
         *,
@@ -1970,14 +1977,14 @@ mod tests {
         let pool = test_pool(test_config(page, page, 64).with_parallelism(NZUsize!(16)));
 
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 16);
+        assert_eq!(get_global_num_stripes(&pool.inner.classes[class_index]), 16);
 
         // When expected parallelism rounds above capacity, the freelist caps
-        // stripes so every word can contain at least one slot.
+        // stripes so every stripe can contain at least one slot.
         let pool = test_pool(test_config(page, page, 12).with_parallelism(NZUsize!(9)));
 
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 8);
+        assert_eq!(get_global_num_stripes(&pool.inner.classes[class_index]), 8);
 
         // Disabling thread-local caches should not change global striping.
         let pool = test_pool(
@@ -1987,7 +1994,7 @@ mod tests {
         );
 
         let class_index = pool.class_index(page).unwrap();
-        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 16);
+        assert_eq!(get_global_num_stripes(&pool.inner.classes[class_index]), 16);
     }
 
     #[test]
@@ -2005,7 +2012,7 @@ mod tests {
             get_thread_cache_capacity(&pool.inner.classes[class_index]),
             7
         );
-        assert_eq!(get_global_num_words(&pool.inner.classes[class_index]), 8);
+        assert_eq!(get_global_num_stripes(&pool.inner.classes[class_index]), 8);
     }
 
     #[test]
@@ -2820,12 +2827,12 @@ mod loom_tests {
     // drop (which drains the global freelist and then releases the pool-owned
     // class reference). Whichever release is last drops the SizeClass and its
     // freelist. Parking strictly before releasing is what keeps the freelist
-    // alive for the return-path fetch_or. Loom performs no liveness check
-    // when tracked state is dropped, so swapping that order manifests as a
-    // use-after-free of the freed bitmap that corrupts loom's internal object
-    // state (caught by its internal asserts in practice, not by a designed
-    // race report). The loom-tracked class strong count still verifies the
-    // release accounting itself.
+    // alive until the return finishes publishing under its stripe lock. Loom
+    // performs no liveness check when tracked state is dropped, so swapping
+    // that order manifests as a use-after-free of the freed freelist state.
+    // This corrupts Loom's internal object state and is caught by its internal
+    // assertions in practice. The Loom-tracked class strong count still
+    // verifies the release accounting itself.
     #[test]
     fn final_drop_races_pool_teardown() {
         loom::model(|| {
@@ -2851,7 +2858,7 @@ mod loom_tests {
     // Release decrement lands on 1, or the race-final path re-stores it with
     // a Relaxed store) before the freelist's Release publication. A
     // successful concurrent take must observe that sentinel (asserted in
-    // Freelist::buffer under loom) before handing the slot to a new mutable
+    // Freelist::claim under loom) before handing the slot to a new mutable
     // handle.
     #[test]
     fn final_drop_races_recheckout() {

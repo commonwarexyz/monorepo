@@ -17,7 +17,7 @@ use commonware_glue::dkg::{
 };
 use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -81,6 +81,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
             max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
             participants: participants.get(Epoch::zero()),
+            directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
         },
     );
@@ -210,6 +211,7 @@ mod tests {
             next_players: Set::from_iter_dedup(
                 network.participants.iter().skip(1).take(2).cloned(),
             ),
+            directory: Unit,
         };
 
         let written =

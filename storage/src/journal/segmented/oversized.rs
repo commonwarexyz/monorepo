@@ -56,9 +56,9 @@ use super::{
     fixed::{Config as FixedConfig, Journal as FixedJournal, Replay as FixedReplay},
     glob::{Config as GlobConfig, Glob},
 };
-use crate::journal::Error;
+use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Error as RError, Handle, Metrics, Storage};
+use commonware_runtime::{Error as RError, Handle};
 use futures::future::try_join;
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
@@ -112,14 +112,12 @@ pub struct Config<C> {
 /// reader, which returns it via [Replay::finish] once exhausted. Mutations on pruned sections
 /// fail with [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the
 /// handle.
-pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
+pub struct Oversized<E: Context, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
 }
 
-impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug
-    for Oversized<E, I, V>
-{
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Oversized")
             .field("oldest_section", &self.oldest_section())
@@ -128,9 +126,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 }
 
-impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
-    Oversized<E, I, V>
-{
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Initialize with crash recovery.
     ///
     /// `checkpoint` is the durable state recovery restores, as `(section, index size)`.
@@ -670,12 +666,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 /// Yields `(section, position, entry)` in order. Dropping the reader before it is exhausted
 /// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an exhausted
 /// reader to get the journal back.
-pub struct Replay<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
+pub struct Replay<E: Context, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
     values: Glob<E, V>,
 }
 
-impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
@@ -704,7 +700,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Supervisor as _, WriteOptions,
+        Blob as _, Buf, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
         buffer::paged::CacheRef, deterministic, mocks::SyncFaultContext,
     };
     use commonware_utils::{NZU16, NZUsize};
