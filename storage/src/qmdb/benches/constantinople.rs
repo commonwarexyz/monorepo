@@ -13,7 +13,7 @@
 //!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache] [warmup]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::unordered::fixed::mmr",
-//!   "any::ordered::fixed::mmb",
+//!   "any::unordered::fixed::mmr-p256", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
 //!   "current::ordered::fixed::mmb", matching the qmdb criterion bench variant names
 //!   (required; without it the harness no-ops so blanket `cargo bench --benches`
@@ -72,6 +72,15 @@ type AnyMerkleized = std::sync::Arc<
     >,
 >;
 type AnyMmrDb = commonware_storage::qmdb::any::unordered::fixed::Db<
+    mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    Rayon,
+>;
+type AnyMmrP256Db = commonware_storage::qmdb::any::unordered::fixed::partitioned::p256::Db<
     mmr::Family,
     Context,
     Digest,
@@ -472,6 +481,7 @@ fn main() {
         db_kind.as_str(),
         "any::unordered::fixed::mmb"
             | "any::unordered::fixed::mmr"
+            | "any::unordered::fixed::mmr-p256"
             | "any::ordered::fixed::mmb"
             | "any::unordered::variable::mmb"
             | "current::unordered::fixed::mmb"
@@ -546,6 +556,24 @@ fn main() {
                     db,
                     args,
                     "any::unordered::fixed::mmr",
+                    AnyMmrMerkleized,
+                    any
+                )
+            }
+            "any::unordered::fixed::mmr-p256" => {
+                let cfg = FixedConfig {
+                    merkle_config,
+                    journal_config,
+                    translator: EightCap,
+                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: threads,
+                };
+                let db = AnyMmrP256Db::init(ctx.child("db"), cfg).await.unwrap();
+                run_pipeline!(
+                    db,
+                    args,
+                    "any::unordered::fixed::mmr-p256",
                     AnyMmrMerkleized,
                     any
                 )

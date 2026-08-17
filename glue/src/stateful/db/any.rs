@@ -17,7 +17,8 @@ use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     index::{
-        Ordered as OrderedIndex, Unordered as UnorderedIndex, unordered::Index as UnorderedIdx,
+        Ordered as OrderedIndex, Unordered as UnorderedIndex,
+        partitioned::unordered::Index as PartitionedUnorderedIdx, unordered::Index as UnorderedIdx,
     },
     journal::contiguous::{
         Contiguous, Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
@@ -41,6 +42,7 @@ use commonware_storage::{
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{
+    num::NonZeroUsize,
     ops::{Deref, Range},
     sync::Arc,
 };
@@ -479,111 +481,121 @@ where
 /// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// applied state.
-impl<F, E, K, V, H, T, S> ManagedDb<E>
-    for Db<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        ANY_BITMAP_CHUNK_BYTES,
-        S,
-    >
-where
-    F: Family,
-    E: Context + Spawner,
-    K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher + 'static,
-    T: Translator,
-    S: Strategy,
-{
-    type Unmerkleized = AnyUnmerkleized<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        S,
-    >;
-    type Merkleized = AnyMerkleized<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        S,
-    >;
-    type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
+macro_rules! impl_unordered_fixed_managed_db {
+    ($index:ty, $config:ty) => {
+        impl<F, E, K, V, H, T, S> ManagedDb<E>
+            for Db<
+                F,
+                E,
+                FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
+                $index,
+                H,
+                unordered::Update<K, FixedEncoding<V>>,
+                ANY_BITMAP_CHUNK_BYTES,
+                S,
+            >
+        where
+            F: Family,
+            E: Context + Spawner,
+            K: Array,
+            V: value::FixedValue + 'static,
+            H: Hasher + 'static,
+            T: Translator,
+            S: Strategy,
+        {
+            type Unmerkleized = AnyUnmerkleized<
+                F,
+                E,
+                FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
+                $index,
+                H,
+                unordered::Update<K, FixedEncoding<V>>,
+                S,
+            >;
+            type Merkleized = AnyMerkleized<
+                F,
+                E,
+                FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
+                $index,
+                H,
+                unordered::Update<K, FixedEncoding<V>>,
+                S,
+            >;
+            type Error = Error<F>;
+            type Config = $config;
+            type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
-    }
+            async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+                <Self>::init(context, config).await
+            }
 
-    fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
-    }
+            fn initial_sync_target() -> Self::SyncTarget {
+                AnySyncTarget::new(
+                    initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
+                    non_empty_range!(Location::new(0), Location::new(1)),
+                )
+            }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
-        AnyUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
-            metadata: None,
+            fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+                let (database, shared) = database.into_parts();
+                AnyUnmerkleized {
+                    batch: database.new_batch(),
+                    db: shared,
+                    metadata: None,
+                }
+            }
+
+            fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+                batch.root() == target.root
+                    && *target.range.start() == batch.bounds().inactivity_floor
+                    && *target.range.end() == batch.bounds().tip.size
+            }
+
+            async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
+                let (db, _) = self.apply_batch(batch.inner).await?;
+                Ok(db)
+            }
+
+            async fn flush(self) -> Result<Self, Error<F>> {
+                self.flush().await
+            }
+
+            async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+                self.start_sync().await
+            }
+
+            async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
+                self.prune((*target.range.start()).into()).await
+            }
+
+            fn sync_target(&self) -> Self::SyncTarget {
+                let bounds = self.bounds();
+                AnySyncTarget::new(
+                    self.root(),
+                    non_empty_range!(self.sync_boundary(), bounds.end),
+                )
+            }
+
+            async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
+                let db = self.rewind(target.range.end()).await?;
+                let db = db.sync().await?;
+
+                let rewound_target = db.sync_target();
+                assert_eq!(
+                    rewound_target, target,
+                    "rewound database target mismatch after rewind",
+                );
+                Ok(db)
+            }
         }
-    }
-
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip.size
-    }
-
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
-    }
-
-    async fn flush(self) -> Result<Self, Error<F>> {
-        self.flush().await
-    }
-
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
-    }
-
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        self.prune((*target.range.start()).into()).await
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
+    };
 }
+
+impl_unordered_fixed_managed_db!(UnorderedIdx<T, Location<F>>, FixedConfig<T, S>);
+impl_unordered_fixed_managed_db!(
+    PartitionedUnorderedIdx<T, Location<F>, 1>,
+    FixedConfig<T, S, NonZeroUsize>
+);
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
@@ -697,52 +709,59 @@ where
     }
 }
 
-impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
-    for Db<
-        F,
-        E,
-        FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
-        UnorderedIdx<T, Location<F>>,
-        H,
-        unordered::Update<K, FixedEncoding<V>>,
-        ANY_BITMAP_CHUNK_BYTES,
-        S,
-    >
-where
-    F: Family,
-    E: Context + Spawner,
-    K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher,
-    T: Translator,
-    S: Strategy,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
+macro_rules! impl_unordered_fixed_state_sync_db {
+    ($index:ty) => {
+        impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
+            for Db<
+                F,
+                E,
+                FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>,
+                $index,
+                H,
+                unordered::Update<K, FixedEncoding<V>>,
+                ANY_BITMAP_CHUNK_BYTES,
+                S,
+            >
+        where
+            F: Family,
+            E: Context + Spawner,
+            K: Array,
+            V: value::FixedValue + 'static,
+            H: Hasher,
+            T: Translator,
+            S: Strategy,
+            R: sync::SourceFor<Self>,
+        {
+            type SyncError = sync::Error<F, R::Error, H::Digest>;
 
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
-    }
+            async fn sync_db(
+                context: E,
+                config: Self::Config,
+                source: R,
+                target: Self::SyncTarget,
+                tip_updates: mpsc::Receiver<Self::SyncTarget>,
+                finish: Option<mpsc::Receiver<()>>,
+                reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+                sync_config: SyncEngineConfig,
+            ) -> Result<Self, Self::SyncError> {
+                sync_standard_db(
+                    context,
+                    config,
+                    source,
+                    target,
+                    tip_updates,
+                    finish,
+                    reached_target,
+                    sync_config,
+                )
+                .await
+            }
+        }
+    };
 }
+
+impl_unordered_fixed_state_sync_db!(UnorderedIdx<T, Location<F>>);
+impl_unordered_fixed_state_sync_db!(PartitionedUnorderedIdx<T, Location<F>, 1>);
 
 impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
     for Db<
@@ -814,11 +833,24 @@ mod tests {
 
     type UnorderedFixedDb =
         fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+    type PartitionedUnorderedFixedDb = fixed::partitioned::p256::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+    fn fixed_config_with_concurrency<B>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+        init_concurrency: B,
+    ) -> FixedConfig<TwoCap, Sequential, B> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -838,8 +870,19 @@ mod tests {
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency,
         }
+    }
+
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+        fixed_config_with_concurrency(suffix, pooler, ())
+    }
+
+    fn partitioned_fixed_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> FixedConfig<TwoCap, Sequential, NonZeroUsize> {
+        fixed_config_with_concurrency(suffix, pooler, NZUsize!(4))
     }
 
     #[test]
@@ -960,6 +1003,94 @@ mod tests {
                 .root();
             assert_eq!(explicit_values, carried_values);
             assert_eq!(explicit_root, carried_root);
+        });
+    }
+
+    /// The P=1 partitioned fixed database must satisfy the same glue-owned apply/finalize
+    /// lifecycle as the flat variant. All keys deliberately share both the partition prefix and
+    /// translated sub-key, so updates, tombstones, and recreates exercise full-key collision
+    /// resolution through the `ManagedDb` wrapper.
+    #[test]
+    fn unordered_fixed_p256_managed_db_collision_roundtrip() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = partitioned_fixed_config("unordered-fixed-p256", &context);
+            let db =
+                <PartitionedUnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                    .await
+                    .unwrap();
+            let db = Shared::new("test", db);
+
+            let key = |suffix: u64| {
+                let mut bytes = [0u8; 32];
+                bytes[..3].copy_from_slice(&[0xa5, 0x11, 0x22]);
+                bytes[24..].copy_from_slice(&suffix.to_be_bytes());
+                Digest::from(bytes)
+            };
+            let value = |generation: u8, suffix: u64| {
+                Sha256::hash(&[
+                    b"partitioned-managed-db",
+                    &[generation],
+                    &suffix.to_be_bytes(),
+                ])
+            };
+
+            let mut seed = db.new_batch_for_test::<_>().await;
+            for suffix in 0..4 {
+                seed = seed.write(key(suffix), Some(value(0, suffix)));
+            }
+            let seed = crate::stateful::db::Unmerkleized::merkleize(seed)
+                .await
+                .unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database = <PartitionedUnorderedFixedDb as ManagedDb<_>>::apply(database, seed)
+                    .await
+                    .unwrap();
+                slot.put(database);
+            }
+
+            let changed = db
+                .new_batch_for_test::<_>()
+                .await
+                .write(key(0), Some(value(1, 0)))
+                .write(key(1), None)
+                .write(key(2), None);
+            let changed = crate::stateful::db::Unmerkleized::merkleize(changed)
+                .await
+                .unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database =
+                    <PartitionedUnorderedFixedDb as ManagedDb<_>>::apply(database, changed)
+                        .await
+                        .unwrap();
+                slot.put(database);
+            }
+
+            let recreated = db
+                .new_batch_for_test::<_>()
+                .await
+                .write(key(1), Some(value(2, 1)));
+            let recreated = crate::stateful::db::Unmerkleized::merkleize(recreated)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let database =
+                <PartitionedUnorderedFixedDb as ManagedDb<_>>::apply(database, recreated)
+                    .await
+                    .unwrap();
+            let (database, sync) =
+                <PartitionedUnorderedFixedDb as ManagedDb<_>>::finalize(database)
+                    .await
+                    .unwrap();
+            slot.put(database);
+            sync.await.expect("database sync failed");
+
+            let guard = db.read().await;
+            assert_eq!(guard.get(&key(0)).await.unwrap(), Some(value(1, 0)));
+            assert_eq!(guard.get(&key(1)).await.unwrap(), Some(value(2, 1)));
+            assert_eq!(guard.get(&key(2)).await.unwrap(), None);
+            assert_eq!(guard.get(&key(3)).await.unwrap(), Some(value(0, 3)));
         });
     }
 

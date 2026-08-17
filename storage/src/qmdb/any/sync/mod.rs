@@ -30,7 +30,7 @@ use crate::{
             unordered::{
                 fixed::{
                     Db as UnorderedFixedDb, Operation as UnorderedFixedOp,
-                    Update as UnorderedFixedUpdate,
+                    Update as UnorderedFixedUpdate, partitioned::p256::Db as UnorderedFixedP256Db,
                 },
                 variable::{
                     Db as UnorderedVariableDb, Operation as UnorderedVariableOp,
@@ -204,6 +204,12 @@ macro_rules! impl_sync_database {
 impl_sync_database!(
     UnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
+    Array, FixedValue
+);
+
+impl_sync_database!(
+    UnorderedFixedP256Db, UnorderedFixedOp, UnorderedFixedUpdate,
+    fixed::Journal<E, Self::Op>, FixedConfig<T, S, NonZeroUsize>,
     Array, FixedValue
 );
 

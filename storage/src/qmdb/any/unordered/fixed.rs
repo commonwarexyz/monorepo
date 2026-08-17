@@ -707,6 +707,139 @@ pub(crate) mod test {
         });
     }
 
+    /// The snapshot index is derived from the authenticated log, so changing between the flat and
+    /// P=1 partitioned representations must preserve durable state in both directions. The same
+    /// partitions are reopened across representations after updates, tombstones, recreates,
+    /// pruning, and an uncommitted crash tail. Deliberate translated-key collisions ensure the
+    /// replay checks full keys rather than treating the compact index key as authoritative.
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_flat_partitioned_p256_reopen_compatibility() {
+        deterministic::Runner::default().start(|context| async move {
+            type Flat = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+            type P256 = partitioned::p256::Db<
+                mmr::Family,
+                Context,
+                Digest,
+                Digest,
+                Sha256,
+                TwoCap,
+                Sequential,
+            >;
+
+            let partition = "flat_partitioned_p256_reopen";
+            let mut keys: Vec<_> = (0u64..96).map(key).collect();
+            keys.extend((0u64..32).map(|i| colliding_digest(0xa5, i)));
+            let mut expected = vec![None; keys.len()];
+
+            let cfg = fixed_db_config::<TwoCap>(partition, &context);
+            let mut db = Flat::init(context.child("flat_populate"), cfg)
+                .await
+                .unwrap();
+
+            let mut batch = db.new_batch();
+            for (i, key) in keys.iter().enumerate() {
+                let value = val(i as u64);
+                batch = batch.write(*key, Some(value));
+                expected[i] = Some(value);
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
+
+            let mut batch = db.new_batch();
+            for (i, key) in keys.iter().enumerate() {
+                if i.is_multiple_of(5) {
+                    batch = batch.write(*key, None);
+                    expected[i] = None;
+                } else if i.is_multiple_of(2) {
+                    let value = val((i + keys.len()) as u64);
+                    batch = batch.write(*key, Some(value));
+                    expected[i] = Some(value);
+                }
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
+
+            let mut batch = db.new_batch();
+            for i in (0..keys.len()).step_by(10) {
+                let value = val((i + keys.len() * 2) as u64);
+                batch = batch.write(keys[i], Some(value));
+                expected[i] = Some(value);
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
+            db = db.sync().await.unwrap();
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            db = db.sync().await.unwrap();
+
+            let flat_root = db.root();
+            let flat_bounds = db.bounds();
+            let flat_floor = db.inactivity_floor_loc();
+            let active_keys = expected.iter().filter(|value| value.is_some()).count();
+            assert_eq!(db.active_keys, active_keys);
+            drop(db);
+
+            let mut cfg = fixed_db_config_partitioned::<TwoCap>(partition, &context);
+            cfg.init_concurrency = NZUsize!(4);
+            let mut db = P256::init(context.child("p256_reopen"), cfg).await.unwrap();
+            assert_eq!(db.root(), flat_root);
+            assert_eq!(db.bounds(), flat_bounds);
+            assert_eq!(db.inactivity_floor_loc(), flat_floor);
+            assert_eq!(db.active_keys, active_keys);
+            for (i, (key, value)) in keys.iter().zip(&expected).enumerate() {
+                assert_eq!(db.get(key).await.unwrap(), *value, "P256 key {i}");
+            }
+
+            let mut batch = db.new_batch();
+            for i in (1..keys.len()).step_by(3) {
+                if i.is_multiple_of(7) {
+                    batch = batch.write(keys[i], None);
+                    expected[i] = None;
+                } else {
+                    let value = val((i + keys.len() * 3) as u64);
+                    batch = batch.write(keys[i], Some(value));
+                    expected[i] = Some(value);
+                }
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
+            db = db.sync().await.unwrap();
+
+            let p256_root = db.root();
+            let p256_bounds = db.bounds();
+            let p256_floor = db.inactivity_floor_loc();
+            let active_keys = expected.iter().filter(|value| value.is_some()).count();
+            assert_eq!(db.active_keys, active_keys);
+
+            // Apply but do not commit one final batch. Reopen must discard this crash tail.
+            let crash_value = val(999_999);
+            let merkleized = db
+                .new_batch()
+                .write(keys[0], Some(crash_value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.get(&keys[0]).await.unwrap(), Some(crash_value));
+            drop(db);
+
+            let cfg = fixed_db_config::<TwoCap>(partition, &context);
+            let db = Flat::init(context.child("flat_reopen"), cfg).await.unwrap();
+            assert_eq!(db.root(), p256_root);
+            assert_eq!(db.bounds(), p256_bounds);
+            assert_eq!(db.inactivity_floor_loc(), p256_floor);
+            assert_eq!(db.active_keys, active_keys);
+            for (i, (key, value)) in keys.iter().zip(&expected).enumerate() {
+                assert_eq!(db.get(key).await.unwrap(), *value, "flat key {i}");
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Build a `P`-partitioned unordered db with churny ops, then assert that reopening it with a
     /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
     /// de-interleave, counts that round down to fewer workers with wider ranges, and counts

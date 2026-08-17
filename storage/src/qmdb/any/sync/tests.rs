@@ -2083,7 +2083,7 @@ mod harnesses {
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
     use commonware_runtime::{BufferPooler, deterministic::Context};
-    use commonware_utils::TestRng;
+    use commonware_utils::{NZUsize, TestRng};
     use rand::Rng;
 
     // ===== Family-generic op creation helpers =====
@@ -2366,6 +2366,100 @@ mod harnesses {
         ) -> Self::Db {
             let db = crate::qmdb::any::unordered::fixed::test::apply_ops(db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
+        }
+    }
+
+    pub struct UnorderedFixedP256Harness;
+
+    impl SyncTestHarness for UnorderedFixedP256Harness {
+        type Family = crate::mmr::Family;
+        type Db = crate::qmdb::any::unordered::fixed::partitioned::p256::Db<
+            crate::mmr::Family,
+            Context,
+            Digest,
+            Digest,
+            commonware_cryptography::Sha256,
+            TwoCap,
+            commonware_parallel::Sequential,
+        >;
+
+        fn sync_target_root(db: &Self::Db) -> Digest {
+            db.root()
+        }
+
+        fn config(
+            suffix: &str,
+            pooler: &impl BufferPooler,
+        ) -> crate::qmdb::any::FixedConfig<
+            TwoCap,
+            commonware_parallel::Sequential,
+            core::num::NonZeroUsize,
+        > {
+            crate::qmdb::any::test::fixed_db_config_full(
+                suffix,
+                pooler,
+                commonware_parallel::Sequential,
+                NZUsize!(4),
+            )
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>>
+        {
+            create_unordered_fixed_ops(n, seed)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>>
+        {
+            create_unordered_fixed_ops(n, 0)
+        }
+
+        async fn init_db(mut ctx: Context) -> Self::Db {
+            let suffix = ctx.next_u64().to_string();
+            let config = Self::config(&suffix, &ctx);
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<
+                TwoCap,
+                commonware_parallel::Sequential,
+                core::num::NonZeroUsize,
+            >,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<
+                crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
+            >,
+        ) -> Self::Db {
+            use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
+
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Update(Update(key, value)) => {
+                        batch = batch.write(key, Some(value));
+                    }
+                    Operation::Delete(key) => {
+                        batch = batch.write(key, None);
+                    }
+                    Operation::CommitFloor(_, _) => {
+                        panic!("CommitFloor not supported in apply_ops");
+                    }
+                }
+            }
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
@@ -2963,6 +3057,7 @@ macro_rules! from_sync_result_tests_for_harness {
 sync_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed);
 sync_tests_for_harness!(harnesses::OrderedVariableHarness, ordered_variable);
 sync_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed);
+sync_tests_for_harness!(harnesses::UnorderedFixedP256Harness, unordered_fixed_p256);
 sync_tests_for_harness!(harnesses::UnorderedVariableHarness, unordered_variable);
 
 from_sync_result_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed_from_sync);
