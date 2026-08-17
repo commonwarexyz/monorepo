@@ -10,6 +10,11 @@ permissions:
 
 jobs:
   All:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.actor == 'patrick-ogrady' &&
+      github.triggering_actor == 'patrick-ogrady')
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
