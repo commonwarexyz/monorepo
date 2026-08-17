@@ -57,15 +57,6 @@ struct Inner<T> {
 /// [`mutate`](Self::mutate) is the only way to mutate it.
 pub struct Writer<T>(Arc<Inner<T>>);
 
-/// Cloneable reader of a [`Writer`]'s database.
-pub struct Reader<T>(Arc<Inner<T>>);
-
-impl<T> Clone for Reader<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
 impl<T> Writer<T> {
     /// Wrap `db` in a new writer.
     pub fn new(db: T) -> Self {
@@ -113,6 +104,9 @@ impl<T> Drop for Writer<T> {
     }
 }
 
+/// Cloneable reader of a [`Writer`]'s database.
+pub struct Reader<T>(Arc<Inner<T>>);
+
 impl<T> Reader<T> {
     /// Acquire a read guard, or report the writer dropped or poisoned.
     pub async fn read(&self) -> Result<AsyncRwLockReadGuard<'_, T>, Closed> {
@@ -125,6 +119,12 @@ impl<T> Reader<T> {
             State::Poisoned => None,
         })
         .map_err(|_| Closed)
+    }
+}
+
+impl<T> Clone for Reader<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 
