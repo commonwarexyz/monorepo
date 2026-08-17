@@ -8,11 +8,11 @@ invariants must hold*; it deliberately omits *how* the code achieves them.
 ## 1. Purpose
 The marshal component provides ordered delivery of finalized blocks
 by Simplex-layer to the application. It is defined in `consensus/src/marshal/mod.rs`. 
-The marshal standard tests in `consensus/src/marshal/standard/mod.rs` drive the
-marshal into a set of interesting semantic states (missing candidate, pending
-backfill, divergent same-height certificates, pending floor anchor, view-pruning
-edges, and so on). Those tests assert per-scenario behaviour under real BLS
-crypto and cannot be reused for fuzzing directly.
+The marshal standard tests under `consensus/src/marshal` drive the marshal into
+a set of interesting semantic states (missing candidate, pending backfill,
+divergent same-height certificates, pending floor anchor, view-pruning edges,
+and so on). Those tests are authoritative ground truth and currently assert
+per-scenario behaviour under real BLS crypto.
 
 This feature reproduces the *prefix* of each such scenario as a deterministic
 script over a fast mock certificate scheme called `SimplexCertificateMock`,
@@ -25,14 +25,18 @@ random input alone reaches rarely or never.
 ## 2. Goals
 
 - **G1.** Move the system under test into a chosen interesting marshal state,
-  defined by the developers in the existed tests then fuzz forward from that state.
+  defined by the developers in the existing tests, then fuzz forward from that state.
 - **G2.** Cover both Standard marshal variants — `Deferred` and `Inline` — with
-  the same scenarios, adversary, and invariants.
+  the same harness, adversary, and invariants, running each source scenario under
+  every compatible variant.
 - **G3.** Detect marshal-layer safety and liveness violations reachable from the
   reproduced states, under both an honest harness and a byzantine one.
 - **G4.** Keep every scenario traceable to the `consensus/src` standard test it
   derives from, so an auditor can map fuzz coverage back to intended behaviour.
 - **G5.** Achieve all of the above without modifying `consensus/src`.
+- **G6.** Cover adversarial / equivocation, recovery / gap repair, floor handling,
+  and certify / verify edge states using faithful reproductions of authoritative
+  source tests.
 
 ## 3. Technical requirements
 
@@ -40,8 +44,9 @@ random input alone reaches rarely or never.
   per Standard variant: `marshal_scenario_standard_deferred_cert_mock` and
   `marshal_scenario_standard_inline_cert_mock`.
 - **R2 — Shared logic.** Both targets MUST exercise the same setup, scenario
-  prefixes, adversary, and invariants; the variant is the only difference between
-  them and is fixed per target (never a fuzzed input field).
+  framework, adversary, and invariants; the variant is fixed per target (never a
+  fuzzed input field). A source scenario runs in every variant compatible with its
+  defining state, as specified in §7.
 - **R3 — Deterministic execution.** A run MUST be fully determined by its input
   bytes: the same input reproduces the same execution, using the deterministic
   runtime in `runtime/src/deterministic.rs`, the mock certificate scheme, and a seeded `FuzzRng`.
@@ -58,32 +63,32 @@ random input alone reaches rarely or never.
 - **R6 — Mode coverage.** The feature MUST support an honest mode (`N4F0C4`,
   four honest engines) and an adversarial mode (`N4F1C3`, node 0
   byzantine, nodes 1–3 honest).
-- **R7 — Source traceability.** Each scenario MUST correspond to a named
-  `consensus/src` standard test and reproduce that test's interesting *state*.
-  Where the exact mechanic is not reachable through the scripting surface, the
-  scenario MUST reproduce the closest sound state and MUST document the divergence
-  at its definition.
+- **R7 — Source fidelity.** Each scenario MUST name an authoritative test under
+  `consensus/src/marshal` and obey the reuse-or-copy requirements in §7. It MUST
+  reproduce the test's defining state at handoff, including any pending operation
+  that is part of that state; a merely similar or "closest" state does not qualify.
 - **R8 — Non-modification.** The feature MUST NOT change anything under
   `consensus/src`. All code lives in the fuzz crate.
-- **R9 — Exclusion of unreproducible sources.** A standard test whose
-  interesting state cannot be *soundly* reproduced through the scripting
-  surface (per the eligibility criteria in §7) MUST be excluded from the
-  scenario set rather than approximated, and each exclusion MUST be documented
-  alongside the scenario definitions together with the constraint that forces
-  it. R7's closest-sound-state fallback applies only when a sound close state
-  exists.
+- **R9 — Exclusion of unreproducible sources.** If a source test's defining state
+  cannot be built and retained through handoff with the available scripting
+  surface in a target configuration, it MUST be excluded from that configuration
+  rather than approximated. Every exclusion MUST identify the unavailable
+  capability. Inability to import the source code is not grounds for exclusion
+  when a faithful copy is scriptable.
 
 ## 4. Properties
 
 The feature must exhibit the following qualitative guarantees. These are the
 audit's acceptance criteria; the checkable predicates are enumerated in §8.
 
-- **P1 — Composition soundness.** The reproduced prefix state must be one the real
-  protocol could actually reach, so that any invariant failure during fuzzing is a
-  genuine defect and never an artefact of an impossible starting state.
-- **P2 — Variant symmetry.** For a given input, the Deferred and Inline targets
-  run the same scenario and are held to the same invariants; neither variant may
-  require relaxing an invariant that the other satisfies.
+- **P1 — Source-faithful composition.** The source test's construction is
+  authoritative. The reproduced prefix MUST preserve its defining state without
+  adding, removing, or changing source artifacts or introducing a new
+  inconsistency at engine handoff.
+- **P2 — Variant symmetry.** For a scenario compatible with both variants, the
+  Deferred and Inline targets run the same prefix and are held to the same
+  invariants; neither variant may require relaxing an invariant that the other
+  satisfies.
 - **P3 — Adversary realism.** Byzantine behaviour must be protocol-plausible:
   messages emitted by the byzantine node must be validly signed and must not rely
   on signature-breaking byte corruption of honest traffic. No forged quorum
@@ -162,43 +167,36 @@ silent (crash-silence), an admissible byzantine behavior:
   shadow each other: the dissemination leader announce is *at* the attack view while the
   Simplex-layer faults are *above* it, so their emissions occupy disjoint views.
 
-## 7. Scenarios (normative shape)
+## 7. Scenarios
 
-Scenarios reproduce marshal states extracted from the standard tests. The spec
-constrains their *shape*, not their count or individual construction:
+Production marshal tests are ground truth. A scenario reproduces the
+state-producing prefix of one such test through the handoff point.
 
-- **S1 — Themed coverage.** The scenario set MUST cover four themes:
-  (a) adversarial / equivocation states; (b) recovery / gap-repair states;
-  (c) floor-handling states; (d) certify / verify edge states.
-- **S2 — Source mapping.** Each scenario MUST derive from, and be annotated with,
-  a specific `consensus/src/marshal/mod.rs` standard test (per R7).
-- **S3 — State only.** A scenario MUST build only the interesting *prefix state*.
-  It MUST NOT re-assert the per-scenario behavioural oracle — that assertion lives
-  in the corresponding `consensus/src/marshal/mod.rs` unit test (see §9, out of scope).
-- **S4 — Universality.** A scenario MUST run under both variants and both modes
-  unless a documented soundness constraint prevents it; scenarios are selected by
-  fuzz input, not fixed per target.
-- **S5 — Honest reproduction.** Scenario prefixes script only the honest core
-  {B, C, D}; node A (index 0) is reserved for the adversary, so the same prefix is
-  valid in both modes.
-- **S6 — Eligibility.** A standard test can be used as a scenario source only
-  if its interesting state passes all four checks:
-  (a) *scriptable* — the prefix can build the state with mailbox verbs alone.
-  No consensus engine, no wrapper verify/certify call, no marshal restart, and
-  no writing to storage before startup.
-  (b) *honest-plausible* — the honest signers could really have produced every
-  fabricated certificate. One leader per round, no two certificates for
-  different blocks at the same height, and no certificate that contradicts the
-  rest of the fabricated history.
-  (c) *floor-compatible* — the whole state fits at or below the floor the
-  engines start from (I1) and still makes sense there.
-  (d) *durable* — the state is still there when the fuzzing phase starts. A
-  race or timing window the prefix cannot hold open does not count.
-- **S7 — Exclusion over approximation.** If a test fails any S6 check, it MUST
-  NOT be forced in: do not fabricate an impossible artifact, and do not swap in
-  a leftover state that duplicates another scenario or is already trivially
-  covered. Exclude the test under R9 instead. The R7 fallback allows a
-  different *mechanism*, never an unsound *state*.
+- **S1 — Reuse first.** Each scenario MUST name its source test. Where existing
+  visibility and generic bounds permit, the source test or its shared
+  state-building helpers MUST be imported and instantiated with
+  `SimplexCertificateMock`. This reuse requirement does not authorize changes
+  under `consensus/src`.
+- **S2 — Faithful copy.** If direct reuse is not possible, the source test's
+  state-producing prefix MUST be copied into the fuzz crate and reproduced without
+  defects. Only the cryptographic backend and necessary harness plumbing may
+  differ; state-producing operations, their ordering, source roles, certificates,
+  and the resulting per-node handoff state MUST preserve the source semantics. A
+  copied scenario MUST NOT substitute an approximate, generic, or merely similar
+  state.
+- **S3 — Verified handoff.** The prefix MUST complete before the consensus engines
+  start, and the defining state MUST remain present at handoff. Construction-time
+  assertions MUST demonstrate that the handoff state corresponds to the source
+  test; source traceability by name or comment alone is insufficient.
+- **S4 — Oracle boundary.** A scenario stops at the source test's interesting
+  handoff state. It need not repeat the source test's post-handoff behavioural
+  assertions, which remain in the production test.
+- **S5 — Compatibility and exclusion.** A scenario MUST run under every wrapper
+  variant and mode compatible with its defining state. If that state or a defining
+  pending operation cannot be built and retained with the available scripting
+  surface, the source MUST be excluded from the incompatible configuration under
+  R9, with the precise missing capability documented. It MUST NOT be replaced by
+  a different state.
 
 ## 8. Invariants (must hold at the measurement point)
 
@@ -226,15 +224,21 @@ reportable defect.
   only safety is checked.
 - **I6 — Bounded pre-heal loss.** Finite message loss before the heal is
   admissible; after the heal, honest nodes must not silently drop honest traffic.
+  The heal restores every link losslessly, so a post-heal network drop is
+  impossible by construction; the residual silent-drop mode, an honest node
+  blocklisting an honest peer, MUST be directly observed at the measurement point
+  and MUST be empty (pairs touching the byzantine node are exempt, since
+  blocklisting a poison-serving adversary is correct).
 - **I7 — Source tree untouched.** `git status consensus/src` MUST stay clean across
   the entire feature.
 
 ## 9. Out of scope
 
 - **Per-scenario behavioural oracles.** The fuzzer does not re-check the specific
-  behaviour each scenario is named for (e.g. "the certified copy survives view
-  pruning"); those assertions remain in the `consensus/src/marshal/mod.rs` unit tests. The fuzzer
-  checks only the §8 invariants and liveness, and does not use unit tests' oracles.
+  post-handoff behaviour each scenario is named for (e.g. "the certified copy
+  survives view pruning"); those assertions remain in the source unit tests.
+  Construction-time assertions proving that the handoff state faithfully matches
+  the source are required by S3 and are not behavioural oracles.
 - **Certification-verdict agreement.** The separate certify-*verdict* agreement
   invariant used by the end-to-end twins targets is not used here (it is
   structurally trivial for Inline). Only block agreement (I2) applies.
@@ -254,22 +258,29 @@ outcome an auditor should confirm.
 1. **Source tree is untouched.**
    `git status --porcelain consensus/src` prints nothing (I7).
 
-2. **Both targets and the runner compile.**
+2. **Source fidelity is demonstrated.**
+   Every retained scenario names its authoritative source and has a
+   construction-time handoff assertion. Existing mock-compatible source logic is
+   instantiated with `SimplexCertificateMock`; otherwise an audit confirms that
+   the copied prefix preserves the source construction through handoff. Every
+   exclusion identifies the unavailable scripting capability (R7, R9, S1-S5).
+
+3. **Both targets and the runner compile.**
    `cargo check -p commonware-consensus-fuzz --features mocks --tests` succeeds,
    proving both entry functions and the variant-generic driver type-check (R1, R2).
 
-3. **Scenario suite passes for both variants and both modes.**
+4. **Scenario suite passes for all compatible variants and modes.**
    `cargo nextest run -p commonware-consensus-fuzz --features mocks scenarios::`
-   runs every scenario under {honest, adversarial} × {deferred, inline} and reports
-   all tests passing. This exercises I1–I6 from every reproduced state and confirms
-   variant symmetry (P2): the adversarial Inline runs do not false-positive on block
+   runs every compatible scenario/configuration combination and reports all tests
+   passing. This exercises I1–I6 from every reproduced state and confirms variant
+   symmetry (P2): the adversarial Inline runs do not false-positive on block
    agreement (I2).
 
-4. **Lint is clean.**
+5. **Lint is clean.**
    `cargo clippy -p commonware-consensus-fuzz --features mocks --tests` reports no
    warnings.
 
-5. **Both fuzz targets build and run.**
+6. **Both fuzz targets build and run.**
    `cargo +nightly fuzz build --fuzz-dir consensus/fuzz
    marshal_scenario_standard_deferred_cert_mock` (and the `inline` target) build,
    then a short `-max_total_time=8` smoke run of each completes with no crash, hang,
@@ -277,10 +288,10 @@ outcome an auditor should confirm.
    open distinct paths (G1, G3). The adversarial Inline smoke in particular must not
    surface a block-agreement false positive (P2).
 
-6. **A planted defect is caught.** As a negative control, an auditor may weaken one
+7. **A planted defect is caught.** As a negative control, an auditor may weaken one
    §8 invariant target (for example, corrupt an honest node's delivered chain) and
    confirm the scenario suite fails, demonstrating the invariants are load-bearing
    rather than vacuous.
 
-Passing steps 1–5, plus the negative control in step 6, constitutes acceptance of
+Passing steps 1–6, plus the negative control in step 7, constitutes acceptance of
 this specification.
