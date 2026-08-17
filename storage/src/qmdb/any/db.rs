@@ -64,7 +64,6 @@ pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
         }
     }
 
-    let context = context.child("floor_prefetch");
     let state = Arc::new(Mutex::new(WarmState {
         running: false,
         pending: None,
@@ -796,7 +795,7 @@ where
     /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
     /// (see [crate::qmdb::SnapshotBuild::Concurrency]).
     ///
-    /// # Panics
+    /// # Supervision
     ///
     /// `floor_prefetch_spawn` must be built (see [`warm_spawner`]) from a context whose
     /// node is never spawn-consumed, and whose owning task outlives the database;
@@ -921,7 +920,7 @@ where
     where
         E: Spawner + 'static,
     {
-        self.floor_prefetch_spawn = warm_spawner(context);
+        self.floor_prefetch_spawn = warm_spawner(context.child("floor_prefetch"));
     }
 
     /// Return a future that warms caches for up to `max_items` operations starting at the

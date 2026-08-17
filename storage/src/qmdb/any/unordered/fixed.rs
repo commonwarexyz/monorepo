@@ -518,6 +518,36 @@ pub(crate) mod test {
                 "delete-all must not update the estimator"
             );
 
+            // A delete-all snap collapsed inside an applied chain must not poison the
+            // estimator either: build (delete-all) -> (re-insert) and apply only the tip.
+            let target_after_refill = db.floor_prefetch_target;
+            let key_a = Sha256::hash(&[&20u64.to_be_bytes()]);
+            let val_a = Sha256::hash(&[&21u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key_a, Some(val_a))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            let mut delete_all = db.new_batch();
+            for i in [7u64, 20u64] {
+                delete_all = delete_all.write(Sha256::hash(&[&i.to_be_bytes()]), None);
+            }
+            let delete_all = delete_all.merkleize(&db, None).await.unwrap();
+            let reinsert = delete_all
+                .new_batch::<Sha256>()
+                .write(Sha256::hash(&[&30u64.to_be_bytes()]), Some(val_a))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(reinsert).await.unwrap();
+            assert!(
+                db.floor_prefetch_target <= target_after_refill.max(4),
+                "collapsed snap must not inflate the estimator: {}",
+                db.floor_prefetch_target
+            );
+
             // Refilling resumes normal scan-based updates from the sane estimate.
             let key = Sha256::hash(&[&7u64.to_be_bytes()]);
             let value = Sha256::hash(&[&8u64.to_be_bytes()]);
