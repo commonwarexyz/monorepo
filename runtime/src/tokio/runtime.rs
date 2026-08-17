@@ -7,7 +7,7 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "dial9")]
-use crate::tokio::dial9::{self, Config as Dial9Config};
+use crate::tokio::dial9::{self, Config as Dial9Config, InstrumentedRuntime};
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
     Spawner as _, StreamOf, Supervisor as _, child_label,
@@ -45,7 +45,9 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::Builder;
+#[cfg(not(feature = "dial9"))]
+use tokio::runtime::Runtime;
 
 #[cfg(feature = "iouring-network")]
 cfg_if::cfg_if! {
@@ -354,6 +356,9 @@ impl Default for Config {
 pub struct Executor {
     registry: Registry,
     metrics: Arc<Metrics>,
+    #[cfg(feature = "dial9")]
+    runtime: InstrumentedRuntime,
+    #[cfg(not(feature = "dial9"))]
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
@@ -423,6 +428,10 @@ impl crate::Runner for Runner {
                         (None, runtime)
                     }
                 };
+                let traced = dial9_recorder
+                    .as_ref()
+                    .is_some_and(|(recorder, _)| dial9::traced(recorder));
+                let runtime = InstrumentedRuntime::new(runtime, dial9_recorder);
             } else {
                 let mut builder = Builder::new_multi_thread();
                 configure(&mut builder);
@@ -540,9 +549,7 @@ impl crate::Runner for Runner {
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
             #[cfg(feature = "dial9")]
-            traced: dial9_recorder
-                .as_ref()
-                .is_some_and(|(recorder, _)| dial9::traced(recorder)),
+            traced,
         });
 
         // Get metrics
@@ -564,14 +571,6 @@ impl crate::Runner for Runner {
         };
         let output = executor.runtime.block_on(panicked.interrupt(f(context)));
         gauge.dec();
-
-        // Release the runtime (dropping it flushes worker-local trace buffers)
-        // before draining the trace pipeline.
-        #[cfg(feature = "dial9")]
-        if let Some((recorder, timeout)) = dial9_recorder {
-            drop(executor);
-            recorder.graceful_shutdown(timeout);
-        }
 
         output
     }
@@ -629,7 +628,7 @@ impl crate::Spawner for Context {
     // Propagate the caller's location into tokio's spawn so tools built on the
     // runtime hooks (e.g. dial9) record the application's spawn site rather
     // than this function.
-    #[track_caller]
+    #[cfg_attr(feature = "dial9", track_caller)]
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,

@@ -14,6 +14,13 @@
 //! time a worker spent descheduled mid-poll) are recorded onto the same
 //! timeline.
 //!
+//! # Coverage
+//!
+//! The runner's root future and tasks using dedicated or blocking shared
+//! execution are driven with `Runtime::block_on`, outside a Tokio task. Their
+//! polls and wakes are therefore not recorded. Use the default async
+//! [Spawner::spawn](crate::Spawner::spawn) execution for per-task visibility.
+//!
 //! Recording is production-safe by design: if the trace directory cannot be
 //! created, telemetry is disabled with an error log and the runtime starts
 //! normally. Trace files are rotated and bounded by a total disk budget.
@@ -74,7 +81,7 @@
 //! let cfg = tokio::Config::default()
 //!     .with_dial9(tokio::dial9::Config::new("/tmp/my_traces"));
 //! tokio::Runner::new(cfg).start(|context| async move {
-//!     // Application code runs traced.
+//!     // Tasks spawned with the default async execution are traced.
 //! });
 //! ```
 
@@ -86,7 +93,7 @@ compile_error!(
 );
 
 use ::dial9::{
-    DiskBuffer, Recorder, RecorderPerfExt as _, RecorderTokioExt as _, TokioAttachOptions,
+    Dial9HandleTokioExt as _, DiskBuffer, Recorder, RecorderPerfExt as _, TokioAttachOptions,
     cpu::{CpuProfilingConfig, SchedEventConfig},
     recorder_or_disabled, spawn_in,
 };
@@ -213,6 +220,42 @@ impl Config {
     }
 }
 
+/// Drops the Tokio runtime before shutting down its dial9 recorder.
+pub(super) struct InstrumentedRuntime {
+    // Fields are dropped in declaration order. Keep the runtime before the
+    // recorder so worker-local trace buffers are flushed before the recorder
+    // drains the trace pipeline.
+    runtime: Runtime,
+    _recorder: RecorderShutdown,
+}
+
+impl InstrumentedRuntime {
+    pub(super) const fn new(runtime: Runtime, recorder: Option<(Recorder, Duration)>) -> Self {
+        Self {
+            runtime,
+            _recorder: RecorderShutdown(recorder),
+        }
+    }
+}
+
+impl std::ops::Deref for InstrumentedRuntime {
+    type Target = Runtime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+struct RecorderShutdown(Option<(Recorder, Duration)>);
+
+impl Drop for RecorderShutdown {
+    fn drop(&mut self) {
+        if let Some((recorder, timeout)) = self.0.take() {
+            recorder.graceful_shutdown(timeout);
+        }
+    }
+}
+
 /// Build a [Recorder] from `cfg` and a tokio [Runtime] instrumented against
 /// it.
 ///
@@ -236,19 +279,23 @@ pub(super) fn attach(
     if cfg.sched_profiling {
         recorder = recorder.with_sched_events(SchedEventConfig::default().include_kernel(true));
     }
-    recorder.build().attach_tokio_runtime_with(
+    let recorder = recorder.build();
+    let mut builder = Builder::new_multi_thread();
+    configure(&mut builder);
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .runtime_name("commonware")
             .task_tracking_enabled(cfg.task_tracking)
             .build(),
-        configure,
-    )
+    )?;
+    Ok((recorder, runtime))
 }
 
 /// Returns whether `recorder` is actually recording, so untraced runtimes
 /// skip spawn instrumentation entirely.
 pub(super) fn traced(recorder: &Recorder) -> bool {
-    recorder.shared().is_some()
+    recorder.handle().is_enabled()
 }
 
 /// Spawn `future` on `runtime` wrapped with dial9 wake-event tracking, so
@@ -300,5 +347,59 @@ mod tests {
             });
         assert!(attributed);
         std::fs::remove_dir_all(&trace_directory).unwrap();
+    }
+
+    #[test]
+    fn test_invalid_trace_directory_disables_recording() {
+        let trace_directory = std::env::temp_dir().join(format!(
+            "commonware_dial9_invalid_path_test_{}",
+            std::process::id()
+        ));
+        std::fs::write(&trace_directory, []).unwrap();
+        let cfg = tokio::Config::default().with_dial9(
+            Config::new(&trace_directory)
+                .with_cpu_profiling(false)
+                .with_sched_profiling(false),
+        );
+
+        let output = tokio::Runner::new(cfg)
+            .start(|context| async move { context.spawn(|_| async move { 42 }).await.unwrap() });
+
+        assert_eq!(output, 42);
+        std::fs::remove_file(trace_directory).unwrap();
+    }
+
+    #[test]
+    fn test_recorder_shutdown_waits_for_returned_context() {
+        let trace_directory = std::env::temp_dir().join(format!(
+            "commonware_dial9_returned_context_test_{}",
+            std::process::id()
+        ));
+        if trace_directory.exists() {
+            std::fs::remove_dir_all(&trace_directory).unwrap();
+        }
+        let cfg = tokio::Config::default().with_dial9(
+            Config::new(&trace_directory)
+                .with_cpu_profiling(false)
+                .with_sched_profiling(false),
+        );
+
+        let context = tokio::Runner::new(cfg).start(|context| async move { context });
+
+        let has_segment = |suffix: &str| {
+            std::fs::read_dir(&trace_directory).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(suffix)
+            })
+        };
+        assert!(has_segment(".bin.active"));
+
+        drop(context);
+        assert!(!has_segment(".bin.active"));
+        assert!(has_segment(".bin"));
+        std::fs::remove_dir_all(trace_directory).unwrap();
     }
 }
