@@ -338,7 +338,10 @@ impl<P: Simplex> ScenarioEnv<P> {
     /// validated after every prior message has been processed.
     pub(crate) async fn missing(&self, node: Node, digest: Sha256Digest) {
         assert!(
-            self.mailboxes[node.idx()].get_block(&digest).await.is_none(),
+            self.mailboxes[node.idx()]
+                .get_block(&digest)
+                .await
+                .is_none(),
             "block must still be missing at handoff: node={node:?} digest={digest}",
         );
     }
