@@ -36,10 +36,8 @@ pub enum PartialWriteMode {
     Subset,
 }
 
-/// Fault configuration for `write_at` operations.
-///
-/// The retention mode applies to failed writes and successful writes that remain unsynchronized
-/// when a crash is simulated.
+/// Fault configuration for `write_at` operations and byte retention from failed writes or
+/// successful unsynchronized writes when a crash is simulated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WriteConfig {
     /// Probability that `write_at` returns an injected failure.
@@ -64,14 +62,14 @@ pub struct Config {
     /// Failure rate for `read_at` operations.
     pub read_rate: Option<f64>,
 
-    /// Fault configuration for `write_at` operations.
+    /// Failure and byte-retention configuration for `write_at` operations.
     pub write_rate: Option<WriteConfig>,
 
     /// Failure rate for `sync` operations.
     pub sync_rate: Option<f64>,
 
-    /// Failure rate for `resize` operations, also used independently as the probability that a
-    /// successful unsynchronized resize survives a simulated crash.
+    /// Failure rate for `resize` operations and probability that a successful unsynchronized
+    /// resize survives a simulated crash.
     pub resize_rate: Option<f64>,
 
     /// Probability that a resize failure is partial (resized to an intermediate
