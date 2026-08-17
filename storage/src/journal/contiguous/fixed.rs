@@ -2646,7 +2646,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_replay_propagates_read_options_and_keeps_writable_tip_cached() {
+    fn test_replay_and_writable_tip_request_dont_cache() {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(3);
 
         let executor = deterministic::Runner::default();
@@ -2712,7 +2712,7 @@ mod tests {
                 assert!(
                     reads
                         .iter()
-                        .all(|options| *options == ReadOptions::default())
+                        .all(|options| *options == ReadOptions::DONT_CACHE)
                 );
             }
 

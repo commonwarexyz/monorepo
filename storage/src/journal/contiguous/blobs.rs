@@ -568,8 +568,8 @@ impl<'a, B: RBlob> Blob<'a, B> {
         read_options: ReadOptions,
     ) -> Result<Replay<'a, B>, Error> {
         match self {
-            // Live writable data reads through its CacheRef, whose policy is configured by the
-            // owner of that cache rather than by this replay operation.
+            // Live writable data reads through its CacheRef, whose misses request DONT_CACHE
+            // independently of this replay operation.
             Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
             Self::Sealed(sealed) => {
                 let mut replay = sealed.replay(buffer_size, read_options)?;
