@@ -4,8 +4,11 @@
 //! The verbs act directly on the marshal mailboxes below the consensus engine,
 //! so a scenario can build a canonical chain, fabricate quorum certificates over
 //! a chosen signer subset, report them, and install floors without a running
-//! engine. The prefix stops at a chosen semantic point and hands back a
-//! [`FuzzPoint`] describing the certified floor the engines then start from.
+//! engine. The prefix network carries no links, so state cannot leak between
+//! nodes: every fetch a prefix provokes stays pending until the fuzzing phase
+//! applies the input topology. The prefix stops at a chosen semantic point and
+//! hands back a [`FuzzPoint`] describing the certified floor the engines then
+//! start from.
 
 use crate::{
     marshal::end_to_end::twins::{B, Ctx, PublicKeyOf, SchemeOf},
@@ -14,7 +17,10 @@ use crate::{
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     Heightable, Reporter as _,
-    marshal::{core::Mailbox, standard::Standard},
+    marshal::{
+        core::{CommitmentFallback, DigestFallback, Mailbox},
+        standard::Standard,
+    },
     simplex::types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
     types::{Epoch, Height, Round, View},
 };
@@ -22,6 +28,7 @@ use commonware_cryptography::{Digestible, Sha256, sha256::Digest as Sha256Digest
 use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, deterministic};
+use commonware_utils::channel::oneshot;
 use std::{sync::Arc, time::Duration};
 
 /// Marshal mailbox for the standard variant over the mock block.
@@ -64,6 +71,10 @@ pub(crate) struct ScenarioEnv<P: Simplex> {
     pub(crate) buffers: Vec<buffered::Mailbox<PublicKeyOf<P>, B<P>>>,
     pub(crate) genesis: B<P>,
     pub(crate) canonical: Vec<B<P>>,
+    /// Receivers for block subscriptions the prefix registered. Held here so
+    /// the subscriptions stay alive through the fuzzing phase (dropping a
+    /// receiver cancels its subscription); scenarios never await them.
+    pub(crate) subscriptions: Vec<oneshot::Receiver<Arc<B<P>>>>,
 }
 
 /// The verbs a scenario uses. Some are unused by the current five scenarios but
@@ -92,6 +103,18 @@ impl<P: Simplex> ScenarioEnv<P> {
         let block = self.build_block(leader, view, parent_view, parent_digest, height);
         self.canonical.push(block.clone());
         block
+    }
+
+    /// Build a same-round equivocation of `block`: identical context (round,
+    /// leader, parent) and height, distinguished only by `timestamp`. Not
+    /// appended to the canonical chain.
+    pub(crate) fn equivocate(&self, block: &B<P>, timestamp: u64) -> B<P> {
+        B::<P>::new::<Sha256>(
+            block.context.clone(),
+            block.context.parent.1,
+            block.height(),
+            timestamp,
+        )
     }
 
     /// Build a side/fork block on an explicit parent without appending it to the
@@ -246,6 +269,43 @@ impl<P: Simplex> ScenarioEnv<P> {
         self.mailboxes[node.idx()].hint_notarized(Self::round(view), commitment);
     }
 
+    /// Register a pending block subscription by digest on `node`, waiting for
+    /// local availability only.
+    pub(crate) fn subscribe_wait(&mut self, node: Node, digest: Sha256Digest) {
+        let receiver = self.mailboxes[node.idx()].subscribe_by_digest(digest, DigestFallback::Wait);
+        self.subscriptions.push(receiver);
+    }
+
+    /// Register a pending block subscription by digest on `node` with a
+    /// round-bound fetch fallback.
+    pub(crate) fn subscribe_fetch_by_round(&mut self, node: Node, view: u64, digest: Sha256Digest) {
+        let receiver = self.mailboxes[node.idx()].subscribe_by_digest(
+            digest,
+            DigestFallback::FetchByRound {
+                round: Self::round(view),
+            },
+        );
+        self.subscriptions.push(receiver);
+    }
+
+    /// Register a pending block subscription by commitment on `node` with a
+    /// round-bound fetch fallback: the exact mailbox call the wrapper's verify
+    /// makes for a missing parent.
+    pub(crate) fn subscribe_commitment_fetch_by_round(
+        &mut self,
+        node: Node,
+        view: u64,
+        commitment: Sha256Digest,
+    ) {
+        let receiver = self.mailboxes[node.idx()].subscribe_by_commitment(
+            commitment,
+            CommitmentFallback::FetchByRound {
+                round: Self::round(view),
+            },
+        );
+        self.subscriptions.push(receiver);
+    }
+
     /// Install a finalization as the marshal floor on `node`.
     pub(crate) fn set_floor(
         &self,
@@ -255,7 +315,9 @@ impl<P: Simplex> ScenarioEnv<P> {
         self.mailboxes[node.idx()].set_floor(finalization);
     }
 
-    /// Gossip `block` from `from` to `to` through the broadcast buffer.
+    /// Seed `block` into `from`'s broadcast buffer addressed to `to`. The
+    /// prefix network has no links, so nothing is delivered before the fuzzing
+    /// phase.
     pub(crate) fn broadcast(&self, from: Node, to: &[Node], block: &B<P>) {
         let recipients = Recipients::Some(
             to.iter()
@@ -269,6 +331,16 @@ impl<P: Simplex> ScenarioEnv<P> {
     /// the prefix reaches a deterministic stop point.
     pub(crate) async fn barrier(&self, node: Node) -> Option<Height> {
         self.mailboxes[node.idx()].get_processed_height().await
+    }
+
+    /// Fence a pending state: assert `digest` is not locally available on
+    /// `node`. The round-trip doubles as a FIFO barrier, so the absence is
+    /// validated after every prior message has been processed.
+    pub(crate) async fn missing(&self, node: Node, digest: Sha256Digest) {
+        assert!(
+            self.mailboxes[node.idx()].get_block(&digest).await.is_none(),
+            "block must still be missing at handoff: node={node:?} digest={digest}",
+        );
     }
 
     /// Advance simulated time.

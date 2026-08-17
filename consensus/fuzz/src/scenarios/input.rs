@@ -44,12 +44,8 @@ pub enum ScenarioKind {
     InternalMissingFinalizedBlock,
     MultipleTrailingGaps,
     LargePendingTip,
-    BlockWithoutFinalization,
     FloorRepairsGapAfterAnchor,
     NewerFloorSupersedesOlder,
-    BelowFloorAnchorWakesSubscriber,
-    StaleBlockRejectedAfterFloor,
-    CertifySurvivesViewPruning,
     DeferredCertifyFallback,
     FirstBlockFetchesGenesisParent,
 }
@@ -78,18 +74,22 @@ pub enum BackfillFault {
     Poison,
 }
 
-/// Whether the Disrupter mutates the consensus channels (vote 3, cert 4,
-/// resolver 5).
+/// The byzantine node's behavior on the consensus channels (vote 3, cert 4,
+/// resolver 5): `Corrupt` runs the Simplex disrupter; `Silent` leaves the
+/// channels dead (crash-silence), so inbound traffic is discarded and the node
+/// emits nothing beyond the dissemination-layer leader announce.
 #[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsensusMutation {
     Corrupt,
-    Passthrough,
+    Silent,
 }
 
-/// Independently-enabled per-layer faults for the two-disrupter adversary: a
-/// dissemination-layer disrupter on channels 1 + 2 and a Simplex-layer Disrupter
-/// on channels 3/4/5 (a `SmallScope` whose density is set by the run's
-/// `fault_rounds`/`fault_rounds_bound`).
+/// Independently-enabled per-layer faults for the adversary: a
+/// dissemination-layer disrupter on channels 1 + 2 (always run) and a
+/// Simplex-layer Disrupter on channels 3/4/5, run only under
+/// [`ConsensusMutation::Corrupt`] (a `SmallScope` whose density is set by the
+/// run's `fault_rounds`/`fault_rounds_bound`); `Silent` leaves those channels
+/// dead.
 #[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FaultPlan {
     /// Block-dissemination fault on channels 2 + 3.

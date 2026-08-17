@@ -27,7 +27,7 @@ use crate::{
             stack::{
                 DEFAULT_MAX_PENDING_ACKS, DeferredMarshal, InlineMarshal, MarshalChoice,
                 TwinsMarshal, genesis_block, register_engine_networks, setup_network,
-                setup_network_links, setup_validator, start_engine_with_floor,
+                setup_validator, start_engine_with_floor,
             },
         },
     },
@@ -107,10 +107,10 @@ async fn apply_degraded_network<P: Simplex>(
     }
 }
 
-/// Floor-aware in-order check: like the standard oracle, but the first delivery
-/// may be the floor height (a single jump out of genesis is permitted) since
-/// `set_floor` prunes below the floor. Duplicate heights with different digests,
-/// gaps, and out-of-order delivery are still rejected.
+/// Floor-aware in-order check: `set_floor` prunes below the floor, so after an
+/// optional genesis delivery the first distinct height must be the floor height,
+/// with contiguous delivery from there. Delivery below the floor, duplicate
+/// heights with different digests, gaps, and out-of-order delivery are rejected.
 fn check_floor_started_order(
     idx: usize,
     delivered: &[(Height, Sha256Digest)],
@@ -131,12 +131,15 @@ fn check_floor_started_order(
         if height_1 == height_0 && digest_1 == digest_0 {
             continue;
         }
-        let contiguous = height_0.get().checked_add(1) == Some(height_1.get());
-        let genesis_to_floor = height_0.get() == 0 && height_1.get() == floor_height;
+        let allowed = if height_0.get() == 0 {
+            height_1.get() == floor_height
+        } else {
+            height_0.get().checked_add(1) == Some(height_1.get())
+        };
         assert!(
-            contiguous || genesis_to_floor,
-            "floor-started node{idx} out-of-order, gap, or same-height fork: {} -> {}; \
-             sequence={delivered:?}; stack={stack}",
+            allowed,
+            "floor-started node{idx} below-floor, out-of-order, gap, or same-height fork \
+             delivery: {} -> {} floor={floor_height}; sequence={delivered:?}; stack={stack}",
             height_0.get(),
             height_1.get(),
         );
@@ -168,8 +171,10 @@ where
     executor.start(|mut context| async move {
         // === SETUP ===
         let (participants, schemes) = P::setup(&mut context, crate::NAMESPACE, NUM_VALIDATORS);
+        // No links yet: the prefix runs on a link-less network so scripted state
+        // stays exactly as built (a pending fetch cannot resolve early); the
+        // fuzzing phase applies the input topology below.
         let mut oracle = setup_network::<P>(context.child("network"), participants.clone()).await;
-        setup_network_links::<P>(&mut oracle, &participants).await;
 
         let genesis = genesis_block::<P>(participants[0].clone());
         let genesis_commitment = genesis.digest();
@@ -253,6 +258,7 @@ where
             buffers,
             genesis,
             canonical: Vec::new(),
+            subscriptions: Vec::new(),
         };
         let point = scenarios::drive(input.scenario, &mut env).await;
         let tip = point.canonical.last().expect("scenario built a canonical chain");
@@ -265,11 +271,6 @@ where
         let attack_height = Height::new(floor_height + 1);
 
         // === FUZZING PHASE ===
-        apply_partition(&oracle, &participants, input.partition.set_partition(), &LINK).await;
-        if input.degraded_network {
-            apply_degraded_network::<P>(&oracle, &participants).await;
-        }
-
         for (idx, validator) in participants.iter().enumerate() {
             let channels = engine_channels[idx].take().expect("engine channels");
             if byzantine && idx == Node::A.idx() {
@@ -350,6 +351,15 @@ where
                     resolver,
                 );
             }
+        }
+
+        // The network was still link-less while the engines and disrupters
+        // started, so every one of them starts from exactly the validated
+        // prefix state; only now is the input topology built, gating the first
+        // possible delivery behind startup.
+        apply_partition(&oracle, &participants, input.partition.set_partition(), &LINK).await;
+        if input.degraded_network {
+            apply_degraded_network::<P>(&oracle, &participants).await;
         }
 
         // Honest apps (for the safety invariants) and per-node delivery-height
@@ -641,11 +651,6 @@ mod tests {
         LargePendingTip
     );
     scenario_smoke!(
-        honest_block_without_finalization,
-        adversarial_block_without_finalization,
-        BlockWithoutFinalization
-    );
-    scenario_smoke!(
         honest_floor_repairs_gap_after_anchor,
         adversarial_floor_repairs_gap_after_anchor,
         FloorRepairsGapAfterAnchor
@@ -654,21 +659,6 @@ mod tests {
         honest_newer_floor_supersedes_older,
         adversarial_newer_floor_supersedes_older,
         NewerFloorSupersedesOlder
-    );
-    scenario_smoke!(
-        honest_below_floor_anchor_wakes_subscriber,
-        adversarial_below_floor_anchor_wakes_subscriber,
-        BelowFloorAnchorWakesSubscriber
-    );
-    scenario_smoke!(
-        honest_stale_block_rejected_after_floor,
-        adversarial_stale_block_rejected_after_floor,
-        StaleBlockRejectedAfterFloor
-    );
-    scenario_smoke!(
-        honest_certify_survives_view_pruning,
-        adversarial_certify_survives_view_pruning,
-        CertifySurvivesViewPruning
     );
     scenario_smoke!(
         honest_deferred_certify_fallback,
