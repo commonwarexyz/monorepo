@@ -97,12 +97,12 @@ impl Blob {
         mut buf: &mut [u8],
         mut offset: u64,
     ) -> Result<(), Error> {
-        while !buf.is_empty() {
-            if !cache.is_disabled() {
-                file.read_exact_at(buf, offset)?;
-                return Ok(());
-            }
+        if !cache.is_disabled() {
+            file.read_exact_at(buf, offset)?;
+            return Ok(());
+        }
 
+        while !buf.is_empty() {
             let iovec = libc::iovec {
                 iov_base: buf.as_mut_ptr().cast(),
                 iov_len: buf.len(),
@@ -124,7 +124,8 @@ impl Blob {
                     continue;
                 }
                 if cache.retry_cached(&err, true) {
-                    continue;
+                    file.read_exact_at(buf, offset)?;
+                    return Ok(());
                 }
                 return Err(err.into());
             }
