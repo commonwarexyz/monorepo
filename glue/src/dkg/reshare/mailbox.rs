@@ -250,12 +250,8 @@ where
 
     /// Request the final block's next-epoch artifact.
     ///
-    /// The ancestry head must be either the final block being verified or the
-    /// parent of the final block being proposed. When materialized, it must yield
-    /// every unfinalized inclusion block as one contiguous chain attached to the
-    /// finalized prefix; otherwise the request is unavailable. A queued request
-    /// whose parent becomes canonical can instead be answered from finalized
-    /// state without consuming the rest of its ancestry.
+    /// Verification ancestry includes the final candidate, while proposal
+    /// ancestry begins at its parent. The actor reconstructs either view lazily.
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Ancestry<B>,
@@ -314,13 +310,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::tests::mocks::{TestBlock, TestBlsVariant};
+    use crate::dkg::tests::mocks::{self, TestBlock, TestBlsVariant};
     use commonware_actor::mailbox;
-    use commonware_cryptography::ed25519::PrivateKey;
+    use commonware_cryptography::{Digestible as _, ed25519::PrivateKey};
     use commonware_runtime::{Runner, deterministic};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, channel::oneshot};
+    use futures::{FutureExt as _, StreamExt as _};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
 
     type TestMessage = Message<TestBlock, TestBlsVariant, PrivateKey>;
+
+    #[derive(Clone)]
+    struct DelayedAncestry {
+        parent: Option<Arc<TestBlock>>,
+        gate: futures::future::Shared<oneshot::Receiver<()>>,
+    }
+
+    impl futures::Stream for DelayedAncestry {
+        type Item = Arc<TestBlock>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.gate.poll_unpin(cx).is_pending() {
+                return Poll::Pending;
+            }
+            Poll::Ready(self.parent.take())
+        }
+    }
+
+    impl Ancestry<TestBlock> for DelayedAncestry {
+        fn peek(&self) -> Option<&TestBlock> {
+            None
+        }
+    }
 
     #[test]
     fn next_log_returns_none_when_actor_gone() {
@@ -332,6 +356,79 @@ mod tests {
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
 
             assert!(mailbox.next_log(Height::new(1)).await.is_none());
+        });
+    }
+
+    #[test]
+    fn epoch_info_forwards_delayed_parent_without_polling() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let (release, gate) = oneshot::channel();
+            let ancestry = DelayedAncestry {
+                parent: Some(parent.clone()),
+                gate: gate.shared(),
+            };
+            let mut request = Box::pin(mailbox.epoch_info(ancestry));
+
+            assert!(request.as_mut().now_or_never().is_none());
+            let message = receiver
+                .try_recv()
+                .expect("request should reach the actor without polling ancestry");
+            let Message::EpochInfo {
+                mut ancestry,
+                response,
+                ..
+            } = message
+            else {
+                panic!("expected epoch info request");
+            };
+            assert!(ancestry.next().now_or_never().is_none());
+
+            release.send(()).expect("ancestry should still be waiting");
+            assert_eq!(
+                ancestry
+                    .next()
+                    .await
+                    .expect("parent should remain in ancestry")
+                    .digest(),
+                parent.digest()
+            );
+            assert!(response.send(EpochInfoResponse::Available(None)).is_ok());
+            assert!(matches!(request.await, EpochInfoResponse::Available(None)));
+        });
+    }
+
+    #[test]
+    fn canceled_epoch_info_closes_forwarded_response_without_polling_ancestry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let (release, gate) = oneshot::channel();
+            let ancestry = DelayedAncestry {
+                parent: Some(parent),
+                gate: gate.shared(),
+            };
+            let mut request = Box::pin(mailbox.epoch_info(ancestry));
+
+            assert!(request.as_mut().now_or_never().is_none());
+            let Message::EpochInfo {
+                ancestry, response, ..
+            } = receiver
+                .try_recv()
+                .expect("request should reach the actor without polling ancestry")
+            else {
+                panic!("expected epoch info request");
+            };
+            drop(request);
+
+            assert!(response.is_closed());
+            assert!(release.send(()).is_ok());
+            drop(ancestry);
         });
     }
 }

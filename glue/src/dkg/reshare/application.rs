@@ -282,7 +282,7 @@ mod tests {
         sync::Mutex,
     };
     use futures::{
-        FutureExt,
+        FutureExt, StreamExt,
         future::{Either, select},
         pin_mut,
     };
@@ -763,6 +763,8 @@ mod tests {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
                 let parent = Arc::new(mocks::genesis_block(leader().public_key()));
                 let tip = final_block(&parent, Some(epoch_payload(1)));
+                let expected_tip = tip.digest();
+                let expected_parent = parent.digest();
                 let inner = RecordingApp::accepting();
                 let (sender, mut receiver) = mailbox::new::<
                     Message<TestBlock, TestBlsVariant, PrivateKey>,
@@ -777,11 +779,29 @@ mod tests {
 
                 assert!(verify.as_mut().now_or_never().is_none());
                 let Some(Message::EpochInfo {
-                    response: reply, ..
+                    mut ancestry,
+                    response: reply,
+                    ..
                 }) = receiver.recv().await
                 else {
                     panic!("verification should request final epoch info");
                 };
+                assert_eq!(
+                    ancestry
+                        .next()
+                        .await
+                        .expect("verification ancestry should retain the candidate")
+                        .digest(),
+                    expected_tip
+                );
+                assert_eq!(
+                    ancestry
+                        .next()
+                        .await
+                        .expect("candidate should be followed by its parent")
+                        .digest(),
+                    expected_parent
+                );
                 assert!(reply.send(response).is_ok());
                 assert!(
                     verify.as_mut().now_or_never().is_none(),
