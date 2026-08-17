@@ -231,7 +231,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: write_failure_rate,
-                    mode: deterministic::PartialWriteMode::Subset(0.0),
+                    retention_frequency: 0.0,
+                    mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()
             };

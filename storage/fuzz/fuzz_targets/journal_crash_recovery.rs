@@ -31,7 +31,7 @@
 //! # Faults
 //!
 //! The operation phase runs under write/sync/resize fault injection. `write_retention_frequency`
-//! independently selects which bytes survive a failed or unsynchronized write, while
+//! controls the prefix of a failed or unsynchronized write that survives, while
 //! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
@@ -204,7 +204,8 @@ impl Params {
         deterministic::FaultConfig {
             write_rate: Some(deterministic::WriteConfig {
                 failure_rate: self.write_rate,
-                mode: deterministic::PartialWriteMode::Subset(self.write_retention_frequency),
+                retention_frequency: self.write_retention_frequency,
+                mode: deterministic::PartialWriteMode::Prefix,
             }),
             sync_rate: Some(self.sync_rate),
             resize_rate: Some(self.resize_rate),
