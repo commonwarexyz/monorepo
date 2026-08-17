@@ -949,16 +949,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn proposed(&mut self, context: &Context<D, S::PublicKey>, payload: D) -> bool {
         let proposal = Proposal::new(context.round, context.parent.0, payload);
 
-        // Accept the captured parent if it is still preferred or remains valid
+        // Reject the captured parent only when it is neither preferred nor valid
         // ancestry.
         if !self
             .find_parent(context.view())
             .is_ok_and(|parent| parent == context.parent)
             && !self.captured_parent_valid(context)
         {
-            // The build latch covers one asynchronous request. If the slot
-            // remains empty, release the latch so the voter can request a new
-            // context.
+            // Rejection leaves the proposal slot empty, so allow the round to retry.
             if let Some(round) = self.views.get_mut(&context.view()) {
                 round.clear_proposal_request();
             }

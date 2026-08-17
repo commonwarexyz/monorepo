@@ -1082,11 +1082,9 @@ impl<
         select_loop! {
             self.context,
             on_start => {
-                // Drop a pending proposal request after its view exits. Retain
-                // requests for the current view and optimistic future views. Also
-                // drop a request when its captured ancestry is invalid and a
-                // replacement parent is available. Run these checks before
-                // rebuilding waiters so the actor cannot poll a stale completion.
+                // Poll only proposal work that can still be adopted. A request
+                // becomes obsolete when its view exits or a replacement
+                // supersedes its captured parent.
                 if pending_propose.as_ref().is_some_and(|pp| {
                     pp.view() < self.state.current_view()
                         || self.state.supersede_proposal_request(&pp.0)
