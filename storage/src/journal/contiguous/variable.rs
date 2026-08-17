@@ -2850,7 +2850,7 @@ mod tests {
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: 1.0,
-                    retention_frequency: 0.0,
+                    retention_rate: 0.0,
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()

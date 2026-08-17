@@ -30,7 +30,7 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. `write_retention_frequency`
+//! The operation phase runs under write/sync/resize fault injection. `write_retention_rate`
 //! controls the prefix of a failed or unsynchronized write that survives, while
 //! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
@@ -167,9 +167,9 @@ struct FuzzInput {
     /// Failure rate for write operations.
     #[arbitrary(with = bounded_rate)]
     write_failure_rate: f64,
-    /// Frequency with which bytes survive a failed or unsynchronized write.
+    /// Probability used to retain bytes from a failed or unsynchronized write.
     #[arbitrary(with = bounded_rate)]
-    write_retention_frequency: f64,
+    write_retention_rate: f64,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: f64,
@@ -192,7 +192,7 @@ struct Params {
     items_per_section: u64,
     write_buffer: NonZeroUsize,
     write_rate: f64,
-    write_retention_frequency: f64,
+    write_retention_rate: f64,
     sync_rate: f64,
     resize_rate: f64,
     partial_resize_rate: f64,
@@ -204,7 +204,7 @@ impl Params {
         deterministic::FaultConfig {
             write_rate: Some(deterministic::WriteConfig {
                 failure_rate: self.write_rate,
-                retention_frequency: self.write_retention_frequency,
+                retention_rate: self.write_retention_rate,
                 mode: deterministic::PartialWriteMode::Prefix,
             }),
             sync_rate: Some(self.sync_rate),
@@ -825,7 +825,7 @@ where
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         write_rate: input.write_failure_rate,
-        write_retention_frequency: input.write_retention_frequency,
+        write_retention_rate: input.write_retention_rate,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,

@@ -1960,7 +1960,7 @@ mod tests {
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
                     failure_rate: 0.0,
-                    retention_frequency: 0.5,
+                    retention_rate: 0.5,
                     mode: PartialWriteMode::Subset,
                 }));
             let (_, checkpoint) =
@@ -2456,7 +2456,7 @@ mod tests {
                     open_rate: Some(0.5),
                     write_rate: Some(WriteConfig {
                         failure_rate: 0.3,
-                        retention_frequency: 0.0,
+                        retention_rate: 0.0,
                         mode: PartialWriteMode::Prefix,
                     }),
                     sync_rate: Some(0.2),
