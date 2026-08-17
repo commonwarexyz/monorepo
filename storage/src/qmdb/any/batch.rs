@@ -31,12 +31,14 @@ use core::{cmp::Ordering, ops::Range};
 use std::{
     collections::{BTreeMap, hash_map},
     iter, mem,
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock, Weak},
 };
 use tracing::debug;
 
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
+
+const DIFF_INDEX_STRIDE: usize = 8;
 
 /// Sorted locations at the retained batch chain's committed boundary.
 type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
@@ -167,6 +169,118 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .binary_search_by(|(candidate, _)| candidate.cmp(key))
         .ok()
         .map(|idx| &entries[idx].1)
+}
+
+/// A compact directory over a large sorted diff. Each strictly increasing order hint identifies
+/// the first key in a fixed-size range. A lookup verifies the hinted range with `K::cmp`, so key
+/// types whose byte prefixes do not preserve their ordering transparently fall back to a full
+/// binary search.
+#[derive(Default)]
+struct DiffIndex {
+    hints: OnceLock<Box<[u32]>>,
+}
+
+impl DiffIndex {
+    fn hint(key: &impl AsRef<[u8]>) -> u32 {
+        let bytes = key.as_ref();
+        let mut prefix = [0; 4];
+        let len = bytes.len().min(prefix.len());
+        prefix[..len].copy_from_slice(&bytes[..len]);
+        u32::from_be_bytes(prefix)
+    }
+
+    fn build<K: AsRef<[u8]>, V>(entries: &[(K, V)]) -> Box<[u32]> {
+        if entries.len() <= DIFF_INDEX_STRIDE * 2 {
+            return Box::new([]);
+        }
+
+        let hints: Vec<_> = entries
+            .iter()
+            .step_by(DIFF_INDEX_STRIDE)
+            .map(|(key, _)| Self::hint(key))
+            .collect();
+        if hints.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Box::new([]);
+        }
+        hints.into_boxed_slice()
+    }
+
+    const fn should_initialize(entry_count: usize, query_count: usize) -> bool {
+        // Building samples one entry per stride, so require at least as many actual probes as
+        // sampled entries before paying the construction and retention cost.
+        entry_count > DIFF_INDEX_STRIDE * 2
+            && query_count >= entry_count.div_ceil(DIFF_INDEX_STRIDE)
+    }
+
+    fn hints<K: AsRef<[u8]>, V>(&self, entries: &[(K, V)]) -> &[u32] {
+        self.hints.get_or_init(|| Self::build(entries))
+    }
+
+    fn lookup_with_hints<'a, K: Ord + AsRef<[u8]>, V>(
+        entries: &'a [(K, V)],
+        key: &K,
+        hints: &[u32],
+    ) -> Option<&'a V> {
+        if hints.is_empty() {
+            return lookup_sorted(entries, key);
+        }
+
+        let hint = Self::hint(key);
+        let Some(range) = hints
+            .partition_point(|candidate| *candidate <= hint)
+            .checked_sub(1)
+        else {
+            return if entries.first().is_none_or(|(first, _)| key < first) {
+                None
+            } else {
+                lookup_sorted(entries, key)
+            };
+        };
+        let start = range * DIFF_INDEX_STRIDE;
+        let end = (start + DIFF_INDEX_STRIDE).min(entries.len());
+
+        // The byte hint is only an accelerator. These comparisons prove that the queried key
+        // belongs to this exact range under the key type's authoritative ordering.
+        if key < &entries[start].0 || (end < entries.len() && key >= &entries[end].0) {
+            return lookup_sorted(entries, key);
+        }
+        entries[start..end]
+            .binary_search_by(|(candidate, _)| candidate.cmp(key))
+            .ok()
+            .map(|index| &entries[start + index].1)
+    }
+
+    /// Use a previously initialized directory, preserving binary search as the cold point-read
+    /// path.
+    fn lookup<'a, K: Ord + AsRef<[u8]>, V>(&self, entries: &'a [(K, V)], key: &K) -> Option<&'a V> {
+        let Some(hints) = self.hints.get() else {
+            return lookup_sorted(entries, key);
+        };
+        Self::lookup_with_hints(entries, key, hints)
+    }
+
+    fn lookup_or_initialize<'a, K: Ord + AsRef<[u8]>, V>(
+        &self,
+        entries: &'a [(K, V)],
+        key: &K,
+    ) -> Option<&'a V> {
+        Self::lookup_with_hints(entries, key, self.hints(entries))
+    }
+}
+
+struct DiffSource<'a, K, F: Family, V> {
+    entries: &'a DiffSlice<K, F, V>,
+    index: &'a DiffIndex,
+}
+
+impl<'a, K: Ord + AsRef<[u8]>, F: Family, V> DiffSource<'a, K, F, V> {
+    fn lookup(&self, key: &K) -> Option<&'a DiffEntry<F, V>> {
+        self.index.lookup(self.entries, key)
+    }
+
+    fn lookup_or_initialize(&self, key: &K) -> Option<&'a DiffEntry<F, V>> {
+        self.index.lookup_or_initialize(self.entries, key)
+    }
 }
 
 /// Returns whether sorted, deduplicated `items` contains `target`, advancing `cursor` past
@@ -340,8 +454,11 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>, S>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
-    /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
+    /// Sorted by key with no duplicates.
     pub(crate) diff: Arc<DiffVec<U::Key, F, U::Value>>,
+
+    /// Clone-shared sparse directory for lookups in `diff`.
+    diff_index: Arc<DiffIndex>,
 
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
@@ -392,7 +509,7 @@ fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy
     key: &U::Key,
 ) -> Option<&'a DiffEntry<F, U::Value>> {
     for batch in ancestors {
-        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
+        if let Some(entry) = batch.diff_index.lookup(batch.diff.as_slice(), key) {
             return Some(entry);
         }
     }
@@ -466,50 +583,117 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
 ///
 /// `on_hit` is invoked (serially, in `pending` order) with each resolving diff entry, so
 /// staged reads can record ancestor resolutions alongside the values.
-fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: Strategy>(
-    pending: &[PendingRead<'a, K>],
-    diffs: &[&'a DiffSlice<K, F, V>],
+fn resolve_pending_from_diffs<'k, 'd, K, F: Family, V: Clone + Send + Sync + 'd, S: Strategy>(
+    pending: &[PendingRead<'k, K>],
+    diffs: &[DiffSource<'d, K, F, V>],
     strategy: &S,
     resolved: &mut [bool],
     results: &mut [Option<V>],
     mut on_hit: impl FnMut(usize, &DiffEntry<F, V>),
 ) where
-    K: Ord + Sync,
+    K: Ord + AsRef<[u8]> + Send + Sync,
 {
     if pending.is_empty() || diffs.is_empty() {
         return;
     }
+    if let [(slot, key)] = pending {
+        if let Some(entry) = diffs.iter().find_map(|diff| diff.lookup(key)) {
+            resolved[*slot] = true;
+            results[*slot] = entry.value().cloned();
+            on_hit(*slot, entry);
+        }
+        return;
+    }
 
-    let resolve = |chunk: &[PendingRead<'a, K>]| -> Vec<(usize, &'a DiffEntry<F, V>)> {
-        chunk
-            .iter()
-            .filter_map(|(slot, key)| {
-                diffs
-                    .iter()
-                    .find_map(|diff| lookup_sorted(diff, key))
-                    .map(|entry| (*slot, entry))
-            })
-            .collect()
-    };
-    let hits: Vec<(usize, &'a DiffEntry<F, V>)> = strategy.run(
-        pending.len(),
-        || resolve(pending),
-        || {
-            let manual = strategy.manual();
-            let chunk_len = pending.len().div_ceil(manual.parallelism());
-            let chunks: Vec<_> = pending.chunks(chunk_len).collect();
-            manual
-                .map_collect_vec(chunks, &resolve)
-                .into_iter()
-                .flatten()
+    if !diffs
+        .iter()
+        .any(|diff| DiffIndex::should_initialize(diff.entries.len(), pending.len()))
+    {
+        let resolve = |chunk: &[PendingRead<'k, K>]| -> Vec<(usize, &'d DiffEntry<F, V>)> {
+            chunk
+                .iter()
+                .filter_map(|(slot, key)| {
+                    diffs
+                        .iter()
+                        .find_map(|diff| diff.lookup(key))
+                        .map(|entry| (*slot, entry))
+                })
                 .collect()
-        },
-    );
+        };
+        let hits = strategy.run(
+            pending.len(),
+            || resolve(pending),
+            || {
+                let manual = strategy.manual();
+                let chunk_len = pending.len().div_ceil(manual.parallelism());
+                let chunks: Vec<_> = pending.chunks(chunk_len).collect();
+                manual
+                    .map_collect_vec(chunks, &resolve)
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            },
+        );
+        for (slot, entry) in hits {
+            resolved[slot] = true;
+            results[slot] = entry.value().cloned();
+            on_hit(slot, entry);
+        }
+        return;
+    }
 
-    for (slot, entry) in hits {
-        resolved[slot] = true;
-        results[slot] = entry.value().cloned();
-        on_hit(slot, entry);
+    let mut remaining: Vec<_> = pending
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (_, key))| (ordinal, *key))
+        .collect();
+    let mut entries_by_ordinal = vec![None; pending.len()];
+    for diff in diffs {
+        if remaining.is_empty() {
+            break;
+        }
+        let initialize = DiffIndex::should_initialize(diff.entries.len(), remaining.len());
+        let resolve = |chunk: &[(usize, &'k K)]| -> Vec<(usize, &'d DiffEntry<F, V>)> {
+            chunk
+                .iter()
+                .filter_map(|(ordinal, key)| {
+                    let entry = if initialize {
+                        diff.lookup_or_initialize(key)
+                    } else {
+                        diff.lookup(key)
+                    };
+                    entry.map(|entry| (*ordinal, entry))
+                })
+                .collect()
+        };
+        let hits = strategy.run(
+            remaining.len(),
+            || resolve(&remaining),
+            || {
+                let manual = strategy.manual();
+                let chunk_len = remaining.len().div_ceil(manual.parallelism());
+                let chunks: Vec<_> = remaining.chunks(chunk_len).collect();
+                manual
+                    .map_collect_vec(chunks, &resolve)
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            },
+        );
+
+        for (ordinal, entry) in hits {
+            let slot = pending[ordinal].0;
+            resolved[slot] = true;
+            entries_by_ordinal[ordinal] = Some(entry);
+        }
+        remaining.retain(|(ordinal, _)| entries_by_ordinal[*ordinal].is_none());
+    }
+
+    for (ordinal, (slot, _)) in pending.iter().enumerate() {
+        if let Some(entry) = entries_by_ordinal[ordinal] {
+            results[*slot] = entry.value().cloned();
+            on_hit(*slot, entry);
+        }
     }
 }
 
@@ -519,16 +703,16 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 ///
 /// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
 /// [`resolve_pending_from_diffs`]). Slots resolved by `local` do not report.
-fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
-    keys: &[&'a K],
+fn resolve_reads<'k, 'd, K, F: Family, V, S: Strategy>(
+    keys: &[&'k K],
     local: impl Fn(&K) -> Option<Option<V>>,
-    diffs: &[&DiffSlice<K, F, V>],
+    diffs: &[DiffSource<'d, K, F, V>],
     strategy: &S,
     on_diff_hit: impl FnMut(usize, &DiffEntry<F, V>),
-) -> UncommittedReadResolution<'a, K, V>
+) -> UncommittedReadResolution<'k, K, V>
 where
-    K: Ord + Sync,
-    V: Clone + Send + Sync,
+    K: Ord + AsRef<[u8]> + Send + Sync,
+    V: Clone + Send + Sync + 'd,
 {
     let mut results = vec![None; keys.len()];
     let mut resolved = vec![false; keys.len()];
@@ -592,26 +776,56 @@ struct DiffMerge<'a, K, F: Family, V> {
 impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
     fn new(streams: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
         Self {
-            cursors: streams.into_iter().map(|s| (s, 0)).collect(),
+            cursors: streams.into_iter().map(|slice| (slice, 0)).collect(),
         }
     }
 
     fn peek_key(cursor: &(&'a DiffSlice<K, F, V>, usize)) -> Option<&'a K> {
-        cursor.0.get(cursor.1).map(|(k, _)| k)
+        cursor.0.get(cursor.1).map(|(key, _)| key)
+    }
+
+    fn next_fixed<const N: usize>(&mut self) -> Option<(&'a K, &'a DiffEntry<F, V>)> {
+        debug_assert_eq!(self.cursors.len(), N);
+        let mut winner = None;
+        let mut tied = 0u8;
+        for level in 0..N {
+            let Some(key) = Self::peek_key(&self.cursors[level]) else {
+                continue;
+            };
+            let Some(current) = winner else {
+                winner = Some(level);
+                tied = 1u8 << level;
+                continue;
+            };
+            match key.cmp(Self::peek_key(&self.cursors[current]).unwrap()) {
+                Ordering::Less => {
+                    winner = Some(level);
+                    tied = 1u8 << level;
+                }
+                Ordering::Equal => tied |= 1u8 << level,
+                Ordering::Greater => {}
+            }
+        }
+
+        // Streams are visited in priority order, so retaining the first equal head selects the
+        // newest entry. Every stream tied at that final minimum must advance exactly once.
+        let level = winner?;
+        let (slice, pos) = self.cursors[level];
+        for (level, cursor) in self.cursors.iter_mut().enumerate() {
+            if tied & (1u8 << level) != 0 {
+                cursor.1 += 1;
+            }
+        }
+        Some((&slice[pos].0, &slice[pos].1))
     }
 
     fn next_general(&mut self) -> Option<(&'a K, &'a DiffEntry<F, V>)> {
-        let n = self.cursors.len();
         let mut winner: Option<usize> = None;
-        for level in 0..n {
-            let Some(k) = Self::peek_key(&self.cursors[level]) else {
+        for level in 0..self.cursors.len() {
+            let Some(key) = Self::peek_key(&self.cursors[level]) else {
                 continue;
             };
-            let better = match winner {
-                None => true,
-                Some(w) => *k < *Self::peek_key(&self.cursors[w]).unwrap(),
-            };
-            if better {
+            if winner.is_none_or(|current| key < Self::peek_key(&self.cursors[current]).unwrap()) {
                 winner = Some(level);
             }
         }
@@ -619,7 +833,7 @@ impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
         let (slice, pos) = self.cursors[level];
         let winning_key = &slice[pos].0;
         for cursor in &mut self.cursors {
-            if Self::peek_key(cursor).is_some_and(|k| k == winning_key) {
+            if Self::peek_key(cursor).is_some_and(|key| key == winning_key) {
                 cursor.1 += 1;
             }
         }
@@ -635,15 +849,15 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
             0 => None,
             1 => {
                 let (slice, pos) = &mut self.cursors[0];
-                let (k, entry) = slice.get(*pos)?;
+                let (key, entry) = slice.get(*pos)?;
                 *pos += 1;
-                Some((k, entry))
+                Some((key, entry))
             }
             2 => {
-                let ka = Self::peek_key(&self.cursors[0]);
-                let kb = Self::peek_key(&self.cursors[1]);
-                let winner = match (ka, kb) {
-                    (Some(a), Some(b)) => match a.cmp(b) {
+                let left = Self::peek_key(&self.cursors[0]);
+                let right = Self::peek_key(&self.cursors[1]);
+                let winner = match (left, right) {
+                    (Some(left), Some(right)) => match left.cmp(right) {
                         Ordering::Less => 0,
                         Ordering::Greater => 1,
                         Ordering::Equal => {
@@ -656,10 +870,12 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
                     (None, None) => return None,
                 };
                 let (slice, pos) = &mut self.cursors[winner];
-                let (k, entry) = &slice[*pos];
+                let (key, entry) = &slice[*pos];
                 *pos += 1;
-                Some((k, entry))
+                Some((key, entry))
             }
+            3 => self.next_fixed::<3>(),
+            4 => self.next_fixed::<4>(),
             _ => self.next_general(),
         }
     }
@@ -1349,6 +1565,7 @@ where
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
+            diff_index: Arc::new(DiffIndex::default()),
             parent: self.ancestors.first().map(Arc::downgrade),
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
@@ -1796,7 +2013,10 @@ where
         let diffs: Vec<_> = ancestors
             .iter()
             .flatten()
-            .map(|batch| batch.diff.as_slice())
+            .map(|batch| DiffSource {
+                entries: batch.diff.as_slice(),
+                index: &batch.diff_index,
+            })
             .collect();
         resolve_reads(
             keys,
@@ -2693,13 +2913,13 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
-        if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
+        if let Some(entry) = self.diff_index.lookup(self.diff.as_slice(), key) {
             return Ok(entry.value().cloned());
         }
         // Walk parent chain. If a parent was freed (committed and dropped), the iterator
         // stops and we fall through to DB.
         for batch in self.ancestors() {
-            if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
+            if let Some(entry) = batch.diff_index.lookup(batch.diff.as_slice(), key) {
                 return Ok(entry.value().cloned());
             }
         }
@@ -2727,11 +2947,23 @@ where
         let ancestors: Vec<_> = self.ancestors().collect();
         let diffs: Vec<_> = ancestors
             .iter()
-            .map(|batch| batch.diff.as_slice())
+            .map(|batch| DiffSource {
+                entries: batch.diff.as_slice(),
+                index: &batch.diff_index,
+            })
             .collect();
+        let initialize = DiffIndex::should_initialize(self.diff.len(), keys.len());
         let (mut results, unresolved) = resolve_reads(
             keys,
-            |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
+            |key| {
+                let entry = if initialize {
+                    self.diff_index
+                        .lookup_or_initialize(self.diff.as_slice(), key)
+                } else {
+                    self.diff_index.lookup(self.diff.as_slice(), key)
+                };
+                entry.map(|entry| entry.value().cloned())
+            },
             &diffs,
             db.strategy(),
             |_, _| {},
@@ -2913,6 +3145,7 @@ where
         Arc::new(MerkleizedBatch {
             journal_batch: self.log.to_merkleized_batch(),
             diff: Arc::new(Vec::new()),
+            diff_index: Arc::new(DiffIndex::default()),
             parent: None,
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
@@ -3099,6 +3332,13 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
+    use std::{
+        sync::{
+            Barrier, Weak as ArcWeak,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
+        thread,
+    };
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
@@ -3166,6 +3406,350 @@ mod tests {
                     "query {q} diverged"
                 );
             }
+        }
+    }
+
+    /// Sparse lookup must preserve full binary search for hits, misses, and queries around every
+    /// sampled range boundary.
+    #[test]
+    fn diff_index_matches_lookup_sorted() {
+        for len in [0, 1, 16, 17, 10_000] {
+            let entries: Vec<_> = (0..len as u64)
+                .map(|key| (((key * 2) << 32).to_be_bytes().to_vec(), key * 3))
+                .collect();
+            let index = DiffIndex::default();
+
+            for key in 0..(len as u64 * 2 + 2) {
+                let key = (key << 32).to_be_bytes().to_vec();
+                let expected = lookup_sorted(&entries, &key).copied();
+                let actual = index.lookup_or_initialize(&entries, &key).copied();
+                assert_eq!(actual, expected, "len {len}, query {key:?} diverged");
+            }
+        }
+    }
+
+    /// A directory whose hints cannot distinguish any sampled ranges must use the full lookup
+    /// path without retaining one redundant hint per stride.
+    #[test]
+    fn diff_index_declines_constant_prefixes() {
+        let entries: Vec<_> = (0..10_000u64)
+            .map(|key| (key.to_be_bytes().to_vec(), key * 3))
+            .collect();
+        let index = DiffIndex::default();
+
+        assert!(index.hints(&entries).is_empty());
+        for key in [0u64, 1, 4_999, 9_999, 10_000] {
+            let key = key.to_be_bytes().to_vec();
+            let expected = lookup_sorted(&entries, &key).copied();
+            let actual = index.lookup(&entries, &key).copied();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    /// A directory with almost no distinct sampled prefixes cannot narrow enough ranges to
+    /// amortize its retained memory and must use the full lookup path.
+    #[test]
+    fn diff_index_declines_duplicate_heavy_prefixes() {
+        let entries: Vec<_> = (0..10_000u64)
+            .map(|key| {
+                let prefix = u32::from(key >= 9_992);
+                let mut bytes = Vec::with_capacity(12);
+                bytes.extend_from_slice(&prefix.to_be_bytes());
+                bytes.extend_from_slice(&key.to_be_bytes());
+                (bytes, key)
+            })
+            .collect();
+        let index = DiffIndex::default();
+
+        assert!(index.hints(&entries).is_empty());
+        for key in [0u64, 4_999, 9_991, 9_992, 9_999] {
+            let prefix = u32::from(key >= 9_992);
+            let mut query = Vec::with_capacity(12);
+            query.extend_from_slice(&prefix.to_be_bytes());
+            query.extend_from_slice(&key.to_be_bytes());
+            assert_eq!(index.lookup(&entries, &query).copied(), Some(key));
+        }
+    }
+
+    /// Closest-first resolution must not initialize a deeper directory after every query was
+    /// resolved by a nearer active entry or tombstone.
+    #[test]
+    fn nearest_hits_leave_deeper_diff_index_cold() {
+        let key = |value: u32| value.to_be_bytes().to_vec();
+        let nearest: DiffVec<_, mmr::Family, u64> = (0..64u32)
+            .map(|value| {
+                let entry = if value == 24 {
+                    DiffEntry::Deleted { base_old_loc: None }
+                } else {
+                    DiffEntry::Active {
+                        value: value as u64 + 1_000,
+                        loc: loc(value as u64 + 1_000),
+                        base_old_loc: None,
+                    }
+                };
+                (key(value), entry)
+            })
+            .collect();
+        let deeper: DiffVec<_, mmr::Family, u64> = (0..64u32)
+            .map(|value| {
+                (
+                    key(value),
+                    DiffEntry::Active {
+                        value: value as u64 + 2_000,
+                        loc: loc(value as u64 + 2_000),
+                        base_old_loc: None,
+                    },
+                )
+            })
+            .collect();
+        let nearest_index = DiffIndex::default();
+        let deeper_index = DiffIndex::default();
+        let sources = [
+            DiffSource {
+                entries: nearest.as_slice(),
+                index: &nearest_index,
+            },
+            DiffSource {
+                entries: deeper.as_slice(),
+                index: &deeper_index,
+            },
+        ];
+        let active = key(16);
+        let deleted = key(24);
+        let pending = [(0, &active), (1, &deleted)];
+        let mut resolved = [false; 2];
+        let mut results = [None; 2];
+
+        resolve_pending_from_diffs(
+            &pending,
+            &sources,
+            &Sequential,
+            &mut resolved,
+            &mut results,
+            |_, _| {},
+        );
+
+        assert_eq!(resolved, [true, true]);
+        assert_eq!(results, [Some(1_016), None]);
+        assert!(deeper_index.hints.get().is_none());
+    }
+
+    /// One key falling through a large nearest hit set must not allocate a directory for the
+    /// deeper diff solely because the original request contained many keys.
+    #[test]
+    fn one_deep_fallthrough_leaves_deeper_diff_index_cold() {
+        let key = |value: u32| value.to_be_bytes().to_vec();
+        let nearest: DiffVec<_, mmr::Family, u64> = (0..63u32)
+            .map(|value| {
+                (
+                    key(value),
+                    DiffEntry::Active {
+                        value: value as u64 + 1_000,
+                        loc: loc(value as u64 + 1_000),
+                        base_old_loc: None,
+                    },
+                )
+            })
+            .collect();
+        let deeper: DiffVec<_, mmr::Family, u64> = (0..64u32)
+            .map(|value| {
+                (
+                    key(value),
+                    DiffEntry::Active {
+                        value: value as u64 + 2_000,
+                        loc: loc(value as u64 + 2_000),
+                        base_old_loc: None,
+                    },
+                )
+            })
+            .collect();
+        let nearest_index = DiffIndex::default();
+        let deeper_index = DiffIndex::default();
+        let sources = [
+            DiffSource {
+                entries: nearest.as_slice(),
+                index: &nearest_index,
+            },
+            DiffSource {
+                entries: deeper.as_slice(),
+                index: &deeper_index,
+            },
+        ];
+        let keys: Vec<_> = (0..64u32).map(key).collect();
+        let pending: Vec<_> = keys.iter().enumerate().collect();
+        let mut resolved = vec![false; keys.len()];
+        let mut results = vec![None; keys.len()];
+
+        resolve_pending_from_diffs(
+            &pending,
+            &sources,
+            &Sequential,
+            &mut resolved,
+            &mut results,
+            |_, _| {},
+        );
+
+        assert!(resolved.iter().all(|resolved| *resolved));
+        assert_eq!(results[0], Some(1_000));
+        assert_eq!(results[62], Some(1_062));
+        assert_eq!(results[63], Some(2_063));
+        assert!(nearest_index.hints.get().is_some());
+        assert!(deeper_index.hints.get().is_none());
+    }
+
+    /// Level-wise lookup must replay interleaved parent/grandparent hits in input order, with a
+    /// nearer tombstone suppressing an older active entry for the same key.
+    #[test]
+    fn multi_depth_resolution_replays_input_order() {
+        let key = |value: u32| value.to_be_bytes().to_vec();
+        let nearest: DiffVec<_, mmr::Family, u64> = (0..64u32)
+            .step_by(2)
+            .map(|value| {
+                let entry = if value == 24 {
+                    DiffEntry::Deleted { base_old_loc: None }
+                } else {
+                    DiffEntry::Active {
+                        value: value as u64 + 1_000,
+                        loc: loc(value as u64 + 1_000),
+                        base_old_loc: None,
+                    }
+                };
+                (key(value), entry)
+            })
+            .collect();
+        let deeper: DiffVec<_, mmr::Family, u64> = (0..64u32)
+            .map(|value| {
+                (
+                    key(value),
+                    DiffEntry::Active {
+                        value: value as u64 + 2_000,
+                        loc: loc(value as u64 + 2_000),
+                        base_old_loc: None,
+                    },
+                )
+            })
+            .collect();
+        let nearest_index = DiffIndex::default();
+        let deeper_index = DiffIndex::default();
+        let sources = [
+            DiffSource {
+                entries: nearest.as_slice(),
+                index: &nearest_index,
+            },
+            DiffSource {
+                entries: deeper.as_slice(),
+                index: &deeper_index,
+            },
+        ];
+        let keys: Vec<_> = (0..64u32).map(key).collect();
+        let pending: Vec<_> = keys.iter().enumerate().collect();
+        let mut resolved = vec![false; keys.len()];
+        let mut results = vec![None; keys.len()];
+        let mut hit_order = Vec::new();
+
+        resolve_pending_from_diffs(
+            &pending,
+            &sources,
+            &Sequential,
+            &mut resolved,
+            &mut results,
+            |slot, _| hit_order.push(slot),
+        );
+
+        assert_eq!(hit_order, (0..64).collect::<Vec<_>>());
+        for (slot, result) in results.into_iter().enumerate() {
+            let expected = if slot == 24 {
+                None
+            } else if slot.is_multiple_of(2) {
+                Some(slot as u64 + 1_000)
+            } else {
+                Some(slot as u64 + 2_000)
+            };
+            assert_eq!(result, expected, "slot {slot} diverged");
+        }
+    }
+
+    /// Concurrent first use of one directory must publish exactly one shared hint payload.
+    #[test]
+    fn diff_index_concurrent_first_initialization_is_shared() {
+        const READERS: usize = 8;
+        let entries = Arc::new(
+            (0..10_000u64)
+                .map(|key| ((key << 32).to_be_bytes().to_vec(), key))
+                .collect::<Vec<_>>(),
+        );
+        let index = Arc::new(DiffIndex::default());
+        let barrier = Arc::new(Barrier::new(READERS));
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let entries = Arc::clone(&entries);
+                let index = Arc::clone(&index);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    index.hints(entries.as_slice()).as_ptr() as usize
+                })
+            })
+            .collect();
+        let pointers: Vec<_> = readers
+            .into_iter()
+            .map(|reader| reader.join().expect("reader must not panic"))
+            .collect();
+
+        assert!(pointers.iter().all(|pointer| *pointer == pointers[0]));
+        assert_eq!(index.hints.get().expect("initialized").len(), 1_250);
+    }
+
+    /// A byte hint may narrow a lookup only when the narrowed range agrees with `K::cmp`.
+    #[test]
+    fn diff_index_falls_back_for_non_byte_ordered_keys() {
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct Key {
+            order: u32,
+            bytes: [u8; 4],
+        }
+
+        impl AsRef<[u8]> for Key {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+
+        impl Ord for Key {
+            fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+                self.order.cmp(&other.order)
+            }
+        }
+
+        impl PartialOrd for Key {
+            fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut entries: Vec<_> = (0..32u32)
+            .map(|index| {
+                let order = index * 2;
+                (
+                    Key {
+                        order,
+                        bytes: order.to_be_bytes(),
+                    },
+                    index,
+                )
+            })
+            .collect();
+        entries[5].0.bytes = u32::MAX.to_be_bytes();
+        let index = DiffIndex::default();
+
+        for order in [10, 11] {
+            let query = Key {
+                order,
+                bytes: u32::MAX.to_be_bytes(),
+            };
+            let expected = lookup_sorted(&entries, &query).copied();
+            let actual = index.lookup_or_initialize(&entries, &query).copied();
+            assert_eq!(actual, expected);
         }
     }
 
@@ -3320,6 +3904,162 @@ mod tests {
                 (7, Some(17), Some(loc(17))),
             ]
         );
+    }
+
+    #[test]
+    fn diff_merge_four_way_preserves_priority_and_exhaustion() {
+        let child = vec![(4, deleted(Some(40))), (9, active(90, 90))];
+        let parent = vec![
+            (1, active(11, 11)),
+            (4, active(14, 14)),
+            (5, deleted(Some(50))),
+            (8, active(18, 18)),
+        ];
+        let grandparent = vec![
+            (2, active(22, 22)),
+            (4, deleted(Some(44))),
+            (6, active(26, 26)),
+            (8, deleted(Some(80))),
+        ];
+        let oldest = vec![
+            (0, active(30, 30)),
+            (3, active(33, 33)),
+            (4, active(34, 34)),
+            (5, active(35, 35)),
+            (6, deleted(Some(60))),
+            (7, active(37, 37)),
+        ];
+        let mut merge = DiffMerge::new([
+            child.as_slice(),
+            parent.as_slice(),
+            grandparent.as_slice(),
+            oldest.as_slice(),
+        ]);
+
+        let merged: Vec<_> = merge
+            .by_ref()
+            .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+            .collect();
+
+        assert_eq!(
+            merged,
+            vec![
+                (0, Some(30), Some(loc(30))),
+                (1, Some(11), Some(loc(11))),
+                (2, Some(22), Some(loc(22))),
+                (3, Some(33), Some(loc(33))),
+                (4, None, None),
+                (5, None, None),
+                (6, Some(26), Some(loc(26))),
+                (7, Some(37), Some(loc(37))),
+                (8, Some(18), Some(loc(18))),
+                (9, Some(90), Some(loc(90))),
+            ]
+        );
+        assert!(merge.next().is_none());
+        assert!(merge.next().is_none());
+    }
+
+    #[test]
+    fn diff_merge_general_path_preserves_priority() {
+        let newest = vec![(4, deleted(Some(40)))];
+        let second = vec![(1, active(11, 11)), (4, active(14, 14))];
+        let empty = Vec::new();
+        let fourth = vec![
+            (0, active(30, 30)),
+            (1, deleted(Some(10))),
+            (4, active(34, 34)),
+        ];
+        let oldest = vec![(2, active(42, 42)), (4, active(44, 44))];
+        let mut merge = DiffMerge::new([
+            newest.as_slice(),
+            second.as_slice(),
+            empty.as_slice(),
+            fourth.as_slice(),
+            oldest.as_slice(),
+        ]);
+
+        let merged: Vec<_> = merge
+            .by_ref()
+            .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+            .collect();
+
+        assert_eq!(
+            merged,
+            vec![
+                (0, Some(30), Some(loc(30))),
+                (1, Some(11), Some(loc(11))),
+                (2, Some(42), Some(loc(42))),
+                (4, None, None),
+            ]
+        );
+        assert!(merge.next().is_none());
+    }
+
+    #[test]
+    fn diff_merge_three_and_four_way_scan_live_heads_once() {
+        #[derive(Clone, Debug)]
+        struct CountedKey {
+            value: usize,
+            comparisons: Arc<AtomicUsize>,
+        }
+
+        impl PartialEq for CountedKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.cmp(other).is_eq()
+            }
+        }
+
+        impl Eq for CountedKey {}
+
+        impl PartialOrd for CountedKey {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for CountedKey {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.comparisons.fetch_add(1, AtomicOrdering::Relaxed);
+                self.value.cmp(&other.value)
+            }
+        }
+
+        for stream_count in [3, 4] {
+            let comparisons = Arc::new(AtomicUsize::new(0));
+            let streams: Vec<DiffVec<_, mmr::Family, u64>> = (0..stream_count)
+                .map(|stream| {
+                    (0..256)
+                        .map(|offset| {
+                            let value = offset * stream_count + stream;
+                            (
+                                CountedKey {
+                                    value,
+                                    comparisons: Arc::clone(&comparisons),
+                                },
+                                active(value as u64, value as u64),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            comparisons.store(0, AtomicOrdering::Relaxed);
+
+            let emitted = DiffMerge::new(streams.iter().map(Vec::as_slice)).count();
+            let actual = comparisons.load(AtomicOrdering::Relaxed);
+            let expected = stream_count * 256;
+            let expected_comparisons = match stream_count {
+                3 => 6 * 256 - 3,
+                4 => 12 * 256 - 6,
+                _ => unreachable!(),
+            };
+
+            assert_eq!(emitted, expected);
+            assert_eq!(
+                actual, expected_comparisons,
+                "{stream_count}-way merge comparison count diverged"
+            );
+        }
     }
 
     #[test]
@@ -3707,6 +4447,131 @@ mod tests {
             assert_eq!(
                 db.get(&key_uncommitted_create).await.unwrap(),
                 Some(Sha256::hash(&[b"uncommitted-create"]))
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn apply_batch_merges_three_dropped_pending_ancestors() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("three-pending-ancestors", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let key = |name: &[u8]| Sha256::hash(&[b"three-pending-key", name]);
+            let value = |generation: u8, name: &[u8]| {
+                Sha256::hash(&[b"three-pending-value", &[generation], name])
+            };
+            let all = key(b"all");
+            let near_delete = key(b"near-delete");
+            let near_active = key(b"near-active");
+            let old_only = key(b"old-only");
+            let grandparent_create = key(b"grandparent-create");
+            let parent_only = key(b"parent-only");
+            let child_only = key(b"child-only");
+            let leaf_only = key(b"leaf-only");
+
+            let seed = db
+                .new_batch()
+                .write(all, Some(value(0, b"all")))
+                .write(near_delete, Some(value(0, b"near-delete")))
+                .write(near_active, Some(value(0, b"near-active")))
+                .write(old_only, Some(value(0, b"old-only")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let grandparent = db
+                .new_batch()
+                .write(all, Some(value(1, b"all")))
+                .write(near_delete, Some(value(1, b"near-delete")))
+                .write(near_active, None)
+                .write(old_only, Some(value(1, b"old-only")))
+                .write(grandparent_create, Some(value(1, b"grandparent-create")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(all, Some(value(2, b"all")))
+                .write(near_delete, Some(value(2, b"near-delete")))
+                .write(grandparent_create, None)
+                .write(parent_only, Some(value(2, b"parent-only")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(all, Some(value(3, b"all")))
+                .write(near_delete, Some(value(3, b"near-delete")))
+                .write(near_active, Some(value(3, b"near-active")))
+                .write(child_only, Some(value(3, b"child-only")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let leaf = child
+                .new_batch::<Sha256>()
+                .write(all, Some(value(4, b"all")))
+                .write(near_delete, None)
+                .write(leaf_only, Some(value(4, b"leaf-only")))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(leaf.bounds.ancestors.len(), 3);
+            let expected_root = leaf.root();
+            let grandparent_diff = Arc::downgrade(&grandparent.diff);
+            let parent_diff = Arc::downgrade(&parent.diff);
+            let child_diff = Arc::downgrade(&child.diff);
+            drop(grandparent);
+            drop(parent);
+            drop(child);
+            assert!(grandparent_diff.upgrade().is_some());
+            assert!(parent_diff.upgrade().is_some());
+            assert!(child_diff.upgrade().is_some());
+
+            let (db, _) = db.apply_batch(leaf).await.unwrap();
+            assert_eq!(db.root(), expected_root);
+            assert!(grandparent_diff.upgrade().is_none());
+            assert!(parent_diff.upgrade().is_none());
+            assert!(child_diff.upgrade().is_none());
+            let db = db.commit().await.unwrap();
+
+            let keys = [
+                &all,
+                &near_delete,
+                &near_active,
+                &old_only,
+                &grandparent_create,
+                &parent_only,
+                &child_only,
+                &leaf_only,
+            ];
+            assert_eq!(
+                db.get_many(&keys).await.unwrap(),
+                vec![
+                    Some(value(4, b"all")),
+                    None,
+                    Some(value(3, b"near-active")),
+                    Some(value(1, b"old-only")),
+                    None,
+                    Some(value(2, b"parent-only")),
+                    Some(value(3, b"child-only")),
+                    Some(value(4, b"leaf-only")),
+                ]
             );
 
             db.destroy().await.unwrap();
@@ -5051,6 +5916,265 @@ mod tests {
             let results: Vec<Option<sha256::Digest>> =
                 db.get_many(&([] as [&sha256::Digest; 0])).await.unwrap();
             assert!(results.is_empty());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A single point read must retain the cold binary-search path instead of constructing a
+    /// directory whose cost can only be amortized by a larger read set.
+    #[test]
+    fn merkleized_get_keeps_cold_diff_index_uninitialized() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("cold-point-diff-index", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let key = |index: u32| {
+                let mut bytes = [0; 32];
+                bytes[..4].copy_from_slice(&index.to_be_bytes());
+                sha256::Digest::from(bytes)
+            };
+            let mut batch = db.new_batch();
+            for index in 0..64 {
+                batch = batch.write(key(index), Some(colliding_digest(0x70, index as u64)));
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            let query = key(17);
+
+            assert!(batch.diff_index.hints.get().is_none());
+            assert_eq!(
+                batch.get(&query, &db).await.unwrap(),
+                Some(colliding_digest(0x70, 17))
+            );
+            assert!(batch.diff_index.hints.get().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Cloning a cold sealed batch must preserve one lazy directory owner for its shared immutable
+    /// diff, regardless of which clone performs the first lookup.
+    #[test]
+    fn merkleized_batch_clones_share_cold_diff_index() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("clone-shared-diff-index", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let key = |index: u32| {
+                let mut bytes = [0; 32];
+                bytes[..4].copy_from_slice(&index.to_be_bytes());
+                sha256::Digest::from(bytes)
+            };
+            let mut batch = db.new_batch();
+            for index in 0..64 {
+                batch = batch.write(key(index), Some(colliding_digest(0x71, index as u64)));
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            let cloned = batch.as_ref().clone();
+
+            assert!(Arc::ptr_eq(&batch.diff, &cloned.diff));
+            assert!(Arc::ptr_eq(&batch.diff_index, &cloned.diff_index));
+            let original_hints = batch.diff_index.hints(batch.diff.as_slice());
+            let cloned_hints = cloned.diff_index.hints(cloned.diff.as_slice());
+            assert!(!original_hints.is_empty());
+            assert_eq!(original_hints.as_ptr(), cloned_hints.as_ptr());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Descendants retain raw ancestor diffs for reads and apply, but lookup directories remain
+    /// owned by the batch whose diff they index and are released with that batch.
+    #[test]
+    fn descendants_do_not_retain_ancestor_diff_indexes() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ancestor-diff-index-ownership", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let key = |index: u32| {
+                let mut bytes = [0; 32];
+                bytes[..4].copy_from_slice(&index.to_be_bytes());
+                sha256::Digest::from(bytes)
+            };
+
+            let mut parent = db.new_batch();
+            for index in 0..512 {
+                parent = parent.write(key(index), Some(colliding_digest(0x72, index as u64)));
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+
+            let mut child = parent.new_batch::<Sha256>();
+            for index in 512..1_024 {
+                child = child.write(key(index), Some(colliding_digest(0x73, index as u64)));
+            }
+            let child = child.merkleize(&db, None).await.unwrap();
+            let grandchild = child
+                .new_batch::<Sha256>()
+                .write(key(1_024), Some(colliding_digest(0x74, 1_024)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert!(!parent.diff_index.hints(parent.diff.as_slice()).is_empty());
+            assert!(!child.diff_index.hints(child.diff.as_slice()).is_empty());
+            let parent_index = Arc::downgrade(&parent.diff_index);
+            let parent_diff = Arc::downgrade(&parent.diff);
+            let child_index = Arc::downgrade(&child.diff_index);
+            let child_diff = Arc::downgrade(&child.diff);
+
+            drop(parent);
+            assert!(parent_index.upgrade().is_none());
+            assert!(parent_diff.upgrade().is_some());
+
+            drop(child);
+            assert!(child_index.upgrade().is_none());
+            assert!(child_diff.upgrade().is_some());
+            assert!(parent_diff.upgrade().is_some());
+
+            drop(grandchild);
+            assert!(child_diff.upgrade().is_none());
+            assert!(parent_diff.upgrade().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Applied ancestors may release their lookup sidecars while descendants retain only the raw
+    /// diffs needed for later apply and fall through to the newly committed database state.
+    #[test]
+    fn initialized_ancestor_commit_drop_preserves_reads_and_apply() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("indexed-ancestor-commit-drop", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let key = |index: u32| {
+                let mut bytes = [0; 32];
+                bytes[..4].copy_from_slice(&index.to_be_bytes());
+                sha256::Digest::from(bytes)
+            };
+            let value = |generation: u8, index: u32| {
+                Sha256::hash(&[
+                    b"indexed-ancestor-value",
+                    &[generation],
+                    &index.to_be_bytes(),
+                ])
+            };
+
+            let mut seed = db.new_batch();
+            for index in 0..8_192 {
+                seed = seed.write(key(index), Some(value(0, index)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let mut grandparent = db.new_batch();
+            for index in 0..4_096 {
+                grandparent = grandparent.write(key(index), Some(value(1, index)));
+            }
+            let grandparent = grandparent.merkleize(&db, None).await.unwrap();
+
+            let mut parent = grandparent.new_batch::<Sha256>();
+            for index in 0..4_096 {
+                parent = parent.write(key(index), (index != 16).then(|| value(2, index)));
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+            let child_key = key(8_192);
+            let child_value = value(3, 8_192);
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(child_key, Some(child_value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert!(
+                !grandparent
+                    .diff_index
+                    .hints(grandparent.diff.as_slice())
+                    .is_empty()
+            );
+            assert!(!parent.diff_index.hints(parent.diff.as_slice()).is_empty());
+            let grandparent_index: ArcWeak<DiffIndex> = Arc::downgrade(&grandparent.diff_index);
+            let parent_index: ArcWeak<DiffIndex> = Arc::downgrade(&parent.diff_index);
+            let parent_diff = Arc::downgrade(&parent.diff);
+            let missing = key(8_193);
+            let queries = [&child_key, &key(8), &key(16), &key(6_000), &missing];
+            assert_eq!(
+                child.get_many(&queries, &db).await.unwrap(),
+                vec![
+                    Some(child_value),
+                    Some(value(2, 8)),
+                    None,
+                    Some(value(0, 6_000)),
+                    None,
+                ]
+            );
+            let child_root = child.root();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+            drop(grandparent);
+            assert!(grandparent_index.upgrade().is_none());
+            assert!(parent_index.upgrade().is_none());
+            assert!(parent_diff.upgrade().is_some());
+            assert_eq!(
+                child.get_many(&queries, &db).await.unwrap(),
+                vec![
+                    Some(child_value),
+                    Some(value(2, 8)),
+                    None,
+                    Some(value(0, 6_000)),
+                    None,
+                ]
+            );
+
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            assert_eq!(db.root(), child_root);
+            assert_eq!(db.get(&child_key).await.unwrap(), Some(child_value));
+            assert_eq!(db.get(&key(8)).await.unwrap(), Some(value(2, 8)));
+            assert_eq!(db.get(&key(16)).await.unwrap(), None);
+            assert!(parent_diff.upgrade().is_none());
 
             db.destroy().await.unwrap();
         });
