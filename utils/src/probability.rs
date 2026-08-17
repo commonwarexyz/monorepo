@@ -2,7 +2,11 @@
 
 use rand::Rng;
 
+// Number of possible `u64` samples and denominator of the threshold grid.
 const SCALE: u128 = 1u128 << u64::BITS;
+
+// Biased `f64` exponent where scaling by 2^64 leaves the 53-bit significand unshifted.
+const SCALED_EXPONENT: u64 = 1023 + 52 - 64;
 
 /// A probability represented as a threshold over all possible `u64` samples.
 ///
@@ -29,7 +33,7 @@ impl Probability {
 
         // A proper fraction with a `u64` denominator is at least 2^-64 below one, so its rounded
         // threshold cannot collide with the sentinel reserved for probability one.
-        debug_assert!(threshold < u64::MAX as u128);
+        assert!(threshold < u64::MAX as u128);
         Some(Self(threshold as u64))
     }
 
@@ -54,10 +58,6 @@ impl Probability {
             return None;
         }
         let significand = (1u64 << 52) | (magnitude & ((1u64 << 52) - 1));
-
-        // Scaling the decoded binary value by 2^64 makes exponent 1011 the point where the
-        // significand needs neither a left nor right shift.
-        const SCALED_EXPONENT: u64 = 1023 + 52 - 64;
         if exponent < SCALED_EXPONENT {
             let shift = (SCALED_EXPONENT - exponent) as u32;
             if significand.trailing_zeros() < shift {
@@ -71,7 +71,7 @@ impl Probability {
             return Some(Self(u64::MAX));
         }
 
-        debug_assert!(threshold < u64::MAX as u128);
+        assert!(threshold < u64::MAX as u128);
         Some(Self(threshold as u64))
     }
 
@@ -103,7 +103,7 @@ impl Probability {
     }
 
     /// Samples this probability using the next `u64` from `rng`.
-    pub fn sample(self, rng: &mut (impl Rng + ?Sized)) -> bool {
+    pub fn sample<R: Rng + ?Sized>(self, rng: &mut R) -> bool {
         match self.0 {
             0 => false,
             u64::MAX => true,
