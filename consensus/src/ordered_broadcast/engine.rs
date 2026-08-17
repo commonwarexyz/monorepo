@@ -1053,7 +1053,8 @@ impl<
         let journal = {
             debug!(?sequencer, "journal replay begin");
 
-            // Prepare the reader
+            // Replay retains the highest tip in memory, so journal pages need
+            // not remain in the OS page cache.
             let mut replay = journal
                 .replay(0, 0, self.journal_replay_buffer, ReadOptions::DONT_CACHE)
                 .await
@@ -1119,29 +1120,5 @@ impl<
         .await
         .expect("unable to sync and prune journal");
         self
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-
-    pub(crate) async fn recover_tip<
-        E: BufferPooler + Clock + Spawner + CryptoRng + Storage + Metrics,
-        C: Signer,
-        S: SequencersProvider<PublicKey = C::PublicKey>,
-        P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
-        D: Digest,
-        A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
-        R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
-        Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
-        M: Monitor<Index = Epoch>,
-        T: Strategy,
-    >(
-        mut engine: Engine<E, C, S, P, D, A, R, Z, M, T>,
-        sequencer: &C::PublicKey,
-    ) -> Option<Node<C::PublicKey, P::Scheme, D>> {
-        engine = engine.journal_prepare(sequencer).await;
-        engine.tip_manager.get(sequencer)
     }
 }

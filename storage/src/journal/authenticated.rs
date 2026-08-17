@@ -2948,6 +2948,7 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
+            // Force backing I/O so the authenticated wrapper's forwarded policy is observable.
             page_cache.clear();
             let stream = journal
                 .replay(0, NZUsize!(100), ReadOptions::DONT_CACHE)

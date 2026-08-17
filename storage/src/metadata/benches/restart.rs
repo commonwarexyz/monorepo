@@ -1,38 +1,50 @@
 use super::utils::{get_random_kvs, init};
 use commonware_runtime::{
-    Supervisor as _,
+    Runner, Supervisor as _,
     benchmarks::{context, tokio},
+    tokio::Config,
 };
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn bench_restart(c: &mut Criterion) {
+    let cfg = Config::default();
     for &num_keys in &[100, 1_000, 10_000, 100_000] {
-        let initial_kvs = get_random_kvs(num_keys);
-        let runner = tokio::Runner::default();
+        // Create metadata and fill it.
+        let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
+        builder.start(|ctx| async move {
+            let mut metadata = init(ctx).await;
+            let kvs = get_random_kvs(num_keys);
+            for (k, v) in kvs {
+                metadata.put(k, v);
+            }
+
+            // Sync twice to ensure both blobs populated
+            metadata = metadata.sync().await.unwrap();
+            metadata.sync().await.unwrap();
+        });
+
+        // Benchmark
+        let runner = tokio::Runner::new(cfg.clone());
         c.bench_function(&format!("{}/keys={}", module_path!(), num_keys), |b| {
-            b.to_async(&runner).iter_custom(|iters| {
-                let initial_kvs = initial_kvs.clone();
-                async move {
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let mut metadata = init(ctx.child("setup")).await;
-                        for (key, value) in &initial_kvs {
-                            metadata.put(key.clone(), value.clone());
-                        }
-                        metadata = metadata.sync().await.unwrap();
-                        metadata.sync().await.unwrap();
-
-                        let start = Instant::now();
-                        let metadata = init(ctx.child("measured")).await;
-                        total += start.elapsed();
-
-                        metadata.destroy().await.unwrap();
-                    }
-                    total
+            b.to_async(&runner).iter_custom(|iters| async move {
+                let ctx = context::get::<commonware_runtime::tokio::Context>();
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let start = Instant::now();
+                    // This is the benchmarked operation
+                    let _metadata = init(ctx.child("storage")).await;
+                    total += start.elapsed();
                 }
+                total
             });
+        });
+
+        // Teardown
+        let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
+        cleaner.start(|ctx| async move {
+            let metadata = init(ctx).await;
+            metadata.destroy().await.unwrap();
         });
     }
 }

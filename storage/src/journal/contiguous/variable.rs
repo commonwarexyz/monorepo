@@ -2631,6 +2631,7 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
+            // Sealed history receives the replay operation's read policy directly.
             page_cache.clear();
             {
                 let stream = journal
@@ -2650,6 +2651,7 @@ mod tests {
                 );
             }
 
+            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
             page_cache.clear();
             {
                 let stream = journal

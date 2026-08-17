@@ -1016,6 +1016,8 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
+        // Replayed artifacts become in-memory state, so journal pages need not
+        // remain in the OS page cache.
         let replayed;
         (self, replayed) = async {
             let mut replay = journal

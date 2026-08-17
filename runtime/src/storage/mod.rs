@@ -1398,6 +1398,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
+        // Exact reads must return the same bytes under either cache policy.
         let default = blob
             .read_at(0, 11, ReadOptions::default())
             .await
@@ -1410,6 +1411,7 @@ pub(crate) mod tests {
             .coalesce();
         assert_eq!(default.as_ref(), uncached.as_ref());
 
+        // Zero-length and past-EOF behavior is policy-independent.
         let default = blob.read_at(0, 0, ReadOptions::default()).await.unwrap();
         let uncached = blob.read_at(0, 0, ReadOptions::DONT_CACHE).await.unwrap();
         assert_eq!(default.len(), 0);
@@ -1418,6 +1420,7 @@ pub(crate) mod tests {
         assert!(blob.read_at(0, 12, ReadOptions::default()).await.is_err());
         assert!(blob.read_at(0, 12, ReadOptions::DONT_CACHE).await.is_err());
 
+        // Vectored destinations preserve their shape and content under either policy.
         for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
             let bufs =
                 IoBufsMut::from(vec![IoBufMut::with_capacity(5), IoBufMut::with_capacity(6)]);

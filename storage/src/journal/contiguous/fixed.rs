@@ -2666,6 +2666,7 @@ mod tests {
             }
             journal = journal.sync().await.expect("failed to sync journal");
 
+            // Sealed history receives the replay operation's read policy directly.
             page_cache.clear();
             recordings.clear();
             {
@@ -2691,6 +2692,7 @@ mod tests {
                 );
             }
 
+            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
             page_cache.clear();
             recordings.clear();
             {

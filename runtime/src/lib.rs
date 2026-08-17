@@ -967,6 +967,7 @@ mod tests {
 
     #[test]
     fn test_read_options_compose() {
+        // The flag must compose, assign, remove, and remain absent from the default.
         let options = ReadOptions::default() | ReadOptions::DONT_CACHE;
         let mut assigned = ReadOptions::default();
         assigned |= ReadOptions::DONT_CACHE;

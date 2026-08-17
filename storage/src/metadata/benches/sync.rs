@@ -1,4 +1,4 @@
-use super::utils::{Key, Val, get_modified_kvs, get_random_kvs, init};
+use super::utils::{get_modified_kvs, get_random_kvs, init};
 use commonware_runtime::{
     Supervisor as _,
     benchmarks::{context, tokio},
@@ -6,89 +6,51 @@ use commonware_runtime::{
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy)]
-enum Shape {
-    Overwrite,
-    Grow,
-    Shrink,
-}
-
-impl Shape {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Overwrite => "overwrite",
-            Self::Grow => "grow",
-            Self::Shrink => "shrink",
-        }
-    }
-
-    fn mutations(self, initial_kvs: &[(Key, Val)], modified: usize) -> Vec<(Key, Val)> {
-        let mut mutations = get_modified_kvs(initial_kvs, modified);
-        if let Some((_, value)) = mutations.first_mut() {
-            match self {
-                Self::Overwrite => {}
-                Self::Grow => value.resize(200, 0),
-                Self::Shrink => value.truncate(50),
-            }
-        }
-        mutations
-    }
-}
-
-const fn shapes(modified: usize) -> &'static [Shape] {
-    if modified == 0 {
-        &[Shape::Overwrite]
-    } else {
-        &[Shape::Overwrite, Shape::Grow, Shape::Shrink]
-    }
-}
-
 fn bench_sync(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for &num_keys in &[100, 1_000, 10_000] {
         for &modified in &[0, 1, 5, 25, 50, 75, 100] {
+            let label = format!("{}/keys={} modified={}", module_path!(), num_keys, modified);
+
+            // Generate key-value pairs for the benchmark
             let initial_kvs = get_random_kvs(num_keys);
+            let modified_kvs = get_modified_kvs(&initial_kvs, modified);
 
-            for &shape in shapes(modified) {
-                let modified_kvs = shape.mutations(&initial_kvs, modified);
-                let label = format!(
-                    "{}/keys={} modified={} shape={}",
-                    module_path!(),
-                    num_keys,
-                    modified,
-                    shape.label()
-                );
-
-                c.bench_function(&label, |b| {
-                    b.to_async(&runner).iter_custom(|iters| {
-                        let initial_kvs = initial_kvs.clone();
-                        let modified_kvs = modified_kvs.clone();
-                        async move {
-                            let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let mut total = Duration::ZERO;
-                            for _ in 0..iters {
-                                let mut metadata = init(ctx.child("storage")).await;
-                                for (key, value) in &initial_kvs {
-                                    metadata.put(key.clone(), value.clone());
-                                }
-                                metadata = metadata.sync().await.unwrap();
-                                metadata = metadata.sync().await.unwrap();
-
-                                for (key, value) in &modified_kvs {
-                                    metadata.put(key.clone(), value.clone());
-                                }
-
-                                let start = Instant::now();
-                                metadata = metadata.sync().await.unwrap();
-                                total += start.elapsed();
-
-                                metadata.destroy().await.unwrap();
+            // Run the benchmark
+            c.bench_function(&label, |b| {
+                b.to_async(&runner).iter_custom(|iters| {
+                    let initial_kvs = initial_kvs.clone();
+                    let modified_kvs = modified_kvs.clone();
+                    async move {
+                        let ctx = context::get::<commonware_runtime::tokio::Context>();
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            // Put initial state
+                            let mut metadata = init(ctx.child("storage")).await;
+                            for (k, v) in &initial_kvs {
+                                metadata.put(k.clone(), v.clone());
                             }
-                            total
+
+                            // Sync twice to ensure both blobs populated
+                            metadata = metadata.sync().await.unwrap();
+                            metadata = metadata.sync().await.unwrap();
+
+                            // Update some keys
+                            for (k, v) in &modified_kvs {
+                                metadata.put(k.clone(), v.clone());
+                            }
+
+                            // Sync new data
+                            let start = Instant::now();
+                            metadata = metadata.sync().await.unwrap();
+                            total += start.elapsed();
+
+                            metadata.destroy().await.unwrap();
                         }
-                    });
+                        total
+                    }
                 });
-            }
+            });
         }
     }
 }

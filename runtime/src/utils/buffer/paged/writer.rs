@@ -205,6 +205,7 @@ impl<B: Blob> Writer<B> {
 
         while last_page_end != 0 {
             // Read the last page and parse its CRC record.
+            // A valid full page remains disk-authoritative and may be read again after startup.
             let page_start = last_page_end - physical_page_size;
             let buf = blob
                 .read_at(
@@ -885,6 +886,8 @@ impl<B: Blob> Writer<B> {
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
         let mut valid_len = 0u64;
         for page in 0..total_pages {
+            // Recovery may replay the validated prefix immediately, so use the
+            // default cache policy.
             match super::get_page_with_checksum_from_blob(
                 &self.blob,
                 page,
@@ -1019,6 +1022,8 @@ impl<B: Blob> Writer<B> {
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
 
+        // The retained prefix becomes the authoritative tip buffer, so this
+        // page need not remain in the OS page cache.
         let (page_data, old_checksum) = super::get_page_with_checksum_from_blob(
             &self.blob,
             full_pages,
@@ -2819,10 +2824,12 @@ mod tests {
                 .replay(NZUsize!(physical_page_size), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
+            // Cross a page boundary to force two refills under the requested policy.
             assert!(replay.ensure(1).await.unwrap());
             replay.advance(page_size);
             assert!(replay.ensure(1).await.unwrap());
 
+            // Seeking resets buffered state but must not reset the read policy.
             replay.seek_to(0).unwrap();
             assert!(replay.ensure(1).await.unwrap());
 
@@ -4273,6 +4280,7 @@ mod tests {
             let data = vec![7; PAGE_SIZE.get() as usize];
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
+            // A partial shrink reloads the retained prefix as the in-memory tip.
             writer.resize(50).await.unwrap();
 
             assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE]);

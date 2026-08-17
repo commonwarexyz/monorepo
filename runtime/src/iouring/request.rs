@@ -1315,6 +1315,7 @@ mod tests {
         let supported = Arc::new(AtomicBool::new(true));
         let mut read = make_read_request(Cache::Disabled(supported.clone()));
 
+        // Preserve completed bytes while retrying without the rejected cache hint.
         assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
         assert!(!read.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert_eq!(read.read, 2);
@@ -1325,6 +1326,7 @@ mod tests {
         assert!(!supported.load(Ordering::Relaxed));
         assert_eq!(read.rw_flags(), 0);
 
+        // Capability loss is shared in both directions across sibling requests.
         let mut sibling_write = make_write_request(Cache::Disabled(supported));
         assert_eq!(sibling_write.rw_flags(), 0);
 
@@ -1335,6 +1337,7 @@ mod tests {
         let mut sibling_read = make_read_request(Cache::Disabled(supported));
         assert_eq!(sibling_read.rw_flags(), 0);
 
+        // Unrelated I/O failures must not disable the hint for future requests.
         let supported = Arc::new(AtomicBool::new(true));
         let mut failing_read = make_read_request(Cache::Disabled(supported.clone()));
         assert_eq!(failing_read.rw_flags(), libc::RWF_DONTCACHE);
@@ -1349,6 +1352,7 @@ mod tests {
         let mut first = make_read_request(Cache::Disabled(supported.clone()));
         let mut second = make_read_request(Cache::Disabled(supported.clone()));
 
+        // Requests queued before the shared downgrade must each requeue without the hint.
         assert_eq!(first.rw_flags(), libc::RWF_DONTCACHE);
         assert_eq!(second.rw_flags(), libc::RWF_DONTCACHE);
         assert!(!first.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));

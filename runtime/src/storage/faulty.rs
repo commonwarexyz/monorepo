@@ -452,6 +452,7 @@ mod tests {
             .unwrap();
         recordings.clear();
 
+        // With fault rates disabled, both read entry points must preserve DONT_CACHE.
         let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
         assert_eq!(read.coalesce(), b"data");
         let read = blob

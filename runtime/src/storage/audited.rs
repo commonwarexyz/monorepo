@@ -238,6 +238,7 @@ mod tests {
             .unwrap();
         assert_eq!(auditor1.state(), auditor2.state());
 
+        // Cache policy is a backend hint and must not enter the deterministic audit event.
         blob1.read_at(0, 4, ReadOptions::default()).await.unwrap();
         blob2.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
 
@@ -254,6 +255,7 @@ mod tests {
             .unwrap();
         recordings.clear();
 
+        // Both read entry points must preserve their independently selected policy.
         blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
         blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::default())
             .await

@@ -579,6 +579,7 @@ async fn fetch_cacheable_page(
     page_num: u64,
     page_size: u64,
 ) -> Result<IoBuf, Arc<Error>> {
+    // CacheRef retains the page, so the source page need not remain in the OS page cache.
     let page = get_page_from_blob(blob, page_num, page_size, ReadOptions::DONT_CACHE)
         .await
         .map_err(Arc::new)?;

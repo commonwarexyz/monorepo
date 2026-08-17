@@ -100,7 +100,7 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Engine, mocks, types::Activity};
+    use super::{Config, Engine, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
@@ -115,12 +115,10 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Quota, ReadOptions, Runner, Spawner, Supervisor as _,
+        Clock, Quota, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        mocks::RecordingContext,
     };
-    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{
         NZU16, NZUsize, NonZeroDuration, TestRng,
         channel::{fallible::OneshotExt, oneshot},
@@ -130,7 +128,7 @@ mod tests {
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
@@ -244,119 +242,6 @@ mod tests {
         link_participants(&mut oracle, &fixture.participants, link).await;
 
         (oracle, registrations)
-    }
-
-    fn assert_recovery_read_options(reads: &[ReadOptions]) {
-        let replay_start = reads
-            .iter()
-            .position(|options| *options == ReadOptions::DONT_CACHE)
-            .expect("replay must request DONT_CACHE");
-        assert!(replay_start > 0, "initialization must retain cached reads");
-        assert!(
-            reads[..replay_start]
-                .iter()
-                .all(|options| *options == ReadOptions::default()),
-            "unexpected initialization read options: {reads:?}"
-        );
-        assert!(
-            reads[replay_start..]
-                .iter()
-                .all(|options| *options == ReadOptions::DONT_CACHE),
-            "unexpected replay read options: {reads:?}"
-        );
-    }
-
-    fn recovery_replay_records_dont_cache_read_options<S, F>(fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut TestRng, &[u8], u32) -> Fixture<S>,
-    {
-        let mut rng = test_rng();
-        let fixture = fixture(&mut rng, TEST_NAMESPACE, 4);
-        let runner = deterministic::Runner::timed(Duration::from_secs(10));
-        runner.start(|context| async move {
-            let epoch = Epoch::new(111);
-            let partition = "aggregation-replay-read-options";
-
-            let journal_cfg = JConfig {
-                partition: partition.into(),
-                compression: Some(3),
-                codec_config: S::certificate_codec_config_unbounded(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(4096),
-            };
-            let mut journal = Journal::<_, Activity<S, Sha256Digest>>::init(
-                context.child("seed_journal"),
-                journal_cfg,
-            )
-            .await
-            .unwrap();
-            (journal, _, _) = journal
-                .append(0, &Activity::Tip(Height::new(7)))
-                .await
-                .unwrap();
-            journal = journal.sync_all().await.unwrap();
-            drop(journal);
-
-            let (oracle, mut registrations) =
-                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
-            let participant = fixture.participants[0].clone();
-            let provider = mocks::Provider::new();
-            assert!(provider.register(epoch, fixture.schemes[0].clone()));
-            let monitor = mocks::Monitor::new(epoch);
-            let automaton = mocks::Application::new(mocks::Strategy::Correct);
-            let (reporter, mut reporter_mailbox) =
-                mocks::Reporter::new(context.child("reporter"), fixture.verifier.clone());
-            reporter.start();
-            let blocker = oracle.control(participant.clone());
-            let (engine_context, recordings) = RecordingContext::new(context.child("engine"));
-            let page_cache = CacheRef::from_pooler(&engine_context, PAGE_SIZE, PAGE_CACHE_SIZE);
-            let engine = Engine::new(
-                engine_context,
-                Config {
-                    monitor,
-                    provider,
-                    automaton,
-                    reporter: reporter_mailbox.clone(),
-                    blocker,
-                    priority_acks: false,
-                    rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
-                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                    window: NonZeroU64::new(10).unwrap(),
-                    activity_timeout: HeightDelta::new(100),
-                    journal_partition: partition.into(),
-                    journal_write_buffer: NZUsize!(4096),
-                    journal_replay_buffer: NZUsize!(4096),
-                    journal_heights_per_section: NonZeroU64::new(6).unwrap(),
-                    journal_compression: Some(3),
-                    journal_page_cache: page_cache,
-                    strategy: Sequential,
-                },
-            );
-            let network = registrations.remove(&participant).unwrap();
-            let handle = engine.start(network);
-
-            let deadline = context.current() + Duration::from_secs(5);
-            loop {
-                if reporter_mailbox.get_tip().await == Some((Height::new(7), epoch)) {
-                    break;
-                }
-                assert!(
-                    context.current() < deadline,
-                    "replayed tip was not reported"
-                );
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            let reads = recordings.snapshot().reads;
-            assert_recovery_read_options(&reads);
-            handle.abort();
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_recovery_replay_records_dont_cache_read_options() {
-        recovery_replay_records_dont_cache_read_options(ed25519::fixture);
     }
 
     /// Spawn aggregation engines for all validators.

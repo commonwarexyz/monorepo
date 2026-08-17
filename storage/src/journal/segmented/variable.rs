@@ -838,6 +838,7 @@ mod tests {
                 .expect("failed to replay");
             recordings.clear();
 
+            // The first lazy refill must carry the caller's policy.
             let (section, offset, _, item) = replay
                 .next()
                 .await
@@ -852,6 +853,7 @@ mod tests {
                     .all(|options| *options == ReadOptions::DONT_CACHE)
             );
 
+            // Crossing into the next section must preserve the same policy.
             recordings.clear();
             let (section, offset, _, item) = replay
                 .next()

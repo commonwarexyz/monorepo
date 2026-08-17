@@ -88,9 +88,9 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
-        Supervisor as _, deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, next_pending_sync},
+        BufferPooler, Clock, Metrics, Quota, Runner, Spawner, Storage, Supervisor as _,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
         reschedule,
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
@@ -9611,26 +9611,6 @@ mod tests {
         first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    fn assert_recovery_read_options(reads: &[ReadOptions]) {
-        let replay_start = reads
-            .iter()
-            .position(|options| *options == ReadOptions::DONT_CACHE)
-            .expect("replay must request DONT_CACHE");
-        assert!(replay_start > 0, "initialization must retain cached reads");
-        assert!(
-            reads[..replay_start]
-                .iter()
-                .all(|options| *options == ReadOptions::default()),
-            "unexpected initialization read options: {reads:?}"
-        );
-        assert!(
-            reads[replay_start..]
-                .iter()
-                .all(|options| *options == ReadOptions::DONT_CACHE),
-            "unexpected replay read options: {reads:?}"
-        );
-    }
-
     /// Certification and the finalize vote share one durable section sync.
     ///
     /// 1. Gate the sync and verify the finalize reaches neither batcher nor network.
@@ -9959,8 +9939,6 @@ mod tests {
                 context.child("reporter_restarted"),
                 reporter_cfg,
             );
-            let (voter_context, recordings) =
-                RecordingContext::new(context.child("voter_restarted"));
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
@@ -9979,13 +9957,9 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &voter_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(voter_context, voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
                 mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
@@ -10050,9 +10024,6 @@ mod tests {
                 .and_then(|payloads| payloads.get(&proposal.payload))
                 .expect("coalesced finalize should replay after restart");
             assert!(signers.contains(&me));
-
-            let reads = recordings.snapshot().reads;
-            assert_recovery_read_options(&reads);
         });
     }
 

@@ -1713,6 +1713,7 @@ mod tests {
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
+            // Evict the index page so replay must exercise the backing journal read.
             page_cache.clear();
             let mut replay = oversized
                 .replay(
@@ -1724,6 +1725,7 @@ mod tests {
                 .await
                 .expect("Failed to replay");
             recordings.clear();
+            // The adapter must preserve the caller's policy on the lazy refill.
             let (section, position, entry) = replay
                 .next()
                 .await

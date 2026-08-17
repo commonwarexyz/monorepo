@@ -657,6 +657,7 @@ mod tests {
         let v2_supported = AtomicBool::new(true);
         let v2_unsupported = AtomicBool::new(false);
 
+        // Use the single-buffer fast path only when no requested per-write flag can be applied.
         assert!(Blob::use_single_write(
             false,
             &Cache::Enabled,
@@ -686,6 +687,7 @@ mod tests {
     #[test]
     fn test_unflagged_vectored_write_uses_legacy_path() {
         let mut legacy_calls = 0;
+        // With no operation or cache flag, vectored writes must bypass the v2 syscall family.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Enabled,
             None::<Capabilities<'static>>,
@@ -718,6 +720,7 @@ mod tests {
         let mut calls = 0;
         let mut attempts = Vec::new();
 
+        // EINTR retries the same suffix, while successful partial reads advance the offset.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -758,6 +761,7 @@ mod tests {
         let mut calls = 0;
         let mut fallback = None;
 
+        // After partial progress, an unsupported hint falls back only for the unread suffix.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -796,6 +800,7 @@ mod tests {
         let mut calls = 0;
         let mut fallback = None;
 
+        // ENOSYS falls back for the unread suffix and disables v2 for every clone.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -824,6 +829,7 @@ mod tests {
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(!v2_supported.load(Ordering::Relaxed));
 
+        // A sibling observes the shared downgrade without probing the absent syscall.
         let mut sibling = [0u8; 1];
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
@@ -847,6 +853,7 @@ mod tests {
         let v2_supported = Arc::new(AtomicBool::new(true));
         let mut output = [0u8; 1];
 
+        // A zero-byte completion before the buffer is full is EOF, not a hint failure.
         let err = Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -869,6 +876,7 @@ mod tests {
         let offset = i64::MAX as u64 + 1;
         let mut fallback = None;
 
+        // Offsets outside off_t never reach preadv2 or disable a supported capability.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -898,6 +906,7 @@ mod tests {
         let mut fallback = None;
         let max_offset = libc::off_t::MAX as u64;
 
+        // If partial progress crosses off_t::MAX, only the unread suffix falls back.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -929,6 +938,7 @@ mod tests {
         let v2_supported = Arc::new(AtomicBool::new(true));
         let mut output = [];
 
+        // Empty reads return before offset conversion or capability probing.
         Blob::read_exact_at_hinted_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -950,6 +960,7 @@ mod tests {
         let mut v2_calls = 0;
         let mut legacy_calls = 0;
 
+        // ENOSYS switches to legacy I/O and preserves SYNC through a trailing barrier.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -980,6 +991,7 @@ mod tests {
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         assert!(!v2_supported.load(Ordering::Relaxed));
 
+        // Later writes and sibling reads observe the shared downgrade without probing.
         let later_v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1028,6 +1040,7 @@ mod tests {
         let v2_supported = Arc::new(AtomicBool::new(true));
         let mut flags = Vec::new();
 
+        // Rejecting DONT_CACHE retries the same v2 write with DSYNC only.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1067,6 +1080,7 @@ mod tests {
         let mut flags = Vec::new();
         let mut legacy_calls = 0;
 
+        // If DSYNC is also unsupported, legacy I/O plus a trailing sync preserves durability.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Disabled(dont_cache_supported.clone()),
             capabilities(&dont_cache_supported, &v2_supported),
@@ -1107,6 +1121,7 @@ mod tests {
         let mut flags = Vec::new();
         let mut legacy_calls = 0;
 
+        // A fresh SYNC-only failure must disable v2 and require a trailing sync.
         let v2_flags_applied = Blob::write_vectored_at_with(
             Cache::Enabled,
             capabilities(&dont_cache_supported, &v2_supported),

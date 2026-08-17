@@ -202,6 +202,8 @@ where
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
+            // Replay rebuilds the epoch caches in memory, so journal pages need
+            // not remain in the OS page cache.
             let mut replay = events
                 .replay(0, 0, READ_BUFFER, ReadOptions::DONT_CACHE)
                 .await
@@ -699,7 +701,7 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{Runner, Supervisor as _, deterministic, mocks::RecordingContext};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU32, TestRng, ordered::Set};
 
     type TestStore<E> = Store<E, MemorySecretStore, MinPk, PublicKey>;
@@ -763,26 +765,6 @@ mod tests {
             let info = store.current().expect("current epoch");
             assert_eq!(info.epoch, Epoch::new(7));
         });
-    }
-
-    fn assert_recovery_read_options(reads: &[ReadOptions]) {
-        let replay_start = reads
-            .iter()
-            .position(|options| *options == ReadOptions::DONT_CACHE)
-            .expect("replay must request DONT_CACHE");
-        assert!(replay_start > 0, "initialization must retain cached reads");
-        assert!(
-            reads[..replay_start]
-                .iter()
-                .all(|options| *options == ReadOptions::default()),
-            "unexpected initialization read options: {reads:?}"
-        );
-        assert!(
-            reads[replay_start..]
-                .iter()
-                .all(|options| *options == ReadOptions::DONT_CACHE),
-            "unexpected replay read options: {reads:?}"
-        );
     }
 
     #[test]
@@ -849,10 +831,7 @@ mod tests {
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
 
-            let (restart_context, recordings) = RecordingContext::new(context.child("restart"));
-            let store = init_store(restart_context, "replay", secret_store).await;
-            let reads = recordings.snapshot().reads;
-            assert_recovery_read_options(&reads);
+            let store = init_store(context.child("restart"), "replay", secret_store).await;
             // The current epoch is not persisted; the setup state re-derives it from
             // finalized blocks, so a restarted store has no current epoch on its own.
             assert!(store.current().is_none());

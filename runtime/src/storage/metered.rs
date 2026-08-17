@@ -277,6 +277,7 @@ mod tests {
             .unwrap();
         recordings.clear();
 
+        // Both read entry points forward DONT_CACHE while contributing to the same metrics.
         let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
         assert_eq!(read.coalesce(), b"data");
         let read = blob
