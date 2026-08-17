@@ -11,6 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
+use commonware_utils::Probability;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -39,9 +40,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
     u.int_in_range(1..=MAX_WRITE_BUF)
 }
 
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
+fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(Probability!(u64::from(percent), 100))
 }
 
 /// Operations that can be performed on the queue.
@@ -86,10 +87,10 @@ struct FuzzInput {
     write_buffer: usize,
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     /// Failure rate for write operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: f64,
+    write_failure_rate: Probability,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
 }
@@ -487,7 +488,7 @@ fn fuzz(input: FuzzInput) {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: write_failure_rate,
-                    retention_rate: 0.0,
+                    retention_rate: Probability!(0.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()

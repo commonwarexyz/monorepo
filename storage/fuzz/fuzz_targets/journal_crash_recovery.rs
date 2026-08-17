@@ -52,7 +52,7 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
-use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -100,9 +100,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 }
 
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
-fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<f64> {
+fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(Probability!(u64::from(percent), 100))
 }
 
 /// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
@@ -166,19 +166,19 @@ struct FuzzInput {
     write_buffer: usize,
     /// Failure rate for write operations.
     #[arbitrary(with = bounded_rate)]
-    write_failure_rate: f64,
+    write_failure_rate: Probability,
     /// Probability used to retain bytes from a failed or unsynchronized write.
     #[arbitrary(with = bounded_rate)]
-    write_retention_rate: f64,
+    write_retention_rate: Probability,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     /// Failure rate for resize operations (truncation during rewind/prune).
     #[arbitrary(with = bounded_rate)]
-    resize_failure_rate: f64,
+    resize_failure_rate: Probability,
     /// Probability that a resize failure is partial.
     #[arbitrary(with = bounded_rate)]
-    partial_resize_rate: f64,
+    partial_resize_rate: Probability,
     /// Operations to execute, split into one `ops` list per cycle at each `Crash` marker.
     #[arbitrary(with = bounded_operations)]
     operations: Vec<JournalOperation>,
@@ -191,11 +191,11 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    write_rate: f64,
-    write_retention_rate: f64,
-    sync_rate: f64,
-    resize_rate: f64,
-    partial_resize_rate: f64,
+    write_rate: Probability,
+    write_retention_rate: Probability,
+    sync_rate: Probability,
+    resize_rate: Probability,
+    partial_resize_rate: Probability,
 }
 
 impl Params {
@@ -208,8 +208,10 @@ impl Params {
                 mode: deterministic::PartialWriteMode::Prefix,
             }),
             sync_rate: Some(self.sync_rate),
-            resize_rate: Some(self.resize_rate),
-            partial_resize_rate: Some(self.partial_resize_rate),
+            resize_rate: Some(deterministic::ResizeConfig {
+                failure_rate: self.resize_rate,
+                partial_rate: self.partial_resize_rate,
+            }),
             ..Default::default()
         }
     }

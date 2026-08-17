@@ -2587,7 +2587,7 @@ mod tests {
             next_pending_sync, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use std::num::NonZeroU16;
 
@@ -2849,8 +2849,8 @@ mod tests {
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: 1.0,
-                    retention_rate: 0.0,
+                    failure_rate: Probability!(1.0),
+                    retention_rate: Probability!(0.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()
@@ -6134,7 +6134,7 @@ mod tests {
                 drop(journal);
 
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    sync_rate: Some(1.0),
+                    sync_rate: Some(Probability!(1.0)),
                     ..Default::default()
                 };
                 assert!(
@@ -6195,7 +6195,7 @@ mod tests {
                 // Fail the offsets metadata sync inside `stage_clear_intent` so `clear_to_size`
                 // aborts before any data is cleared. The reset intent never becomes durable.
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    sync_rate: Some(1.0),
+                    sync_rate: Some(Probability!(1.0)),
                     ..Default::default()
                 };
                 assert!(journal.0.clear_to_size(7).await.is_err());
@@ -6253,7 +6253,7 @@ mod tests {
                 // subsequent `data.clear()` (a blob remove) so `clear_to_size` aborts after the
                 // intent is durable but before the data is cleared.
                 *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    remove_rate: Some(1.0),
+                    remove_rate: Some(Probability!(1.0)),
                     ..Default::default()
                 };
                 assert!(journal.0.clear_to_size(7).await.is_err());
