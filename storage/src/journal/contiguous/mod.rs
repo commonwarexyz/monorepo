@@ -85,6 +85,15 @@ async fn warm_range<B: commonware_runtime::Blob>(
 /// assert_eq!(position_to_blob(25, 10), 2);  // position 25 -> blob 2
 /// assert_eq!(position_to_blob(30, 10), 3);  // position 30 -> blob 3
 /// ```
+/// Return the first retained logical position in `blob`: the oldest retained blob may
+/// begin mid-grid (a mid-blob pruning boundary or an `init_at_size` start), and its items
+/// are stored from physical offset zero.
+#[inline]
+fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
+    let start = blob_first_position(blob, items_per_blob)?;
+    Ok(pruning_boundary.max(start))
+}
+
 const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
     position / items_per_blob
 }
