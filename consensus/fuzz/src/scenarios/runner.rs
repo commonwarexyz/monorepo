@@ -12,7 +12,7 @@ use super::{
     adversary,
     elector::ByzantineLeaderAtView,
     environment::{Mb, Node, ScenarioEnv},
-    input::{ConsensusMutation, MarshalScenarioPrefixInput, Mode},
+    input::{ConsensusMutation, MarshalScenarioPrefixInput},
     scenarios,
 };
 use crate::{
@@ -177,7 +177,7 @@ where
         block_contexts.record(genesis_commitment, genesis.context.clone());
         let stack_label: Arc<str> = "scenario".into();
 
-        let byzantine = matches!(input.mode, Mode::DisrupterN4F1C3);
+        let byzantine = input.config.faults > 0;
 
         let mut nodes: Vec<Option<MarshalNode<P, M>>> = Vec::with_capacity(NUM_VALIDATORS as usize);
         let mut engine_channels: Vec<Option<NetworkChannels<PublicKeyOf<P>>>> =
@@ -484,19 +484,17 @@ where
 mod tests {
     use super::*;
     use crate::{
-        SimplexCertificateMock,
-        scenarios::input::{
-            BackfillFault, BlockFault, ConsensusMutation, FaultPlan, Mode, ScenarioKind,
-        },
+        Configuration, N4F0C4, N4F1C3, SimplexCertificateMock,
+        scenarios::input::{BackfillFault, BlockFault, ConsensusMutation, FaultPlan, ScenarioKind},
         utils::Partition,
     };
     use commonware_consensus::simplex::ForwardingPolicy;
 
-    fn run(scenario: ScenarioKind, mode: Mode) {
+    fn run(scenario: ScenarioKind, config: Configuration) {
         let input = MarshalScenarioPrefixInput {
             raw_bytes: vec![0u8; 64],
             scenario,
-            mode,
+            config,
             fault_plan: FaultPlan {
                 block_fault: BlockFault::Partition,
                 backfill: BackfillFault::Poison,
@@ -516,58 +514,52 @@ mod tests {
 
     #[test]
     fn honest_missing_candidate() {
-        run(ScenarioKind::MissingCandidate, Mode::HonestN4F0C4);
+        run(ScenarioKind::MissingCandidate, N4F0C4);
     }
 
     #[test]
     fn honest_finalization_without_block() {
-        run(ScenarioKind::FinalizationWithoutBlock, Mode::HonestN4F0C4);
+        run(ScenarioKind::FinalizationWithoutBlock, N4F0C4);
     }
 
     #[test]
     fn honest_subscribe_before_block() {
-        run(ScenarioKind::SubscribeBeforeBlock, Mode::HonestN4F0C4);
+        run(ScenarioKind::SubscribeBeforeBlock, N4F0C4);
     }
 
     #[test]
     fn honest_same_height_different_views() {
-        run(ScenarioKind::SameHeightDifferentViews, Mode::HonestN4F0C4);
+        run(ScenarioKind::SameHeightDifferentViews, N4F0C4);
     }
 
     #[test]
     fn honest_pending_floor_anchor() {
-        run(ScenarioKind::PendingFloorAnchor, Mode::HonestN4F0C4);
+        run(ScenarioKind::PendingFloorAnchor, N4F0C4);
     }
 
     #[test]
     fn adversarial_missing_candidate() {
-        run(ScenarioKind::MissingCandidate, Mode::DisrupterN4F1C3);
+        run(ScenarioKind::MissingCandidate, N4F1C3);
     }
 
     #[test]
     fn adversarial_finalization_without_block() {
-        run(
-            ScenarioKind::FinalizationWithoutBlock,
-            Mode::DisrupterN4F1C3,
-        );
+        run(ScenarioKind::FinalizationWithoutBlock, N4F1C3);
     }
 
     #[test]
     fn adversarial_subscribe_before_block() {
-        run(ScenarioKind::SubscribeBeforeBlock, Mode::DisrupterN4F1C3);
+        run(ScenarioKind::SubscribeBeforeBlock, N4F1C3);
     }
 
     #[test]
     fn adversarial_same_height_different_views() {
-        run(
-            ScenarioKind::SameHeightDifferentViews,
-            Mode::DisrupterN4F1C3,
-        );
+        run(ScenarioKind::SameHeightDifferentViews, N4F1C3);
     }
 
     #[test]
     fn adversarial_pending_floor_anchor() {
-        run(ScenarioKind::PendingFloorAnchor, Mode::DisrupterN4F1C3);
+        run(ScenarioKind::PendingFloorAnchor, N4F1C3);
     }
 
     // Smoke: an honest run with a degraded deprived-node link exercises the
@@ -577,7 +569,7 @@ mod tests {
         let input = MarshalScenarioPrefixInput {
             raw_bytes: vec![0],
             scenario: ScenarioKind::PendingFloorAnchor,
-            mode: Mode::HonestN4F0C4,
+            config: N4F0C4,
             fault_plan: FaultPlan {
                 block_fault: BlockFault::Omit,
                 backfill: BackfillFault::Withhold,
@@ -599,11 +591,11 @@ mod tests {
         ($honest:ident, $adversarial:ident, $kind:ident) => {
             #[test]
             fn $honest() {
-                run(ScenarioKind::$kind, Mode::HonestN4F0C4);
+                run(ScenarioKind::$kind, N4F0C4);
             }
             #[test]
             fn $adversarial() {
-                run(ScenarioKind::$kind, Mode::DisrupterN4F1C3);
+                run(ScenarioKind::$kind, N4F1C3);
             }
         };
     }

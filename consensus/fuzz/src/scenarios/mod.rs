@@ -21,5 +21,5 @@ pub(crate) mod runner;
 pub(crate) mod scenarios;
 mod strategy;
 
-pub use input::{MarshalScenarioPrefixInput, Mode, ScenarioKind};
+pub use input::{MarshalScenarioPrefixInput, ScenarioKind};
 pub use runner::{fuzz_marshal_scenario_prefix_deferred, fuzz_marshal_scenario_prefix_inline};

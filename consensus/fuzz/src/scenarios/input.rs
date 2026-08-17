@@ -1,10 +1,14 @@
 //! Libfuzzer-facing input for the scenario-based marshal target.
 //!
-//! A minimal input selects the first scenario in the adversarial mode with a
-//! connected network; larger inputs pick other scenarios, the honest mode, and
-//! reshape the pre-GST topology, byzantine strategy, and forwarding around them.
+//! A minimal input selects the first scenario in the adversarial `N4F1C3` config
+//! with a connected network; larger inputs pick other scenarios, the honest
+//! `N4F0C4` config, and reshape the pre-GST topology, byzantine strategy, and
+//! forwarding around them.
 
-use crate::utils::{Partition, SetPartition};
+use crate::{
+    Configuration, N4F0C4, N4F1C3,
+    utils::{Partition, SetPartition},
+};
 use arbitrary::Arbitrary;
 use commonware_consensus::{marshal::mocks::harness::BLOCKS_PER_EPOCH, simplex::ForwardingPolicy};
 
@@ -48,15 +52,6 @@ pub enum ScenarioKind {
     CertifySurvivesViewPruning,
     DeferredCertifyFallback,
     FirstBlockFetchesGenesisParent,
-}
-
-/// The fuzzing-phase configuration after the prefix.
-#[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Mode {
-    /// Four honest engines start from the floor; pressure from network faults.
-    HonestN4F0C4,
-    /// Node 0 is a full-channel adversary; nodes 1-3 are honest.
-    DisrupterN4F1C3,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.
@@ -109,7 +104,8 @@ pub struct FaultPlan {
 pub struct MarshalScenarioPrefixInput {
     pub raw_bytes: Vec<u8>,
     pub scenario: ScenarioKind,
-    pub mode: Mode,
+    /// The cluster configuration: `N4F0C4` (honest) or `N4F1C3` (node 0 byzantine).
+    pub config: Configuration,
     pub fault_plan: FaultPlan,
     /// Fault-density parameters for the Simplex disrupter's `SmallScope` (wrapped
     /// by `LiveScope` so it faults live views above the floor).
@@ -124,7 +120,10 @@ pub struct MarshalScenarioPrefixInput {
 impl Arbitrary<'_> for MarshalScenarioPrefixInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let scenario = ScenarioKind::arbitrary(u)?;
-        let mode = Mode::arbitrary(u)?;
+        let config = match u.int_in_range(0..=1)? {
+            0 => N4F1C3,
+            _ => N4F0C4,
+        };
         let fault_plan = FaultPlan::arbitrary(u)?;
 
         let partition = match u.int_in_range(0..=99)? {
@@ -152,7 +151,7 @@ impl Arbitrary<'_> for MarshalScenarioPrefixInput {
         Ok(Self {
             raw_bytes,
             scenario,
-            mode,
+            config,
             fault_plan,
             fault_rounds,
             fault_rounds_bound,
