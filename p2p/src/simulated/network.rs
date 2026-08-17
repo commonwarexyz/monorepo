@@ -1569,7 +1569,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(2),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(9, 10),
+                success_rate: Probability!(0.9),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())

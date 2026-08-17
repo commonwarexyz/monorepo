@@ -111,7 +111,7 @@
 //!         Link {
 //!             latency: Duration::from_millis(5),
 //!             jitter: Duration::from_millis(2),
-//!             success_rate: Probability!(3, 4),
+//!             success_rate: Probability!(0.75),
 //!         },
 //!     ).await.unwrap();
 //!
@@ -128,7 +128,7 @@
 //!         Link {
 //!             latency: Duration::from_millis(100),
 //!             jitter: Duration::from_millis(25),
-//!             success_rate: Probability!(4, 5),
+//!             success_rate: Probability!(0.8),
 //!         },
 //!     ).await.unwrap();
 //!
@@ -289,7 +289,7 @@ mod tests {
                             Link {
                                 latency: Duration::from_millis(5),
                                 jitter: Duration::from_millis(2),
-                                success_rate: Probability!(3, 4),
+                                success_rate: Probability!(0.75),
                             },
                         )
                         .await;
@@ -424,7 +424,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(5),
                         jitter: Duration::from_millis(2),
-                        success_rate: Probability!(3, 4),
+                        success_rate: Probability!(0.75),
                     },
                 )
                 .await;

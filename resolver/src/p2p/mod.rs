@@ -156,7 +156,7 @@ mod tests {
     const LINK_UNRELIABLE: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1, 2),
+        success_rate: Probability!(0.5),
     };
 
     fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {

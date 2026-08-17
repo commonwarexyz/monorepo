@@ -93,7 +93,7 @@ pub const LINK: Link = Link {
 pub const UNRELIABLE_LINK: Link = Link {
     latency: Duration::from_millis(200),
     jitter: Duration::from_millis(50),
-    success_rate: Probability!(7, 10),
+    success_rate: Probability!(0.7),
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 

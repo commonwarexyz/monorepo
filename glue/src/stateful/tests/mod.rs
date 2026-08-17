@@ -156,7 +156,7 @@ fn state_sync_lossy_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: Probability!(7, 10),
+        success_rate: Probability!(0.7),
     };
     run_state_sync_lossy(
         SingleDbEngine::new(NUM_VALIDATORS).with_state_sync(),
@@ -171,7 +171,7 @@ fn lossy_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: Probability!(7, 10),
+        success_rate: Probability!(0.7),
     };
     run_lossy(SingleDbEngine::new(NUM_VALIDATORS), link.clone());
     run_lossy(MultiDbEngine::new(NUM_VALIDATORS), link);
@@ -290,7 +290,7 @@ where
 }
 
 fn storage_fault_config() -> deterministic::FaultConfig {
-    deterministic::FaultConfig::default().sync(Probability!(1, 100))
+    deterministic::FaultConfig::default().sync(Probability!(0.01))
 }
 
 fn default_storage_fault_schedule<P>(restart_order: impl IntoIterator<Item = P>) -> Schedule<P>

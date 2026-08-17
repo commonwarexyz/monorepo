@@ -39,6 +39,48 @@ impl Probability {
         Some(Self(threshold as u64))
     }
 
+    /// Creates a probability from an `f64` that maps exactly to a 64-bit threshold.
+    ///
+    /// Returns [`None`] if `value` is not finite, is outside `[0, 1]`, or would require rounding.
+    /// The exact IEEE-754 value is preserved rather than interpreting its source spelling as a
+    /// decimal ratio.
+    pub const fn from_f64(value: f64) -> Option<Self> {
+        let bits = value.to_bits();
+        let magnitude = bits & (u64::MAX >> 1);
+
+        if magnitude == 0 {
+            return Some(Self::ZERO);
+        }
+        if bits != magnitude || magnitude > 1.0f64.to_bits() {
+            return None;
+        }
+
+        let exponent = magnitude >> 52;
+        if exponent == 0 {
+            return None;
+        }
+        let significand = (1u64 << 52) | (magnitude & ((1u64 << 52) - 1));
+
+        // Scaling the decoded binary value by 2^64 makes exponent 1011 the point where the
+        // significand needs neither a left nor right shift.
+        const SCALED_EXPONENT: u64 = 1023 + 52 - 64;
+        if exponent < SCALED_EXPONENT {
+            let shift = (SCALED_EXPONENT - exponent) as u32;
+            if significand.trailing_zeros() < shift {
+                return None;
+            }
+            return Some(Self(significand >> shift));
+        }
+
+        let threshold = (significand as u128) << (exponent - SCALED_EXPONENT);
+        if threshold == SCALE {
+            return Some(Self::ONE);
+        }
+
+        debug_assert!(threshold < u64::MAX as u128);
+        Some(Self(threshold as u64))
+    }
+
     /// Returns whether this probability never occurs.
     pub const fn is_zero(self) -> bool {
         self.0 == Self::ZERO.0
@@ -76,15 +118,17 @@ impl Probability {
     }
 }
 
-/// Creates a [`Probability`] from an integer numerator and denominator.
+/// Creates a [`Probability`] from an integer ratio or an exactly representable `f64`.
 ///
-/// Literal arguments are validated at compile time. Expression arguments are validated at
-/// runtime.
+/// The two-argument form preserves the exact ratio. The one-argument form preserves the exact
+/// IEEE-754 value and accepts only a literal that maps exactly to a 64-bit threshold. Ratio
+/// literals are validated at compile time; ratio expressions are validated at runtime.
 ///
 /// # Panics
 ///
-/// The expression form panics if the denominator is zero or the numerator exceeds the
-/// denominator. Use [`Probability::new`] to validate untrusted values without panicking.
+/// The ratio expression form panics if its denominator is zero or its numerator exceeds the
+/// denominator. Use [`Probability::new`] or [`Probability::from_f64`] to validate untrusted values
+/// without panicking.
 ///
 /// # Examples
 ///
@@ -92,13 +136,21 @@ impl Probability {
 /// use commonware_utils::Probability;
 ///
 /// const HALF: Probability = Probability!(1, 2);
+/// const NINETY_EIGHT_PERCENT: Probability = Probability!(0.98);
 /// assert_eq!(HALF.as_f64(), 0.5);
+/// assert_eq!(NINETY_EIGHT_PERCENT.as_f64(), 0.98);
 /// ```
 ///
 /// ```compile_fail
 /// use commonware_utils::Probability;
 ///
 /// const INVALID: Probability = Probability!(2, 1);
+/// ```
+///
+/// ```compile_fail
+/// use commonware_utils::Probability;
+///
+/// const REQUIRES_ROUNDING: Probability = Probability!(1e-20);
 /// ```
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -108,6 +160,13 @@ impl Probability {
 )))] // BETA
 #[macro_export]
 macro_rules! Probability {
+    ($value:literal) => {
+        const {
+            $crate::Probability::from_f64($value).expect(
+                "probability requires a value in [0, 1] exactly representable as a 64-bit threshold",
+            )
+        }
+    };
     ($numerator:literal, $denominator:literal) => {
         const {
             $crate::Probability::new($numerator, $denominator)
@@ -159,6 +218,51 @@ mod tests {
         assert_eq!(Probability!(1, 2).as_f64(), 0.5);
         assert!(Probability::new(1, 0).is_none());
         assert!(Probability::new(2, 1).is_none());
+    }
+
+    #[test]
+    fn f64_construction_preserves_clean_binary_value() {
+        const FROM_LITERAL: Probability = Probability!(0.98);
+        const MINIMUM_INTERIOR: f64 = f64::from_bits(959u64 << 52);
+
+        assert_eq!(FROM_LITERAL.0, 18_077_809_192_235_360_256);
+        assert_eq!(FROM_LITERAL.as_f64(), 0.98);
+        assert_ne!(FROM_LITERAL, Probability!(49, 50));
+        assert_eq!(Probability!(0.5), Probability!(1, 2));
+        assert_eq!(Probability::from_f64(0.0), Some(Probability::ZERO));
+        assert_eq!(Probability::from_f64(-0.0), Some(Probability::ZERO));
+        assert_eq!(Probability::from_f64(1.0), Some(Probability::ONE));
+        assert_eq!(
+            Probability::from_f64(MINIMUM_INTERIOR),
+            Some(Probability(1))
+        );
+
+        let below_one = f64::from_bits(1.0f64.to_bits() - 1);
+        assert_eq!(
+            Probability::from_f64(below_one).unwrap().as_f64(),
+            below_one
+        );
+    }
+
+    #[test]
+    fn f64_construction_rejects_lossy_or_invalid_values() {
+        const BELOW_MINIMUM: f64 = f64::from_bits(958u64 << 52);
+        const MINIMUM_INTERIOR_BITS: u64 = 959u64 << 52;
+
+        for value in [
+            BELOW_MINIMUM,
+            f64::from_bits(MINIMUM_INTERIOR_BITS + 1),
+            f64::from_bits(1),
+            -0.1,
+            1.1,
+            f64::from_bits(1.0f64.to_bits() + 1),
+            f64::NAN,
+            f64::from_bits(f64::NAN.to_bits() | (1u64 << 63)),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(Probability::from_f64(value).is_none());
+        }
     }
 
     #[test]

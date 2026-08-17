@@ -576,7 +576,7 @@ mod tests {
             let delayed_link = Link {
                 latency: Duration::from_millis(50),
                 jitter: Duration::from_millis(40),
-                success_rate: Probability!(1, 2),
+                success_rate: Probability!(0.5),
             };
             link_participants(
                 &mut oracle,
@@ -1026,7 +1026,7 @@ mod tests {
             let delayed_link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(49, 50),
+                success_rate: Probability!(0.98),
             };
 
             let (mut oracle, mut registrations) =

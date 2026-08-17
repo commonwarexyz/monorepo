@@ -3724,7 +3724,7 @@ mod tests {
             let degraded_link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: Probability!(1, 2),
+                success_rate: Probability!(0.5),
             };
             link_validators(
                 &mut oracle,
@@ -5438,7 +5438,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(49, 50),
+                success_rate: Probability!(0.98),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 

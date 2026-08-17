@@ -30,7 +30,7 @@ fn dkg_e2e_lossy_network() {
         Link {
             latency: Duration::from_millis(60),
             jitter: Duration::from_millis(20),
-            success_rate: Probability!(3, 4),
+            success_rate: Probability!(0.75),
         },
         vec![],
         ExpectedOutcome::Success,

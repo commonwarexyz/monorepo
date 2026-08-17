@@ -100,7 +100,7 @@ async fn setup_degraded_network<E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: Probability!(3, 5),
+        success_rate: Probability!(0.6),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {

@@ -513,7 +513,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 10, Probability!(1, 10)).await;
+                initialize_simulation(context.child("network"), 10, Probability!(0.1)).await;
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
 

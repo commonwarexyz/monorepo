@@ -1933,7 +1933,7 @@ mod tests {
     fn test_recover_retained_successful_resize() {
         let cfg = deterministic::Config::default()
             .with_seed(83)
-            .with_storage_fault_config(FaultConfig::default().resize(Probability!(1, 2)));
+            .with_storage_fault_config(FaultConfig::default().resize(Probability!(0.5)));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
                 let (blob, _) = context.open("crash_resize", b"blob").await.unwrap();
@@ -1960,7 +1960,7 @@ mod tests {
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
                     failure_rate: Probability::ZERO,
-                    retention_rate: Probability!(1, 2),
+                    retention_rate: Probability!(0.5),
                     mode: PartialWriteMode::Subset,
                 }));
             let (_, checkpoint) =
@@ -2415,7 +2415,7 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
-                    open_rate: Some(Probability!(1, 2)),
+                    open_rate: Some(Probability!(0.5)),
                     ..Default::default()
                 });
 
@@ -2453,13 +2453,13 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
-                    open_rate: Some(Probability!(1, 2)),
+                    open_rate: Some(Probability!(0.5)),
                     write_rate: Some(WriteConfig {
-                        failure_rate: Probability!(3, 10),
+                        failure_rate: Probability!(0.3),
                         retention_rate: Probability::ZERO,
                         mode: PartialWriteMode::Prefix,
                     }),
-                    sync_rate: Some(Probability!(1, 5)),
+                    sync_rate: Some(Probability!(0.2)),
                     ..Default::default()
                 });
 

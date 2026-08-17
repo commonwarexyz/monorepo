@@ -648,7 +648,7 @@ fn reshare_e2e_lossy_network(#[case] network: Network) {
     .link(Link {
         latency: Duration::from_millis(100),
         jitter: Duration::from_millis(50),
-        success_rate: Probability!(7, 10),
+        success_rate: Probability!(0.7),
     })
     .timeout(Duration::from_secs(720))
     .run()
