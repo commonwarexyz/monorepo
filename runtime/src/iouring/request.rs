@@ -553,9 +553,7 @@ impl Cache {
     fn fallback(&mut self) -> bool {
         match std::mem::replace(self, Self::Enabled) {
             Self::Disabled(supported) => {
-                if supported.swap(false, Ordering::Relaxed) {
-                    tracing::debug!("RWF_DONTCACHE unsupported, falling back to cached I/O");
-                }
+                supported.store(false, Ordering::Relaxed);
                 true
             }
             Self::Enabled => false,
@@ -746,8 +744,6 @@ impl SyncRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::traces::collector::TraceStorage;
-    use commonware_macros::test_collect_traces;
     use commonware_utils::channel::oneshot;
     use futures::executor::block_on;
     use std::{
@@ -1347,8 +1343,8 @@ mod tests {
         assert!(matches!(failing_read.result, Some(Err(Error::ReadFailed))));
     }
 
-    #[test_collect_traces]
-    fn test_queued_cache_fallbacks_retry_and_log_once(traces: TraceStorage) {
+    #[test]
+    fn test_queued_cache_fallbacks_retry() {
         let supported = Arc::new(AtomicBool::new(true));
         let mut first = make_read_request(Cache::Disabled(supported.clone()));
         let mut second = make_read_request(Cache::Disabled(supported.clone()));
@@ -1360,13 +1356,6 @@ mod tests {
         assert!(!supported.load(Ordering::Relaxed));
         assert_eq!(first.rw_flags(), 0);
         assert_eq!(second.rw_flags(), 0);
-
-        let transition_logs = traces
-            .get_all()
-            .iter()
-            .filter(|event| event.metadata.content.contains("RWF_DONTCACHE unsupported"))
-            .count();
-        assert_eq!(transition_logs, 1);
     }
 
     #[test]

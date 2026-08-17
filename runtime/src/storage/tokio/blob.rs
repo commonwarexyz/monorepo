@@ -34,27 +34,15 @@ impl Cache {
             && matches!(self, Self::Disabled(supported) if supported.load(Ordering::Relaxed))
     }
 
-    /// Disable cache bypass for this request and its sibling handles.
-    ///
-    /// Returns whether this call performed the shared capability transition.
-    fn fallback(&mut self) -> Option<bool> {
-        match std::mem::replace(self, Self::Enabled) {
-            Self::Disabled(supported) => Some(supported.swap(false, Ordering::Relaxed)),
-            Self::Enabled => None,
-        }
-    }
-
     /// Return whether an unsupported cache-bypass attempt should be retried with normal caching.
     fn retry_cached(&mut self, err: &std::io::Error, attempted_dont_cache: bool) -> bool {
         if err.raw_os_error() != Some(libc::EOPNOTSUPP) || !attempted_dont_cache {
             return false;
         }
-        let Some(transitioned) = self.fallback() else {
+        let Self::Disabled(supported) = std::mem::replace(self, Self::Enabled) else {
             return false;
         };
-        if transitioned {
-            tracing::debug!("RWF_DONTCACHE unsupported, using normal page caching");
-        }
+        supported.store(false, Ordering::Relaxed);
         true
     }
 }
@@ -108,19 +96,11 @@ impl Blob {
     }
 
     /// Stop using the v2 syscall family and cache hints for every clone of this handle.
-    ///
-    /// Returns whether this call performed the shared v2 capability transition.
-    fn disable_v2(capabilities: Capabilities<'_>) -> bool {
-        // Clear the hint first so a concurrent EOPNOTSUPP result does not emit a second event for
-        // the capability loss already implied by ENOSYS.
+    fn disable_v2(capabilities: Capabilities<'_>) {
         capabilities
             .dont_cache_supported
             .store(false, Ordering::Relaxed);
-        let transitioned = capabilities.v2_supported.swap(false, Ordering::Relaxed);
-        if transitioned {
-            tracing::debug!("preadv2 and pwritev2 flags unavailable, using legacy positioned I/O");
-        }
-        transitioned
+        capabilities.v2_supported.store(false, Ordering::Relaxed);
     }
 
     fn syscall_result(ret: libc::ssize_t) -> std::io::Result<usize> {
@@ -150,14 +130,18 @@ impl Blob {
         Ok(())
     }
 
+    fn use_single_write(sync: bool, cache: &Cache, v2_supported: &AtomicBool) -> bool {
+        !sync && (!cache.is_disabled() || !v2_supported.load(Ordering::Relaxed))
+    }
+
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
     /// `flags` apply to every submission, so callers must only pass durability flags when the
     /// write fits one submission. Hinted submissions carry `RWF_DONTCACHE` on Linux while the
     /// backend may support it. An EOPNOTSUPP disables the hint and retries normally.
-    fn write_vectored_at_with<V2, Legacy>(
+    fn write_vectored_at_with<'a, V2, Legacy>(
         mut cache: Cache,
-        capabilities: Capabilities<'_>,
+        capabilities: impl Into<Option<Capabilities<'a>>>,
         mut offset: u64,
         mut bufs: IoBufs,
         flags: SyscallFlags,
@@ -173,6 +157,7 @@ impl Blob {
         ) -> std::io::Result<usize>,
         Legacy: FnMut(*const libc::iovec, libc::c_int, libc::off_t) -> std::io::Result<usize>,
     {
+        let capabilities = capabilities.into();
         assert!(
             flags.operation.is_none() || bufs.chunk_count() <= IOVEC_BATCH_SIZE,
             "durability flags on a multi-submission write serialize its batches"
@@ -192,8 +177,8 @@ impl Blob {
             let syscall_offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
             let iovecs = io_slices.as_ptr().cast::<libc::iovec>();
             let iovec_count = io_slices_len as libc::c_int;
-            let attempted_v2 =
-                cfg!(target_os = "linux") && capabilities.v2_supported.load(Ordering::Relaxed);
+            let attempted_v2 = cfg!(target_os = "linux")
+                && capabilities.is_some_and(|state| state.v2_supported.load(Ordering::Relaxed));
             let attempted_dont_cache = attempted_v2 && cache.is_disabled();
             let result = if attempted_v2 {
                 write_v2(
@@ -221,7 +206,7 @@ impl Blob {
                     }
 
                     if attempted_v2 && err.raw_os_error() == Some(libc::ENOSYS) {
-                        Self::disable_v2(capabilities);
+                        Self::disable_v2(capabilities.expect("v2 attempt requires capabilities"));
                         if flags.operation.is_some() {
                             v2_flags_applied = false;
                         }
@@ -241,7 +226,7 @@ impl Blob {
                         && flags.operation.is_some()
                         && err.raw_os_error() == Some(libc::EOPNOTSUPP)
                     {
-                        Self::disable_v2(capabilities);
+                        Self::disable_v2(capabilities.expect("v2 attempt requires capabilities"));
                         v2_flags_applied = false;
                         continue;
                     }
@@ -263,7 +248,7 @@ impl Blob {
 
     fn write_vectored_at(
         cache: Cache,
-        capabilities: Capabilities<'_>,
+        capabilities: Option<Capabilities<'_>>,
         file: &File,
         offset: u64,
         bufs: IoBufs,
@@ -422,6 +407,7 @@ impl Blob {
         }
     }
 
+    #[cfg(target_os = "linux")]
     const fn needs_trailing_sync(sync: bool, fused: bool, v2_flags_applied: bool) -> bool {
         sync && (!fused || !v2_flags_applied)
     }
@@ -505,8 +491,13 @@ impl crate::Blob for Blob {
         // Derive per-write policy from the requested options and cached backend support.
         let sync = options.contains(WriteOptions::SYNC);
         let dont_cache = options.contains(WriteOptions::DONT_CACHE);
-        // Preserve the ordinary single-buffer path without touching shared capability state.
-        let bufs = if !sync && !dont_cache {
+        let cache = if dont_cache {
+            Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            Cache::Enabled
+        };
+        // Preserve the ordinary single-buffer path whenever no per-write flag can be applied.
+        let bufs = if Self::use_single_write(sync, &cache, &self.v2_supported) {
             match bufs.try_into_single() {
                 Ok(buf) => {
                     return task::spawn_blocking(move || {
@@ -520,20 +511,18 @@ impl crate::Blob for Blob {
         } else {
             bufs
         };
-        let cache = if dont_cache {
-            Cache::Disabled(self.dont_cache_supported.clone())
-        } else {
-            Cache::Enabled
-        };
-        let dont_cache_supported = self.dont_cache_supported.clone();
-        let v2_supported = self.v2_supported.clone();
+        let capability_state = (cfg!(target_os = "linux") && (sync || cache.is_disabled()))
+            .then(|| (self.dont_cache_supported.clone(), self.v2_supported.clone()));
         let partition = sync.then(|| self.partition.clone());
         let name = sync.then(|| self.name.clone());
         task::spawn_blocking(move || {
-            let capabilities = Capabilities {
-                dont_cache_supported: &dont_cache_supported,
-                v2_supported: &v2_supported,
-            };
+            let capabilities =
+                capability_state
+                    .as_ref()
+                    .map(|(dont_cache_supported, v2_supported)| Capabilities {
+                        dont_cache_supported,
+                        v2_supported,
+                    });
             cfg_if! {
                 if #[cfg(target_os = "linux")] {
                     // Fuse durability only when the write fits one submission. Fusing every batch
@@ -624,10 +613,8 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::traces::collector::TraceStorage;
-    use commonware_macros::test_collect_traces;
-    use std::sync::Barrier;
 
+    #[cfg(target_os = "linux")]
     fn capabilities<'a>(
         dont_cache_supported: &'a AtomicBool,
         v2_supported: &'a AtomicBool,
@@ -664,148 +651,62 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_bypass_transition_is_shared_once() {
-        const THREADS: usize = 8;
+    fn test_single_write_uses_effective_cache_support() {
         let supported = Arc::new(AtomicBool::new(true));
-        let barrier = Arc::new(Barrier::new(THREADS));
-        let transitions = std::thread::scope(|scope| {
-            let handles = (0..THREADS)
-                .map(|_| {
-                    let supported = supported.clone();
-                    let barrier = barrier.clone();
-                    scope.spawn(move || {
-                        let mut cache = Cache::Disabled(supported);
-                        barrier.wait();
-                        cache.fallback().expect("disabled cache can fall back")
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .collect::<Vec<_>>()
-        });
+        let unsupported = Arc::new(AtomicBool::new(false));
+        let v2_supported = AtomicBool::new(true);
+        let v2_unsupported = AtomicBool::new(false);
 
+        assert!(Blob::use_single_write(
+            false,
+            &Cache::Enabled,
+            &v2_supported
+        ));
+        assert!(Blob::use_single_write(
+            false,
+            &Cache::Disabled(unsupported),
+            &v2_supported
+        ));
+        assert!(Blob::use_single_write(
+            false,
+            &Cache::Disabled(supported.clone()),
+            &v2_unsupported
+        ));
         assert_eq!(
-            transitions
-                .into_iter()
-                .filter(|transition| *transition)
-                .count(),
-            1
+            Blob::use_single_write(false, &Cache::Disabled(supported), &v2_supported),
+            !cfg!(target_os = "linux")
         );
-        assert!(!supported.load(Ordering::Relaxed));
+        assert!(!Blob::use_single_write(
+            true,
+            &Cache::Enabled,
+            &v2_supported
+        ));
     }
 
     #[test]
-    fn test_v2_transition_is_shared_once() {
-        const THREADS: usize = 8;
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let v2_supported = Arc::new(AtomicBool::new(true));
-        let barrier = Arc::new(Barrier::new(THREADS));
-        let transitions = std::thread::scope(|scope| {
-            let handles = (0..THREADS)
-                .map(|_| {
-                    let dont_cache_supported = dont_cache_supported.clone();
-                    let v2_supported = v2_supported.clone();
-                    let barrier = barrier.clone();
-                    scope.spawn(move || {
-                        barrier.wait();
-                        Blob::disable_v2(capabilities(&dont_cache_supported, &v2_supported))
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .collect::<Vec<_>>()
-        });
+    fn test_unflagged_vectored_write_uses_legacy_path() {
+        let mut legacy_calls = 0;
+        let v2_flags_applied = Blob::write_vectored_at_with(
+            Cache::Enabled,
+            None::<Capabilities<'static>>,
+            0,
+            IoBufs::from(vec![crate::IoBuf::from(b"he"), crate::IoBuf::from(b"llo")]),
+            SyscallFlags {
+                operation: None,
+                dont_cache: 0,
+            },
+            |_, _, _, _| panic!("unflagged write must not probe the v2 syscall"),
+            |_, iovec_count, offset| {
+                legacy_calls += 1;
+                assert_eq!(iovec_count, 2);
+                assert_eq!(offset, 0);
+                Ok(5)
+            },
+        )
+        .unwrap();
 
-        assert_eq!(
-            transitions
-                .into_iter()
-                .filter(|transition| *transition)
-                .count(),
-            1
-        );
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        assert!(!v2_supported.load(Ordering::Relaxed));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test_collect_traces]
-    fn test_concurrent_hinted_read_failures_log_each_transition_once(traces: TraceStorage) {
-        const THREADS: usize = 8;
-
-        let run = |error: i32| {
-            let dont_cache_supported = Arc::new(AtomicBool::new(true));
-            let v2_supported = Arc::new(AtomicBool::new(true));
-            let barrier = Arc::new(Barrier::new(THREADS));
-            let dispatch = tracing::dispatcher::get_default(Clone::clone);
-
-            std::thread::scope(|scope| {
-                let handles = (0..THREADS)
-                    .map(|_| {
-                        let dont_cache_supported = dont_cache_supported.clone();
-                        let v2_supported = v2_supported.clone();
-                        let barrier = barrier.clone();
-                        let dispatch = dispatch.clone();
-                        scope.spawn(move || {
-                            tracing::dispatcher::with_default(&dispatch, || {
-                                let mut output = [0u8; 1];
-                                Blob::read_exact_at_hinted_with(
-                                    Cache::Disabled(dont_cache_supported.clone()),
-                                    capabilities(&dont_cache_supported, &v2_supported),
-                                    &mut output,
-                                    0,
-                                    |_, _| {
-                                        barrier.wait();
-                                        Err(std::io::Error::from_raw_os_error(error))
-                                    },
-                                    |buf, _| {
-                                        buf.copy_from_slice(b"x");
-                                        Ok(())
-                                    },
-                                )
-                                .unwrap();
-                                assert_eq!(&output, b"x");
-                            });
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                for handle in handles {
-                    handle.join().unwrap();
-                }
-            });
-
-            assert!(!dont_cache_supported.load(Ordering::Relaxed));
-            if error == libc::ENOSYS {
-                assert!(!v2_supported.load(Ordering::Relaxed));
-            } else {
-                assert!(v2_supported.load(Ordering::Relaxed));
-            }
-        };
-
-        run(libc::EOPNOTSUPP);
-        run(libc::ENOSYS);
-
-        let events = traces.get_all();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.metadata.content.contains("RWF_DONTCACHE unsupported"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event
-                    .metadata
-                    .content
-                    .contains("preadv2 and pwritev2 flags unavailable"))
-                .count(),
-            1
-        );
+        assert_eq!(legacy_calls, 1);
+        assert!(v2_flags_applied);
     }
 
     #[cfg(target_os = "linux")]

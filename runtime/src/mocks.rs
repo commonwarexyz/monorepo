@@ -13,8 +13,6 @@ use commonware_utils::{
 };
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
-#[cfg(feature = "test-utils")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     future::{Future, poll_fn},
     mem,
@@ -501,156 +499,6 @@ macro_rules! forward_context {
 
         impl<E: TryCryptoRng> TryCryptoRng for $wrapper<E> {}
     };
-}
-
-/// Shared controls for forcing cache-bypass options through a [DontCacheContext].
-///
-/// This is intended for tests and benchmarks that need to compare otherwise identical
-/// storage operations with and without the best-effort cache-bypass hint.
-#[cfg(feature = "test-utils")]
-#[derive(Clone, Default)]
-pub struct DontCacheControl {
-    read: Arc<AtomicBool>,
-    write: Arc<AtomicBool>,
-}
-
-#[cfg(feature = "test-utils")]
-impl DontCacheControl {
-    /// Enable or disable [ReadOptions::DONT_CACHE] on delegated reads.
-    pub fn set_read(&self, enabled: bool) {
-        self.read.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Enable or disable [WriteOptions::DONT_CACHE] on delegated writes.
-    pub fn set_write(&self, enabled: bool) {
-        self.write.store(enabled, Ordering::Relaxed);
-    }
-
-    fn read(&self) -> bool {
-        self.read.load(Ordering::Relaxed)
-    }
-
-    fn write(&self) -> bool {
-        self.write.load(Ordering::Relaxed)
-    }
-}
-
-/// Context wrapper that can force cache-bypass options on delegated storage operations.
-#[cfg(feature = "test-utils")]
-#[derive(Clone)]
-pub struct DontCacheContext<E> {
-    /// Wrapped context.
-    pub inner: E,
-    /// Controls shared by this context, its children, and opened blobs.
-    pub control: DontCacheControl,
-}
-
-#[cfg(feature = "test-utils")]
-impl<E> DontCacheContext<E> {
-    /// Wrap `inner` and return a handle for changing the forced options.
-    pub fn new(inner: E) -> (Self, DontCacheControl) {
-        let control = DontCacheControl::default();
-        (
-            Self {
-                inner,
-                control: control.clone(),
-            },
-            control,
-        )
-    }
-}
-
-#[cfg(feature = "test-utils")]
-forward_context!(DontCacheContext, control);
-
-#[cfg(feature = "test-utils")]
-impl<E: Storage> Storage for DontCacheContext<E> {
-    type Blob = DontCacheBlob<E::Blob>;
-
-    async fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
-        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
-        Ok((
-            DontCacheBlob {
-                inner,
-                control: self.control.clone(),
-            },
-            len,
-            version,
-        ))
-    }
-
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
-}
-
-/// Blob wrapper controlled by [DontCacheControl].
-#[cfg(feature = "test-utils")]
-#[derive(Clone)]
-pub struct DontCacheBlob<B> {
-    inner: B,
-    control: DontCacheControl,
-}
-
-#[cfg(feature = "test-utils")]
-impl<B: Blob> Blob for DontCacheBlob<B> {
-    async fn read_at_buf(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufsMut> + Send,
-        mut options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        if self.control.read() {
-            options |= ReadOptions::DONT_CACHE;
-        }
-        self.inner.read_at_buf(offset, len, bufs, options).await
-    }
-
-    async fn read_at(
-        &self,
-        offset: u64,
-        len: usize,
-        mut options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        if self.control.read() {
-            options |= ReadOptions::DONT_CACHE;
-        }
-        self.inner.read_at(offset, len, options).await
-    }
-
-    async fn write_at(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-        mut options: WriteOptions,
-    ) -> Result<(), Error> {
-        if self.control.write() {
-            options |= WriteOptions::DONT_CACHE;
-        }
-        self.inner.write_at(offset, bufs, options).await
-    }
-
-    async fn resize(&self, len: u64) -> Result<(), Error> {
-        self.inner.resize(len).await
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
-        self.inner.sync().await
-    }
-
-    async fn start_sync(&self) -> Handle<()> {
-        self.inner.start_sync().await
-    }
 }
 
 /// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].
@@ -1390,39 +1238,6 @@ mod tests {
     use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
-
-    #[cfg(feature = "test-utils")]
-    #[test]
-    fn dont_cache_context_forces_and_updates_options() {
-        deterministic::Runner::default().start(|context| async move {
-            let (inner, recordings) = RecordingContext::new(context);
-            let (context, control) = DontCacheContext::new(inner);
-            let (blob, _) = context.open("dont_cache", b"blob").await.unwrap();
-
-            control.set_write(true);
-            blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
-            control.set_write(false);
-            blob.write_at(4, b"more", WriteOptions::default())
-                .await
-                .unwrap();
-
-            control.set_read(true);
-            blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
-            control.set_read(false);
-            blob.read_at(4, 4, ReadOptions::default()).await.unwrap();
-
-            assert_eq!(
-                recordings.snapshot(),
-                RecordingSnapshot {
-                    reads: vec![ReadOptions::DONT_CACHE, ReadOptions::default()],
-                    writes: vec![
-                        WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-                        WriteOptions::default(),
-                    ],
-                }
-            );
-        });
-    }
 
     #[test]
     fn recording_context_preserves_data_and_records_options() {
