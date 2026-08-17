@@ -18,7 +18,6 @@ mod threshold_batch_verify_same_message;
 mod threshold_batch_verify_same_message_pre;
 mod threshold_batch_verify_same_signer;
 mod threshold_recover;
-mod threshold_verify_aggregate;
 mod tle_decrypt;
 mod tle_encrypt;
 
@@ -28,7 +27,6 @@ criterion_main!(
     dkg::feldman_desmedt::benches,
     hash_to_curve::benches,
     threshold_recover::benches,
-    threshold_verify_aggregate::benches,
     combine_public_keys::benches,
     combine_signatures::benches,
     signature_generation::benches,
