@@ -35,11 +35,12 @@ pub(crate) type WarmSpawner = Box<dyn Fn(BoxFuture<'static, ()>) + Send + Sync>;
 
 /// Build a [`WarmSpawner`] whose tasks are supervised children of `context`.
 ///
-/// At most one warming pass runs at a time: while one is in flight, later requests are
-/// dropped. Skipped windows are recovered naturally, since each arm starts at the current
-/// floor and consecutive windows overlap.
+/// At most one warming pass runs at a time. The newest request stashed while a pass runs
+/// is coalesced: the running task drains it next, so a window that advanced past the
+/// active pass is still warmed rather than dropped. Requests stashed while a pass is
+/// aborted mid-flight are picked up by the next arm.
 pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
-    /// Clears the in-flight flag when the pass finishes or is aborted mid-flight.
+    /// Clears the runner flag when the pass finishes or is aborted mid-flight.
     struct InFlight(Arc<AtomicBool>);
     impl Drop for InFlight {
         fn drop(&mut self) {
@@ -49,21 +50,44 @@ pub(crate) fn warm_spawner<E: Spawner + 'static>(context: E) -> WarmSpawner {
 
     let context = context.child("floor_prefetch");
     let in_flight = Arc::new(AtomicBool::new(false));
+    let pending: Arc<Mutex<Option<BoxFuture<'static, ()>>>> = Arc::new(Mutex::new(None));
     Box::new(move |fut| {
+        // Stash the newest request, then try to claim the runner slot. A stash that
+        // lands while the runner winds down is either drained by it or claimed by this
+        // arm's swap.
+        *lock(&pending) = Some(fut);
         if in_flight.swap(true, Ordering::AcqRel) {
             return;
         }
         let guard = InFlight(Arc::clone(&in_flight));
+        let flag = Arc::clone(&in_flight);
+        let pending = Arc::clone(&pending);
         drop(context.child("warm").spawn(move |_| async move {
             let _guard = guard;
-            fut.await;
+            loop {
+                let Some(fut) = lock(&pending).take() else {
+                    // Release the slot, then recheck: a request stashed between the
+                    // take and the release must not strand until the next arm.
+                    flag.store(false, Ordering::Release);
+                    if lock(&pending).is_some() && !flag.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    break;
+                };
+                fut.await;
+            }
         }));
     })
+}
+
+/// Lock a poison-tolerant mutex: a panicked warming pass must not wedge later arms.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
