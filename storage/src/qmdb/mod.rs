@@ -343,12 +343,13 @@ where
 }
 
 /// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
-/// it was present among the cursor's conflicts.
+/// it was present among the cursor's conflicts. When supplied, the matched location is removed
+/// from `cache` with the snapshot deletion.
 async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -357,10 +358,17 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? else {
+    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    else {
         return Ok(None);
     };
+
+    // Cache entries mirror current snapshot locations, so invalidate the matched location with
+    // the authoritative deletion.
     cursor.delete();
+    if let Some(cache) = cache {
+        cache.remove(&*loc);
+    }
 
     Ok(Some(loc))
 }
@@ -389,13 +397,14 @@ where
 
 /// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
 /// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
-/// is inserted at the cursor.
+/// is inserted at the cursor. When supplied, the matched old location is removed from `cache` with
+/// the snapshot update.
 async fn update_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -404,9 +413,16 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? {
+    if let Some(loc) =
+        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    {
+        // Removing the superseded cache entry with the snapshot update lets the caller reuse its
+        // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
+        if let Some(cache) = cache {
+            cache.remove(&*loc);
+        }
         return Ok(Some(loc));
     }
 
@@ -437,7 +453,10 @@ where
             let op = reader.read(*loc).await?;
             let k = op.key().expect("operation without key");
             let matches = *k == *key;
-            if let Some(cache) = cache.as_deref_mut() {
+
+            // Every caller immediately mutates a match. Admitting it here could evict a live
+            // candidate before the caller invalidates this location.
+            if !matches && let Some(cache) = cache.as_deref_mut() {
                 cache.put(*loc, k.clone());
             }
             matches
