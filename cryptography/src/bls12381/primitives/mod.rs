@@ -49,6 +49,7 @@
 pub mod group;
 pub mod ops;
 pub mod sharing;
+pub mod subgroup;
 pub mod variant;
 
 use thiserror::Error;

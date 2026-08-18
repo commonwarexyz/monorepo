@@ -1098,6 +1098,21 @@ impl G1 {
         out
     }
 
+    /// Multi-scalar multiplication with tiny unsigned coefficients.
+    ///
+    /// Computes `sum_i coefficients[i] * affine[i]`, reading `bits` bits (at
+    /// most 8) of each one-byte coefficient. Uses blst's Pippenger routine,
+    /// whose bucket accumulation sums points batch-affine (one field inversion
+    /// per bucket), so this is far cheaper than a sequence of point additions.
+    pub(crate) fn small_msm(affine: &[blst_p1_affine], coefficients: &[u8], bits: usize) -> Self {
+        assert_eq!(affine.len(), coefficients.len());
+        assert!(bits <= 8);
+        if affine.is_empty() {
+            return Self::zero();
+        }
+        Self::msm_sequential(affine, coefficients, bits)
+    }
+
     /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
@@ -1255,10 +1270,34 @@ impl Write for G1 {
     }
 }
 
-impl Read for G1 {
-    type Cfg = ();
+impl G1 {
+    /// Return whether this point lies in the prime-order subgroup G1.
+    ///
+    /// This is the exact per-point test (blst's endomorphism-based check). When
+    /// checking many points at once,
+    /// [`subgroup::batch_in_g1`](super::subgroup::batch_in_g1) is faster.
+    pub fn in_subgroup(&self) -> bool {
+        // SAFETY: self.0 is a valid blst_p1.
+        unsafe { blst_p1_in_g1(&self.0) }
+    }
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    /// Decode a point, verifying its encoding and that it is on the curve, but
+    /// *not* that it lies in the prime-order subgroup.
+    ///
+    /// # Warning
+    ///
+    /// The result may be a valid curve point outside G1. Using such a point in
+    /// a pairing or scalar multiplication without a subgroup check enables
+    /// small-subgroup attacks. Callers MUST establish subgroup membership —
+    /// via [`Self::in_subgroup`] or a batched
+    /// [`subgroup::batch_in_g1`](super::subgroup::batch_in_g1) — before relying
+    /// on it. This exists so that many points can be decoded cheaply and then
+    /// subgroup-checked together.
+    pub fn read_unchecked(buf: &mut impl Buf) -> Result<Self, Error> {
+        Self::read_point(buf, false)
+    }
+
+    fn read_point(buf: &mut impl Buf, subgroup: bool) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
         // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
@@ -1283,11 +1322,19 @@ impl Read for G1 {
             }
 
             // Verify that the deserialized element is in G1
-            if !blst_p1_in_g1(&ret) {
+            if subgroup && !blst_p1_in_g1(&ret) {
                 return Err(Invalid("G1", "Outside G1"));
             }
         }
         Ok(Self(ret))
+    }
+}
+
+impl Read for G1 {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        Self::read_point(buf, true)
     }
 }
 
