@@ -155,9 +155,12 @@ impl ZkPariBackend {
 }
 
 /// Derive the aggregation challenge from the verifying key and the ledger.
+///
+/// The key is bound by its cached digest rather than its full encoding, which
+/// keeps batch verification from re-serializing the key once per claim.
 pub(super) fn derive_theta(verifying_key: &VerifyingKey, ledger: &[G1; TRANSFER_BATCH]) -> Scalar {
     let mut transcript = Transcript::new(THETA_NAMESPACE, Version::V1);
-    transcript.commit(verifying_key.encode());
+    transcript.commit(verifying_key.digest().as_slice());
     for point in ledger {
         transcript.commit(point.encode());
     }

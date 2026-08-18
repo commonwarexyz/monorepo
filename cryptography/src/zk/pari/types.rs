@@ -376,7 +376,12 @@ impl VerifyingKey {
         self.public_inputs as usize
     }
 
-    pub(crate) const fn digest(&self) -> &[u8; 32] {
+    /// A collision-resistant digest of this key.
+    ///
+    /// Binds every field of the key (including the relation and commitment-key
+    /// digests), so it uniquely identifies both the relation and this setup.
+    /// Useful for binding the key into a transcript without re-encoding it.
+    pub const fn digest(&self) -> &[u8; 32] {
         &self.digest
     }
 
