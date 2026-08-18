@@ -31,9 +31,15 @@
 //! `1/3` per round. So `r` rounds accept a bad point with probability at most
 //! `3^{-r}`, independent of the cofactor's factorization.
 //!
-//! For BLS12-381 the G1 cofactor's smallest prime factor is `3`, so this `1/3`
-//! bound is tight and small coefficients are optimal: larger coefficients could
-//! not lower the per-round error, only make each round more expensive.
+//! For BLS12-381 the G1 cofactor's smallest prime factor is `3`, so for a
+//! single combination per round this `1/3` bound is tight: larger coefficients
+//! cannot lower a round's error, only make it more expensive. This is not the
+//! only design point, though. Partitioning the points into `B` buckets and
+//! checking each bucket sum separately lowers the per-round error to `1/B`
+//! (needing fewer rounds), at the cost of `B` subgroup checks per round instead
+//! of one; which is faster depends on the relative cost of a subgroup check and
+//! a point summation. This module takes the single-combination approach, whose
+//! one fast check per round pairs well with blst's endomorphism-based test.
 
 use super::group::G1;
 #[cfg(not(feature = "std"))]
@@ -82,8 +88,15 @@ pub fn batch_in_g1(
     let rounds = rounds_for_security(security);
     // Batching pays a fixed cost of one subgroup check per round regardless of
     // the input size, so for few points the exact per-point path is cheaper.
+    // This crossover is algorithmic and cannot be delegated to `strategy`
+    // (which only chooses serial vs parallel execution of a single algorithm),
+    // but the per-point checks still run through `strategy` so a parallel one
+    // spreads them across threads just as it does the batched rounds.
     if points.len() <= 2 * rounds {
-        return points.iter().all(G1::in_subgroup);
+        return strategy
+            .map_collect_vec_with_multiplier(points.iter(), 1, |point| point.in_subgroup())
+            .into_iter()
+            .all(|in_subgroup| in_subgroup);
     }
     // One shared inversion converts every point to affine; the per-round
     // combinations then reuse them.
@@ -269,6 +282,13 @@ mod tests {
         points[123] = off_subgroup_point(&mut rng);
         assert!(!batch_in_g1(&points, SECURITY, &rayon, &mut rng));
         assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+
+        // Small batches take the per-point fallback, which also runs through the
+        // strategy; a parallel strategy must handle it correctly too.
+        let mut small: Vec<G1> = (0..50).map(|_| in_subgroup_point(&mut rng)).collect();
+        assert!(batch_in_g1(&small, SECURITY, &rayon, &mut rng));
+        small[7] = off_subgroup_point(&mut rng);
+        assert!(!batch_in_g1(&small, SECURITY, &rayon, &mut rng));
     }
 
     #[test]
