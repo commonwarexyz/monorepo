@@ -1,5 +1,5 @@
 use crate::stateful::{
-    Application, Input, Proposed,
+    Application, ExecutionError, Input, Proposed,
     db::{
         DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Unmerkleized, UnmerkleizedOf,
         Writer,
@@ -292,8 +292,8 @@ impl<
         _ancestry: impl Ancestry<Self::Block>,
         _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        None
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        Ok(None)
     }
 
     async fn verify(
@@ -301,8 +301,8 @@ impl<
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Option<MerkleizedOf<Self::Databases, E>> {
-        None
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        Ok(None)
     }
 
     async fn apply(
@@ -310,8 +310,8 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> MerkleizedOf<Self::Databases, E> {
-        TestMerkleized
+    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
+        Ok(TestMerkleized)
     }
 }
 

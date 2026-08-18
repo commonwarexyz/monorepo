@@ -207,7 +207,7 @@ where
 mod tests {
     use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
-        Application, Input, Proposed,
+        Application, ExecutionError, Input, Proposed,
         actor::syncer::{StateSyncMetadata, UpdateOutcome, init_databases_from_marshal},
         db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
@@ -342,7 +342,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 
@@ -351,7 +351,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 
@@ -360,7 +360,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
+        ) -> Result<TestMerkleized, ExecutionError> {
             unreachable!("WedgeApp only serves the syncer harness")
         }
     }

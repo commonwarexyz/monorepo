@@ -22,7 +22,7 @@
 //!   [`Processor::publish_snapshot`] publishes a fresh capture afterwards.
 //!
 use crate::stateful::{
-    Application, Input, Proposed, PruneConfig,
+    Application, ExecutionError, Input, Proposed, PruneConfig,
     actor::{core::Verification, metrics::Metrics as StatefulMetrics},
     db::{
         Anchor, Barrier, DatabaseSet, MerkleizedOf, Publisher, ReadersOf, SnapshotsOf,
@@ -335,6 +335,9 @@ enum PrepareBatchesError {
     Incomplete,
     /// The attempt was cancelled while waiting.
     Cancelled,
+    /// A competing finalization landed mid-preparation. The caller re-checks
+    /// against the new canonical state.
+    Stale,
 }
 
 /// Provides a cancellation signal for speculative actor work.
@@ -658,6 +661,9 @@ where
             Some(merkleized) => merkleized,
             None => {
                 let batches = A::Databases::new_batches(&self.execution.readers).await;
+                // Failure here is impossible on a correct node: the batches were
+                // just forked from applied state, mutation authority is unique,
+                // and there is no caller to answer with a refusal.
                 let batch = self
                     .app
                     .apply(
@@ -665,7 +671,8 @@ where
                         block,
                         batches,
                     )
-                    .await;
+                    .await
+                    .unwrap_or_else(|err| panic!("finalize replay failed: {err:?}"));
                 assert!(
                     A::Databases::matches_sync_targets(&batch, &sync_targets),
                     "finalize replay state root must match block commitments",
@@ -820,7 +827,15 @@ where
             }
         }
 
-        Ok(A::Databases::new_batches(&self.readers).await)
+        let batches = A::Databases::new_batches(&self.readers).await;
+
+        // A finalization can land between the anchor check above and the
+        // per-database forks, leaving a batch set that straddles it. Refuse it
+        // like any other stale read; the caller re-checks canonical state.
+        if self.state.lock().last_processed.digest != *parent {
+            return Err(PrepareBatchesError::Stale);
+        }
+        Ok(batches)
     }
 
     /// Replays one certified block and caches its commitment-matching state.
@@ -844,7 +859,7 @@ where
 
         let batches = self.fork_batches(&parent_digest).await?;
 
-        let Some(merkleized) = await_or_cancel(
+        let Some(applied) = await_or_cancel(
             cancellation,
             app.apply(
                 (context.child("rebuild_pending_apply"), consensus_context),
@@ -855,6 +870,14 @@ where
         .await
         else {
             return Err(PrepareBatchesError::Cancelled);
+        };
+        let merkleized = match applied {
+            Ok(merkleized) => merkleized,
+            // A block finalized while this replay executed. The requester
+            // re-checks canonical state; this replay never panics on it.
+            Err(ExecutionError::Stale) => return Err(PrepareBatchesError::Stale),
+            Err(ExecutionError::Shutdown) => return Err(PrepareBatchesError::Cancelled),
+            Err(ExecutionError::Fatal(err)) => panic!("application replay failed: {err}"),
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
@@ -1168,6 +1191,15 @@ where
                     );
                     return;
                 }
+                // Unreachable: the actor admits no finalization while a
+                // proposal runs (it becomes the FIFO barrier), so nothing can
+                // go stale. Decline loudly rather than hide a broken barrier.
+                Err(PrepareBatchesError::Stale) => {
+                    warn!(?parent_digest, "proposal went stale during prepare_batches");
+                    debug_assert!(false, "no finalization can interleave a proposal");
+                    response.send_lossy(None);
+                    return;
+                }
             };
 
             let proposed = match await_or_cancel(
@@ -1181,7 +1213,18 @@ where
             )
             .await
             {
-                Some(result) => result,
+                Some(Ok(result)) => result,
+                Some(Err(err)) => {
+                    // Stale is unreachable for the same reason as above;
+                    // Shutdown and everything else also just decline.
+                    warn!(?parent_digest, ?err, "proposal failed");
+                    debug_assert!(
+                        !matches!(err, ExecutionError::Stale),
+                        "no finalization can interleave a proposal",
+                    );
+                    response.send_lossy(None);
+                    return;
+                }
                 None => {
                     debug!(?parent_digest, "proposal request cancelled during propose");
                     return;
@@ -1283,7 +1326,7 @@ mod tests {
         fetch_ancestor,
     };
     use crate::stateful::{
-        Application, Input, Proposed, PruneConfig,
+        Application, ExecutionError, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{
             Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, SyncTargetsOf,
@@ -1337,6 +1380,8 @@ mod tests {
     type TestSet<E> = crate::stateful::db::Single<Qmdb<E>>;
     type TestMerkleized =
         <TestSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
+    type TestUnmerkleized =
+        <TestSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Unmerkleized;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1541,17 +1586,17 @@ mod tests {
             height: Height,
             view: View,
             mut batches: UnmerkleizedOf<TestSet<deterministic::Context>, deterministic::Context>,
-        ) -> MerkleizedOf<TestSet<deterministic::Context>, deterministic::Context> {
+        ) -> Result<
+            MerkleizedOf<TestSet<deterministic::Context>, deterministic::Context>,
+            ExecutionError,
+        > {
             let current_counter = batches
                 .get(&counter_key())
-                .await
-                .expect("counter read should succeed")
+                .await?
                 .map_or(0, |digest| digest_to_u64(&digest));
             batches = batches.write(counter_key(), Some(u64_to_digest(current_counter + 1)));
             batches = batches.write(height_key(height), Some(u64_to_digest(view.get())));
-            crate::stateful::db::Unmerkleized::merkleize(batches)
-                .await
-                .expect("merkleize should succeed")
+            Ok(crate::stateful::db::Unmerkleized::merkleize(batches).await?)
         }
     }
 
@@ -1573,13 +1618,15 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             let mut ancestry = Box::pin(ancestry);
-            let parent = ancestry.next().await?;
+            let Some(parent) = ancestry.next().await else {
+                return Ok(None);
+            };
             let context = context.1.clone();
             let view = context.round.view();
             let height = parent.height().next();
-            let merkleized = Self::execute(height, view, batches).await;
+            let merkleized = Self::execute(height, view, batches).await?;
             let block = Block {
                 context,
                 parent: parent.digest(),
@@ -1590,7 +1637,7 @@ mod tests {
                     merkleized.bounds().tip.size
                 ),
             };
-            Some(Proposed { block, merkleized })
+            Ok(Some(Proposed { block, merkleized }))
         }
 
         async fn verify(
@@ -1598,15 +1645,18 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
-        ) -> Option<MerkleizedOf<Self::Databases, deterministic::Context>> {
+        ) -> Result<Option<MerkleizedOf<Self::Databases, deterministic::Context>>, ExecutionError>
+        {
             let mut ancestry = Box::pin(ancestry);
-            let block = ancestry.next().await?;
+            let Some(block) = ancestry.next().await else {
+                return Ok(None);
+            };
             let merkleized =
-                Self::execute(block.height(), block.context.round.view(), batches).await;
+                Self::execute(block.height(), block.context.round.view(), batches).await?;
             if merkleized.root() != block.state_root {
-                return None;
+                return Ok(None);
             }
-            Some(merkleized)
+            Ok(Some(merkleized))
         }
 
         async fn apply(
@@ -1614,7 +1664,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
-        ) -> MerkleizedOf<Self::Databases, deterministic::Context> {
+        ) -> Result<MerkleizedOf<Self::Databases, deterministic::Context>, ExecutionError> {
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
 
@@ -1793,7 +1843,7 @@ mod tests {
                 .fork_batches(&parent.digest())
                 .await
                 .expect("parent should be available");
-            let merkleized = ExecutionApp::execute(height, view, batches).await;
+            let merkleized = ExecutionApp::execute(height, view, batches).await.unwrap();
             let block = Block {
                 context,
                 parent: parent.digest(),
@@ -1805,6 +1855,13 @@ mod tests {
                 ),
             };
             (block, merkleized)
+        }
+
+        async fn fork_from(&self, parent: &Block) -> TestUnmerkleized {
+            self.processor
+                .fork_batches(&parent.digest())
+                .await
+                .expect("parent must be forkable")
         }
 
         async fn stage_pending_child(&mut self, parent: &Block, view: View) -> Block {
@@ -2089,6 +2146,30 @@ mod tests {
                 prune, None,
                 "pruning should wait for the full retention window",
             );
+        });
+    }
+
+    /// A batch forked before a competing finalization refuses its next operation with
+    /// the typed stale error, end to end through the set wrapper, the database cell,
+    /// and the storage checks.
+    #[test]
+    fn stale_fork_refuses_through_the_set() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+
+            // Fork from the applied anchor, then finalize a competing child.
+            let stale = harness.fork_from(&genesis).await;
+            let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let applied;
+            (harness, applied) = harness.finalize(winner).await;
+            assert!(applied);
+
+            assert!(matches!(
+                ExecutionApp::execute(Height::new(1), View::new(1), stale).await,
+                Err(ExecutionError::Stale)
+            ));
+            drop(harness);
         });
     }
 
@@ -2547,7 +2628,9 @@ mod tests {
                 .fork_batches(&block1.digest())
                 .await
                 .expect("processed anchor should be available");
-            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
+            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches)
+                .await
+                .unwrap();
             let gap_block = Block {
                 context: consensus_context(block1.digest(), gap_view),
                 parent: block1.digest(),

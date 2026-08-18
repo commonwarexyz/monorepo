@@ -96,9 +96,10 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_storage::{merkle::Family, qmdb};
 use db::{DatabaseSet, MerkleizedOf, ReadersOf, UnmerkleizedOf};
 use rand_core::Rng;
-use std::future::Future;
+use std::{convert::Infallible, future::Future};
 
 mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
@@ -108,6 +109,41 @@ pub mod probe;
 
 #[cfg(test)]
 mod tests;
+
+/// Why a batch operation failed during block execution.
+///
+/// Implementations of [`Application`] propagate storage errors from batch operations
+/// with `?` and never interpret them. The wrapper is the only layer that knows what
+/// each case means for the block being executed.
+#[derive(Debug)]
+pub enum ExecutionError {
+    /// Applied state left the executing block's branch: a competing block was
+    /// finalized mid-execution and the batches refused their next read. The wrapper
+    /// re-checks the block against the new canonical state.
+    Stale,
+    /// The runtime is shutting down; the work is discarded.
+    Shutdown,
+    /// Any other storage failure. Storage errors are unrecoverable, so the wrapper
+    /// treats this as fatal.
+    Fatal(String),
+}
+
+impl<F: Family> From<qmdb::Error<F>> for ExecutionError {
+    fn from(err: qmdb::Error<F>) -> Self {
+        use commonware_runtime::Error as RuntimeError;
+        match err {
+            qmdb::Error::StaleRead => Self::Stale,
+            qmdb::Error::Runtime(RuntimeError::Closed | RuntimeError::Aborted) => Self::Shutdown,
+            err => Self::Fatal(err.to_string()),
+        }
+    }
+}
+
+impl From<Infallible> for ExecutionError {
+    fn from(err: Infallible) -> Self {
+        match err {}
+    }
+}
 
 /// The output of a successful [`Application::propose`] call.
 pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
@@ -225,13 +261,16 @@ where
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
+    ///
+    /// Storage errors from batch operations are propagated as [`ExecutionError`],
+    /// never interpreted (see [`verify`](Self::verify)).
     fn propose(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
-    ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
+    ) -> impl Future<Output = Result<Option<Proposed<Self, E>>, ExecutionError>> + Send;
 
     /// Verify a block received from a peer, relative to its ancestry.
     ///
@@ -270,14 +309,18 @@ where
     ///
     /// `batches` is a branch-scoped view, not a historical snapshot. Retained
     /// ancestor overlays preserve same-branch state, while unresolved reads fall
-    /// through to the batch's own database. A batch is therefore valid only
-    /// while applied state advances along its own branch.
+    /// through to the batch's own database. Once a block from a competing branch
+    /// is finalized, every batch operation refuses with a stale error instead of
+    /// answering across branches. Implementations propagate storage errors with
+    /// `?` as [`ExecutionError`] and never interpret them: on
+    /// [`ExecutionError::Stale`] the wrapper re-checks the block against the new
+    /// canonical state and retries or answers from there.
     fn verify(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> impl Future<Output = Option<MerkleizedOf<Self::Databases, E>>> + Send;
+    ) -> impl Future<Output = Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError>> + Send;
 
     /// Apply a previously certified block to reconstruct its merkleized state.
     ///
@@ -295,16 +338,16 @@ where
     /// wrapper itself never cancels it. Cancellation must not violate
     /// invariants or lose durable progress.
     ///
-    /// # Panics
-    ///
-    /// Implementations should panic if execution fails, as this indicates
-    /// data corruption or non-determinism.
+    /// Storage errors from batch operations are propagated as [`ExecutionError`],
+    /// never interpreted (see [`verify`](Self::verify)). The wrapper re-checks
+    /// canonical state when a verification replay goes stale and panics when the
+    /// failure is impossible on a correct node (the finalize path).
     fn apply(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> impl Future<Output = MerkleizedOf<Self::Databases, E>> + Send;
+    ) -> impl Future<Output = Result<MerkleizedOf<Self::Databases, E>, ExecutionError>> + Send;
 
     /// Observe a finalized block after it is reflected in the database set.
     ///

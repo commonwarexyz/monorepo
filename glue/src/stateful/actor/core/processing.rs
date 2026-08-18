@@ -3,7 +3,10 @@
 //! The loop owns the database set and is the only thing that mutates it.
 //! Verification jobs hold readers instead, so they are never cancelled: a
 //! job that is mid-read when a finalized block arrives finishes that read, the
-//! apply runs, and the job continues against the state it installs.
+//! apply runs, and the job continues against the state it installs. A job on
+//! the losing side of that apply is refused at its next batch operation
+//! ([`ExecutionError::Stale`](crate::stateful::ExecutionError::Stale)) and
+//! answered from the canonical chain.
 //!
 //! Each finalized block is applied to the databases, its flush deferred to a
 //! pool, and a snapshot of the applied state staged for publication. The loop
@@ -404,7 +407,7 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 mod tests {
     use super::{Message, Processing, VerificationRequest, skip_finalized_block};
     use crate::stateful::{
-        Application, Input, Proposed, PruneConfig,
+        Application, ExecutionError, Input, Proposed, PruneConfig,
         actor::{
             core::mailbox::Mailbox,
             metrics::Metrics as StatefulMetrics,
@@ -460,6 +463,10 @@ mod tests {
         verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
         proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
         verify_valid: bool,
+        /// Verifications that return [`ExecutionError::Stale`] after their gate
+        /// releases, standing in for a batch read refused by a competing
+        /// finalization.
+        stale_verifies: Arc<Mutex<usize>>,
         observed_contexts: Arc<Mutex<Vec<Name>>>,
     }
 
@@ -485,13 +492,13 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             let gate = self.proposal_gate.lock().take();
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            None
+            Ok(None)
         }
 
         async fn verify(
@@ -499,10 +506,12 @@ mod tests {
             context: (deterministic::Context, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
             self.observed_contexts.lock().push(context.0.name());
             let mut ancestry = Box::pin(ancestry);
-            let _block = ancestry.next().await?;
+            let Some(_block) = ancestry.next().await else {
+                return Ok(None);
+            };
             let mut gate = self
                 .verify_gates
                 .lock()
@@ -510,7 +519,14 @@ mod tests {
                 .expect("unexpected verification");
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
-            self.verify_valid.then_some(TestMerkleized)
+            {
+                let mut stale = self.stale_verifies.lock();
+                if *stale > 0 {
+                    *stale -= 1;
+                    return Err(ExecutionError::Stale);
+                }
+            }
+            Ok(self.verify_valid.then_some(TestMerkleized))
         }
 
         async fn apply(
@@ -518,8 +534,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
-            TestMerkleized
+        ) -> Result<TestMerkleized, ExecutionError> {
+            Ok(TestMerkleized)
         }
     }
 
@@ -555,7 +571,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             panic!("replay-gated application proposal is not used")
         }
 
@@ -564,14 +580,14 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
             let gate = self.verify_gate.lock().take();
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            Some(TestMerkleized)
+            Ok(Some(TestMerkleized))
         }
 
         async fn apply(
@@ -579,7 +595,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
+        ) -> Result<TestMerkleized, ExecutionError> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
             let gate = (block.height() == self.gate_height)
                 .then(|| self.gates.lock().pop_front())
@@ -588,7 +604,7 @@ mod tests {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            TestMerkleized
+            Ok(TestMerkleized)
         }
 
         async fn finalized(
@@ -709,6 +725,7 @@ mod tests {
             verify_gates: Arc::new(Mutex::new(verify_gates)),
             proposal_gate: Arc::new(Mutex::new(None)),
             verify_valid: true,
+            stale_verifies: Arc::default(),
             observed_contexts: Arc::default(),
         };
         let processor = Processor::new(
@@ -755,6 +772,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -812,6 +830,88 @@ mod tests {
         });
     }
 
+    /// A verification that goes stale because its own block finalized mid-execution
+    /// is answered from the canonical chain: true, not false.
+    #[test]
+    fn stale_verification_of_finalized_block_answers_true() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                stale_verifies: Arc::new(Mutex::new(1)),
+                observed_contexts: Arc::default(),
+            };
+            let (mut mailbox, _reader, marshal, actor) =
+                spawn_gated_application(&context, "stale-self-finalized", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let block_context = block.context();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block_context),
+                ancestry::from_iter([Arc::new(block.clone()), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification should start");
+
+            // The block itself finalizes while its verification is parked.
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block), acknowledgement));
+            waiter.await.expect("finalization should be acknowledged");
+
+            // The parked execution resumes and refuses with Stale; the verifier
+            // re-checks canonical state and answers true.
+            release.send(()).expect("verification should remain active");
+            assert!(verify.await);
+            actor.abort();
+            drop(marshal);
+        });
+    }
+
+    /// A verification that goes stale because a competing block finalized is
+    /// answered from the canonical chain: false.
+    #[test]
+    fn stale_verification_of_competing_block_answers_false() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                stale_verifies: Arc::new(Mutex::new(1)),
+                observed_contexts: Arc::default(),
+            };
+            let (mut mailbox, _reader, marshal, actor) =
+                spawn_gated_application(&context, "stale-competing", app).await;
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let winner = TestBlock::child(&genesis, 2);
+            let block_context = block.context();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block_context),
+                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification should start");
+
+            // A competing block at the same height finalizes while the
+            // verification is parked.
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            waiter.await.expect("finalization should be acknowledged");
+
+            release.send(()).expect("verification should remain active");
+            assert!(!verify.await);
+            actor.abort();
+            drop(marshal);
+        });
+    }
+
     #[test]
     fn verification_preserves_request_attributes() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -821,6 +921,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: observed_contexts.clone(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -868,6 +969,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -902,6 +1004,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -963,6 +1066,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: false,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -1028,6 +1132,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -1082,6 +1187,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -1165,6 +1271,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -1225,6 +1332,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([fork_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -1303,6 +1411,7 @@ mod tests {
                 ]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _reader, _marshal, actor) =
@@ -1477,6 +1586,7 @@ mod tests {
                 verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 verify_valid: true,
+                stale_verifies: Arc::default(),
                 observed_contexts: Arc::default(),
             };
             let mut signing = context.child("signing");

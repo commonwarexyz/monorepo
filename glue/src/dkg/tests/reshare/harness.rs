@@ -20,8 +20,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Input, Proposed,
+        Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, SyncEngineConfig,
             Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
@@ -363,10 +363,10 @@ impl App {
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
         mut batches: UnmerkleizedOf<Database<E>, E>,
-    ) -> MerkleizedOf<Database<E>, E> {
+    ) -> Result<MerkleizedOf<Database<E>, E>, ExecutionError> {
         let key = Sha256::hash(&[b"height"]);
         batches = batches.write(key, Some(u64_to_digest(height.get())));
-        batches.merkleize().await.unwrap()
+        Ok(batches.merkleize().await?)
     }
 }
 
@@ -388,12 +388,14 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         ancestry: impl Ancestry<Self::Block>,
         batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        let parent = ancestry.peek()?.clone();
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        let Some(parent) = ancestry.peek().cloned() else {
+            return Ok(None);
+        };
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let merkleized = Self::execute(height, batches).await;
+        let merkleized = Self::execute(height, batches).await?;
         let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
@@ -403,7 +405,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn verify(
@@ -411,12 +413,14 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Option<MerkleizedOf<Self::Databases, E>> {
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
         // Reshare final-block payload validation is enforced by the surrounding
         // reshare::Application wrapper; this inner app only executes state.
-        let tip = ancestry.peek().cloned()?;
-        let merkleized = Self::execute(tip.height(), batches).await;
-        Some(merkleized)
+        let Some(tip) = ancestry.peek().cloned() else {
+            return Ok(None);
+        };
+        let merkleized = Self::execute(tip.height(), batches).await?;
+        Ok(Some(merkleized))
     }
 
     async fn apply(
@@ -424,7 +428,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> MerkleizedOf<Self::Databases, E> {
+    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
         Self::execute(block.height(), batches).await
     }
 

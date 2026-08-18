@@ -5,7 +5,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, MerkleizedOf, Single, SnapshotsOf, SyncEngineConfig,
@@ -246,7 +246,7 @@ impl App {
     pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
         height: Height,
         batches: UnmerkleizedOf<MultiDatabaseSet<E>, E>,
-    ) -> MerkleizedOf<MultiDatabaseSet<E>, E> {
+    ) -> Result<MerkleizedOf<MultiDatabaseSet<E>, E>, ExecutionError> {
         let (mut batch_a, batch_b) = batches;
 
         // DB-A: increment counter and write a height marker, mirroring the single-db app's
@@ -254,8 +254,7 @@ impl App {
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batch_a
             .get(&counter)
-            .await
-            .unwrap()
+            .await?
             .map_or(0, |v| digest_to_u64(&v));
         batch_a = batch_a.write(counter, Some(u64_to_digest(current + 1)));
         batch_a = batch_a.write(
@@ -269,9 +268,9 @@ impl App {
             u64_to_digest(height.get()),
         );
 
-        let merkleized_a = batch_a.merkleize().await.unwrap();
-        let merkleized_b = batch_b.merkleize().await.unwrap();
-        (merkleized_a, merkleized_b)
+        let merkleized_a = batch_a.merkleize().await?;
+        let merkleized_b = batch_b.merkleize().await?;
+        Ok((merkleized_a, merkleized_b))
     }
 }
 
@@ -293,11 +292,13 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
         let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
+        let Some(parent) = ancestry.next().await else {
+            return Ok(None);
+        };
         let height = Height::new(parent.height().get() + 1);
-        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await?;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = Block {
@@ -309,10 +310,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
             root_b: merkleized_b.root(),
             range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
         };
-        Some(Proposed {
+        Ok(Some(Proposed {
             block,
             merkleized: (merkleized_a, merkleized_b),
-        })
+        }))
     }
 
     async fn verify(
@@ -320,10 +321,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Option<MerkleizedOf<Self::Databases, E>> {
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
         let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
+        let Some(tip) = ancestry.next().await else {
+            return Ok(None);
+        };
+        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await?;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
@@ -331,9 +334,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let matches_b = merkleized_b.root() == tip.root_b
             && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == tip.range_b;
         if !matches_a || !matches_b {
-            return None;
+            return Ok(None);
         }
-        Some((merkleized_a, merkleized_b))
+        Ok(Some((merkleized_a, merkleized_b)))
     }
 
     async fn apply(
@@ -341,7 +344,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> MerkleizedOf<Self::Databases, E> {
+    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
         Self::execute(block.height(), batches).await
     }
 

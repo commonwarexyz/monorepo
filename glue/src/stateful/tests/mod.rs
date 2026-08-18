@@ -18,8 +18,8 @@ use crate::{
         property::Property,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Input, Proposed,
+        Stateful as StatefulActor, SyncPlan,
         db::{DatabaseSet, Merkleized as _, Publisher, ReadersOf, SyncEngineConfig},
     },
 };
@@ -949,19 +949,22 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
-        let proposed = <MultiApp as Application<deterministic::Context>>::propose(
+    ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
+        let Some(proposed) = <MultiApp as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
             ancestry,
             batches,
             input,
         )
-        .await?;
-        Some(Proposed {
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Proposed {
             block: proposed.block,
             merkleized: proposed.merkleized,
-        })
+        }))
     }
 
     async fn verify(
@@ -969,7 +972,10 @@ impl Application<deterministic::Context> for GatedMultiApp {
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+    ) -> Result<
+        Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized>,
+        ExecutionError,
+    > {
         let gate = self.verify_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
@@ -989,7 +995,8 @@ impl Application<deterministic::Context> for GatedMultiApp {
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+    ) -> Result<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized, ExecutionError>
+    {
         <MultiApp as Application<deterministic::Context>>::apply(
             &mut self.inner,
             context,
@@ -1049,7 +1056,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let merkleized = App::execute(height, batches).await;
+        let merkleized = App::execute(height, batches).await.unwrap();
         let bounds = merkleized.bounds();
         let block = Block {
             context: Context {
@@ -1101,7 +1108,7 @@ async fn build_multi_chain(
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
+        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await.unwrap();
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = MultiBlock {

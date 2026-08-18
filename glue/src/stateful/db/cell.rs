@@ -17,6 +17,11 @@
 //! being torn down, so later leases park forever and are dropped along with
 //! the tasks holding them.
 //!
+//! A lease guarantees the database is present and unchanging for one call, not
+//! that the caller's batch is still current: a batch operation under a lease
+//! can still refuse because a competing batch was applied (see
+//! [`commonware_storage::qmdb::Error::StaleRead`]).
+//!
 //! Two rules keep callers out of trouble. The lock is not reentrant, so never
 //! hold a lease while acquiring another on the same cell: a mutation queued
 //! between the two would deadlock both. And a [`Writer`] must outlive the
