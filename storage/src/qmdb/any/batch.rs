@@ -14,6 +14,7 @@ use crate::{
             db::Db,
             operation::{Operation, update},
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
+            view::View,
         },
         applied::ApplyGuard,
         batch_chain::{self, Bounds, Commitment},
@@ -204,6 +205,8 @@ enum Base<F: Family, D: Digest, U: update::Update, S: Strategy> {
         state: Commitment<F, D>,
         inactivity_floor_loc: Location<F>,
         active_keys: usize,
+        /// The applied state this batch chain forked from.
+        view: View<F, D>,
     },
     /// Created from a parent batch via `parent.new_batch()`.
     Child(Arc<MerkleizedBatch<F, D, U, S>>),
@@ -250,6 +253,15 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
         match self {
             Self::Db { .. } => None,
             Self::Child(parent) => Some(parent),
+        }
+    }
+
+    /// The chain-base view: every batch in a chain reads and merkleizes as of the
+    /// generation the chain forked from the DB at.
+    fn view(&self) -> View<F, D> {
+        match self {
+            Self::Db { view, .. } => view.clone(),
+            Self::Child(parent) => parent.view(),
         }
     }
 }
@@ -360,6 +372,17 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 
     /// Position and floor bounds for this batch chain.
     pub(crate) bounds: batch_chain::Bounds<F, D>,
+
+    /// The chain-base view. `None` only while `apply_batch` consumes a uniquely-owned
+    /// batch (nothing can fork from or read through it in that state).
+    view: Option<View<F, D>>,
+}
+
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S> {
+    /// The chain-base view.
+    pub(crate) fn view(&self) -> View<F, D> {
+        self.view.clone().expect("batch view taken by apply")
+    }
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
@@ -383,6 +406,7 @@ where
     db_state: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
+    view: View<F, H::Digest>,
 }
 
 /// Look up a key in the ancestor chain (immediate parent first).
@@ -1244,9 +1268,18 @@ where
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
         // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Hash against the chain-base mem capture: exact under concurrent applies and
+        // prunes. A chain whose committed prefix was dropped after applying needs the
+        // prefix's nodes, which exist only in the live tree; that pattern requires the
+        // owner to have applied the prefix, so the live read is safe there.
+        let mem = if self.db_state.size > self.view.size {
+            db.log.mem()
+        } else {
+            Arc::clone(&self.view.mem)
+        };
         let (journal, root) = db
             .log
-            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .merkleize(self.journal_batch, ops, inactive_peaks, mem)
             .await?;
         if let Some(job) = diff_merge.take() {
             diff = job.await;
@@ -1295,6 +1328,7 @@ where
                 ancestors,
                 inactivity_floor: floor,
             },
+            view: Some(self.view),
         }))
     }
 }
@@ -1332,6 +1366,7 @@ where
             db_state,
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
             base_active_keys: self.base.active_keys(),
+            view: self.base.view(),
         };
         (self.mutations, m)
     }
@@ -2718,6 +2753,7 @@ where
                 state: self.commitment(),
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
+                view: self.view(),
             },
         }
     }
@@ -2778,6 +2814,17 @@ where
         self.validate_batch(&batch)?;
         let db_size = *self.last_commit_loc + 1;
         let start_loc = Location::new(db_size);
+
+        // A uniquely-owned batch can never be forked from or read through again, so drop
+        // its view before the Merkle apply: releasing the mem capture keeps the mutation
+        // in place. Live clones (concurrent forks) keep theirs and force copy-on-write.
+        let batch = match Arc::try_unwrap(batch) {
+            Ok(mut owned) => {
+                owned.view = None;
+                Arc::new(owned)
+            }
+            Err(batch) => batch,
+        };
 
         // Apply journal (handles its own partial ancestor skipping).
         self.log = self.log.apply_batch(&batch.journal_batch).await?;
@@ -2904,6 +2951,7 @@ where
             ancestor_diffs: Vec::new(),
             ancestor_base_locs: Vec::new(),
             bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            view: Some(self.view()),
         })
     }
 }

@@ -411,11 +411,17 @@ where
         }
     }
 
-    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
-    /// job submitted through [`Strategy::spawn`].
+    /// The in-memory Merkle state, captured copy-on-write.
+    pub(crate) fn mem(&self) -> Arc<Mem<F, H::Digest>> {
+        self.merkle.mem()
+    }
+
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root against `mem`,
+    /// all as one CPU-bound job submitted through [`Strategy::spawn`].
     ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
-    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
+    /// `mem` must contain the batch chain's base state; hashing against the base capture
+    /// (rather than the live state) keeps the job exact under concurrent applies and prunes.
+    /// A parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
     /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
     /// completion against its snapshot and the result is discarded (a panic inside the job is
     /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
@@ -424,12 +430,12 @@ where
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
         items: Vec<C::Item>,
         inactive_peaks: usize,
+        mem: Arc<Mem<F, H::Digest>>,
     ) -> Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>
     where
         C::Item: 'static,
     {
         let ancestors = batch.inner.retain_ancestors();
-        let mem = self.merkle.mem();
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
         strategy
@@ -3725,12 +3731,17 @@ mod tests {
         // Build a speculative suffix over a prefix that will be committed independently.
         let prefix_items = (0..8u8).map(create_operation::<F>).collect();
         let (prefix, _) = journal
-            .merkleize(journal.new_batch(), prefix_items, 0)
+            .merkleize(journal.new_batch(), prefix_items, 0, journal.mem())
             .await
             .unwrap();
         let pending_items = (8..10u8).map(create_operation::<F>).collect();
         let (pending, _) = journal
-            .merkleize(prefix.new_batch::<Sha256>(), pending_items, 0)
+            .merkleize(
+                prefix.new_batch::<Sha256>(),
+                pending_items,
+                0,
+                journal.mem(),
+            )
             .await
             .unwrap();
 
@@ -3743,7 +3754,12 @@ mod tests {
         let child_batch = pending.new_batch::<Sha256>();
         drop(pending);
         let (child, expected_root) = journal
-            .merkleize(child_batch, vec![create_operation::<F>(10)], 0)
+            .merkleize(
+                child_batch,
+                vec![create_operation::<F>(10)],
+                0,
+                journal.mem(),
+            )
             .await
             .unwrap();
         journal = journal.apply_batch(&child).await.unwrap();
@@ -3807,7 +3823,7 @@ mod tests {
 
             let release = block_strategy(journal.strategy(), 2);
             let (item, clean_drop) = DropMonitor::tracked(create_operation::<mmr::Family>(10));
-            let mut merkleize = Box::pin(journal.merkleize(c_batch, vec![item], 0));
+            let mut merkleize = Box::pin(journal.merkleize(c_batch, vec![item], 0, journal.mem()));
             assert!(futures::poll!(merkleize.as_mut()).is_pending());
             drop(merkleize);
             drop(a);

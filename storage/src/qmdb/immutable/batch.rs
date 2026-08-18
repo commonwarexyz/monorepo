@@ -276,7 +276,7 @@ where
         // strategy instead of occupying the calling task (see `Journal::merkleize`).
         let (journal, root) = db
             .journal
-            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .merkleize(self.journal_batch, ops, inactive_peaks, db.journal.mem())
             .await
             .expect("inactive_peaks computed from batch size");
 
