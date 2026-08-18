@@ -755,7 +755,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // certification, and finalization must not run ahead of that anchor.
         // Certification already applies this, so it only matters when replay
         // restores a certified round without re-running that precheck.
-        if !self.explicit_parent_ready(view) {
+        let proposal = self.views.get(&view)?.proposal()?;
+        if !self.explicit_parent_ready(proposal) {
             return None;
         }
         let candidate = self.views.get_mut(&view)?.construct_finalize()?.clone();
@@ -1181,16 +1182,20 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.outstanding_certifications.insert(view);
     }
 
-    /// Queues a blocked immediate same-term child when `parent` certifies or
-    /// finalizes.
+    /// Queues a blocked child when its required parent certifies or finalizes.
     fn wake_certification_child(&mut self, parent: View) {
         let child = parent.next();
-        if self.previous_in_term(child) != Some(parent)
-            || child <= self.last_finalized
-            || !self
-                .views
-                .get(&child)
-                .is_some_and(|round| round.notarization().is_some())
+        if child <= self.last_finalized {
+            return;
+        }
+        let Some(round) = self.views.get(&child) else {
+            return;
+        };
+        let Some(proposal) = round.proposal() else {
+            return;
+        };
+        if round.notarization().is_none()
+            || self.required_certification_parent(proposal) != Some(parent)
         {
             return;
         }
@@ -1352,11 +1357,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     // outgoing term's final view may contribute to a pipelined-handoff
     // proposal (`handoff_leader` and `handoff_parent` decide when it applies).
     //
-    // The `*_parent_ready` predicates answer whether a view's immediate parent
-    // is settled enough to act on. Certification and finalization require
-    // `explicit_parent_ready`. Notarize issuance inside the optimistic window
-    // uses `optimistic_parent_ready`, which delegates to its ancestry resolver
-    // so issuance and proposal construction share one ancestry rule.
+    // The `*_parent_ready` predicates answer whether a proposal's required
+    // parent is settled enough to act on. Certification and finalization
+    // require `explicit_parent_ready`. Notarize issuance inside the optimistic
+    // window uses `optimistic_parent_ready`, which delegates to its ancestry
+    // resolver so issuance and proposal construction share one ancestry rule.
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
     /// proposal, the strongest form of ancestry.
@@ -1668,22 +1673,24 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns whether certification may run for a proposal.
     ///
-    /// Optimistic notarize votes can make a same-term child notarized before
-    /// its immediate parent has certified, but certification waits for explicit
-    /// certified or finalized parent ancestry.
+    /// Optimistic notarize votes can make a child notarized before its required
+    /// parent has certified, but certification waits for explicit certified or
+    /// finalized parent ancestry.
     ///
-    /// Term-start views bypass this precheck because they are outside the
-    /// issuance window (see
+    /// Term-start views normally bypass this precheck because they are outside
+    /// the issuance window (see
     /// [`Lookahead::issuance_floor`](crate::simplex::Lookahead)). Peers verify
-    /// term starts only through explicit ancestry. A local pipelined-handoff
-    /// proposal can be built without explicit ancestry, but certification
-    /// starts only after the view is directly notarized. Every other honest
-    /// voter requires explicit ancestry before voting for the term start.
+    /// term starts only through explicit ancestry. A pipelined-handoff proposal
+    /// can be locally endorsed without explicit ancestry. When it links
+    /// directly to the outgoing term's tip, that tip becomes its required
+    /// certification parent.
     fn certification_parent_ready(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
         let (view, parent) = (proposal.view(), proposal.parent);
         Self::ensure_parent_precedes(view, parent)?;
 
-        if view.is_term_start(self.term_length()) {
+        if view.is_term_start(self.term_length())
+            && self.required_certification_parent(proposal).is_none()
+        {
             return Ok(());
         }
 
@@ -1691,7 +1698,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // is trivially satisfied once contiguity holds).
         self.validate_parent_span(view, parent)?;
 
-        if self.explicit_parent_ready(view) {
+        if self.explicit_parent_ready(proposal) {
             return Ok(());
         }
 
@@ -1701,11 +1708,30 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         })
     }
 
-    /// Returns true when `view`'s immediate in-term parent is explicitly
-    /// certified (or finalized), the ancestry that certification and
-    /// finalization both require. Term starts have no in-term parent and always pass.
-    fn explicit_parent_ready(&self, view: View) -> bool {
-        self.previous_in_term(view)
+    /// Returns the parent whose explicit certification gates `proposal`.
+    ///
+    /// In-term proposals require their immediate predecessor. Term-start
+    /// proposals normally arrive through explicit ancestry and need no extra
+    /// gate, but a locally endorsed pipelined handoff links directly to the
+    /// outgoing term's tip before it certifies and must retain that barrier.
+    fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
+        let view = proposal.view();
+        self.previous_in_term(view).or_else(|| {
+            let previous = view.previous()?;
+            (self.handoff_leader(view).is_some()
+                && proposal.parent == previous
+                && self
+                    .views
+                    .get(&view)
+                    .is_some_and(|round| round.broadcast_notarize()))
+            .then_some(previous)
+        })
+    }
+
+    /// Returns true when the proposal's required parent is explicitly
+    /// certified (or finalized).
+    fn explicit_parent_ready(&self, proposal: &Proposal<D>) -> bool {
+        self.required_certification_parent(proposal)
             .is_none_or(|parent| self.explicit_ancestry_payload(parent).is_some())
     }
 
@@ -6695,6 +6721,28 @@ mod tests {
         (certified, tip)
     }
 
+    /// Leaves a single-participant state at a pipelined term boundary with a
+    /// local notarize vote for the uncertified outgoing tip.
+    fn prepare_single_participant_term_boundary(
+        state: &mut TestState,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) -> Proposal<Sha256Digest> {
+        let certified = fetch_proposal(4, 3, 64);
+        let notarization = build_notarization(verifier, schemes, &certified);
+        assert!(state.add_notarization(notarization).0);
+        assert!(state.certified(View::new(4), true).is_some());
+        let _ = state.certify_candidates();
+
+        let context = state
+            .try_propose()
+            .expect("outgoing leader should propose the term tip");
+        let tip = fetch_proposal(5, 4, 65);
+        assert!(state.proposed(&context, tip.payload));
+        assert!(state.construct_notarize(View::new(5)).is_some());
+        tip
+    }
+
     #[test]
     fn pipelined_handoff_proposes_on_uncertified_term_end() {
         let runtime = deterministic::Runner::default();
@@ -6742,6 +6790,84 @@ mod tests {
             assert!(ready.iter().any(|p| p.round.view() == View::new(6)));
             assert!(state.certified(View::new(6), true).is_some());
             assert_eq!(state.current_view(), View::new(7));
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_certification_waits_for_parent() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
+            let tip =
+                prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
+
+            let child_context = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip");
+            let child = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&child_context, child.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            let child_notarization = build_notarization(&verifier, &schemes, &child);
+            assert!(state.add_notarization(child_notarization).0);
+
+            // A single participant forms both notarizations. Only the parent
+            // may cross the application certification barrier first.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![tip]);
+
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(View::new(5), handle);
+            assert!(state.certified(View::new(5), true).is_some());
+
+            // Completing the cross-term parent wakes the blocked child.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![child]);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_finalize_waits_for_parent_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
+            let tip =
+                prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
+
+            let child_context = state
+                .try_propose()
+                .expect("handoff proposal should use the uncertified tip");
+            let child = fetch_proposal(6, 5, 66);
+            assert!(state.proposed(&child_context, child.payload));
+            assert!(state.construct_notarize(View::new(6)).is_some());
+
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            let child_notarization = build_notarization(&verifier, &schemes, &child);
+            assert!(state.add_notarization(child_notarization).0);
+
+            // Model a recovered child certification to keep the finalization
+            // gate defensive even if certification ordering regresses.
+            assert!(state.certified(View::new(6), true).is_some());
+            assert!(state.construct_finalize(View::new(6)).is_none());
+
+            assert!(state.certified(View::new(5), true).is_some());
+            assert!(state.construct_finalize(View::new(6)).is_some());
         });
     }
 
