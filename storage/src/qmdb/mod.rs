@@ -86,6 +86,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub mod any;
+pub(crate) mod applied;
 pub mod batch_chain;
 pub(crate) mod bitmap;
 pub mod compact;
@@ -257,6 +258,12 @@ pub enum Error<F: Family> {
     /// See [`batch_chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
+
+    /// A view can no longer answer reads: the database began a new incarnation (rewind,
+    /// prune, sync handoff) or the view's undo records were evicted. Refork from a fresh
+    /// view; the database itself is unharmed.
+    #[error(transparent)]
+    Stale(#[from] applied::Stale),
 
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]

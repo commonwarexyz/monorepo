@@ -1,0 +1,575 @@
+//! Versioned applied state for QMDBs.
+//!
+//! [`Applied`] owns the shared-mutable core of a database: the key index, the activity
+//! bitmap, and a window of undo records describing what recent applies displaced. All of
+//! it is guarded by one synchronous lock with a single coherence rule: an apply mutates
+//! the index and bitmap, records what it displaced, and bumps the generation under one
+//! write hold; a read resolves entirely under one read hold. Guards never cross journal
+//! I/O, hashing, or an await.
+//!
+//! Mutation goes through two doors. [`Applied::commit_apply`] hands its closure an
+//! [`ApplyGuard`] whose primitives record each displaced index entry and bitmap chunk
+//! into the apply's undo record, so capture cannot be forgotten. [`Applied::commit_epoch`]
+//! hands out raw access instead: it begins a new incarnation (rewind, prune, sync
+//! handoff), clearing the window, so epoch mutations record no history and views minted
+//! under the old epoch become permanently [`Stale`].
+//!
+//! Reads as of an old generation are exact, not approximate: an undo record stores a
+//! key's index entry at the instant an apply displaced it, so the oldest record at or
+//! after a view's generation is that key's state at the view. A key with no record is
+//! untouched since the view, so the live index filtered to the view's size answers (the
+//! journal is append-only). The same argument covers bitmap chunks.
+//!
+//! The bitmap physically stays in its own [`Shared`] lock so the `current` family's
+//! grafted readers can keep an `Arc` to it, but every bitmap write happens while the
+//! applied write hold is held, so a reader under the applied read hold observes a frozen
+//! bitmap. Independent readers of the bitmap lock alone get the same per-call atomicity
+//! they get today.
+//!
+//! Splitting the write hold, or reading the index and window under separate holds,
+//! breaks exactness. Do not "optimize" the locking here.
+
+use crate::{
+    index::Unordered as UnorderedIndex,
+    merkle::{Family, Location},
+    qmdb::{bitmap::Shared, delete_known_loc, operation::Key, update_known_loc},
+};
+use ahash::AHashSet;
+use commonware_utils::{
+    bitmap,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
+use std::{collections::VecDeque, sync::Arc};
+
+/// Displaced index entries, sorted by key bytes: each key's active location before an
+/// apply, or `None` when the key was absent.
+type UndoKeys<F> = Vec<(Box<[u8]>, Option<Location<F>>)>;
+
+/// A logical apply count paired with the incarnation it belongs to.
+///
+/// `sequence` increments once per [`Applied::commit_apply`]. `epoch` increments once per
+/// [`Applied::commit_epoch`]; a generation from an older epoch never matches the state
+/// again. Generations support equality and window-coverage checks only; they carry no
+/// arithmetic and are never interchangeable with physical locations.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Generation {
+    epoch: u64,
+    sequence: u64,
+}
+
+/// The state has moved past what a view can answer: the view's epoch ended, its undo
+/// records were evicted, or a fresh-only read raced an apply.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("view is stale")]
+pub struct Stale;
+
+/// What one apply displaced, captured at the instant of displacement.
+struct ApplyUndo<F: Family, const N: usize> {
+    /// The generation the displaced state belonged to.
+    before: Generation,
+    keys: UndoKeys<F>,
+    /// Pre-images of the below-boundary bitmap chunks this apply dirtied.
+    #[allow(dead_code)] // consumed once merkleize reads chunks as-of
+    chunks: Vec<(usize, [u8; N])>,
+}
+
+impl<F: Family, const N: usize> ApplyUndo<F, N> {
+    fn resolve(&self, key: &[u8]) -> Option<Option<Location<F>>> {
+        self.keys
+            .binary_search_by(|(k, _)| (**k).cmp(key))
+            .ok()
+            .map(|i| self.keys[i].1)
+    }
+
+    #[allow(dead_code)] // consumed once merkleize reads chunks as-of
+    fn chunk(&self, idx: usize) -> Option<&[u8; N]> {
+        self.chunks
+            .binary_search_by_key(&idx, |(i, _)| *i)
+            .ok()
+            .map(|i| &self.chunks[i].1)
+    }
+}
+
+/// How [`Applied::resolve`] answered a point lookup.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Resolution<F: Family> {
+    /// An undo record answered for this exact key: its active location at the view's
+    /// generation (`None` = absent). No journal disambiguation needed.
+    Exact(Option<Location<F>>),
+    /// The key is untouched since the view's generation: live index candidates filtered
+    /// to the view's size. Collision candidates; disambiguate against the journal.
+    Candidates(Vec<Location<F>>),
+}
+
+struct State<F: Family, I, const N: usize> {
+    index: I,
+    bitmap: Arc<Shared<N>>,
+    /// Undo records, oldest first. Covers generations `[front.before, generation)`.
+    window: VecDeque<Arc<ApplyUndo<F, N>>>,
+    generation: Generation,
+}
+
+/// Handle to the shared-mutable core of a database. Cheap to clone; all clones see the
+/// same state. See the module docs for the coherence rules.
+pub(crate) struct Applied<F: Family, I, const N: usize> {
+    inner: Arc<RwLock<State<F, I, N>>>,
+}
+
+impl<F: Family, I, const N: usize> Clone for Applied<F, I, N> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<F: Family, I, const N: usize> std::fmt::Debug for Applied<F, I, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.read();
+        f.debug_struct("Applied")
+            .field("generation", &state.generation)
+            .field("window_depth", &state.window.len())
+            .finish()
+    }
+}
+
+/// The only handle to the index and bitmap during an apply. Every mutation primitive
+/// records what it displaces into the apply's undo record, so capture cannot be skipped.
+pub(crate) struct ApplyGuard<'a, F: Family, I, const N: usize> {
+    index: &'a mut I,
+    bitmap: RwLockWriteGuard<'a, bitmap::Prunable<N>>,
+    /// First location this apply appends; displaced state lives below it.
+    boundary: u64,
+    keys: UndoKeys<F>,
+    chunks: Vec<(usize, [u8; N])>,
+    touched: AHashSet<usize>,
+}
+
+impl<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize> ApplyGuard<'_, F, I, N> {
+    /// Move `key` from `old` to `new` in the index.
+    pub(crate) fn update(&mut self, key: &impl Key, old: Location<F>, new: Location<F>) {
+        update_known_loc::<F, _>(self.index, key, old, new);
+        self.keys.push((key.as_ref().into(), Some(old)));
+    }
+
+    /// Insert `key` at `new`; the key must be absent.
+    pub(crate) fn insert(&mut self, key: &impl Key, new: Location<F>) {
+        self.index.insert(key.as_ref(), new);
+        self.keys.push((key.as_ref().into(), None));
+    }
+
+    /// Remove `key`, known to be at `old`.
+    pub(crate) fn delete(&mut self, key: &impl Key, old: Location<F>) {
+        delete_known_loc::<F, _>(self.index, key, old);
+        self.keys.push((key.as_ref().into(), Some(old)));
+    }
+
+    /// Set the activity bit at `loc`, capturing the chunk's pre-image if the bit
+    /// predates this apply.
+    pub(crate) fn set_bit(&mut self, loc: u64, value: bool) {
+        if loc < self.boundary {
+            let idx = (loc / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
+            if self.touched.insert(idx) {
+                self.chunks
+                    .push((idx, *self.bitmap.get_chunk_containing(loc)));
+            }
+        }
+        self.bitmap.set_bit(loc, value);
+    }
+
+    /// Zero-extend the bitmap to `size` bits.
+    pub(crate) fn extend_to(&mut self, size: u64) {
+        self.bitmap.extend_to(size);
+    }
+}
+
+impl<F: Family, I, const N: usize> Applied<F, I, N> {
+    pub(crate) fn new(index: I, bitmap: Arc<Shared<N>>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(State {
+                index,
+                bitmap,
+                window: VecDeque::new(),
+                generation: Generation::default(),
+            })),
+        }
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, State<F, I, N>> {
+        self.inner.read()
+    }
+
+    /// The current generation.
+    pub(crate) fn generation(&self) -> Generation {
+        self.read().generation
+    }
+
+    /// Apply one batch's index and bitmap mutations, record what they displaced, and
+    /// bump the generation, all under one write hold. Returns the closure's result and
+    /// the new generation.
+    pub(crate) fn commit_apply<R>(
+        &self,
+        f: impl FnOnce(&mut ApplyGuard<'_, F, I, N>) -> R,
+    ) -> (R, Generation) {
+        let mut state = self.inner.write();
+        let state = &mut *state;
+        let bitmap = state.bitmap.write();
+        let boundary = bitmap::Readable::<N>::len(&*bitmap);
+        let mut guard = ApplyGuard {
+            index: &mut state.index,
+            bitmap,
+            boundary,
+            keys: Vec::new(),
+            chunks: Vec::new(),
+            touched: AHashSet::new(),
+        };
+        let out = f(&mut guard);
+        let ApplyGuard {
+            mut keys,
+            mut chunks,
+            ..
+        } = guard;
+        keys.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        chunks.sort_unstable_by_key(|(i, _)| *i);
+        state.window.push_back(Arc::new(ApplyUndo {
+            before: state.generation,
+            keys,
+            chunks,
+        }));
+        state.generation.sequence += 1;
+        (out, state.generation)
+    }
+
+    /// Begin a new incarnation (rewind, prune, sync handoff): clear the undo window,
+    /// bump the epoch, and hand the closure raw access to rebuild the index and bitmap.
+    /// Views minted under the old epoch become permanently stale.
+    pub(crate) fn commit_epoch<R>(
+        &self,
+        f: impl FnOnce(&mut I, &mut bitmap::Prunable<N>) -> R,
+    ) -> (R, Generation) {
+        let mut state = self.inner.write();
+        let state = &mut *state;
+        state.window.clear();
+        state.generation.epoch += 1;
+        let mut bitmap = state.bitmap.write();
+        let out = f(&mut state.index, &mut bitmap);
+        drop(bitmap);
+        (out, state.generation)
+    }
+
+    /// Evict undo records older than `floor` (the oldest generation any live view still
+    /// needs). A floor from an ended epoch is ignored; the epoch bump already cleared
+    /// the window.
+    #[allow(dead_code)] // consumed once the owner tracks live views
+    pub(crate) fn set_retention_floor(&self, floor: Generation) {
+        let mut state = self.inner.write();
+        if floor.epoch != state.generation.epoch {
+            return;
+        }
+        while state
+            .window
+            .front()
+            .is_some_and(|undo| undo.before.sequence < floor.sequence)
+        {
+            state.window.pop_front();
+        }
+    }
+
+    /// Whether the window can answer reads as of `view`.
+    fn covers(state: &State<F, I, N>, view: Generation) -> bool {
+        if view.epoch != state.generation.epoch || view.sequence > state.generation.sequence {
+            return false;
+        }
+        if view.sequence == state.generation.sequence {
+            return true;
+        }
+        state
+            .window
+            .front()
+            .is_some_and(|front| front.before.sequence <= view.sequence)
+    }
+
+    /// Run `f` against the live index and bitmap iff the state is still exactly at
+    /// `view`'s generation, under the same hold as the check.
+    #[allow(dead_code)] // consumed by the fresh-only merkleize checks
+    pub(crate) fn read_fresh<R>(
+        &self,
+        view: Generation,
+        f: impl FnOnce(&I, &bitmap::Prunable<N>) -> R,
+    ) -> Result<R, Stale> {
+        let state = self.read();
+        if state.generation != view {
+            return Err(Stale);
+        }
+        let bitmap = state.bitmap.read();
+        Ok(f(&state.index, &bitmap))
+    }
+
+    /// Run `f` against the live index under a read hold. For reads at the current tip
+    /// only (the owner's own lookups); versioned reads go through [`Self::resolve`].
+    pub(crate) fn with_index<R>(&self, f: impl FnOnce(&I) -> R) -> R {
+        f(&self.read().index)
+    }
+}
+
+impl<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize> Applied<F, I, N> {
+    /// Resolve `key`'s active location as of `view` (a generation and the journal size
+    /// at that generation). See [`Resolution`] for the two answer shapes.
+    pub(crate) fn resolve(
+        &self,
+        view: Generation,
+        size: u64,
+        key: &impl Key,
+    ) -> Result<Resolution<F>, Stale> {
+        let state = self.read();
+        if !Self::covers(&state, view) {
+            return Err(Stale);
+        }
+        for undo in &state.window {
+            if undo.before.sequence < view.sequence {
+                continue;
+            }
+            if let Some(loc) = undo.resolve(key.as_ref()) {
+                return Ok(Resolution::Exact(loc));
+            }
+        }
+        Ok(Resolution::Candidates(
+            state
+                .index
+                .get(key.as_ref())
+                .copied()
+                .filter(|loc| **loc < size)
+                .collect(),
+        ))
+    }
+
+    /// The content of bitmap chunk `idx` as of `view`. Bits at or beyond the view's
+    /// size may reflect later appends; consumers must bound iteration by the view's
+    /// size, never by chunk content.
+    #[allow(dead_code)] // consumed once merkleize reads chunks as-of
+    pub(crate) fn chunk(&self, view: Generation, idx: usize) -> Result<[u8; N], Stale> {
+        let state = self.read();
+        if !Self::covers(&state, view) {
+            return Err(Stale);
+        }
+        for undo in &state.window {
+            if undo.before.sequence < view.sequence {
+                continue;
+            }
+            if let Some(chunk) = undo.chunk(idx) {
+                return Ok(*chunk);
+            }
+        }
+        Ok(bitmap::Readable::<N>::get_chunk(&*state.bitmap, idx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{index::unordered::Index, merkle::mmr, translator::TwoCap};
+    use commonware_runtime::{Runner as _, deterministic};
+
+    type L = Location<mmr::Family>;
+    type TestIndex = Index<TwoCap, L>;
+    const N: usize = 4;
+    type TestApplied = Applied<mmr::Family, TestIndex, N>;
+
+    fn key(bytes: &[u8]) -> Vec<u8> {
+        bytes.to_vec()
+    }
+
+    fn with_applied(f: impl FnOnce(TestApplied)) {
+        deterministic::Runner::default().start(|context| async move {
+            let index = TestIndex::new(context, TwoCap);
+            let bitmap = Arc::new(Shared::new(bitmap::Prunable::<N>::default()));
+            f(Applied::new(index, bitmap));
+        });
+    }
+
+    fn exact(resolution: Resolution<mmr::Family>) -> Option<L> {
+        match resolution {
+            Resolution::Exact(loc) => loc,
+            Resolution::Candidates(_) => panic!("expected a window answer"),
+        }
+    }
+
+    fn candidates(resolution: Resolution<mmr::Family>) -> Vec<L> {
+        match resolution {
+            Resolution::Exact(_) => panic!("expected live candidates"),
+            Resolution::Candidates(locs) => locs,
+        }
+    }
+
+    /// One apply: extend the bitmap to `size` and run `f` against the guard.
+    fn apply(
+        applied: &TestApplied,
+        size: u64,
+        f: impl FnOnce(&mut ApplyGuard<'_, mmr::Family, TestIndex, N>),
+    ) -> Generation {
+        let ((), generation) = applied.commit_apply(|guard| {
+            guard.extend_to(size);
+            f(guard);
+        });
+        generation
+    }
+
+    #[test]
+    fn resolve_walks_the_window_exactly() {
+        with_applied(|applied| {
+            let (a, b, c) = (key(&[1, 1]), key(&[2, 2]), key(&[3, 3]));
+
+            // Gen 1: a@0, b@1.
+            let g1 = apply(&applied, 2, |g| {
+                g.insert(&a, L::new(0));
+                g.set_bit(0, true);
+                g.insert(&b, L::new(1));
+                g.set_bit(1, true);
+            });
+
+            // Gen 2: rewrite a to 2, delete b, create c@3.
+            let g2 = apply(&applied, 4, |g| {
+                g.update(&a, L::new(0), L::new(2));
+                g.set_bit(2, true);
+                g.set_bit(0, false);
+                g.delete(&b, L::new(1));
+                g.set_bit(1, false);
+                g.insert(&c, L::new(3));
+                g.set_bit(3, true);
+            });
+
+            // As of g1: a@0, b@1, c absent. All answered by gen-2's record.
+            assert_eq!(exact(applied.resolve(g1, 2, &a).unwrap()), Some(L::new(0)));
+            assert_eq!(exact(applied.resolve(g1, 2, &b).unwrap()), Some(L::new(1)));
+            assert_eq!(exact(applied.resolve(g1, 2, &c).unwrap()), None);
+
+            // As of g2 (current): no record is newer, so the live index answers.
+            assert_eq!(candidates(applied.resolve(g2, 4, &a).unwrap()), [L::new(2)]);
+            assert!(candidates(applied.resolve(g2, 4, &b).unwrap()).is_empty());
+            assert_eq!(candidates(applied.resolve(g2, 4, &c).unwrap()), [L::new(3)]);
+
+            // Gen 3: rewrite a again. The OLDEST record at or after g1 must win for g1.
+            apply(&applied, 5, |g| {
+                g.update(&a, L::new(2), L::new(4));
+                g.set_bit(4, true);
+                g.set_bit(2, false);
+            });
+            assert_eq!(exact(applied.resolve(g1, 2, &a).unwrap()), Some(L::new(0)));
+            assert_eq!(exact(applied.resolve(g2, 4, &a).unwrap()), Some(L::new(2)));
+        });
+    }
+
+    #[test]
+    fn untouched_keys_fall_through_with_the_size_filter() {
+        with_applied(|applied| {
+            let (a, b) = (key(&[1, 1]), key(&[9, 9]));
+            let g1 = apply(&applied, 1, |g| {
+                g.insert(&a, L::new(0));
+                g.set_bit(0, true);
+            });
+            apply(&applied, 2, |g| {
+                g.insert(&b, L::new(1));
+                g.set_bit(1, true);
+            });
+
+            // `a` is untouched since g1: live candidates answer. `b` was created after
+            // g1; its record answers absent.
+            assert_eq!(candidates(applied.resolve(g1, 1, &a).unwrap()), [L::new(0)]);
+            assert_eq!(exact(applied.resolve(g1, 1, &b).unwrap()), None);
+
+            // A collision sibling created after the view is filtered by size, not by a
+            // record: `c` collides with `a` under TwoCap.
+            let c = key(&[1, 1, 7]);
+            let g2 = applied.generation();
+            apply(&applied, 3, |g| {
+                g.insert(&c, L::new(2));
+                g.set_bit(2, true);
+            });
+            // As of g2, `a`'s bucket now holds locations 0 and 2; the filter drops 2.
+            assert_eq!(candidates(applied.resolve(g2, 2, &a).unwrap()), [L::new(0)]);
+        });
+    }
+
+    /// Bits `[0, size)` of a chunk; bits past a view's size carry no contract.
+    fn bits(chunk: [u8; N], size: u64) -> Vec<bool> {
+        (0..size)
+            .map(|bit| chunk[(bit / 8) as usize] & (1 << (bit % 8)) != 0)
+            .collect()
+    }
+
+    #[test]
+    fn chunks_answer_from_pre_images() {
+        with_applied(|applied| {
+            // Chunk 0 covers bits [0, 32). Fill a few bits.
+            let a = key(&[1, 1]);
+            let g1 = apply(&applied, 3, |g| {
+                g.insert(&a, L::new(0));
+                g.set_bit(0, true);
+                g.set_bit(2, true);
+            });
+            let bits_at_g1 = bits(applied.chunk(g1, 0).unwrap(), 3);
+            assert_eq!(bits_at_g1, [true, false, true]);
+
+            // Clearing bit 0 dirties chunk 0; the pre-image must keep answering for g1
+            // even though the same apply also set bit 3 (above g1's size) in that chunk.
+            let g2 = apply(&applied, 4, |g| {
+                g.update(&a, L::new(0), L::new(3));
+                g.set_bit(3, true);
+                g.set_bit(0, false);
+            });
+            assert_eq!(bits(applied.chunk(g1, 0).unwrap(), 3), bits_at_g1);
+            assert_eq!(
+                bits(applied.chunk(g2, 0).unwrap(), 4),
+                [false, false, true, true]
+            );
+        });
+    }
+
+    #[test]
+    fn eviction_and_epochs_make_views_stale() {
+        with_applied(|applied| {
+            let a = key(&[1, 1]);
+            let g1 = apply(&applied, 1, |g| {
+                g.insert(&a, L::new(0));
+                g.set_bit(0, true);
+            });
+            let g2 = apply(&applied, 2, |g| {
+                g.update(&a, L::new(0), L::new(1));
+                g.set_bit(1, true);
+                g.set_bit(0, false);
+            });
+
+            // Evict records older than g2: g1 loses coverage, g2 keeps it.
+            applied.set_retention_floor(g2);
+            assert_eq!(applied.resolve(g1, 1, &a), Err(Stale));
+            assert_eq!(applied.chunk(g1, 0), Err(Stale));
+            assert!(applied.resolve(g2, 2, &a).is_ok());
+
+            // An epoch bump stales every prior generation, including the tip.
+            let ((), g3) = applied.commit_epoch(|_, _| {});
+            assert_eq!(applied.resolve(g2, 2, &a), Err(Stale));
+            assert!(applied.resolve(g3, 2, &a).is_ok());
+
+            // A retention floor from the ended epoch is ignored.
+            applied.set_retention_floor(g2);
+            assert!(applied.resolve(g3, 2, &a).is_ok());
+        });
+    }
+
+    #[test]
+    fn read_fresh_requires_the_exact_generation() {
+        with_applied(|applied| {
+            let a = key(&[1, 1]);
+            let g1 = apply(&applied, 1, |g| {
+                g.insert(&a, L::new(0));
+                g.set_bit(0, true);
+            });
+            assert!(applied.read_fresh(g1, |_, _| ()).is_ok());
+
+            apply(&applied, 2, |g| {
+                g.set_bit(1, true);
+            });
+            assert_eq!(applied.read_fresh(g1, |_, _| ()), Err(Stale));
+        });
+    }
+}

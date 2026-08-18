@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Floored as _, update_known_loc,
+        Error, applied::Applied, batch_chain::Commitment, bitmap::Shared, delete_known_loc,
+        metrics::Metrics, operation::Floored as _, update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -87,13 +87,14 @@ pub struct Db<
     /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
 
-    /// An index of all currently active operations, mapping each key to the location in the
-    /// log containing its most recent update.
+    /// The versioned shared-mutable core: the key index (mapping each key to the location of
+    /// its most recent update), the undo window, and the generation. The activity bitmap is
+    /// guarded through it as well; see [`Applied`].
     ///
     /// # Invariant
     ///
-    /// - Only references `Operation::Update`s.
-    pub(crate) index: I,
+    /// - The index only references `Operation::Update`s.
+    pub(crate) applied: Applied<F, I, N>,
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
@@ -103,6 +104,9 @@ pub struct Db<
     /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
     /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
     /// tree leaves and proofs.
+    ///
+    /// This is a read handle to the same bitmap [`Self::applied`] guards; all writes go
+    /// through [`Applied`]'s mutation doors.
     ///
     /// # Invariants
     ///
@@ -205,8 +209,10 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
+        // Collect so no index hold crosses the await points below.
+        let locs: Vec<Location<F>> = self
+            .applied
+            .with_index(|index| index.get(key).copied().collect());
         let mut result = None;
         for loc in locs {
             let op = self.log.read(*loc).await?;
@@ -307,8 +313,9 @@ where
         // Probe the in-memory index. Each key may map to multiple locations due to hash
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        self.index
-            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+        self.applied.with_index(|index| {
+            index.get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)))
+        });
 
         // Sort by position and deduplicate for the batched cache read.
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
@@ -414,9 +421,11 @@ where
     Operation<F, U>: Codec,
 {
     /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
-    /// inactivity-floor check.
+    /// inactivity-floor check. Begins a new incarnation: views minted before the prune
+    /// become stale.
     pub(crate) fn prune_bitmap(&mut self, prune_loc: Location<F>) {
-        self.bitmap.write().prune_to_bit(*prune_loc);
+        self.applied
+            .commit_epoch(|_, bitmap| bitmap.prune_to_bit(*prune_loc));
     }
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
@@ -632,10 +641,9 @@ where
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below
         // rewind_size flip back to active in the loop below. `rewind_size >= bitmap.pruned_bits()`
         // is enforced upstream: directly via the `bounds.start` check above, or via
-        // `current::Db::rewind`'s explicit `pruned_bits` precondition. The debug_assert catches
-        // regressions.
-        {
-            let mut bitmap = self.bitmap.write();
+        // `current::Db::rewind`'s explicit `pruned_bits` precondition. The assert catches
+        // regressions. Rewind begins a new incarnation: views minted before it become stale.
+        self.applied.commit_epoch(|index, bitmap| {
             assert!(
                 bitmap.pruned_bits() <= rewind_size,
                 "bitmap pruned boundary exceeded journal retained start",
@@ -652,16 +660,14 @@ where
                         if new_loc < rewind_size {
                             bitmap.set_bit(*new_loc, true);
                         }
-                        update_known_loc(&mut self.index, &key, old_loc, new_loc);
+                        update_known_loc(index, &key, old_loc, new_loc);
                     }
-                    SnapshotUndo::Remove { key, old_loc } => {
-                        delete_known_loc(&mut self.index, &key, old_loc)
-                    }
+                    SnapshotUndo::Remove { key, old_loc } => delete_known_loc(index, &key, old_loc),
                     SnapshotUndo::Insert { key, new_loc } => {
                         if new_loc < rewind_size {
                             bitmap.set_bit(*new_loc, true);
                         }
-                        self.index.insert(&key, new_loc);
+                        index.insert(&key, new_loc);
                     }
                 }
             }
@@ -671,7 +677,7 @@ where
             // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
             // guaranteed by the early-return at the top of this function.
             bitmap.set_bit(rewind_size - 1, true);
-        }
+        });
 
         self.active_keys = self
             .active_keys
@@ -789,7 +795,7 @@ where
             log,
             root,
             inactivity_floor_loc,
-            index,
+            applied: Applied::new(index, Arc::clone(&bitmap)),
             last_commit_loc,
             active_keys,
             bitmap,

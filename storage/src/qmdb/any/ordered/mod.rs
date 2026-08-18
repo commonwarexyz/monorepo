@@ -89,21 +89,23 @@ where
             return Ok(None);
         }
 
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
+        // Collect so no index hold crosses the await points below.
+        let locs: Vec<Location<F>> = self
+            .applied
+            .with_index(|index| index.get(key).copied().collect());
         let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
             return Ok(Some(span));
         }
 
-        let Some((iter, _)) = self.index.prev_translated_key(key) else {
+        let Some(locs) = self.applied.with_index(|index| {
+            index
+                .prev_translated_key(key)
+                .map(|(iter, _)| iter.copied().collect::<Vec<Location<F>>>())
+        }) else {
             // DB is empty.
             return Ok(None);
         };
-
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = iter.copied().collect();
         let span = self
             .find_span(locs, key)
             .await?
@@ -124,8 +126,10 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>> {
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
+        // Collect so no index hold crosses the await points below.
+        let locs: Vec<Location<F>> = self
+            .applied
+            .with_index(|index| index.get(key).copied().collect());
         for loc in locs {
             let op = self.log.read(*loc).await?;
             assert!(
@@ -155,8 +159,10 @@ where
     where
         V: 'a,
     {
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let start_locs: Vec<Location<F>> = self.index.get(&start).copied().collect();
+        // Collect so no index hold crosses the await points below.
+        let start_locs: Vec<Location<F>> = self
+            .applied
+            .with_index(|index| index.get(&start).copied().collect());
         let mut init_pending = self.fetch_all_updates(start_locs.iter()).await?;
         init_pending.retain(|x| x.key >= start);
 
@@ -168,15 +174,18 @@ where
                     return Some((Ok((item.key, item.value)), (driver_key, pending)));
                 }
 
-                // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-                let locs: Vec<Location<F>> = {
-                    let Some((iter, wrapped)) = self.index.next_translated_key(&driver_key) else {
-                        return None; // DB is empty
-                    };
-                    if wrapped {
-                        return None; // End of DB
-                    }
-                    iter.copied().collect()
+                // Collect so no index hold crosses the await points below.
+                let next = self.applied.with_index(|index| {
+                    index
+                        .next_translated_key(&driver_key)
+                        .map(|(iter, wrapped)| {
+                            (iter.copied().collect::<Vec<Location<F>>>(), wrapped)
+                        })
+                });
+                let locs: Vec<Location<F>> = match next {
+                    None => return None,            // DB is empty
+                    Some((_, true)) => return None, // End of DB
+                    Some((locs, false)) => locs,
                 };
 
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently

@@ -1507,8 +1507,10 @@ pub(crate) mod test {
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.index.get(&k);
-        assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
+        let locs: Vec<_> = db
+            .applied
+            .with_index(|index| index.get(&k).cloned().collect());
+        assert_eq!(locs.len(), 1);
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -1992,5 +1994,89 @@ pub(crate) mod test {
                     .collect()
             }
         }
+    }
+
+    /// Differential oracle: a view's point reads must equal a model of the state at the
+    /// view's generation, no matter how many applies land afterwards.
+    #[test_traced]
+    fn views_answer_exactly_under_later_applies() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // A key universe with a colliding pair under TwoCap (same first two bytes).
+            let mut keys: Vec<Digest> = (0u64..8)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .collect();
+            keys.push(colliding_digest(1, 0));
+            keys.push(colliding_digest(1, 1));
+            let value = |round: u64, i: u64| Sha256::hash(&[&(round * 1000 + i).to_be_bytes()]);
+
+            // Each round rewrites a shifting subset, deletes one key, and recreates the
+            // key deleted last round. Floor raises move surviving ops, so old views also
+            // exercise move records.
+            let mut model: HashMap<Digest, Digest> = HashMap::new();
+            let mut checkpoints = Vec::new();
+            for round in 0u64..6 {
+                let mut batch = db.new_batch();
+                for (i, k) in keys.iter().enumerate() {
+                    let i = i as u64;
+                    if (i + round).is_multiple_of(3) {
+                        let v = value(round, i);
+                        batch = batch.write(*k, Some(v));
+                        model.insert(*k, v);
+                    }
+                }
+                let victim = keys[(round % keys.len() as u64) as usize];
+                batch = batch.write(victim, None);
+                model.remove(&victim);
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                checkpoints.push((db.view(), model.clone()));
+            }
+
+            // Every checkpoint answers exactly, including keys never written.
+            let absent = Sha256::hash(&[&u64::MAX.to_be_bytes()]);
+            for (round, (view, model)) in checkpoints.iter().enumerate() {
+                for k in keys.iter().chain([&absent]) {
+                    assert_eq!(
+                        db.get_at(view, k).await.unwrap(),
+                        model.get(k).cloned(),
+                        "round {round} key {k:?}",
+                    );
+                }
+            }
+
+            // Prune begins a new incarnation: every old view is stale, a fresh one answers.
+            let db = db.commit().await.unwrap();
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
+            for (view, _) in &checkpoints {
+                assert!(matches!(
+                    db.get_at(view, &keys[0]).await,
+                    Err(crate::qmdb::Error::Stale(_))
+                ));
+            }
+            let fresh = db.view();
+            let model = &checkpoints.last().unwrap().1;
+            for k in &keys {
+                assert_eq!(db.get_at(&fresh, k).await.unwrap(), model.get(k).cloned());
+            }
+
+            // Evicting past a view's generation makes it stale; the tip view survives.
+            let mut batch = db.new_batch();
+            batch = batch.write(keys[0], Some(value(99, 0)));
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let tip = db.view();
+            db.applied.set_retention_floor(tip.generation());
+            assert!(matches!(
+                db.get_at(&fresh, &keys[0]).await,
+                Err(crate::qmdb::Error::Stale(_))
+            ));
+            assert_eq!(db.get_at(&tip, &keys[0]).await.unwrap(), Some(value(99, 0)));
+
+            db.destroy().await.unwrap();
+        });
     }
 }

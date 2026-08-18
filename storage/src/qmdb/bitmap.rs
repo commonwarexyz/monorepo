@@ -26,9 +26,9 @@ impl<const N: usize> Shared<N> {
         }
     }
 
-    /// Acquire a shared read guard over the committed bitmap. Kept private so external callers
-    /// go through [`bitmap::Readable`] (which doesn't expose a guard across `.await`).
-    fn read(&self) -> RwLockReadGuard<'_, bitmap::Prunable<N>> {
+    /// Acquire a shared read guard over the committed bitmap. Kept crate-private so external
+    /// callers go through [`bitmap::Readable`] (which doesn't expose a guard across `.await`).
+    pub(crate) fn read(&self) -> RwLockReadGuard<'_, bitmap::Prunable<N>> {
         self.inner.read()
     }
 

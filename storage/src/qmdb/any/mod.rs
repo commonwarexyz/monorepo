@@ -96,6 +96,7 @@ pub mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod traits;
 pub mod value;
+pub mod view;
 pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;

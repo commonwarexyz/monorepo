@@ -15,11 +15,10 @@ use crate::{
             operation::{Operation, update},
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
+        applied::ApplyGuard,
         batch_chain::{self, Bounds, Commitment},
         bitmap::Shared,
-        delete_known_loc,
         operation::{Key, Operation as OperationTrait},
-        update_known_loc,
     },
 };
 use ahash::{AHashMap, AHashSet};
@@ -556,30 +555,30 @@ where
 }
 
 /// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
-/// install the winning `Active` location and clear the prior committed location.
+/// install the winning `Active` location and clear the prior committed location. The
+/// guard records everything displaced into the apply's undo record.
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
-    snapshot: &mut I,
-    bitmap: &mut bitmap::Prunable<N>,
+    guard: &mut ApplyGuard<'_, F, I, N>,
     key: &impl Key,
     entry: &DiffEntry<F, V>,
     base_old_loc: Option<Location<F>>,
 ) {
     match entry {
         DiffEntry::Active { loc, .. } => match base_old_loc {
-            Some(old) => update_known_loc::<F, _>(snapshot, key, old, *loc),
-            None => snapshot.insert(key, *loc),
+            Some(old) => guard.update(key, old, *loc),
+            None => guard.insert(key, *loc),
         },
         DiffEntry::Deleted { .. } => {
             if let Some(old) = base_old_loc {
-                delete_known_loc::<F, _>(snapshot, key, old);
+                guard.delete(key, old);
             }
         }
     }
     if let Some(loc) = entry.loc() {
-        bitmap.set_bit(*loc, true);
+        guard.set_bit(*loc, true);
     }
     if let Some(loc) = base_old_loc {
-        bitmap.set_bit(*loc, false);
+        guard.set_bit(*loc, false);
     }
 }
 
@@ -874,36 +873,39 @@ where
         // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
-        if self.ancestors.is_empty() {
-            for key in mutations.keys() {
-                locations.extend(db.index.get(key).copied());
-            }
-        } else {
-            let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
-            for key in mutations.keys() {
-                match ancestors.resolve(key) {
-                    Some(DiffEntry::Deleted { .. }) => {
-                        // Stale; handled via extract_parent_deleted_creates.
-                    }
-                    Some(DiffEntry::Active {
-                        loc, base_old_loc, ..
-                    }) => {
-                        locations.push(*loc);
-                        if include_active_collision_siblings {
-                            locations.extend(
-                                db.index
-                                    .get(key)
-                                    .copied()
-                                    .filter(move |loc| Some(*loc) != *base_old_loc),
-                            );
+        db.applied.with_index(|index| {
+            if self.ancestors.is_empty() {
+                for key in mutations.keys() {
+                    locations.extend(index.get(key).copied());
+                }
+            } else {
+                let mut ancestors =
+                    DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
+                for key in mutations.keys() {
+                    match ancestors.resolve(key) {
+                        Some(DiffEntry::Deleted { .. }) => {
+                            // Stale; handled via extract_parent_deleted_creates.
                         }
-                    }
-                    None => {
-                        locations.extend(db.index.get(key).copied());
+                        Some(DiffEntry::Active {
+                            loc, base_old_loc, ..
+                        }) => {
+                            locations.push(*loc);
+                            if include_active_collision_siblings {
+                                locations.extend(
+                                    index
+                                        .get(key)
+                                        .copied()
+                                        .filter(move |loc| Some(*loc) != *base_old_loc),
+                                );
+                            }
+                        }
+                        None => {
+                            locations.extend(index.get(key).copied());
+                        }
                     }
                 }
             }
-        }
+        });
         db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
         locations.dedup();
         locations
@@ -1100,7 +1102,10 @@ where
                                 }
                                 Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
                                     || {
-                                        if db.index.get(key).any(|&l| l == candidate) {
+                                        let active = db.applied.with_index(|index| {
+                                            index.get(key).any(|&l| l == candidate)
+                                        });
+                                        if active {
                                             FloorOutcome::MoveNew {
                                                 base_old_loc: Some(candidate),
                                             }
@@ -1608,12 +1613,14 @@ where
             .filter(|(slot, _)| self.resolutions.get(*slot).is_some_and(Option::is_some))
             .count()
             .min(self.keys.len());
-        let existing_writes = upserts
-            .iter()
-            .map(|(key, _)| key)
-            .chain(self.batch.mutations.keys())
-            .filter(|&key| db.index.get(key).next().is_some())
-            .count();
+        let existing_writes = db.applied.with_index(|index| {
+            upserts
+                .iter()
+                .map(|(key, _)| key)
+                .chain(self.batch.mutations.keys())
+                .filter(|&key| index.get(key).next().is_some())
+                .count()
+        });
         let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
@@ -2282,16 +2289,18 @@ where
 
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
-        for key in deleted
-            .iter()
-            .map(|(k, _)| k)
-            .chain(created.iter().map(|(k, _, _)| k))
-        {
-            let Some((iter, _)) = db.index.prev_translated_key(key) else {
-                continue;
-            };
-            prev_locations.extend(iter.copied());
-        }
+        db.applied.with_index(|index| {
+            for key in deleted
+                .iter()
+                .map(|(k, _)| k)
+                .chain(created.iter().map(|(k, _, _)| k))
+            {
+                let Some((iter, _)) = index.prev_translated_key(key) else {
+                    continue;
+                };
+                prev_locations.extend(iter.copied());
+            }
+        });
         prev_locations.sort();
         prev_locations.dedup();
 
@@ -2773,21 +2782,16 @@ where
         // Apply journal (handles its own partial ancestor skipping).
         self.log = self.log.apply_batch(&batch.journal_batch).await?;
 
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
-            let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(*batch.bounds.tip.size);
+        // Publish the index and bitmap mutations, recording what they displace, under one
+        // write hold.
+        let last_commit_loc = self.last_commit_loc;
+        self.applied.commit_apply(|guard| {
+            guard.extend_to(*batch.bounds.tip.size);
 
             if batch.ancestor_diffs.is_empty() {
                 // Fast path: no ancestors to merge, no fixups to look up.
                 for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.index,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
+                    apply_diff(guard, key, entry, entry.base_old_loc());
                 }
             } else {
                 // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
@@ -2811,7 +2815,7 @@ where
                             .resolve(key)
                             .map(DiffEntry::loc)
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
+                        apply_diff(guard, key, entry, old);
                     }
                 } else {
                     let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
@@ -2838,7 +2842,7 @@ where
                             },
                             DiffEntry::loc,
                         );
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
+                        apply_diff(guard, key, entry, old);
                     }
                 }
             }
@@ -2846,9 +2850,9 @@ where
             // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
             // set the new; earlier ancestor commits between them are already 0 from
             // `extend_to`.
-            bitmap.set_bit(*self.last_commit_loc, false);
-            bitmap.set_bit(*batch.bounds.tip.size - 1, true);
-        }
+            guard.set_bit(*last_commit_loc, false);
+            guard.set_bit(*batch.bounds.tip.size - 1, true);
+        });
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
@@ -4377,7 +4381,10 @@ mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            let committed_loc = db.index.get(&key_db).next().copied().unwrap();
+            let committed_loc = db
+                .applied
+                .with_index(|index| index.get(&key_db).next().copied())
+                .unwrap();
 
             // Create a parent batch with a second key (in-memory ancestor).
             let parent = db
