@@ -334,6 +334,18 @@ impl LinearCombination {
             .collect();
         Self { terms }
     }
+
+    /// Return the constant value if this combination has no non-constant term.
+    ///
+    /// Only column 0 (the fixed one) carries a constant, so a combination is
+    /// constant exactly when every other column is absent.
+    fn as_constant(&self) -> Option<Scalar> {
+        if self.terms.keys().all(|&column| column == 0) {
+            Some(self.terms.get(&0).cloned().unwrap_or_else(Scalar::zero))
+        } else {
+            None
+        }
+    }
 }
 
 struct Row {
@@ -358,6 +370,11 @@ struct Compiler<'a> {
     value_sources: Vec<ValueSource>,
     next_column: usize,
     committed_start: usize,
+    // Nodes deferred as `base^2`: fused into their single consuming assertion
+    // instead of materializing an output column and a square row.
+    square_nodes: BTreeMap<usize, LinearCombination>,
+    // Whether each node is used exactly once and only as an assertion side.
+    fusable: Vec<bool>,
 }
 
 impl<'a> Compiler<'a> {
@@ -418,6 +435,8 @@ impl<'a> Compiler<'a> {
         rows.try_reserve_exact(row_capacity)
             .map_err(|_| Error::AllocationFailed)?;
 
+        let fusable = fusable_nodes(circuit, layout);
+
         Ok(Self {
             circuit,
             layout,
@@ -427,6 +446,8 @@ impl<'a> Compiler<'a> {
             value_sources,
             next_column,
             committed_start,
+            square_nodes: BTreeMap::new(),
+            fusable,
         })
     }
 
@@ -448,29 +469,20 @@ impl<'a> Compiler<'a> {
             let expression = match node {
                 CircuitNode::Add(_, _) => left.add(&right),
                 CircuitNode::Mul(_, _) => {
-                    let node_u32 = u32::try_from(node_index).map_err(|_| Error::SizeOverflow)?;
-                    let output = self.allocate(ValueSource::Circuit(CircuitIdx::Node(node_u32)))?;
-                    let output_expression = LinearCombination::coordinate(output);
-                    if left == right {
-                        self.rows.push(Row {
-                            squared: left,
-                            linear: output_expression.clone(),
-                        });
+                    // Multiplication by a constant is a linear scaling, so it
+                    // folds into the combination with no rows or columns.
+                    if let Some(constant) = right.as_constant() {
+                        left.scale(&constant)
+                    } else if let Some(constant) = left.as_constant() {
+                        right.scale(&constant)
+                    } else if left == right && self.fusable[node_index] {
+                        // A square consumed only by one assertion is deferred
+                        // and emitted as a single row at that assertion.
+                        self.square_nodes.insert(node_index, left);
+                        LinearCombination::zero()
                     } else {
-                        let difference =
-                            self.allocate(ValueSource::DifferenceSquare(left_index, right_index))?;
-                        let difference_expression = LinearCombination::coordinate(difference);
-                        self.rows.push(Row {
-                            squared: left.sub(&right),
-                            linear: difference_expression.clone(),
-                        });
-                        self.rows.push(Row {
-                            squared: left.add(&right),
-                            linear: difference_expression
-                                .add(&output_expression.scale(&Scalar::from(4u64))),
-                        });
+                        self.compile_product(node_index, left_index, right_index, left, right)?
                     }
-                    output_expression
                 }
             };
             self.node_expressions.push(expression);
@@ -478,14 +490,75 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn compile_product(
+        &mut self,
+        node_index: usize,
+        left_index: CircuitIdx,
+        right_index: CircuitIdx,
+        left: LinearCombination,
+        right: LinearCombination,
+    ) -> Result<LinearCombination, Error> {
+        let node_u32 = u32::try_from(node_index).map_err(|_| Error::SizeOverflow)?;
+        let output = self.allocate(ValueSource::Circuit(CircuitIdx::Node(node_u32)))?;
+        let output_expression = LinearCombination::coordinate(output);
+        if left == right {
+            self.rows.push(Row {
+                squared: left,
+                linear: output_expression.clone(),
+            });
+        } else {
+            let difference =
+                self.allocate(ValueSource::DifferenceSquare(left_index, right_index))?;
+            let difference_expression = LinearCombination::coordinate(difference);
+            self.rows.push(Row {
+                squared: left.sub(&right),
+                linear: difference_expression.clone(),
+            });
+            self.rows.push(Row {
+                squared: left.add(&right),
+                linear: difference_expression.add(&output_expression.scale(&Scalar::from(4u64))),
+            });
+        }
+        Ok(output_expression)
+    }
+
     fn compile_assertions(&mut self) -> Result<(), Error> {
         for &(left, right) in &self.circuit.assertions {
+            // A deferred square `base^2` asserted equal to `other` becomes the
+            // single row `base^2 == other` directly.
+            if let Some((base, other)) = self.assertion_square(left, right) {
+                self.rows.push(Row {
+                    squared: base,
+                    linear: self.expression(other)?,
+                });
+                continue;
+            }
             self.rows.push(Row {
                 squared: self.expression(left)?.sub(&self.expression(right)?),
                 linear: LinearCombination::zero(),
             });
         }
         Ok(())
+    }
+
+    /// If one side of an assertion is a deferred square node, return its base
+    /// expression and the other side.
+    fn assertion_square(
+        &self,
+        left: CircuitIdx,
+        right: CircuitIdx,
+    ) -> Option<(LinearCombination, CircuitIdx)> {
+        if let CircuitIdx::Node(index) = left
+            && let Some(base) = self.square_nodes.get(&(index as usize))
+        {
+            return Some((base.clone(), right));
+        }
+        if let CircuitIdx::Node(index) = right
+            && let Some(base) = self.square_nodes.get(&(index as usize))
+        {
+            return Some((base.clone(), left));
+        }
+        None
     }
 
     fn link_inputs(&mut self) -> Result<(), Error> {
@@ -646,6 +719,37 @@ pub(super) fn compile_valued(
     })
 }
 
+/// Determine which nodes are used exactly once and only as an assertion side.
+///
+/// Such a node can be fused into that assertion, since no other constraint
+/// needs its value materialized in its own column.
+fn fusable_nodes(circuit: &Circuit<Scalar>, layout: &InputLayout) -> Vec<bool> {
+    let mut assertion_uses = vec![0u32; circuit.nodes.len()];
+    let mut other_uses = vec![0u32; circuit.nodes.len()];
+    let bump = |counts: &mut [u32], idx: CircuitIdx| {
+        if let CircuitIdx::Node(node) = idx {
+            counts[node as usize] = counts[node as usize].saturating_add(1);
+        }
+    };
+    for node in &circuit.nodes {
+        let (left, right) = match *node {
+            CircuitNode::Add(left, right) | CircuitNode::Mul(left, right) => (left, right),
+        };
+        bump(&mut other_uses, left);
+        bump(&mut other_uses, right);
+    }
+    for &idx in layout.public.iter().chain(layout.committed()) {
+        bump(&mut other_uses, idx);
+    }
+    for &(left, right) in &circuit.assertions {
+        bump(&mut assertion_uses, left);
+        bump(&mut assertion_uses, right);
+    }
+    (0..circuit.nodes.len())
+        .map(|node| other_uses[node] == 0 && assertion_uses[node] == 1)
+        .collect()
+}
+
 fn validate_circuit(circuit: &Circuit<Scalar>, layout: &InputLayout) -> Result<(), Error> {
     for &idx in layout.public.iter().chain(layout.committed()) {
         validate_index(circuit, idx, "input layout")?;
@@ -789,11 +893,68 @@ fn hash_indices(hasher: &mut blake3::Hasher, indices: &[CircuitIdx]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zk::circuit::{Var, build, build_with_values};
+    use crate::zk::circuit::{BoolVar, Var, build, build_with_values};
     use commonware_math::algebra::Field;
 
     fn scalar(value: u64) -> Scalar {
         Scalar::from(value)
+    }
+
+    #[test]
+    fn constant_folding_and_square_fusion_shrink_the_relation() {
+        // Decompose an 8-bit committed value into bits, enforce booleanity on
+        // each, and reconstruct with weighted (constant) sums. Folding removes
+        // the reconstruction multiplications and fusion collapses each
+        // booleanity square into one row, so the relation stays tiny.
+        const BITS: usize = 8;
+        let value = 0b1011_0010u64;
+        let (valued, selected) = build_with_values(|ctx| {
+            let bits = (0..BITS)
+                .map(|i| BoolVar::witness(ctx, move |_| (value >> i) & 1 == 1))
+                .collect::<Vec<_>>();
+            let mut sum = Var::constant(ctx, Scalar::zero());
+            for (i, bit) in bits.iter().enumerate() {
+                let weight = Var::constant(ctx, Scalar::from(1u64 << i));
+                sum += &(bit.clone().into_var() * &weight);
+            }
+            let committed = Var::witness(ctx, move |_| Scalar::from(value));
+            committed.assert_eq(&sum);
+            vec![committed]
+        });
+        let layout = InputLayout::new(Vec::new(), vec![selected]).expect("layout is valid");
+        let relation = compile(&valued.circuit, &layout).expect("circuit should compile");
+
+        // Each bit contributes one witness column and one fused booleanity
+        // row; reconstruction adds no rows. With the constant one, the
+        // committed value, its link row, and the reconstruction assertion,
+        // the padded domain stays at 16 rather than blowing up to 64+.
+        assert!(
+            relation.rows.len() <= BITS + 4,
+            "rows: {}",
+            relation.rows.len()
+        );
+        assert_eq!(relation.domain_size(), 16);
+
+        let assignment = compile_valued(&valued, &layout, &relation).expect("values compile");
+        assert!(relation.is_satisfied(&assignment));
+
+        // A wrong reconstruction is rejected.
+        let (bad_valued, _) = build_with_values(|ctx| {
+            let bits = (0..BITS)
+                .map(|i| BoolVar::witness(ctx, move |_| (value >> i) & 1 == 1))
+                .collect::<Vec<_>>();
+            let mut sum = Var::constant(ctx, Scalar::zero());
+            for (i, bit) in bits.iter().enumerate() {
+                let weight = Var::constant(ctx, Scalar::from(1u64 << i));
+                sum += &(bit.clone().into_var() * &weight);
+            }
+            // Commit a value that does not match the bits.
+            let committed = Var::witness(ctx, move |_| Scalar::from(value + 1));
+            committed.assert_eq(&sum);
+            vec![committed]
+        });
+        let bad = compile_valued(&bad_valued, &layout, &relation).expect("values compile");
+        assert!(!relation.is_satisfied(&bad));
     }
 
     fn committed_a_rank(relation: &Relation) -> usize {
