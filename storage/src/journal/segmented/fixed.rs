@@ -385,9 +385,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
     /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
-    /// are allocated lazily as the reader advances.
-    /// Every backing blob read performed by the returned replay uses `read_options`, including
-    /// reads after advancing to another section.
+    /// are allocated lazily as the reader advances. Every backing blob read performed by
+    /// the returned replay uses `read_options`, including reads after advancing to
+    /// another section.
     pub async fn replay(
         mut self,
         start_section: u64,

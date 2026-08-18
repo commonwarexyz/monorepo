@@ -795,9 +795,6 @@ stability_scope!(BETA {
         /// - Caller-provided chunk layout is preserved.
         /// - [`ReadOptions::DONT_CACHE`] is a best-effort hint and does not guarantee
         ///   that the range is absent from the OS page cache.
-        /// - Unsupported options are transparent to the caller.
-        /// - Zero-length reads preserve implementation-specific offset validation but
-        ///   do not issue I/O or probe option support.
         ///
         /// # Panics
         ///
@@ -820,9 +817,6 @@ stability_scope!(BETA {
         /// - A successful read returns exactly `len` bytes beginning at `offset`.
         /// - [`ReadOptions::DONT_CACHE`] is a best-effort hint and does not guarantee
         ///   that the range is absent from the OS page cache.
-        /// - An unsupported [`ReadOptions::DONT_CACHE`] hint is transparent to the caller.
-        /// - Zero-length reads preserve implementation-specific offset validation but do not
-        ///   issue I/O or probe option support.
         fn read_at(
             &self,
             offset: u64,
@@ -843,9 +837,6 @@ stability_scope!(BETA {
         ///   [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
         /// - [`WriteOptions::DONT_CACHE`] is a best-effort hint and does not change visibility
         ///   or durability, or guarantee that the range is absent from the OS page cache.
-        /// - An unsupported [`WriteOptions::DONT_CACHE`] hint is transparent to the caller.
-        /// - Zero-length writes preserve implementation-specific offset validation but do not
-        ///   issue I/O or probe option support.
         fn write_at(
             &self,
             offset: u64,

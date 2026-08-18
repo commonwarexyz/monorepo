@@ -475,9 +475,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// starting from `start_position` in `start_section`.
     ///
     /// Setup flushes the index journal's buffered pages so the reader observes every
-    /// accepted write.
-    /// Every backing index-journal read performed by the returned replay uses `read_options`,
-    /// including reads after advancing to another section.
+    /// accepted write. Every backing index-journal read performed by the returned
+    /// replay uses `read_options`, including reads after advancing to another
+    /// section.
     pub async fn replay(
         self,
         start_section: u64,
