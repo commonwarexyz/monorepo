@@ -1715,12 +1715,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// proposals normally arrive through explicit ancestry and need no extra
     /// gate, but a locally endorsed pipelined handoff links directly to the
     /// outgoing term's tip before it certifies and must retain that barrier.
+    /// The endorsement is detected from round state (an own notarize vote on
+    /// a tip-linked proposal), not the elector opt-in, so replay preserves
+    /// the barrier across a restart that removes the opt-in.
     fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
         let view = proposal.view();
         self.previous_in_term(view).or_else(|| {
             let previous = view.previous()?;
-            (self.handoff_leader(view).is_some()
-                && proposal.parent == previous
+            (proposal.parent == previous
                 && self
                     .views
                     .get(&view)
@@ -5604,9 +5606,18 @@ mod tests {
             );
             state.set_genesis(test_genesis());
 
-            // Enter the view where we are the leader.
-            assert!(state.enter_view(view));
-            state.set_leader(view, None);
+            // A vote replays after the parent's certificate and certification
+            // (journal replay is append-ordered): restore them first so the
+            // vote sits on explicitly certified ancestry.
+            let parent = Proposal::new(
+                Rnd::new(epoch, View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([41u8; 32]),
+            );
+            let parent_notarization = build_notarization(&verifier, &schemes, &parent);
+            assert!(state.add_notarization(parent_notarization).0);
+            assert!(state.certified(View::new(1), true).is_some());
+            let _ = state.certify_candidates();
             assert_eq!(state.leader_index(view), Some(Participant::new(0)));
 
             // Replay our own notarize vote.
@@ -6820,6 +6831,55 @@ mod tests {
 
             // A single participant forms both notarizations. Only the parent
             // may cross the application certification barrier first.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![tip]);
+
+            let mut pool = AbortablePool::<()>::default();
+            let handle = pool.push(futures::future::pending());
+            state.set_certify_handle(View::new(5), handle);
+            assert!(state.certified(View::new(5), true).is_some());
+
+            // Completing the cross-term parent wakes the blocked child.
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert_eq!(ready, vec![child]);
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_certification_barrier_survives_optout_restart() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            // The elector no longer opts into pipelined handoffs, but the
+            // journal holds an early vote issued under the opt-in.
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_from_config(&mut context, 1, 0, 9, 10, handoff_terms());
+
+            let certified = fetch_proposal(4, 3, 64);
+            let notarization = build_notarization(&verifier, &schemes, &certified);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(4), true).is_some());
+            let _ = state.certify_candidates();
+
+            let tip = fetch_proposal(5, 4, 65);
+            let tip_vote = Notarize::sign(&schemes[0], tip.clone()).expect("tip vote");
+            state.replay(&Artifact::Notarize(tip_vote));
+            let child = fetch_proposal(6, 5, 66);
+            let child_vote = Notarize::sign(&schemes[0], child.clone()).expect("child vote");
+            state.replay(&Artifact::Notarize(child_vote));
+
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(tip_notarization).0);
+            let child_notarization = build_notarization(&verifier, &schemes, &child);
+            assert!(state.add_notarization(child_notarization).0);
+
+            // The replayed early vote retains the certification barrier: only
+            // the parent may cross it first.
             let (ready, fetches) = state.certify_candidates();
             assert!(fetches.is_empty());
             assert_eq!(ready, vec![tip]);
