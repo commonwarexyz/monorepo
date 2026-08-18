@@ -255,7 +255,7 @@ impl Read for Claim {
 }
 
 /// A Pari proof consisting of two G1 elements and one scalar.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Proof {
     pub(crate) t: G1,
     pub(crate) u: G1,

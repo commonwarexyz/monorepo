@@ -15,6 +15,26 @@ fn transfer_relation_fits_domain_256() {
     assert_eq!(relation.domain_size(), 256);
 }
 
+/// The backend's wire types satisfy the bounds an integrating chain requires
+/// (a fixed-size, self-describing, hashable codec value that crosses threads).
+#[cfg(feature = "codec")]
+#[test]
+fn wire_types_satisfy_integration_bounds() {
+    use commonware_codec::{FixedSize, Read, Write};
+    use core::{fmt::Debug, hash::Hash};
+
+    fn assert_wire<T>()
+    where
+        T: FixedSize + for<'a> Read<Cfg = ()> + Write + Clone + Eq + Debug + Hash + Send + Sync,
+    {
+    }
+    fn assert_params<T: Send + Sync + 'static>() {}
+
+    assert_wire::<super::payments::PaymentCommitment>();
+    assert_wire::<super::payments::RangeProof>();
+    assert_params::<super::payments::PaymentsParams>();
+}
+
 #[test]
 fn transfer_pipeline_verifies() {
     let params = ZkPariBackend::setup(&SEED).expect("setup is infallible");

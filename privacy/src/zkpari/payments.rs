@@ -101,7 +101,7 @@ impl Opening for PaymentOpening {
 ///
 /// The block-1 (aggregate) commitment is recomputed by the verifier from the
 /// ledger, so it is not carried on the wire.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RangeProof {
     pub c_hat: G1,
     pub proof: pari::Proof,
