@@ -287,6 +287,8 @@ where
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
         // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // The live mem satisfies `merkleize`'s capture contract here: this family is
+        // owner-serialized, so nothing prunes or applies between fork and merkleize.
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks, db.journal.mem())

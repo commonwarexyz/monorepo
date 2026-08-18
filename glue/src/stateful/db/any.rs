@@ -860,7 +860,7 @@ mod tests {
     #[test]
     fn unmerkleized_batch_reads_its_fork_state() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("unordered-fixed-live-fallback", &context);
+            let config = fixed_config("unordered-fixed-fork-state", &context);
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();

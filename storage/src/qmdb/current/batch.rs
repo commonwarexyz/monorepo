@@ -523,8 +523,8 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        inner.require_on_ladder(&db.any)?;
-        let entry = db.any.applied.generation();
+        let entry = inner.require_on_ladder(&db.any)?;
+        let view = inner.read_view(&db.any)?;
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
@@ -540,6 +540,7 @@ where
                 metadata,
                 staged_updates,
                 Some(prefetched),
+                view,
                 |floor, tip, limit, out| {
                     Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
                 },
@@ -593,14 +594,15 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        inner.require_on_ladder(&db.any)?;
-        let entry = db.any.applied.generation();
+        let entry = inner.require_on_ladder(&db.any)?;
+        let view = inner.read_view(&db.any)?;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
                 staged_updates,
+                view,
                 |floor, tip, limit, out| {
                     Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
                 },
@@ -641,8 +643,8 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        inner.require_on_ladder(&db.any)?;
-        let entry = db.any.applied.generation();
+        let entry = inner.require_on_ladder(&db.any)?;
+        let view = inner.read_view(&db.any)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
@@ -650,6 +652,7 @@ where
                 metadata,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
                 None,
+                view,
                 |floor, tip, limit, out| {
                     Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
                 },
@@ -690,14 +693,15 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        inner.require_on_ladder(&db.any)?;
-        let entry = db.any.applied.generation();
+        let entry = inner.require_on_ladder(&db.any)?;
+        let view = inner.read_view(&db.any)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
                 metadata,
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
+                view,
                 |floor, tip, limit, out| {
                     Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
                 },

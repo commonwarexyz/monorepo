@@ -697,7 +697,7 @@ where
         // is enforced upstream: directly via the `bounds.start` check above, or via
         // `current::Db::rewind`'s explicit `pruned_bits` precondition. The assert catches
         // regressions. Rewind begins a new incarnation: views minted before it become stale.
-        self.applied.commit_epoch(|index, bitmap| {
+        self.applied.begin_epoch(|index, bitmap| {
             assert!(
                 bitmap.pruned_bits() <= rewind_size,
                 "bitmap pruned boundary exceeded journal retained start",

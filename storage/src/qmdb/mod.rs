@@ -261,8 +261,9 @@ pub enum Error<F: Family> {
     StaleBatch,
 
     /// A view can no longer answer reads: the database began a new incarnation (rewind,
-    /// prune, sync handoff) or the view's undo records were evicted. Refork from a fresh
-    /// view; the database itself is unharmed.
+    /// sync handoff) or the view's undo records were evicted; views survive pruning.
+    /// Refork from a fresh view; the database itself is unharmed. Distinct from
+    /// [`Error::StaleBatch`], which rejects applying a batch from a different fork.
     #[error(transparent)]
     Stale(#[from] applied::Stale),
 

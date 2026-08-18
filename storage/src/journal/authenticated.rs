@@ -419,8 +419,9 @@ where
     /// Add `items` to `batch`, merkleize, and compute the post-apply root against `mem`,
     /// all as one CPU-bound job submitted through [`Strategy::spawn`].
     ///
-    /// `mem` must contain the batch chain's base state; hashing against the base capture
-    /// (rather than the live state) keeps the job exact under concurrent applies and prunes.
+    /// `mem` must contain every committed node the batch's operations hash against
+    /// (typically the batch chain's base capture; hashing against a capture rather than
+    /// the live state keeps the job exact under concurrent applies and prunes).
     /// A parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
     /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
     /// completion against its snapshot and the result is discarded (a panic inside the job is

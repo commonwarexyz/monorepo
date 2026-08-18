@@ -2361,4 +2361,52 @@ pub(crate) mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    /// A sibling apply whose tip SIZE coincides with an own ancestor's tip must still
+    /// stale: the ladder compares commitments (size and root), not sizes.
+    #[test_traced]
+    fn ordered_batch_stales_on_equal_size_sibling_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 80_000).to_be_bytes()]);
+
+            let mut seed = db.new_batch();
+            for i in 0u64..10 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Chain: parent writes key(0); the child stays live. The sibling writes the
+            // same key with a different value, so its tip has the same size as the
+            // parent's but a different root.
+            let parent = db
+                .new_batch()
+                .write(key(0), Some(val(100)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key(1), None)
+                .write(key(200), Some(val(200)));
+            let sibling = db
+                .new_batch()
+                .write(key(0), Some(val(999)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert_eq!(sibling.bounds().tip.size, parent.bounds().tip.size);
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                child.merkleize(&db, None).await,
+                Err(crate::qmdb::Error::Stale(_))
+            ));
+            db.destroy().await.unwrap();
+        });
+    }
 }

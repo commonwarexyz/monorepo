@@ -79,7 +79,8 @@ where
     /// Get the value of `key` as of `view`, or None if it had no value there.
     ///
     /// Exact under concurrent applies. Returns [`crate::qmdb::Error::Stale`] if the view
-    /// can no longer answer (new incarnation, or its undo records were evicted).
+    /// can no longer answer (new incarnation, or its undo records were evicted), and a
+    /// journal `ItemPruned` error if the answering operation was since pruned.
     pub async fn get_at(
         &self,
         view: &View<F, H::Digest>,

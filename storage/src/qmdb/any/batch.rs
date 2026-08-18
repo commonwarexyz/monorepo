@@ -16,7 +16,7 @@ use crate::{
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
             view::View,
         },
-        applied::{Applied, ApplyGuard, Resolution, Stale},
+        applied::{Applied, ApplyGuard, Generation, Resolution, Stale},
         batch_chain::{self, Bounds, Commitment},
         operation::{Key, Operation as OperationTrait},
     },
@@ -259,8 +259,20 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
     fn view(&self) -> View<F, D> {
         match self {
             Self::Db { view, .. } => view.clone(),
-            Self::Child(parent) => parent.view(),
+            Self::Child(parent) => parent.base_view(),
         }
+    }
+
+    /// The chain's effective committed boundary: the fork point, advanced past any
+    /// dropped, already-applied prefix.
+    fn boundary(&self) -> Commitment<F, D> {
+        let oldest_base = self.parent().map(|parent| {
+            parent
+                .ancestors()
+                .last()
+                .map_or(parent.bounds.base, |oldest| oldest.bounds.base)
+        });
+        batch_chain::effective_boundary(self.db(), oldest_base)
     }
 }
 
@@ -323,13 +335,26 @@ where
     pub(crate) fn require_on_ladder<E, C, I, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(), Stale>
+    ) -> Result<Generation, Stale>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         self.batch.require_on_ladder(db)
+    }
+
+    /// See [`UnmerkleizedBatch::read_view`].
+    pub(crate) fn read_view<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<View<F, H::Digest>, Stale>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        self.batch.read_view(db)
     }
 }
 
@@ -398,7 +423,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 
 impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S> {
     /// The chain-base view.
-    pub(crate) fn view(&self) -> View<F, D> {
+    pub(crate) fn base_view(&self) -> View<F, D> {
         self.view.clone().expect("batch view taken by apply")
     }
 }
@@ -433,31 +458,33 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Whether `size` is one of this chain's own boundaries: the committed boundary,
-    /// the fork point, or an ancestor's tip. The owner applying this chain's own
-    /// ancestors moves the live state along exactly these sizes.
-    fn on_ladder(&self, size: u64) -> bool {
-        size == *self.db_state.size
-            || size == *self.base_state.size
-            || self.ancestors.iter().any(|a| *a.commitment().size == size)
-    }
-
-    /// Pin the read view. A chain whose committed prefix was dropped after applying
-    /// reads state that exists only live, so it gets a fresh view of the effective
-    /// boundary instead of the chain-base capture; that pattern requires the owner to
-    /// have applied the prefix, so the fresh reads are safe there.
-    fn pin_read_view<E, C, I, const N: usize>(&mut self, db: &Db<F, E, C, I, H, U, N, S>)
+    /// Require the live state to be this chain's read view or on its own boundary
+    /// ladder: the committed boundary, the fork point, or an own ancestor's tip. The
+    /// ordered path's live scans (predecessor buckets, collision siblings) only make
+    /// sense against own-chain state, so anything else moving the state surfaces as
+    /// [`Stale`], never as a torn root. Commitments (size AND root) identify state, so
+    /// an equal-size foreign apply cannot pass. Sound without a joint lock: applies
+    /// take the database by value, so state cannot move while the caller holds `&db`.
+    fn require_live<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(), Stale>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        if self.db_state.size > self.view.size {
-            self.view = View {
-                generation: db.applied.generation(),
-                size: self.db_state.size,
-                mem: db.log.mem(),
-            };
+        if db.applied.generation() == self.view.generation {
+            return Ok(());
+        }
+        let live = db.commitment();
+        if live == self.db_state
+            || live == self.base_state
+            || self.ancestors.iter().any(|a| a.commitment() == live)
+        {
+            Ok(())
+        } else {
+            Err(Stale)
         }
     }
 }
@@ -981,19 +1008,15 @@ where
                         locations.push(*loc);
                         if include_active_collision_siblings {
                             // The ordered path's sibling pointers are rewritten against
-                            // fresh state; the live bucket is the source of truth here.
-                            db.applied.read_on_ladder(
-                                self.view.generation,
-                                |size| self.on_ladder(size),
-                                |index| {
-                                    locations.extend(
-                                        index
-                                            .get(key)
-                                            .copied()
-                                            .filter(|loc| Some(*loc) != *base_old_loc),
-                                    )
-                                },
-                            )?;
+                            // live state, validated up front by `require_live`.
+                            db.applied.with_index(|index| {
+                                locations.extend(
+                                    index
+                                        .get(key)
+                                        .copied()
+                                        .filter(|loc| Some(*loc) != *base_old_loc),
+                                )
+                            });
                         }
                     }
                     None => {
@@ -1442,10 +1465,7 @@ where
             v.extend(parent.ancestors());
             v
         });
-        let db_state = batch_chain::effective_boundary(
-            self.base.db(),
-            ancestors.last().map(|oldest| oldest.bounds.base),
-        );
+        let db_state = self.base.boundary();
         let m = Merkleizer {
             journal_batch: self.journal_batch,
             ancestors,
@@ -1669,7 +1689,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let view = self.batch.committed_read_view(db);
+        let view = self.batch.read_view(db)?;
         let (batch, staged_updates, prefetched) = self
             .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
                 fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
@@ -1681,6 +1701,7 @@ where
                 metadata,
                 staged_updates,
                 Some(prefetched),
+                view.clone(),
                 |floor, tip, limit, out| {
                     fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
                 },
@@ -1743,6 +1764,8 @@ where
             .filter(|(slot, _)| self.resolutions.get(*slot).is_some_and(Option::is_some))
             .count()
             .min(self.keys.len());
+        // Live read: `steps_bound` only sizes the prefetch, so staleness is harmless
+        // (the raise falls back to the as-of live scan on any shortfall).
         let existing_writes = db.applied.with_index(|index| {
             upserts
                 .iter()
@@ -1758,7 +1781,7 @@ where
         // source, and the step bound, none of which depend on the resolution. The batch
         // moves into the job, so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
-        let view = self.batch.committed_read_view(db);
+        let view = self.batch.read_view(db)?;
         let resolve = db
             .strategy()
             .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
@@ -1820,12 +1843,18 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let view = self.batch.committed_read_view(db);
+        let view = self.batch.read_view(db)?;
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                db,
+                metadata,
+                staged_updates,
+                view.clone(),
+                |floor, tip, limit, out| {
+                    fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
+                },
+            )
             .await
     }
 }
@@ -1903,70 +1932,71 @@ where
         Ok(())
     }
 
-    /// The view committed reads resolve against: the chain base normally, or a fresh
-    /// view of the effective boundary when a committed prefix was dropped after
-    /// applying (see [`Merkleizer::pin_read_view`]).
-    fn committed_read_view<E, C, I, const N: usize>(
+    /// Whether `live` is one of this chain's own boundaries: the effective committed
+    /// boundary, the fork point, or an own ancestor's tip. The owner applying this
+    /// chain's own ancestors moves the live state along exactly these commitments;
+    /// commitments (size AND root) identify state, so an equal-size foreign apply
+    /// cannot pass.
+    fn chain_ladder(&self, live: &Commitment<F, H::Digest>) -> bool {
+        *live == self.base.boundary()
+            || *live == self.base.base_state()
+            || self.base.parent().is_some_and(|parent| {
+                parent
+                    .ancestors()
+                    .any(|ancestor| ancestor.commitment() == *live)
+            })
+    }
+
+    /// The view reads resolve against: the chain-base capture normally, or a live view
+    /// of the effective boundary when a committed prefix was dropped after applying
+    /// (that state exists only live; own-ancestor diffs shadow every key touched past
+    /// it). The live mint is ladder-checked, so state moved by anything other than
+    /// this chain's own boundaries surfaces as [`Stale`], never as a torn read. Sound
+    /// without a joint lock: applies take the database by value, so state cannot move
+    /// while the caller holds `&db`.
+    pub(crate) fn read_view<E, C, I, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> View<F, H::Digest>
+    ) -> Result<View<F, H::Digest>, Stale>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         let view = self.base.view();
-        let oldest_base = self.base.parent().map(|parent| {
-            parent
-                .ancestors()
-                .last()
-                .map_or(parent.bounds.base, |oldest| oldest.bounds.base)
-        });
-        let boundary = batch_chain::effective_boundary(self.base.db(), oldest_base);
-        if boundary.size > view.size {
-            View {
-                generation: db.applied.generation(),
-                size: boundary.size,
-                mem: db.log.mem(),
-            }
-        } else {
-            view
+        let boundary = self.base.boundary();
+        if boundary.size <= view.size {
+            return Ok(view);
         }
+        if !self.chain_ladder(&db.commitment()) {
+            return Err(Stale);
+        }
+        Ok(View {
+            generation: db.applied.generation(),
+            size: boundary.size,
+            mem: db.log.mem(),
+        })
     }
 
-    /// Require the live state to sit on this chain's boundary ladder: the chain base,
-    /// an own ancestor's tip, or the effective committed boundary. For batches whose
-    /// merkleize reads live state (the current family), anything else moving the state
-    /// must surface as [`Stale`], never as a torn root.
+    /// Require the live state to be this chain's base or on its boundary ladder (see
+    /// [`Self::chain_ladder`]). For batches whose merkleize reads live state (the
+    /// current family), anything else moving the state must surface as [`Stale`],
+    /// never as a torn root. Returns the generation observed, for span checks.
     pub(crate) fn require_on_ladder<E, C, I, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(), Stale>
+    ) -> Result<Generation, Stale>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let view = self.base.view();
-        let parent = self.base.parent();
-        let oldest_base = parent.map(|p| {
-            p.ancestors()
-                .last()
-                .map_or(p.bounds.base, |oldest| oldest.bounds.base)
-        });
-        let boundary = batch_chain::effective_boundary(self.base.db(), oldest_base);
-        db.applied.read_on_ladder(
-            view.generation,
-            |size| {
-                size == *boundary.size
-                    || size == *self.base.base_state().size
-                    || parent.is_some_and(|p| {
-                        p.ancestors()
-                            .any(|ancestor| *ancestor.commitment().size == size)
-                    })
-            },
-            |_| (),
-        )
+        let generation = db.applied.generation();
+        if generation == self.base.view().generation || self.chain_ladder(&db.commitment()) {
+            Ok(generation)
+        } else {
+            Err(Stale)
+        }
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -2005,7 +2035,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let view = self.committed_read_view(db);
+        let view = self.read_view(db)?;
         if self.reads_committed_only() {
             return db
                 .get_many_map_at(&view, keys, |data, _| data.value().clone())
@@ -2110,7 +2140,7 @@ where
             });
         Self::fill_committed_reads(
             unresolved,
-            &self.committed_read_view(db),
+            &self.read_view(db)?,
             db,
             &mut results,
             |data, loc| (data.value().clone(), loc, data.cached()),
@@ -2154,12 +2184,13 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let view = self.committed_read_view(db);
+        let view = self.read_view(db)?;
         self.merkleize_with_floor_scan(
             db,
             metadata,
             StagedUpdates::<F, update::Unordered<K, V>>::new(),
             None,
+            view.clone(),
             |floor, tip, limit, out| fill_candidates_at(&db.applied, &view, floor, tip, limit, out),
         )
         .await
@@ -2183,6 +2214,7 @@ where
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
+        view: View<F, H::Digest>,
         fill_candidates: impl FnMut(
             Location<F>,
             u64,
@@ -2196,7 +2228,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         let (mut mutations, mut m) = self.into_parts();
-        m.pin_read_view(db);
+        m.view = view;
         let m = m;
 
         // Resolve existing keys.
@@ -2380,11 +2412,12 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let view = self.committed_read_view(db);
+        let view = self.read_view(db)?;
         self.merkleize_with_floor_scan(
             db,
             metadata,
             StagedUpdates::<F, update::Ordered<K, V>>::new(),
+            view.clone(),
             |floor, tip, limit, out| fill_candidates_at(&db.applied, &view, floor, tip, limit, out),
         )
         .await
@@ -2406,6 +2439,7 @@ where
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
+        view: View<F, H::Digest>,
         fill_candidates: impl FnMut(
             Location<F>,
             u64,
@@ -2419,8 +2453,9 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let (mut mutations, mut m) = self.into_parts();
-        m.pin_read_view(db);
+        m.view = view;
         let m = m;
+        m.require_live(db)?;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true)?;
@@ -2508,25 +2543,21 @@ where
         db.strategy()
             .sort_by(&mut created, |(a, _, _), (b, _, _)| a.cmp(b));
 
-        // Look up prev_translated_key for created/deleted keys. Predecessors only make
-        // sense against fresh state, so the read is ladder-checked.
+        // Look up prev_translated_key for created/deleted keys. Predecessors read live
+        // state, validated up front by `require_live`.
         let mut prev_locations = Vec::new();
-        db.applied.read_on_ladder(
-            m.view.generation,
-            |size| m.on_ladder(size),
-            |index| {
-                for key in deleted
-                    .iter()
-                    .map(|(k, _)| k)
-                    .chain(created.iter().map(|(k, _, _)| k))
-                {
-                    let Some((iter, _)) = index.prev_translated_key(key) else {
-                        continue;
-                    };
-                    prev_locations.extend(iter.copied());
-                }
-            },
-        )?;
+        db.applied.with_index(|index| {
+            for key in deleted
+                .iter()
+                .map(|(k, _)| k)
+                .chain(created.iter().map(|(k, _, _)| k))
+            {
+                let Some((iter, _)) = index.prev_translated_key(key) else {
+                    continue;
+                };
+                prev_locations.extend(iter.copied());
+            }
+        });
         prev_locations.sort();
         prev_locations.dedup();
 
@@ -3023,7 +3054,7 @@ where
         // Publish the index and bitmap mutations, recording what they displace, under one
         // write hold.
         let last_commit_loc = self.last_commit_loc;
-        self.applied.commit_apply(|guard| {
+        self.applied.apply(|guard| {
             guard.extend_to(*batch.bounds.tip.size);
 
             if batch.ancestor_diffs.is_empty() {

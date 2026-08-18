@@ -2084,64 +2084,178 @@ pub(crate) mod test {
         });
     }
 
+    /// How a straddle run interferes with the in-flight batch.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Straddle {
+        /// No interference (the control run).
+        None,
+        /// A sibling rewriting every key is applied and committed mid-flight.
+        Apply,
+        /// As `Apply`, plus a prune past the seed's first bitmap chunk.
+        ApplyAndPrune,
+    }
+
+    /// Run one straddle scenario: seed, fork an observed batch (optionally with staged
+    /// reads), interfere per `straddle`, then read and merkleize through the batch.
+    /// Returns the observed values and the merkleized root.
+    async fn straddled_run(
+        context: Context,
+        staged: bool,
+        straddle: Straddle,
+    ) -> (Vec<Option<Digest>>, Digest) {
+        // Enough keys that a full rewrite advances the inactivity floor past the first
+        // bitmap chunk, so the ApplyAndPrune variant actually prunes.
+        const KEYS: u64 = 600;
+        let key = |i: u64| {
+            if i < 2 {
+                colliding_digest(7, i)
+            } else {
+                Sha256::hash(&[&i.to_be_bytes()])
+            }
+        };
+        let val = |i: u64| Sha256::hash(&[&(i + 500_000).to_be_bytes()]);
+
+        let mut db = create_test_db(context).await;
+        let mut seed = db.new_batch();
+        for i in 0u64..KEYS {
+            seed = seed.write(key(i), Some(val(i)));
+        }
+        let seed = seed.merkleize(&db, None).await.unwrap();
+        (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // Fork the observed batch: writes over some keys, reads over others (one
+        // colliding pair included).
+        let read_keys = [key(0), key(1), key(5), key(660), key(999)];
+        let read_refs: Vec<_> = read_keys.iter().collect();
+        let batch = db
+            .new_batch()
+            .write(key(0), Some(val(1_000)))
+            .write(key(660), Some(val(1_660)));
+        let (batch, staged_batch) = if staged {
+            let (values, staged) = batch.stage(&read_refs, &db).await.unwrap();
+            (None, Some((values, staged)))
+        } else {
+            (Some(batch), None)
+        };
+
+        let db = if straddle == Straddle::None {
+            db
+        } else {
+            let mut sibling = db.new_batch();
+            for i in 0u64..KEYS {
+                sibling = sibling.write(key(i), Some(val(i + 2_000)));
+            }
+            sibling = sibling.write(key(5), None);
+            let sibling = sibling.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            let db = db.commit().await.unwrap();
+            if straddle == Straddle::ApplyAndPrune {
+                let boundary = db.sync_boundary();
+                let db = db.prune(boundary).await.unwrap();
+                assert!(db.bitmap.pruned_bits() > 0, "prune variant must prune");
+                db
+            } else {
+                db
+            }
+        };
+
+        // A prune that removes the batch's superseded reads makes an exact merkleize
+        // impossible (the journal data is gone); the contract is a clean pruned error,
+        // never a torn root. The other variants merkleize exactly.
+        let outcome = match (batch, staged_batch) {
+            (None, Some((values, staged))) => staged
+                .merkleize(vec![(0, Some(val(1_000)))], Vec::new(), None, &db)
+                .await
+                .map(|merkleized| (values, merkleized.root())),
+            (Some(batch), None) => match batch.get_many(&read_refs, &db).await {
+                Ok(values) => batch
+                    .merkleize(&db, None)
+                    .await
+                    .map(|merkleized| (values, merkleized.root())),
+                Err(e) => Err(e),
+            },
+            _ => unreachable!("exactly one arm holds the batch"),
+        };
+        let out = match outcome {
+            Ok((values, root)) => {
+                assert!(straddle != Straddle::ApplyAndPrune);
+                (values, root)
+            }
+            Err(crate::qmdb::Error::Journal(JournalError::ItemPruned(_))) => {
+                assert!(straddle == Straddle::ApplyAndPrune);
+                (Vec::new(), Sha256::hash(&[b"pruned"]))
+            }
+            Err(e) => panic!("unexpected merkleize error: {e}"),
+        };
+        db.destroy().await.unwrap();
+        out
+    }
+
     /// The crash-class pin: a batch forked before a sibling apply reads and merkleizes
-    /// exactly as if the apply never happened. On the old live-read design this
-    /// scenario panicked (index out of bounds, missing Merkle nodes) or tore reads.
+    /// exactly as if the apply never happened -- including across a prune of its scan
+    /// range and through staged reads. On the old live-read design these scenarios
+    /// panicked (index out of bounds, missing Merkle nodes) or tore reads.
     #[test_traced]
     fn batch_reads_and_merkleizes_across_a_sibling_apply() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
-            let val = |i: u64| Sha256::hash(&[&(i + 500_000).to_be_bytes()]);
-
-            let mut roots = Vec::new();
-            let mut values = Vec::new();
-            for straddle in [false, true] {
-                let label = if straddle { "straddle" } else { "control" };
-                let mut db = create_test_db(context.child(label)).await;
-
-                // Identical seed.
-                let mut seed = db.new_batch();
-                for i in 0u64..50 {
-                    seed = seed.write(key(i), Some(val(i)));
-                }
-                let seed = seed.merkleize(&db, None).await.unwrap();
-                (db, _) = db.apply_batch(seed).await.unwrap();
-                let db = db.commit().await.unwrap();
-
-                // Fork the observed batch: writes over some keys, reads over others.
-                let batch = db
-                    .new_batch()
-                    .write(key(0), Some(val(1_000)))
-                    .write(key(60), Some(val(1_060)));
-
-                // In the straddle run, a sibling rewrites overlapping keys, deletes one,
-                // and is applied and committed while `batch` is in flight.
-                let db = if straddle {
-                    let mut sibling = db.new_batch();
-                    for i in 0u64..50 {
-                        sibling = sibling.write(key(i), Some(val(i + 2_000)));
-                    }
-                    sibling = sibling.write(key(5), None);
-                    let sibling = sibling.merkleize(&db, None).await.unwrap();
-                    let (db, _) = db.apply_batch(sibling).await.unwrap();
-                    db.commit().await.unwrap()
-                } else {
-                    db
-                };
-
-                // Reads through the batch see only its chain-base state.
-                let read_keys = [key(0), key(1), key(5), key(60), key(99)];
-                let read_refs: Vec<_> = read_keys.iter().collect();
-                values.push(batch.get_many(&read_refs, &db).await.unwrap());
-
-                // Merkleization is exact for the chain base.
-                let merkleized = batch.merkleize(&db, None).await.unwrap();
-                roots.push(merkleized.root());
-                db.destroy().await.unwrap();
+            // Partitions are seeded per run, so a shared label is fine.
+            for staged in [false, true] {
+                let control = straddled_run(context.child("run"), staged, Straddle::None).await;
+                let run = straddled_run(context.child("run"), staged, Straddle::Apply).await;
+                assert_eq!(control.0, run.0, "values diverged (staged={staged})");
+                assert_eq!(control.1, run.1, "root diverged (staged={staged})");
+                // The prune variant asserts its clean-error contract internally.
+                straddled_run(context.child("run"), staged, Straddle::ApplyAndPrune).await;
             }
-            assert_eq!(values[0], values[1]);
-            assert_eq!(roots[0], roots[1]);
+        });
+    }
+
+    /// Rewind begins a new incarnation: pre-rewind views and batches go `Stale`, and a
+    /// fresh view answers from the rewound state.
+    #[test_traced]
+    fn rewind_stales_views_and_batches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 700_000).to_be_bytes()]);
+            let mut db = create_test_db(context).await;
+
+            let seed = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let rewind_to = db.bounds().end;
+
+            let second = db
+                .new_batch()
+                .write(key(0), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(second).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let view = db.view();
+            let batch = db.new_batch().write(key(1), Some(val(2)));
+
+            let db = db.rewind(rewind_to).await.unwrap();
+            assert!(matches!(
+                db.get_at(&view, &key(0)).await,
+                Err(crate::qmdb::Error::Stale(_))
+            ));
+            assert!(matches!(
+                batch.merkleize(&db, None).await,
+                Err(crate::qmdb::Error::Stale(_))
+            ));
+            let fresh = db.view();
+            assert_eq!(db.get_at(&fresh, &key(0)).await.unwrap(), Some(val(0)));
+            db.destroy().await.unwrap();
         });
     }
 }
