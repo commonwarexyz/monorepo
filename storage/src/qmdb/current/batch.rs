@@ -18,6 +18,7 @@ use crate::{
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
+        applied::{Generation, Stale},
         batch_chain::Bounds,
         bitmap::{Shared, fill_from},
         current::{
@@ -522,6 +523,8 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        inner.require_on_ladder(&db.any)?;
+        let entry = db.any.applied.generation();
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
@@ -542,7 +545,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
     }
 }
 
@@ -590,6 +593,8 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        inner.require_on_ladder(&db.any)?;
+        let entry = db.any.applied.generation();
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let inner = inner
             .merkleize_with_floor_scan(
@@ -601,7 +606,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
     }
 }
 
@@ -636,6 +641,8 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        inner.require_on_ladder(&db.any)?;
+        let entry = db.any.applied.generation();
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
@@ -648,7 +655,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
     }
 }
 
@@ -683,6 +690,8 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        inner.require_on_ladder(&db.any)?;
+        let entry = db.any.applied.generation();
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
             .merkleize_with_floor_scan(
@@ -694,7 +703,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
     }
 }
 
@@ -812,6 +821,7 @@ async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     current_db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
+    entry: Generation,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
 where
     F: Graftable,
@@ -938,6 +948,13 @@ where
         &ops_root,
     )
     .await?;
+
+    // The current layer reads the live bitmap and grafted tree throughout, so its root
+    // is only exact if no apply landed during the merkleize span. A mover forces a
+    // clean retry instead of a torn root.
+    if current_db.any.applied.generation() != entry {
+        return Err(Error::Stale(Stale));
+    }
 
     Ok(Arc::new(MerkleizedBatch {
         inner,

@@ -312,6 +312,31 @@ impl<F: Family, I, const N: usize> Applied<F, I, N> {
         Ok(f(&state.index, &bitmap))
     }
 
+    /// Run `f` against the live index iff the live state sits on the batch chain's
+    /// boundary ladder -- the view itself, or a size `ladder` accepts (one of the
+    /// chain's own ancestor boundaries, which the owner may have applied since the
+    /// fork) -- under the same hold as the check. Reads that only make sense against
+    /// fresh state (ordered predecessor and collision-sibling scans) go through here;
+    /// anything else moving the state returns [`Stale`].
+    pub(crate) fn read_on_ladder<R>(
+        &self,
+        view: Generation,
+        ladder: impl Fn(u64) -> bool,
+        f: impl FnOnce(&I) -> R,
+    ) -> Result<R, Stale> {
+        let state = self.read();
+        if state.generation.epoch != view.epoch {
+            return Err(Stale);
+        }
+        if state.generation != view {
+            let size = bitmap::Readable::<N>::len(&*state.bitmap.read());
+            if !ladder(size) {
+                return Err(Stale);
+            }
+        }
+        Ok(f(&state.index))
+    }
+
     /// Run `f` against the live index under a read hold. For reads at the current tip
     /// only (the owner's own lookups); versioned reads go through [`Self::resolve`].
     pub(crate) fn with_index<R>(&self, f: impl FnOnce(&I) -> R) -> R {

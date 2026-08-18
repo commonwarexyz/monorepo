@@ -4249,4 +4249,44 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// A sibling apply between fork and merkleize surfaces as `Stale` from the current
+    /// family's fresh-only entry check -- never a torn canonical root.
+    #[test_traced("WARN")]
+    fn test_current_batch_stales_across_a_sibling_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_config::<OneCap>("stale-straddle", &ctx),
+            )
+            .await
+            .unwrap();
+
+            let mut seed = db.new_batch();
+            for i in 0u64..20 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let batch = db.new_batch().write(key(0), Some(val(1_000)));
+
+            let sibling = db
+                .new_batch()
+                .write(key(1), Some(val(2_000)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                batch.merkleize(&db, None).await,
+                Err(Error::Stale(_))
+            ));
+            db.destroy().await.unwrap();
+        });
+    }
 }

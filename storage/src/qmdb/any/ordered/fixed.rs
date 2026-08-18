@@ -2314,4 +2314,51 @@ pub(crate) mod test {
             }
         }
     }
+
+    /// A sibling apply while an ordered batch is in flight surfaces as `Stale` from its
+    /// fresh-only predecessor scan -- never a torn root.
+    #[test_traced]
+    fn ordered_batch_stales_across_a_sibling_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            let mut seed = db.new_batch();
+            for i in 0u64..20 {
+                seed = seed.write(
+                    Sha256::hash(&[&i.to_be_bytes()]),
+                    Some(Sha256::hash(&[&(i + 90_000).to_be_bytes()])),
+                );
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // A delete forces the predecessor-bucket scan during merkleize.
+            let batch = db
+                .new_batch()
+                .write(Sha256::hash(&[&3u64.to_be_bytes()]), None)
+                .write(
+                    Sha256::hash(&[&100u64.to_be_bytes()]),
+                    Some(Sha256::hash(&[&90_100u64.to_be_bytes()])),
+                );
+
+            let sibling = db
+                .new_batch()
+                .write(
+                    Sha256::hash(&[&7u64.to_be_bytes()]),
+                    Some(Sha256::hash(&[&90_700u64.to_be_bytes()])),
+                )
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                batch.merkleize(&db, None).await,
+                Err(crate::qmdb::Error::Stale(_))
+            ));
+            db.destroy().await.unwrap();
+        });
+    }
 }

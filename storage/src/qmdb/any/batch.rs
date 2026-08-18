@@ -313,6 +313,26 @@ where
     resolutions: Vec<StagedResolution<F, U>>,
 }
 
+impl<F: Family, H, U, S: Strategy> Staged<F, H, U, S>
+where
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// See [`UnmerkleizedBatch::require_on_ladder`].
+    pub(crate) fn require_on_ladder<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(), Stale>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        self.batch.require_on_ladder(db)
+    }
+}
+
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 ///
@@ -413,6 +433,15 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Whether `size` is one of this chain's own boundaries: the committed boundary,
+    /// the fork point, or an ancestor's tip. The owner applying this chain's own
+    /// ancestors moves the live state along exactly these sizes.
+    fn on_ladder(&self, size: u64) -> bool {
+        size == *self.db_state.size
+            || size == *self.base_state.size
+            || self.ancestors.iter().any(|a| *a.commitment().size == size)
+    }
+
     /// Pin the read view. A chain whose committed prefix was dropped after applying
     /// reads state that exists only live, so it gets a fresh view of the effective
     /// boundary instead of the chain-base capture; that pattern requires the owner to
@@ -953,14 +982,18 @@ where
                         if include_active_collision_siblings {
                             // The ordered path's sibling pointers are rewritten against
                             // fresh state; the live bucket is the source of truth here.
-                            db.applied.with_index(|index| {
-                                locations.extend(
-                                    index
-                                        .get(key)
-                                        .copied()
-                                        .filter(|loc| Some(*loc) != *base_old_loc),
-                                )
-                            });
+                            db.applied.read_on_ladder(
+                                self.view.generation,
+                                |size| self.on_ladder(size),
+                                |index| {
+                                    locations.extend(
+                                        index
+                                            .get(key)
+                                            .copied()
+                                            .filter(|loc| Some(*loc) != *base_old_loc),
+                                    )
+                                },
+                            )?;
                         }
                     }
                     None => {
@@ -1901,6 +1934,41 @@ where
         }
     }
 
+    /// Require the live state to sit on this chain's boundary ladder: the chain base,
+    /// an own ancestor's tip, or the effective committed boundary. For batches whose
+    /// merkleize reads live state (the current family), anything else moving the state
+    /// must surface as [`Stale`], never as a torn root.
+    pub(crate) fn require_on_ladder<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(), Stale>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let view = self.base.view();
+        let parent = self.base.parent();
+        let oldest_base = parent.map(|p| {
+            p.ancestors()
+                .last()
+                .map_or(p.bounds.base, |oldest| oldest.bounds.base)
+        });
+        let boundary = batch_chain::effective_boundary(self.base.db(), oldest_base);
+        db.applied.read_on_ladder(
+            view.generation,
+            |size| {
+                size == *boundary.size
+                    || size == *self.base.base_state().size
+                    || parent.is_some_and(|p| {
+                        p.ancestors()
+                            .any(|ancestor| *ancestor.commitment().size == size)
+                    })
+            },
+            |_| (),
+        )
+    }
+
     /// Read through: mutations -> ancestor diffs -> committed DB.
     pub async fn get<E, C, I, const N: usize>(
         &self,
@@ -2440,20 +2508,25 @@ where
         db.strategy()
             .sort_by(&mut created, |(a, _, _), (b, _, _)| a.cmp(b));
 
-        // Look up prev_translated_key for created/deleted keys.
+        // Look up prev_translated_key for created/deleted keys. Predecessors only make
+        // sense against fresh state, so the read is ladder-checked.
         let mut prev_locations = Vec::new();
-        db.applied.with_index(|index| {
-            for key in deleted
-                .iter()
-                .map(|(k, _)| k)
-                .chain(created.iter().map(|(k, _, _)| k))
-            {
-                let Some((iter, _)) = index.prev_translated_key(key) else {
-                    continue;
-                };
-                prev_locations.extend(iter.copied());
-            }
-        });
+        db.applied.read_on_ladder(
+            m.view.generation,
+            |size| m.on_ladder(size),
+            |index| {
+                for key in deleted
+                    .iter()
+                    .map(|(k, _)| k)
+                    .chain(created.iter().map(|(k, _, _)| k))
+                {
+                    let Some((iter, _)) = index.prev_translated_key(key) else {
+                        continue;
+                    };
+                    prev_locations.extend(iter.copied());
+                }
+            },
+        )?;
         prev_locations.sort();
         prev_locations.dedup();
 
