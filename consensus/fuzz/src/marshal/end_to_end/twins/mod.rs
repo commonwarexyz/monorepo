@@ -524,9 +524,20 @@ where
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
         for (idx, application) in &state.primaries {
-            invariants::check_local_blocks(*idx, application, state.genesis, &self.stack_label);
+            invariants::check_local_blocks(
+                *idx,
+                application,
+                state.genesis,
+                commonware_consensus::types::Height::zero(),
+                &self.stack_label,
+            );
         }
-        invariants::check_all_blocks(&state.honest, state.genesis, Some(&self.stack_label));
+        invariants::check_all_blocks(
+            &state.honest,
+            state.genesis,
+            commonware_consensus::types::Height::zero(),
+            Some(&self.stack_label),
+        );
     }
 }
 

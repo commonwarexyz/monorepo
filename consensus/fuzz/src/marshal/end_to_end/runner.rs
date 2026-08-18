@@ -543,7 +543,12 @@ fn run_standard_disrupter<P: Simplex>(
         )
         .await;
 
-        invariants::check_all_blocks(&honest_apps, genesis_commitment, None);
+        invariants::check_all_blocks(
+            &honest_apps,
+            genesis_commitment,
+            commonware_consensus::types::Height::zero(),
+            None,
+        );
     });
 }
 
@@ -680,7 +685,12 @@ where
         )
         .await;
 
-        invariants::check_all_blocks(&honest_apps, genesis_digest, None);
+        invariants::check_all_blocks(
+            &honest_apps,
+            genesis_digest,
+            commonware_consensus::types::Height::zero(),
+            None,
+        );
     });
 }
 

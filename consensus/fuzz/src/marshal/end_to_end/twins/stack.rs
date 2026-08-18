@@ -19,10 +19,10 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Relay, Reporter,
+    Automaton, CertifiableAutomaton, Heightable as _, Relay, Reporter,
     marshal::{
         Config, Start, Update,
-        core::{Actor, Mailbox},
+        core::{Actor, Buffer, Mailbox},
         mocks::{
             application::Application,
             block::Block as MockBlock,
@@ -39,7 +39,7 @@ use commonware_consensus::{
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Hasher as _, PublicKey, Sha256,
+    Digest, Digestible as _, Hasher as _, PublicKey, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
@@ -48,11 +48,12 @@ use commonware_p2p::{
     Receiver, Sender,
     simulated::{Config as NetworkConfig, Network as SimulatedNetwork, Oracle},
 };
+use commonware_resolver::TargetedResolver;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_storage::archive::immutable;
+use commonware_storage::archive::{Archive as _, immutable};
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -343,6 +344,158 @@ impl<P: Simplex> Validator<P> {
             .expect("marshal resolver must be installed before actor startup");
         actor.start(reporter, self.buffer.clone(), resolver);
     }
+
+    /// Removes the installed resolver so a caller can wrap it (for example in an
+    /// observing adapter) before starting the actor with [`Self::start_with`].
+    pub(crate) fn take_resolver(&mut self) -> MarshalResolver<P> {
+        self.resolver
+            .take()
+            .expect("marshal resolver must be installed before actor startup")
+    }
+
+    /// Starts the actor with a caller-supplied resolver (for example one wrapping
+    /// the real resolver taken via [`Self::take_resolver`]) and broadcast buffer
+    /// (for example a recording wrapper around the real buffer), so a scenario can
+    /// observe the fetches and blocks the marshal issues. The `handler::Receiver`
+    /// half of the resolver tuple must be the one the real resolver engine feeds.
+    pub(crate) fn start_with_buffer<R, Buf>(
+        &mut self,
+        reporter: impl Reporter<Activity = Update<B<P>>>,
+        resolver: (handler::Receiver<Sha256Digest>, R),
+        buffer: Buf,
+    ) where
+        R: TargetedResolver<
+                Key = handler::Key<Sha256Digest>,
+                Subscriber = handler::Annotation,
+                PublicKey = PublicKeyOf<P>,
+            >,
+        Buf: Buffer<Standard<B<P>>, PublicKey = PublicKeyOf<P>>,
+    {
+        let actor = self
+            .actor
+            .take()
+            .expect("marshal actor must be started exactly once");
+        actor.start(reporter, buffer, resolver);
+    }
+}
+
+/// An explicit representation of the on-disk rows a restart scenario seeds into
+/// a node's archives before its marshal actor starts.
+///
+/// `finalized_blocks` are block rows keyed by height; `finalizations_by_height`
+/// are finalization rows keyed by height. A gap (a finalization whose block is
+/// absent) is expressed by omitting the block. This mirrors the source restart
+/// tests' `seed_inconsistent_restart_state`.
+pub(crate) struct PrestartSeed<P: Simplex> {
+    pub(crate) finalized_blocks: Vec<B<P>>,
+    pub(crate) finalizations_by_height: Vec<(Height, Finalization<SchemeOf<P>, Sha256Digest>)>,
+}
+
+impl<P: Simplex> Default for PrestartSeed<P> {
+    fn default() -> Self {
+        Self {
+            finalized_blocks: Vec::new(),
+            finalizations_by_height: Vec::new(),
+        }
+    }
+}
+
+impl<P: Simplex> PrestartSeed<P> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.finalized_blocks.is_empty() && self.finalizations_by_height.is_empty()
+    }
+}
+
+/// Writes `seed` directly into `validator`'s finalized-block and
+/// finalization-by-height archives, using the exact partition names
+/// [`setup_validator`] reopens, so a subsequently-initialized marshal actor
+/// replays the seeded rows at startup. Must be called before [`setup_validator`]
+/// for the same validator.
+pub(crate) async fn seed_prestart<P: Simplex>(
+    context: deterministic::Context,
+    validator: &PublicKeyOf<P>,
+    seed: &PrestartSeed<P>,
+) {
+    let partition_prefix = format!("validator-{validator}");
+    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let replay_buffer = NZUsize!(1024);
+    let write_buffer = NZUsize!(1024);
+
+    let mut finalizations_by_height: Finalizations<P> = immutable::Archive::init(
+        context.child("seed_finalizations_by_height"),
+        immutable::Config {
+            metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
+            freezer_table_partition: format!(
+                "{partition_prefix}-finalizations-by-height-freezer-table"
+            ),
+            freezer_table_initial_size: 64,
+            freezer_table_resize_frequency: 10,
+            freezer_table_resize_chunk_size: 10,
+            freezer_key_partition: format!("{partition_prefix}-finalizations-by-height-freezer-key"),
+            freezer_key_page_cache: page_cache.clone(),
+            freezer_value_partition: format!(
+                "{partition_prefix}-finalizations-by-height-freezer-value"
+            ),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
+            items_per_section: NZU64!(10),
+            codec_config: SchemeOf::<P>::certificate_codec_config_unbounded(),
+            replay_buffer,
+            freezer_key_write_buffer: write_buffer,
+            freezer_value_write_buffer: write_buffer,
+            ordinal_write_buffer: write_buffer,
+        },
+    )
+    .await
+    .expect("failed to initialize seeded finalizations archive");
+
+    let mut finalized_blocks: FinalizedBlocks<P> = immutable::Archive::init(
+        context.child("seed_finalized_blocks"),
+        immutable::Config {
+            metadata_partition: format!("{partition_prefix}-finalized-blocks-metadata"),
+            freezer_table_partition: format!("{partition_prefix}-finalized-blocks-freezer-table"),
+            freezer_table_initial_size: 64,
+            freezer_table_resize_frequency: 10,
+            freezer_table_resize_chunk_size: 10,
+            freezer_key_partition: format!("{partition_prefix}-finalized-blocks-freezer-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{partition_prefix}-finalized-blocks-freezer-value"),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition_prefix}-finalized-blocks-ordinal"),
+            items_per_section: NZU64!(10),
+            codec_config: (),
+            replay_buffer,
+            freezer_key_write_buffer: write_buffer,
+            freezer_value_write_buffer: write_buffer,
+            ordinal_write_buffer: write_buffer,
+        },
+    )
+    .await
+    .expect("failed to initialize seeded finalized blocks archive");
+
+    for block in &seed.finalized_blocks {
+        finalized_blocks = finalized_blocks
+            .put(block.height().get(), block.digest(), block.clone())
+            .await
+            .expect("failed to seed finalized block");
+    }
+    finalized_blocks
+        .sync()
+        .await
+        .expect("failed to sync seeded finalized blocks");
+
+    for (height, finalization) in &seed.finalizations_by_height {
+        finalizations_by_height = finalizations_by_height
+            .put(height.get(), finalization.proposal.payload, finalization.clone())
+            .await
+            .expect("failed to seed finalization");
+    }
+    finalizations_by_height
+        .sync()
+        .await
+        .expect("failed to sync seeded finalizations");
 }
 
 pub(crate) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
