@@ -87,6 +87,7 @@ use thiserror::Error;
 
 pub mod any;
 pub(crate) mod applied;
+pub use applied::{Generation, Stale};
 pub mod batch_chain;
 pub(crate) mod bitmap;
 pub mod compact;

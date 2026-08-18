@@ -45,12 +45,16 @@ use std::{collections::VecDeque, sync::Arc};
 /// apply, or `None` when the key was absent.
 type UndoKeys<F> = Vec<(Box<[u8]>, Option<Location<F>>)>;
 
+/// Most undo records retained without an explicit retention floor. Bounds memory for
+/// owners that never track live views; views older than the cap go [`Stale`].
+const MAX_WINDOW_DEPTH: usize = 64;
+
 /// A logical apply count paired with the incarnation it belongs to.
 ///
-/// `sequence` increments once per [`Applied::commit_apply`]. `epoch` increments once per
-/// [`Applied::commit_epoch`]; a generation from an older epoch never matches the state
-/// again. Generations support equality and window-coverage checks only; they carry no
-/// arithmetic and are never interchangeable with physical locations.
+/// `sequence` increments once per applied batch. `epoch` increments once per incarnation
+/// change (rewind, sync handoff); a generation from an older epoch never matches the
+/// state again. Generations support equality and window-coverage checks only; they carry
+/// no arithmetic and are never interchangeable with physical locations.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Generation {
     epoch: u64,
@@ -234,6 +238,9 @@ impl<F: Family, I, const N: usize> Applied<F, I, N> {
             keys,
             chunks,
         }));
+        if state.window.len() > MAX_WINDOW_DEPTH {
+            state.window.pop_front();
+        }
         state.generation.sequence += 1;
         (out, state.generation)
     }

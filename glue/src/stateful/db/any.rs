@@ -858,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn unmerkleized_batch_falls_through_to_applied_state() {
+    fn unmerkleized_batch_reads_its_fork_state() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-live-fallback", &context);
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
@@ -882,8 +882,11 @@ mod tests {
             slot.put(database);
             sync.await.expect("finalize flush failed");
 
-            // The batch commitment does not provide a historical database view.
-            assert_eq!(pre_finalization.get(&key).await.unwrap(), Some(value));
+            // A batch reads as of its fork state, so the concurrent finalization is
+            // invisible to it; a fresh batch sees the finalized value.
+            assert_eq!(pre_finalization.get(&key).await.unwrap(), None);
+            let post_finalization = db.new_batch_for_test::<_>().await;
+            assert_eq!(post_finalization.get(&key).await.unwrap(), Some(value));
         });
     }
 

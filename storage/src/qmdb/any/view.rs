@@ -3,15 +3,15 @@
 //! A [`View`] is a read capability pinned to the database's applied state at a
 //! generation. The owner keeps applying batches; a view's reads are incapable of
 //! observing anything newer. It is a generation coordinate, a copy-on-write capture of
-//! the in-memory Merkle state, and a read protocol over the live index and undo window
-//! (see [`crate::qmdb::applied`]) -- not a frozen copy: it pins no journal data and
-//! costs a few `Arc` clones to create.
+//! the in-memory Merkle state, and a read protocol over the live index and undo
+//! window -- not a frozen copy: it pins no journal data and costs a few `Arc` clones
+//! to create.
 //!
-//! A view survives any number of concurrent applies. It goes [`Stale`] only when the
-//! database begins a new incarnation (rewind, prune, sync handoff) or when its undo
-//! records are evicted past the retention floor.
+//! A view survives any number of concurrent applies, including pruning (physical GC).
+//! It goes [`Stale`] only when the database begins a new incarnation (rewind, sync
+//! handoff) or when its undo records are evicted past the retention window.
 //!
-//! [`Stale`]: crate::qmdb::applied::Stale
+//! [`Stale`]: crate::qmdb::Stale
 
 use super::operation::update::Update;
 use crate::{
