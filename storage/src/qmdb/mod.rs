@@ -260,8 +260,9 @@ pub enum Error<F: Family> {
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// A view can no longer answer reads: the database began a new incarnation (rewind,
-    /// sync handoff) or the view's undo records were evicted; views survive pruning.
+    /// A view or batch can no longer answer reads: the database began a new incarnation
+    /// (rewind, sync handoff), the view's undo records were evicted, or a merkleize that
+    /// reads live state found it moved by a foreign apply; views survive pruning.
     /// Refork from a fresh view; the database itself is unharmed. Distinct from
     /// [`Error::StaleBatch`], which rejects applying a batch from a different fork.
     #[error(transparent)]

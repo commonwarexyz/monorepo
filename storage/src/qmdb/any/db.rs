@@ -105,8 +105,8 @@ pub struct Db<
     /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
     /// tree leaves and proofs.
     ///
-    /// This is a read handle to the same bitmap [`Self::applied`] guards; all writes go
-    /// through [`Applied`]'s mutation doors.
+    /// This is a read handle to the same bitmap [`Self::applied`] guards; after init,
+    /// all writes go through [`Applied`].
     ///
     /// # Invariants
     ///

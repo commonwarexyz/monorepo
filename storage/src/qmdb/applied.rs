@@ -79,7 +79,8 @@ pub struct Generation {
 }
 
 /// The state has moved past what a view can answer: the view's epoch ended, its undo
-/// records were evicted, or a fresh-only read raced an apply.
+/// records were evicted, or a read that requires live own-chain state (an ordered scan,
+/// or the current family's merkleize) found the state moved by a foreign apply.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("view is stale")]
 pub struct Stale;
@@ -333,8 +334,9 @@ impl<F: Family, I, const N: usize> Applied<F, I, N> {
 }
 
 impl<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize> Applied<F, I, N> {
-    /// Resolve `key`'s active location as of `view` (a generation and the journal size
-    /// at that generation). See [`Resolution`] for the two answer shapes.
+    /// Resolve `key`'s active location as of the view identified by `generation` and
+    /// `size` (the journal size at that generation). See [`Resolution`] for the two
+    /// answer shapes.
     pub(crate) fn resolve(
         &self,
         generation: Generation,
@@ -363,9 +365,10 @@ impl<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize> Applied<
         ))
     }
 
-    /// Resolve many keys as of `view` under one read hold, visiting each key's
-    /// candidate locations as `(key index, location)`. Undo-record answers and live
-    /// candidates both report through `visit`; absent keys report nothing.
+    /// Resolve many keys as of the view identified by `generation` and `size` under one
+    /// read hold, visiting each key's candidate locations as `(key index, location)`.
+    /// Undo-record answers and live candidates both report through `visit`; absent keys
+    /// report nothing.
     pub(crate) fn resolve_many<K: Key>(
         &self,
         generation: Generation,
@@ -398,22 +401,29 @@ impl<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize> Applied<
         Ok(())
     }
 
-    /// The content of bitmap chunk `idx` as of `view`. Bits at or beyond the view's
-    /// size may reflect later appends; consumers must bound iteration by the view's
-    /// size, never by chunk content.
-    #[allow(dead_code)] // consumed once the current family reads chunks as-of
-    pub(crate) fn chunk(&self, generation: Generation, idx: usize) -> Result<[u8; N], Stale> {
+    /// The content of bitmap chunk `idx` as of the view identified by `generation`.
+    /// Bits at or beyond the view's size may reflect later appends; consumers must
+    /// bound iteration by the view's size, never by chunk content.
+    #[cfg(test)]
+    fn chunk(&self, generation: Generation, idx: usize) -> Result<[u8; N], Stale> {
         let state = self.read();
         if !Self::covers(&state, generation) {
             return Err(Stale);
         }
-        Ok(live_or_zero_chunk(&state, generation, idx))
+        let bitmap = state.bitmap.read();
+        let chunks = AsOfChunks {
+            state: &state,
+            bitmap: &bitmap,
+            generation,
+            // Point reads have no length contract to enforce.
+            size: u64::MAX,
+        };
+        Ok(bitmap::Readable::<N>::get_chunk(&chunks, idx))
     }
-}
 
-impl<F: Family, I, const N: usize> Applied<F, I, N> {
     /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)` as of
-    /// `view`, holding one read guard for the whole batch. Returns the next `scan_from`.
+    /// the view identified by `generation` and `size`, holding one read guard for the
+    /// whole batch. Returns the next `scan_from`.
     ///
     /// The candidate sequence is what [`crate::qmdb::bitmap::fill_from`] would produce
     /// over the bitmap at the view's generation, truncated to the view's size.
@@ -456,24 +466,6 @@ fn window_chunk<F: Family, I, const N: usize>(
         .find_map(|undo| undo.chunk(idx).copied())
 }
 
-/// Chunk `idx` as of `view`: undo pre-image, live chunk, or all-zero for a pruned chunk
-/// with no pre-image. The zero answer is exact: pruning never passes the inactivity
-/// floor, so a bit set at the view's generation in a since-pruned chunk was cleared by a
-/// later apply, and that apply captured the chunk's pre-image.
-fn live_or_zero_chunk<F: Family, I, const N: usize>(
-    state: &State<F, I, N>,
-    generation: Generation,
-    idx: usize,
-) -> [u8; N] {
-    if let Some(chunk) = window_chunk(state, generation, idx) {
-        return chunk;
-    }
-    if idx < bitmap::Readable::<N>::pruned_chunks(&*state.bitmap) {
-        return [0; N];
-    }
-    bitmap::Readable::<N>::get_chunk(&*state.bitmap, idx)
-}
-
 /// Bitmap chunks as of a view: undo pre-images first, live chunks otherwise, with the
 /// length frozen at the view's size. Bits at or beyond that size carry no contract;
 /// consumers bound iteration by `len()`. Constructed under the applied read hold, so the
@@ -494,6 +486,9 @@ impl<F: Family, I, const N: usize> bitmap::Readable<N> for AsOfChunks<'_, F, I, 
         if let Some(chunk) = window_chunk(self.state, self.generation, idx) {
             return chunk;
         }
+        // A pruned chunk with no pre-image was all-zero at every covered generation:
+        // pruning never passes the inactivity floor, so a bit set at the view's
+        // generation was cleared by a later apply, which captured the pre-image.
         if idx < self.bitmap.pruned_chunks() {
             return [0; N];
         }
@@ -531,7 +526,7 @@ impl<F: Family, I, const N: usize> bitmap::Readable<N> for AsOfChunks<'_, F, I, 
 mod tests {
     use super::*;
     use crate::{index::unordered::Index, merkle::mmr, translator::TwoCap};
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     type L = Location<mmr::Family>;
     type TestIndex = Index<TwoCap, L>;
@@ -741,5 +736,33 @@ mod tests {
             assert_eq!(applied.resolve(g0, 1, &a), Err(Stale));
             assert!(applied.resolve(applied.generation(), loc + 1, &a).is_ok());
         });
+    }
+
+    #[test]
+    fn views_never_match_a_foreign_database() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut instances = Vec::new();
+            for label in ["a", "b"] {
+                let index = TestIndex::new(context.child(label), TwoCap);
+                let bitmap = Arc::new(Shared::new(bitmap::Prunable::<N>::default()));
+                instances.push(Applied::<mmr::Family, _, N>::new(index, bitmap));
+            }
+            let a = key(&[1, 1]);
+            let g = apply(&instances[0], 1, |guard| {
+                g_insert(guard, &a);
+            });
+            apply(&instances[1], 1, |guard| {
+                g_insert(guard, &a);
+            });
+            // Same sequence, different instance: epochs are process-unique, so the
+            // foreign database can never answer for this view.
+            assert_eq!(instances[1].resolve(g, 1, &a), Err(Stale));
+            assert!(instances[0].resolve(g, 1, &a).is_ok());
+        });
+    }
+
+    fn g_insert(guard: &mut ApplyGuard<'_, mmr::Family, TestIndex, N>, key: &[u8]) {
+        guard.insert(&key.to_vec(), L::new(0));
+        guard.set_bit(0, true);
     }
 }

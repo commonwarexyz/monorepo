@@ -523,16 +523,22 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let entry = inner.require_on_ladder(&db.any)?;
+        let entry_generation = inner.require_on_ladder(&db.any)?;
         let view = inner.read_view(&db.any)?;
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
         // raise scans below), clamped to the committed prefix inside the helper.
         let (inner, staged_updates, prefetched) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
-                Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
-            })
+            .resolve_updates_prefetched(
+                updates,
+                upserts,
+                &db.any,
+                &view,
+                |floor, tip, limit, out| {
+                    Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
+                },
+            )
             .await?;
         let inner = inner
             .merkleize_with_floor_scan(
@@ -546,7 +552,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry_generation).await
     }
 }
 
@@ -594,7 +600,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let entry = inner.require_on_ladder(&db.any)?;
+        let entry_generation = inner.require_on_ladder(&db.any)?;
         let view = inner.read_view(&db.any)?;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let inner = inner
@@ -608,7 +614,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry_generation).await
     }
 }
 
@@ -643,7 +649,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let entry = inner.require_on_ladder(&db.any)?;
+        let entry_generation = inner.require_on_ladder(&db.any)?;
         let view = inner.read_view(&db.any)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
@@ -658,7 +664,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry_generation).await
     }
 }
 
@@ -693,7 +699,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let entry = inner.require_on_ladder(&db.any)?;
+        let entry_generation = inner.require_on_ladder(&db.any)?;
         let view = inner.read_view(&db.any)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
@@ -707,7 +713,7 @@ where
                 },
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry).await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent, entry_generation).await
     }
 }
 
@@ -825,7 +831,7 @@ async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     current_db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
-    entry: Generation,
+    entry_generation: Generation,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
 where
     F: Graftable,
@@ -956,7 +962,7 @@ where
     // The current layer reads the live bitmap and grafted tree throughout, so its root
     // is only exact if no apply landed during the merkleize span. A mover forces a
     // clean retry instead of a torn root.
-    if current_db.any.applied.generation() != entry {
+    if current_db.any.applied.generation() != entry_generation {
         return Err(Error::Stale(Stale));
     }
 

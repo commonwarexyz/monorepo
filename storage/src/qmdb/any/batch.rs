@@ -254,8 +254,8 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
         }
     }
 
-    /// The chain-base view: every batch in a chain reads and merkleizes as of the
-    /// generation the chain forked from the DB at.
+    /// The view this chain's reads resolve against; usually the fork-time capture. See
+    /// `UnmerkleizedBatch::read_view` for when it advances past the fork.
     fn view(&self) -> View<F, D> {
         match self {
             Self::Db { view, .. } => view.clone(),
@@ -458,13 +458,11 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Require the live state to be this chain's read view or on its own boundary
-    /// ladder: the committed boundary, the fork point, or an own ancestor's tip. The
-    /// ordered path's live scans (predecessor buckets, collision siblings) only make
-    /// sense against own-chain state, so anything else moving the state surfaces as
-    /// [`Stale`], never as a torn root. Commitments (size AND root) identify state, so
-    /// an equal-size foreign apply cannot pass. Sound without a joint lock: applies
-    /// take the database by value, so state cannot move while the caller holds `&db`.
+    /// [`UnmerkleizedBatch::require_on_ladder`], expressed on the collected chain: the
+    /// read view, the boundary, the fork point, or an own ancestor's tip. The ordered
+    /// path's live scans (predecessor buckets, collision siblings) only make sense
+    /// against own-chain state, so anything else moving the state surfaces as
+    /// [`Stale`], never as a torn root.
     fn require_live<E, C, I, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -770,7 +768,12 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
 
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` as of `view`,
 /// under a single read guard, returning the next `floor`.
-fn fill_candidates_at<F: Family, D: Digest, I, const N: usize>(
+fn fill_candidates_at<
+    F: Family,
+    D: Digest,
+    I: UnorderedIndex<Value = Location<F>>,
+    const N: usize,
+>(
     applied: &Applied<F, I, N>,
     view: &View<F, D>,
     floor: Location<F>,
@@ -959,8 +962,8 @@ where
     /// Gather existing-key locations for all keys in `mutations`.
     ///
     /// For each mutation key, checks the ancestor diffs first (returning the uncommitted
-    /// location for Active entries, skipping Deleted entries). Keys not in the ancestor diffs
-    /// fall back to the committed DB snapshot.
+    /// location for Active entries, skipping Deleted entries). Keys not in the ancestor
+    /// diffs resolve as of the chain's read view (and can fail [`Stale`]).
     ///
     /// When `include_active_collision_siblings` is true, Active entries also scan the snapshot
     /// bucket for collision siblings (other keys sharing the same translated-key bucket). The
@@ -1459,7 +1462,10 @@ where
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
+    fn into_parts(
+        self,
+        view: View<F, H::Digest>,
+    ) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
         let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut v = vec![Arc::clone(parent)];
             v.extend(parent.ancestors());
@@ -1473,7 +1479,7 @@ where
             db_state,
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
             base_active_keys: self.base.active_keys(),
-            view: self.base.view(),
+            view,
         };
         (self.mutations, m)
     }
@@ -1691,7 +1697,7 @@ where
     {
         let view = self.batch.read_view(db)?;
         let (batch, staged_updates, prefetched) = self
-            .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
+            .resolve_updates_prefetched(updates, upserts, db, &view, |floor, tip, limit, out| {
                 fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
             })
             .await?;
@@ -1731,6 +1737,7 @@ where
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        view: &View<F, H::Digest>,
         mut fill_candidates: impl FnMut(
             Location<F>,
             u64,
@@ -1781,7 +1788,6 @@ where
         // source, and the step bound, none of which depend on the resolution. The batch
         // moves into the job, so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
-        let view = self.batch.read_view(db)?;
         let resolve = db
             .strategy()
             .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
@@ -1936,7 +1942,8 @@ where
     /// boundary, the fork point, or an own ancestor's tip. The owner applying this
     /// chain's own ancestors moves the live state along exactly these commitments;
     /// commitments (size AND root) identify state, so an equal-size foreign apply
-    /// cannot pass.
+    /// cannot pass. Check-then-read is race-free: applies take the database by value,
+    /// so state cannot move while the caller holds `&db`.
     fn chain_ladder(&self, live: &Commitment<F, H::Digest>) -> bool {
         *live == self.base.boundary()
             || *live == self.base.base_state()
@@ -1950,10 +1957,8 @@ where
     /// The view reads resolve against: the chain-base capture normally, or a live view
     /// of the effective boundary when a committed prefix was dropped after applying
     /// (that state exists only live; own-ancestor diffs shadow every key touched past
-    /// it). The live mint is ladder-checked, so state moved by anything other than
-    /// this chain's own boundaries surfaces as [`Stale`], never as a torn read. Sound
-    /// without a joint lock: applies take the database by value, so state cannot move
-    /// while the caller holds `&db`.
+    /// it). The live mint is checked against [`Self::chain_ladder`], so foreign state
+    /// surfaces as [`Stale`], never as a torn read.
     pub(crate) fn read_view<E, C, I, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2227,9 +2232,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (mut mutations, mut m) = self.into_parts();
-        m.view = view;
-        let m = m;
+        let (mut mutations, m) = self.into_parts(view);
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false)?;
@@ -2452,9 +2455,9 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (mut mutations, mut m) = self.into_parts();
-        m.view = view;
-        let m = m;
+        let (mut mutations, m) = self.into_parts(view);
+        // The ordered path reads live index state (collision siblings, predecessor
+        // buckets); require own-chain state up front so it stales instead of tearing.
         m.require_live(db)?;
 
         // Resolve existing keys.
@@ -4681,7 +4684,10 @@ mod tests {
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
-            let (_mutations, merkleizer) = child.into_parts();
+            let (_mutations, merkleizer) = {
+                let view = child.base.view();
+                child.into_parts(view)
+            };
 
             let current_loc = merkleizer.base_state.size;
             let batch_ops = vec![Operation::Update(update::Unordered(

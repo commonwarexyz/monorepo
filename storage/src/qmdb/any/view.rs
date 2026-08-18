@@ -86,6 +86,7 @@ where
         view: &View<F, H::Digest>,
         key: &U::Key,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
+        self.metrics.lookups_requested.inc();
         let locs = match self.applied.resolve(view.generation, *view.size, key)? {
             Resolution::Exact(None) => return Ok(None),
             Resolution::Exact(Some(loc)) => vec![loc],
