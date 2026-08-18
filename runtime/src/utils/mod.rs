@@ -65,14 +65,28 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+/// Panic payload whose diagnostic was emitted before unwinding a task.
+#[derive(Debug)]
+struct ReportedPanic(&'static str);
+
+/// Resumes unwinding without invoking the process panic hook again.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+pub(crate) fn resume_reported_panic(message: &'static str) -> ! {
+    std::panic::resume_unwind(Box::new(ReportedPanic(message)))
+}
+
+/// Extracts a message from an arbitrary panic payload.
 pub(crate) fn extract_panic_message(err: &(dyn Any + Send)) -> String {
-    err.downcast_ref::<&str>().map_or_else(
-        || {
-            err.downcast_ref::<String>()
-                .map_or_else(|| format!("{err:?}"), |s| s.clone())
-        },
-        |s| s.to_string(),
-    )
+    match (
+        err.downcast_ref::<&str>(),
+        err.downcast_ref::<String>(),
+        err.downcast_ref::<ReportedPanic>(),
+    ) {
+        (Some(message), _, _) => (*message).to_string(),
+        (_, Some(message), _) => message.clone(),
+        (_, _, Some(reported)) => reported.0.to_string(),
+        _ => format!("{err:?}"),
+    }
 }
 
 /// Synchronization primitive that enables a thread to block until a waker delivers a signal.
@@ -122,7 +136,21 @@ impl ArcWake for Blocker {
 mod tests {
     use super::*;
     use futures::task::waker;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn reported_panic_is_classified_and_extracts_message() {
+        let reported = catch_unwind(AssertUnwindSafe(|| {
+            resume_reported_panic("reported panic");
+        }))
+        .expect_err("reported panic did not unwind");
+
+        assert!(reported.is::<ReportedPanic>());
+        assert_eq!(extract_panic_message(&*reported), "reported panic");
+    }
 
     #[test]
     fn test_blocker_waits_until_wake() {

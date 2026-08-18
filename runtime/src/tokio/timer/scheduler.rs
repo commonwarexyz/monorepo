@@ -1,0 +1,1146 @@
+//! Native sharded timer scheduler shared by the Linux and macOS backends.
+//!
+//! [`Builder`] installs a Tokio worker park callback before runtime startup.
+//! Each initial worker claims one shard, and construction waits for every claim
+//! before exposing the timer. It then constructs and probes every native alarm
+//! before starting one driver task per shard. Other threads cache a round-robin
+//! shard on their first timer registration.
+//!
+//! Runtime affinity is identified by the allocation of its shared [`Affinity`].
+//! Cached assignments retain a `Weak<Affinity>`. That weak reference keeps an
+//! old allocation reserved until the stale assignment is pruned, so allocation
+//! pointer reuse cannot alias a different runtime.
+//!
+//! ```text
+//! Timer --Arc--> Shard <---------------- Arc -- driver task
+//!                 |
+//!                 +-- NativeAlarm
+//!                 +-- DriverSignal
+//!                 +-- Mutex<ShardState> --> Heap --Arc--> Entry
+//!                                                    ^
+//!                                                    |
+//!                               RegisteredSleep --Arc+
+//!                                      |
+//!                                      +--Weak--> original Shard
+//! ```
+//!
+//! A nonzero sleep reads the shared platform monotonic clock before affinity
+//! selection, then eagerly registers on the selected shard. Selection work
+//! therefore cannot extend the requested duration. Immediate sleeps still
+//! consume Tokio cooperative budget. Wall deadlines are sampled once and then
+//! follow the same relative path.
+//!
+//! The shard mutex owns heap residency, lifecycle, and the deadline most
+//! recently confirmed at the native alarm. Native alarm mutations, readiness
+//! waits, and arbitrary waker code run outside that mutex. Producers update the
+//! heap and send a durable coalesced signal. The driver snapshots the desired
+//! minimum, performs the native operation without the lock, then relocks and
+//! repeats if a producer changed the minimum. A 50 nanosecond tolerance accepts
+//! an existing alarm that is only slightly later than a newly earlier minimum.
+//!
+//! Expiry removes at most 32 entries per lock acquisition and attempts `FIRED`
+//! before unlocking. A prior cancellation may already have won `QUIESCENT`.
+//! [`Batch`] invokes or releases wakers afterward and completes committed
+//! entries even if the driver is dropped. The driver yields after 512
+//! expirations only when more elapsed work remains.
+//!
+//! Each entry has one terminal transition from `WAITING` to `FIRED`,
+//! `QUIESCENT`, or `FAILED`. Each shard similarly moves from `Running` to either
+//! orderly `Stopped` or fatal `Failed`. Failure claims root interruption while
+//! holding the shard lock, then unlocks before publishing the diagnostic and
+//! waking failed sleepers. This preserves the infrastructure failure as the
+//! root cause without invoking callbacks under scheduler locks.
+
+#[cfg(target_os = "linux")]
+use super::linux::NativeAlarm;
+#[cfg(target_os = "macos")]
+use super::macos::NativeAlarm;
+use super::{
+    heap::Heap,
+    sync::{AtomicWaker, EntryArc, Mutex},
+};
+use crate::utils::{Panicker, extract_panic_message, resume_reported_panic};
+use commonware_macros::select;
+use futures::{FutureExt as _, future::Either};
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
+use std::{
+    any::Any,
+    cell::RefCell,
+    future::Future,
+    io,
+    panic::{AssertUnwindSafe, catch_unwind},
+    pin::Pin,
+    sync::{Arc, Weak, mpsc},
+    task::{Context, Poll, Waker},
+    time::{Duration, Instant, SystemTime},
+};
+use thiserror::Error;
+use tokio::runtime::{Builder as TokioBuilder, Runtime};
+
+/// Maximum difference covered by an already armed slightly later alarm.
+const REARM_TOLERANCE: Duration = Duration::from_nanos(50);
+
+/// Maximum number of expired entries removed under one heap lock.
+const WAKE_BATCH: usize = 32;
+
+/// Expired entries processed before yielding when more are ready.
+const EXPIRY_YIELD_BUDGET: usize = 512;
+
+/// Maximum time allowed for every initial Tokio worker to claim timer affinity.
+const WORKER_AFFINITY_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Entry state before its single terminal transition.
+const ENTRY_WAITING: u8 = 0;
+
+/// Entry state after its deadline expires.
+const ENTRY_FIRED: u8 = 1;
+
+/// Entry state after cancellation or orderly scheduler shutdown.
+const ENTRY_QUIESCENT: u8 = 2;
+
+/// Entry state after timer infrastructure fails.
+const ENTRY_FAILED: u8 = 3;
+
+/// Heap index used by entries that are not resident.
+pub(super) const NOT_IN_HEAP: usize = usize::MAX;
+
+thread_local! {
+    /// Cached assignments for every timer runtime used by this thread.
+    static THREAD_ASSIGNMENTS: RefCell<ThreadAssignments> = const {
+        RefCell::new(ThreadAssignments::new())
+    };
+}
+
+/// Absolute deadline in the platform monotonic clock domain.
+///
+/// This newtype distinguishes alarm and heap deadlines from relative
+/// [`Duration`] values while retaining their representation and ordering.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct Deadline(Duration);
+
+impl Deadline {
+    /// Constructs a deadline from a duration since the monotonic epoch.
+    pub(super) const fn from_duration(duration: Duration) -> Self {
+        Self(duration)
+    }
+
+    /// Returns the duration since the monotonic epoch.
+    pub(super) const fn as_duration(self) -> Duration {
+        self.0
+    }
+
+    /// Adds a duration without exceeding the platform alarm limit.
+    pub(super) fn saturating_add(self, duration: Duration, limit: Self) -> Self {
+        match self.0.checked_add(duration) {
+            Some(deadline) if deadline <= limit.0 => Self(deadline),
+            _ => limit,
+        }
+    }
+
+    /// Returns the nonnegative distance from an earlier deadline.
+    const fn saturating_duration_since(self, earlier: Self) -> Duration {
+        self.0.saturating_sub(earlier.0)
+    }
+}
+
+/// Platform monotonic clock and one-shot alarm owned by a scheduler shard.
+///
+/// Producers may call [`Alarm::now`] concurrently. One driver serializes
+/// arming, disarming, and waiting. [`Alarm::wait`] must be cancellation-safe
+/// because a producer signal may win while the readiness future is pending.
+pub(super) trait Alarm: Send + Sync + Sized + 'static {
+    /// Largest monotonic deadline that can be armed safely.
+    fn max_deadline(&self) -> Deadline;
+
+    /// Reads monotonic time without making a relative deadline early.
+    fn now(&self) -> io::Result<Deadline>;
+
+    /// Arms a one-shot alarm at an absolute monotonic deadline.
+    fn arm(&self, deadline: Deadline) -> io::Result<()>;
+
+    /// Disarms the alarm.
+    fn disarm(&self) -> io::Result<()>;
+
+    /// Waits for and fully consumes one readiness event.
+    fn wait(&self) -> impl Future<Output = io::Result<()>> + Send;
+}
+
+/// Bridges timer configuration before and after the Tokio runtime is built.
+pub(crate) struct Builder {
+    /// Shared allocator used by callbacks and the eventual scheduler.
+    affinity: Arc<Affinity>,
+    /// One notification for every initial worker affinity claim.
+    worker_claimed: mpsc::Receiver<()>,
+}
+
+impl Builder {
+    /// Allocates shard affinity and installs its worker callback before runtime startup.
+    pub(crate) fn install(runtime_builder: &mut TokioBuilder, worker_threads: usize) -> Self {
+        let affinity = Arc::new(Affinity {
+            worker_threads,
+            next_worker: AtomicUsize::new(0),
+            next_fallback: AtomicUsize::new(0),
+        });
+        let callback_affinity = Arc::clone(&affinity);
+        let (worker_claimed_sender, worker_claimed) = mpsc::channel();
+        runtime_builder.on_thread_park(move || {
+            if callback_affinity.claim_worker() {
+                let _ = worker_claimed_sender.send(());
+            }
+        });
+        Self {
+            affinity,
+            worker_claimed,
+        }
+    }
+
+    /// Enters the built runtime, validates every shard, and starts its drivers.
+    pub(crate) fn build(self, runtime: &Runtime, panicker: Panicker) -> Timer {
+        // Tokio queues every initial worker before returning its runtime. No
+        // Commonware task can create a block_in_place replacement before this
+        // method, so finish original worker claims before exposing the timer.
+        let deadline = Instant::now() + WORKER_AFFINITY_START_TIMEOUT;
+        for claimed in 0..self.affinity.worker_threads {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            self.worker_claimed
+                .recv_timeout(remaining)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to initialize timer worker affinity after {claimed} of {} claims \
+                         within {WORKER_AFFINITY_START_TIMEOUT:?}: {error}",
+                        self.affinity.worker_threads
+                    )
+                });
+        }
+
+        // AsyncFd registration requires the reactor selected by this builder.
+        let _guard = runtime.enter();
+
+        // Construct and validate every shard before starting any driver. If one
+        // operation panics, unwinding drops its alarm and all prior shards.
+        let mut shards = Vec::with_capacity(self.affinity.worker_threads);
+        for index in 0..self.affinity.worker_threads {
+            let shard = Arc::new(Shard::new(index, NativeAlarm::new(), panicker.clone()));
+
+            // Fail during runtime startup rather than the first user timer.
+            shard.alarm.now().unwrap_or_else(|error| {
+                panic!(
+                    "failed to initialize timer shard {index} during read monotonic clock: {error}"
+                )
+            });
+            shard.alarm.arm(shard.max_deadline).unwrap_or_else(|error| {
+                panic!("failed to initialize timer shard {index} during initial arm: {error}")
+            });
+            shard.alarm.disarm().unwrap_or_else(|error| {
+                panic!("failed to initialize timer shard {index} during initial disarm: {error}")
+            });
+
+            shards.push(shard);
+        }
+
+        for shard in &shards {
+            runtime.spawn(run_driver(Arc::clone(shard)));
+        }
+
+        Timer {
+            shards,
+            affinity: self.affinity,
+        }
+    }
+}
+
+/// Runtime-owned facade for the native timer scheduler.
+///
+/// Dropping the facade stops every shard before the owning Tokio runtime tears
+/// down its reactor.
+pub(crate) struct Timer {
+    /// Shards selected by worker or cached fallback affinity.
+    shards: Vec<Arc<Shard<NativeAlarm>>>,
+    /// Per-runtime shard selection state.
+    affinity: Arc<Affinity>,
+}
+
+impl Timer {
+    /// Eagerly registers a sleep measured from this method call.
+    pub(crate) fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        if duration.is_zero() {
+            Either::Left(tokio::task::coop::consume_budget())
+        } else {
+            Either::Right(register_relative(&self.shards, duration, || {
+                self.affinity.select()
+            }))
+        }
+    }
+
+    /// Eagerly converts one wall-clock deadline and registers its sleep.
+    pub(crate) fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let remaining = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default();
+        self.sleep(remaining)
+    }
+}
+
+/// Captures a relative deadline before selecting its registration shard.
+fn register_relative<A: Alarm>(
+    shards: &[Arc<Shard<A>>],
+    duration: Duration,
+    select: impl FnOnce() -> usize,
+) -> RegisteredSleep<A> {
+    // All native shards share one platform monotonic clock, so any shard can
+    // establish the deadline before affinity work consumes part of the delay.
+    let now = shards
+        .first()
+        .expect("timer scheduler must contain at least one shard")
+        .alarm
+        .now();
+    let index = select();
+    shards[index].register(now, duration)
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        for shard in &self.shards {
+            shard.stop();
+        }
+    }
+}
+
+/// Future-side owner of an eagerly registered timer entry.
+///
+/// Dropping the future cancels against its construction-time shard without
+/// keeping that shard or its native alarm alive.
+struct RegisteredSleep<A: Alarm> {
+    /// Non-owning reference to the shard selected at construction.
+    shard: Weak<Shard<A>>,
+    /// Heap entry shared with the driver.
+    entry: EntryArc<Entry>,
+}
+
+impl<A: Alarm> Future for RegisteredSleep<A> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let coop = std::task::ready!(tokio::task::coop::poll_proceed(context));
+        self.entry.poll(context).map(|()| coop.made_progress())
+    }
+}
+
+impl<A: Alarm> Drop for RegisteredSleep<A> {
+    fn drop(&mut self) {
+        if self.entry.transition(ENTRY_QUIESCENT) {
+            // Task migration cannot change the shard that owns this entry.
+            if let Some(shard) = self.shard.upgrade() {
+                shard.cancel(&self.entry);
+            }
+        }
+    }
+}
+
+/// Shared timer entry with exactly one terminal lifecycle transition.
+///
+/// The future, heap, and driver may own the entry concurrently. Its state moves
+/// once from waiting to fired, quiescent, or failed.
+pub(super) struct Entry {
+    /// Waiting or terminal lifecycle state.
+    state: AtomicU8,
+    /// Latest task waker registered by the future.
+    waker: AtomicWaker,
+    /// Exact heap array index or [`NOT_IN_HEAP`].
+    pub(super) heap_index: AtomicUsize,
+}
+
+impl Entry {
+    /// Creates one unregistered waiting entry.
+    ///
+    /// Loom's modeled atomic waker constructor is not const.
+    #[allow(clippy::missing_const_for_fn)]
+    pub(super) fn new() -> Self {
+        Self {
+            state: AtomicU8::new(ENTRY_WAITING),
+            waker: AtomicWaker::new(),
+            heap_index: AtomicUsize::new(NOT_IN_HEAP),
+        }
+    }
+
+    /// Polls the terminal state while closing the registration race.
+    fn poll(&self, context: &mut Context<'_>) -> Poll<()> {
+        // Acquire observes the terminal transition before returning its outcome.
+        match self.state.load(AtomicOrdering::Acquire) {
+            ENTRY_FIRED => return Poll::Ready(()),
+            ENTRY_FAILED => resume_reported_panic("high-resolution timer scheduler failed"),
+            ENTRY_QUIESCENT => return Poll::Pending,
+            _ => {}
+        }
+
+        self.waker.register(context.waker());
+
+        // Completion may race with waker registration, so state is checked twice.
+        // Acquire again pairs with the terminal transition that may have just won.
+        match self.state.load(AtomicOrdering::Acquire) {
+            ENTRY_FIRED => {
+                self.waker.take();
+                Poll::Ready(())
+            }
+            ENTRY_FAILED => {
+                self.waker.take();
+                resume_reported_panic("high-resolution timer scheduler failed");
+            }
+            ENTRY_QUIESCENT => {
+                self.waker.take();
+                Poll::Pending
+            }
+            _ => Poll::Pending,
+        }
+    }
+
+    /// Attempts the single transition from waiting to a terminal state.
+    fn transition(&self, terminal: u8) -> bool {
+        // AcqRel arbitrates one winner and publishes its preceding completion work.
+        self.state
+            .compare_exchange(
+                ENTRY_WAITING,
+                terminal,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Takes the currently registered waker after a successful transition.
+    fn take_waker(&self) -> Option<Waker> {
+        self.waker.take()
+    }
+}
+
+/// One independently locked timer heap and its serialized native-alarm driver.
+///
+/// Producers register and cancel through [`Shard::state`]. The driver performs
+/// alarm operations and invokes entry wakers only after releasing that lock.
+struct Shard<A: Alarm> {
+    /// Zero-based diagnostic index.
+    index: usize,
+    /// Platform clock shared with producers and alarm serialized by the driver.
+    alarm: A,
+    /// Largest deadline accepted by this shard's platform alarm.
+    max_deadline: Deadline,
+    /// Coalesced producer-to-driver notification.
+    signal: DriverSignal,
+    /// Authoritative heap and lifecycle state.
+    state: Mutex<ShardState>,
+    /// Root runtime panic propagation handle.
+    panicker: Panicker,
+}
+
+impl<A: Alarm> Shard<A> {
+    /// Creates an empty running shard and caches its platform deadline limit.
+    fn new(index: usize, alarm: A, panicker: Panicker) -> Self {
+        let max_deadline = alarm.max_deadline();
+        Self {
+            index,
+            alarm,
+            max_deadline,
+            signal: DriverSignal::new(),
+            state: Mutex::new(ShardState::new()),
+            panicker,
+        }
+    }
+
+    /// Eagerly registers a relative sleep from a prior monotonic observation.
+    fn register(
+        self: &Arc<Self>,
+        now: io::Result<Deadline>,
+        duration: Duration,
+    ) -> RegisteredSleep<A> {
+        let entry = EntryArc::new(Entry::new());
+        let deadline = match now {
+            Ok(now) => now.saturating_add(duration, self.max_deadline),
+            Err(error) => {
+                // This entry is not heap-resident, so fail it directly before shard cleanup.
+                // Release publishes failure before the returned future can be polled.
+                entry.state.store(ENTRY_FAILED, AtomicOrdering::Release);
+                self.fail(DriverFailure::io(
+                    "read monotonic clock during registration",
+                    error,
+                ));
+                return RegisteredSleep {
+                    shard: Arc::downgrade(self),
+                    entry,
+                };
+            }
+        };
+        let notify = {
+            let mut state = self.state.lock();
+            match state.lifecycle {
+                ShardLifecycle::Stopped => {
+                    // Release makes orderly teardown visible to a later future poll.
+                    entry.state.store(ENTRY_QUIESCENT, AtomicOrdering::Release);
+                    false
+                }
+                ShardLifecycle::Failed => {
+                    // Release makes fatal teardown visible to a later future poll.
+                    entry.state.store(ENTRY_FAILED, AtomicOrdering::Release);
+                    false
+                }
+                ShardLifecycle::Running => {
+                    let previous = state.entries.peek();
+                    state.entries.push(deadline, EntryArc::clone(&entry));
+                    let desired = state.entries.peek();
+                    previous != desired && !arm_covers(state.armed_deadline, desired)
+                }
+            }
+        };
+        if notify {
+            // The heap carries the payload, so the signal only requests recomputation.
+            self.signal.notify();
+        }
+        RegisteredSleep {
+            shard: Arc::downgrade(self),
+            entry,
+        }
+    }
+
+    /// Removes a canceled entry from its original shard immediately.
+    fn cancel(&self, entry: &EntryArc<Entry>) {
+        let notify = {
+            let mut state = self.state.lock();
+            let index = entry.heap_index.load(AtomicOrdering::Relaxed);
+            if index == NOT_IN_HEAP {
+                return;
+            }
+            let previous = state.entries.peek();
+            assert!(
+                state.entries.remove(index, entry),
+                "timer heap index does not reference its entry"
+            );
+            let desired = state.entries.peek();
+            previous != desired && !arm_covers(state.armed_deadline, desired)
+        };
+        if notify {
+            self.signal.notify();
+        }
+    }
+
+    /// Converges the native alarm on the latest desired minimum.
+    fn rearm(&self) -> Result<(), DriverFailure> {
+        loop {
+            let (armed, desired, stopped) = {
+                let state = self.state.lock();
+                (
+                    state.armed_deadline,
+                    state.entries.peek(),
+                    state.lifecycle != ShardLifecycle::Running,
+                )
+            };
+            if stopped || arm_covers(armed, desired) {
+                return Ok(());
+            }
+
+            // Native operations stay outside the heap mutex so producers progress.
+            match desired {
+                Some(deadline) => self
+                    .alarm
+                    .arm(deadline)
+                    .map_err(|error| DriverFailure::io("arm native alarm", error))?,
+                None => self
+                    .alarm
+                    .disarm()
+                    .map_err(|error| DriverFailure::io("disarm native alarm", error))?,
+            }
+
+            let mut state = self.state.lock();
+            if state.lifecycle != ShardLifecycle::Running {
+                drop(state);
+                let _ = self.alarm.disarm();
+                return Ok(());
+            }
+            state.armed_deadline = desired;
+            let current = state.entries.peek();
+            if arm_covers(state.armed_deadline, current) {
+                return Ok(());
+            }
+            // A producer changed the minimum during the syscall, so converge again.
+        }
+    }
+
+    /// Pops one bounded batch of entries whose deadlines have elapsed.
+    fn take_expired(&self, batch: &mut Batch) -> Result<bool, DriverFailure> {
+        let now = self
+            .alarm
+            .now()
+            .map_err(|error| DriverFailure::io("read monotonic clock during expiry", error))?;
+        let mut state = self.state.lock();
+        assert!(
+            batch.entries.is_empty(),
+            "timer driver started a batch before completing the previous batch"
+        );
+        // Consumed one-shot readiness makes the prior armed deadline non-authoritative.
+        state.armed_deadline = None;
+        while batch.entries.len() < WAKE_BATCH
+            && state.entries.peek().is_some_and(|deadline| deadline <= now)
+        {
+            let entry = state.entries.pop().expect("timer heap minimum disappeared");
+            // Attempt expiry while heap removal is still serialized. A prior
+            // cancellation may already have won QUIESCENT, but cannot mutate
+            // the heap concurrently. Callbacks and final release stay deferred.
+            let _ = entry.transition(ENTRY_FIRED);
+            batch.entries.push(entry);
+        }
+        Ok(state.entries.peek().is_some_and(|deadline| deadline <= now))
+    }
+
+    /// Marks orderly teardown and releases every queued sleep without waking it.
+    fn stop(&self) {
+        let pending = {
+            let mut state = self.state.lock();
+            if state.lifecycle != ShardLifecycle::Running {
+                return;
+            }
+            state.lifecycle = ShardLifecycle::Stopped;
+            state.armed_deadline = None;
+            drain_heap(&mut state.entries)
+        };
+        complete_entries(pending, ENTRY_QUIESCENT);
+        self.signal.notify();
+    }
+
+    /// Captures failure state, drains the heap, and interrupts the root runtime.
+    fn fail(&self, failure: DriverFailure) {
+        let (queued, desired, armed, notified, notification, pending) = {
+            let mut state = self.state.lock();
+            if state.lifecycle != ShardLifecycle::Running {
+                return;
+            }
+            let queued = state.entries.len();
+            let desired = state.entries.peek();
+            let armed = state.armed_deadline;
+            let notified = self.signal.is_notified();
+            state.lifecycle = ShardLifecycle::Failed;
+            state.armed_deadline = None;
+            let pending = drain_heap(&mut state.entries);
+            // Claim root interruption while the shard lock prevents a newly
+            // failed sleep from racing this more detailed payload.
+            let notification = self.panicker.claim_fatal();
+            (queued, desired, armed, notified, notification, pending)
+        };
+
+        // The root receiver may invoke its waker synchronously, so publish only
+        // after releasing the shard lock and before waking failed sleepers.
+        if let Some(notification) = notification {
+            let message = format!(
+                "timer shard {} failed during {}: {}. snapshot=ShardSnapshot {{ queued: \
+                 {queued}, desired: {desired:?}, armed: {armed:?}, notified: {notified} }}",
+                self.index,
+                failure.operation(),
+                failure,
+            );
+            notification.notify(Box::new(message));
+        }
+
+        // Every failed shard emits its own actionable diagnostic, even when
+        // another panic already claimed or closed root interruption.
+        tracing::error!(
+            shard = self.index,
+            operation = failure.operation(),
+            error = %failure,
+            error_kind = ?failure.error_kind(),
+            raw_os_error = ?failure.raw_os_error(),
+            queued,
+            ?desired,
+            ?armed,
+            notified,
+            "timer infrastructure failed"
+        );
+        complete_entries(pending, ENTRY_FAILED);
+        self.signal.notify();
+    }
+
+    /// Returns whether normal driver work has ended.
+    fn is_terminal(&self) -> bool {
+        self.state.lock().lifecycle != ShardLifecycle::Running
+    }
+}
+
+/// Operating state for one timer shard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShardLifecycle {
+    /// Driver and producers may perform ordinary timer work.
+    Running,
+    /// The owning runtime is shutting down normally.
+    Stopped,
+    /// Native timer infrastructure failed while the runtime was live.
+    Failed,
+}
+
+/// Heap, confirmed native arm, and lifecycle serialized by one shard mutex.
+struct ShardState {
+    /// Indexed 4-ary minimum heap.
+    entries: Heap,
+    /// Deadline most recently confirmed armed by the driver.
+    armed_deadline: Option<Deadline>,
+    /// Whether the shard is running, stopped normally, or failed.
+    lifecycle: ShardLifecycle,
+}
+
+impl ShardState {
+    /// Creates empty running shard state.
+    fn new() -> Self {
+        Self {
+            entries: Heap::default(),
+            armed_deadline: None,
+            lifecycle: ShardLifecycle::Running,
+        }
+    }
+}
+
+/// Fatal error returned by a shard driver.
+#[derive(Debug, Error)]
+enum DriverFailure {
+    /// Operating-system or reactor failure with stable operation context.
+    #[error("{error}")]
+    Io {
+        /// Operation active when the error occurred.
+        operation: &'static str,
+        /// Original error retained for structured diagnostics.
+        #[source]
+        error: io::Error,
+    },
+    /// Panic caught at the driver containment boundary.
+    #[error("{message}")]
+    Panic {
+        /// Stable text extracted from the panic payload.
+        message: String,
+    },
+}
+
+impl DriverFailure {
+    /// Wraps an I/O error with stable operation context.
+    const fn io(operation: &'static str, error: io::Error) -> Self {
+        Self::Io { operation, error }
+    }
+
+    /// Wraps an unwinding panic as a driver failure.
+    fn panic(panic: &(dyn Any + Send)) -> Self {
+        Self::Panic {
+            message: extract_panic_message(panic),
+        }
+    }
+
+    /// Returns the operation active when the failure occurred.
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Io { operation, .. } => operation,
+            Self::Panic { .. } => "driver panic",
+        }
+    }
+
+    /// Returns the structured I/O error kind when this failure came from I/O.
+    fn error_kind(&self) -> Option<io::ErrorKind> {
+        match self {
+            Self::Io { error, .. } => Some(error.kind()),
+            Self::Panic { .. } => None,
+        }
+    }
+
+    /// Returns the raw operating-system error code when one is available.
+    fn raw_os_error(&self) -> Option<i32> {
+        match self {
+            Self::Io { error, .. } => error.raw_os_error(),
+            Self::Panic { .. } => None,
+        }
+    }
+}
+
+/// Driver-owned expirations removed from the heap but awaiting callbacks.
+///
+/// Dropping the batch completes expirations already committed under the shard
+/// lock, including when the driver is aborted or unwinds.
+struct Batch {
+    /// Entries removed from the heap but not yet fully completed.
+    entries: Vec<EntryArc<Entry>>,
+}
+
+impl Batch {
+    /// Allocates one reusable batch with the fixed lock-batch capacity.
+    fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(WAKE_BATCH),
+        }
+    }
+
+    /// Completes every entry and invokes all callbacks outside the heap lock.
+    fn complete(&mut self, terminal: u8) -> Option<Box<dyn Any + Send>> {
+        let mut first_panic = None;
+        for entry in self.entries.drain(..) {
+            // Waking or releasing the final user waker may unwind.
+            let completion = catch_unwind(AssertUnwindSafe(move || {
+                // Expiry attempts FIRED while popping under the shard lock.
+                // Other lifecycle paths transition their drained entries here.
+                if (entry.state.load(AtomicOrdering::Acquire) == terminal
+                    || entry.transition(terminal))
+                    && let Some(waker) = entry.take_waker()
+                {
+                    if terminal == ENTRY_QUIESCENT {
+                        drop(waker);
+                    } else {
+                        waker.wake();
+                    }
+                }
+                drop(entry);
+            }));
+            if let Err(panic) = completion
+                && first_panic.is_none()
+            {
+                first_panic = Some(panic);
+            }
+        }
+        first_panic
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        // Abortion or unwind still delivers expiry committed during heap removal.
+        let _ = self.complete(ENTRY_FIRED);
+    }
+}
+
+/// Runs fallible alarm and signal handling with wrapper-owned completion state.
+async fn run_driver_loop<A: Alarm>(
+    shard: &Arc<Shard<A>>,
+    batch: &mut Batch,
+) -> Result<(), DriverFailure> {
+    shard.rearm()?;
+    loop {
+        if shard.is_terminal() {
+            return Ok(());
+        }
+        select! {
+            result = shard.alarm.wait() => {
+                result.map_err(|error| DriverFailure::io("wait for native alarm", error))?;
+                let mut processed = 0_usize;
+                loop {
+                    let more = shard.take_expired(batch)?;
+                    processed = processed.saturating_add(batch.entries.len());
+                    // Callbacks run after take_expired releases the shard mutex.
+                    if let Some(panic) = batch.complete(ENTRY_FIRED) {
+                        return Err(DriverFailure::panic(&*panic));
+                    }
+                    if !more {
+                        break;
+                    }
+                    if processed >= EXPIRY_YIELD_BUDGET {
+                        processed = 0;
+                        tokio::task::yield_now().await;
+                    }
+                }
+                shard.rearm()?;
+            },
+            _ = shard.signal.wait() => {
+                shard.rearm()?;
+            },
+        }
+    }
+}
+
+/// Catches driver failure and publishes it before completion storage is dropped.
+async fn run_driver<A: Alarm>(shard: Arc<Shard<A>>) {
+    let mut batch = Batch::new();
+    let outcome = AssertUnwindSafe(run_driver_loop(&shard, &mut batch))
+        .catch_unwind()
+        .await;
+    let failure = match outcome {
+        Ok(Ok(())) => return,
+        Ok(Err(failure)) => failure,
+        Err(panic) => DriverFailure::panic(&*panic),
+    };
+    shard.fail(failure);
+}
+
+/// Single-consumer, multi-producer signal for shard recomputation.
+///
+/// Notifications are durable and coalescing because the heap carries the
+/// desired alarm state.
+struct DriverSignal {
+    /// Whether at least one notification remains unconsumed.
+    notified: AtomicBool,
+    /// Driver waker for the single waiting task.
+    waker: AtomicWaker,
+}
+
+impl DriverSignal {
+    /// Creates an unnotified signal.
+    ///
+    /// Loom's modeled atomic waker constructor is not const.
+    #[allow(clippy::missing_const_for_fn)]
+    fn new() -> Self {
+        Self {
+            notified: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        }
+    }
+
+    /// Latches a notification and wakes only on the false-to-true edge.
+    fn notify(&self) {
+        // Release publishes heap changes before the driver's acquire consume.
+        if !self.notified.swap(true, AtomicOrdering::Release) {
+            self.waker.wake();
+        }
+    }
+
+    /// Waits with a consume-register-consume protocol that cannot lose a wake.
+    async fn wait(&self) {
+        futures::future::poll_fn(|context| {
+            if self.notified.swap(false, AtomicOrdering::AcqRel) {
+                self.waker.take();
+                return Poll::Ready(());
+            }
+            self.waker.register(context.waker());
+            if self.notified.swap(false, AtomicOrdering::AcqRel) {
+                self.waker.take();
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Reports whether a notification is currently latched.
+    fn is_notified(&self) -> bool {
+        self.notified.load(AtomicOrdering::Acquire)
+    }
+}
+
+/// Cached shard selection keyed by one runtime's affinity allocation.
+#[derive(Debug)]
+struct ThreadAssignment {
+    /// Weak ownership and allocation identity of the runtime affinity.
+    affinity: Weak<Affinity>,
+    /// Selected shard index.
+    index: usize,
+}
+
+impl ThreadAssignment {
+    /// Returns whether this assignment belongs to `affinity`.
+    fn belongs_to(&self, affinity: &Arc<Affinity>) -> bool {
+        std::ptr::eq(self.affinity.as_ptr(), Arc::as_ptr(affinity))
+    }
+
+    /// Returns whether the runtime that owns this assignment is still alive.
+    fn is_live(&self) -> bool {
+        self.affinity.strong_count() != 0
+    }
+}
+
+/// Per-thread assignments with a direct path for the most recent runtime.
+struct ThreadAssignments {
+    /// Assignment for the runtime used most recently on this thread.
+    current: Option<ThreadAssignment>,
+    /// Preserved assignments for other runtimes used by this thread.
+    inactive: Vec<ThreadAssignment>,
+}
+
+impl ThreadAssignments {
+    /// Creates an empty per-thread assignment cache.
+    const fn new() -> Self {
+        Self {
+            current: None,
+            inactive: Vec::new(),
+        }
+    }
+
+    /// Makes a cached runtime current and returns its assignment.
+    fn activate(&mut self, affinity: &Arc<Affinity>) -> Option<usize> {
+        if let Some(current) = self.current.as_ref()
+            && current.belongs_to(affinity)
+        {
+            return Some(current.index);
+        }
+        // Cache misses are already the cold path, so retire assignments whose
+        // runtimes have ended before searching the inactive set.
+        self.inactive.retain(ThreadAssignment::is_live);
+        let position = self
+            .inactive
+            .iter()
+            .position(|assignment| assignment.belongs_to(affinity))?;
+        let assignment = self.inactive.swap_remove(position);
+        let index = assignment.index;
+        if let Some(previous) = self.current.replace(assignment)
+            && previous.is_live()
+        {
+            self.inactive.push(previous);
+        }
+        Some(index)
+    }
+
+    /// Installs a new assignment as the fast-path runtime.
+    fn install(&mut self, affinity: &Arc<Affinity>, index: usize) {
+        let assignment = ThreadAssignment {
+            affinity: Arc::downgrade(affinity),
+            index,
+        };
+        if let Some(previous) = self.current.replace(assignment)
+            && !previous.belongs_to(affinity)
+            && previous.is_live()
+        {
+            self.inactive.push(previous);
+        }
+    }
+}
+
+/// Per-runtime shard allocation state and thread-cache identity.
+///
+/// Initial Tokio workers and fallback callers use separate allocators so a
+/// fallback selection cannot consume an initial worker assignment.
+struct Affinity {
+    /// Number of native timer shards.
+    worker_threads: usize,
+    /// Allocator exhausted by initial worker park callbacks during startup.
+    next_worker: AtomicUsize,
+    /// Allocator consumed only on uncached fallback lookup.
+    next_fallback: AtomicUsize,
+}
+
+impl Affinity {
+    /// Selects a cached shard or creates a fallback assignment.
+    fn select(self: &Arc<Self>) -> usize {
+        THREAD_ASSIGNMENTS.with(|assignments| {
+            let mut assignments = assignments.borrow_mut();
+            if let Some(index) = assignments.activate(self) {
+                return index;
+            }
+            // Relaxed ordering is sufficient because this counter allocates unique claims only.
+            let index =
+                self.next_fallback.fetch_add(1, AtomicOrdering::Relaxed) % self.worker_threads;
+            assignments.install(self, index);
+            index
+        })
+    }
+
+    /// Claims one unique shard for an initial Tokio worker.
+    ///
+    /// Returns whether this callback claimed a new worker slot.
+    fn claim_worker(self: &Arc<Self>) -> bool {
+        // After startup, replacement workers need no assignment until they
+        // actually register a timer through `select`.
+        if self.next_worker.load(AtomicOrdering::Relaxed) >= self.worker_threads {
+            return false;
+        }
+        THREAD_ASSIGNMENTS.with(|assignments| {
+            let mut assignments = assignments.borrow_mut();
+            if assignments.activate(self).is_some() {
+                // Before Timer exposure, only an earlier initial-worker claim
+                // can have installed this runtime's assignment on this thread.
+                return false;
+            }
+
+            // Initial workers exhaust every slot before timer construction returns.
+            // Relaxed ordering is sufficient because this counter allocates
+            // unique claims only.
+            //
+            // Loom's atomic implementation does not provide `try_update`.
+            #[allow(deprecated)]
+            let Ok(index) = self.next_worker.fetch_update(
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+                |next| {
+                    if next < self.worker_threads {
+                        Some(next + 1)
+                    } else {
+                        None
+                    }
+                },
+            ) else {
+                return false;
+            };
+            assignments.install(self, index);
+            true
+        })
+    }
+}
+
+/// Returns whether an existing alarm safely covers the current desired state.
+fn arm_covers(armed: Option<Deadline>, desired: Option<Deadline>) -> bool {
+    match (armed, desired) {
+        (None, None) => true,
+        (Some(armed), Some(desired)) if armed == desired => true,
+        (Some(armed), Some(desired)) if desired < armed => {
+            armed.saturating_duration_since(desired) <= REARM_TOLERANCE
+        }
+        _ => false,
+    }
+}
+
+/// Removes every heap item and returns its shared entry.
+fn drain_heap(heap: &mut Heap) -> Vec<EntryArc<Entry>> {
+    let mut entries = Vec::with_capacity(heap.len());
+    while let Some(entry) = heap.pop() {
+        entries.push(entry);
+    }
+    entries
+}
+
+/// Transitions entries and contains each individual callback unwind.
+fn complete_entries(entries: Vec<EntryArc<Entry>>, terminal: u8) {
+    let mut batch = Batch { entries };
+    let _ = batch.complete(terminal);
+}
+
+/// Observations shared by scheduler and runtime tests.
+#[cfg(all(test, not(feature = "loom")))]
+pub(super) mod test_helpers {
+    use super::{Affinity, THREAD_ASSIGNMENTS, ThreadAssignments, Timer};
+    use std::sync::{Arc, atomic::Ordering};
+
+    /// Returns the current resident entry count for every shard.
+    pub(crate) fn heap_lengths(timer: &Timer) -> Vec<usize> {
+        timer
+            .shards
+            .iter()
+            .map(|shard| shard.state.lock().entries.len())
+            .collect()
+    }
+
+    /// Returns the worker and fallback allocator claim counts.
+    pub(crate) fn allocator_claims(timer: &Timer) -> (usize, usize) {
+        (
+            timer.affinity.next_worker.load(Ordering::Relaxed),
+            timer.affinity.next_fallback.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Returns this runtime's assignment cached on the current thread.
+    pub(crate) fn current_assignment(timer: &Timer) -> Option<usize> {
+        THREAD_ASSIGNMENTS.with(|assignments| assignment(&assignments.borrow(), &timer.affinity))
+    }
+
+    /// Returns a cached assignment without changing the fast-path runtime.
+    pub(super) fn assignment(
+        assignments: &ThreadAssignments,
+        affinity: &Arc<Affinity>,
+    ) -> Option<usize> {
+        assignments
+            .current
+            .as_ref()
+            .filter(|assignment| assignment.belongs_to(affinity))
+            .or_else(|| {
+                assignments
+                    .inactive
+                    .iter()
+                    .find(|assignment| assignment.belongs_to(affinity))
+            })
+            .map(|assignment| assignment.index)
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests;
+#[cfg(all(test, not(feature = "loom")))]
+mod tests;

@@ -1,7 +1,7 @@
 use crate::{
     Error,
     telemetry::metrics::raw::Gauge,
-    utils::{extract_panic_message, supervision::Tree},
+    utils::{ReportedPanic, extract_panic_message, supervision::Tree},
 };
 use commonware_utils::{
     channel::oneshot,
@@ -9,8 +9,7 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _,
-    future::{Either, poll_fn, select},
-    pin_mut,
+    future::poll_fn,
     stream::{AbortHandle, Abortable, Aborted},
 };
 use std::{
@@ -333,6 +332,16 @@ impl MetricHandle {
 /// A panic emitted by a spawned task.
 pub type Panic = Box<dyn Any + Send + 'static>;
 
+/// A claimed root-interruption sender that can publish without holding [`Panicker`]'s lock.
+pub(crate) struct PanicNotification(oneshot::Sender<Panic>);
+
+impl PanicNotification {
+    /// Publishes the claimed panic if root interruption is still open.
+    pub(crate) fn notify(self, panic: Panic) {
+        let _ = self.0.send(panic);
+    }
+}
+
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.
 #[derive(Clone)]
 pub(crate) struct Panicker {
@@ -344,11 +353,12 @@ impl Panicker {
     /// Creates a new [Panicker].
     pub(crate) fn new(catch: bool) -> (Self, Panicked) {
         let (sender, receiver) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         let panicker = Self {
             catch,
-            sender: Arc::new(Mutex::new(Some(sender))),
+            sender: Arc::clone(&sender),
         };
-        let panicked = Panicked { receiver };
+        let panicked = Panicked { receiver, sender };
         (panicker, panicked)
     }
 
@@ -360,29 +370,45 @@ impl Panicker {
 
     /// Notifies the [Panicker] that a panic has occurred.
     pub(crate) fn notify(&self, panic: Box<dyn Any + Send + 'static>) {
-        // Log the panic
-        let err = extract_panic_message(&*panic);
-        error!(?err, "task panicked");
+        // Infrastructure failures emit richer diagnostics before their waiters unwind.
+        if !panic.is::<ReportedPanic>() {
+            let err = extract_panic_message(&*panic);
+            error!(?err, "task panicked");
+        }
 
         // If we are catching panics, just return
         if self.catch {
             return;
         }
 
-        // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
+        self.send(panic);
+    }
+
+    /// Claims root interruption for an infrastructure failure regardless of panic policy.
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
+    pub(crate) fn claim_fatal(&self) -> Option<PanicNotification> {
+        self.claim()
+    }
+
+    /// Sends the first root-interrupting panic and ignores later failures.
+    fn send(&self, panic: Box<dyn Any + Send + 'static>) {
+        let Some(notification) = self.claim() else {
             return;
         };
+        notification.notify(panic);
+    }
 
-        // Send the panic
-        let _ = sender.send(panic);
+    /// Claims the first root-interrupting notification.
+    fn claim(&self) -> Option<PanicNotification> {
+        let sender = self.sender.lock().take();
+        sender.map(PanicNotification)
     }
 }
 
 /// A handle that will be notified when a panic occurs.
 pub(crate) struct Panicked {
     receiver: oneshot::Receiver<Panic>,
+    sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
 }
 
 impl Panicked {
@@ -391,25 +417,51 @@ impl Panicked {
     where
         Fut: Future,
     {
-        // Wait for task to complete or panic
-        let panicked = self.receiver;
-        pin_mut!(panicked);
-        pin_mut!(task);
-        match select(panicked, task).await {
-            Either::Left((panic, task)) => match panic {
-                // If there is a panic, resume the unwind
-                Ok(panic) => {
-                    resume_unwind(panic);
+        // Capture root-task panics long enough to arbitrate them against a
+        // detailed infrastructure failure published during the same poll.
+        let Self { receiver, sender } = self;
+        let mut panicked = std::pin::pin!(receiver);
+        let mut task = std::pin::pin!(AssertUnwindSafe(task).catch_unwind());
+        let mut task_result = None;
+        let mut interruption_open = true;
+        poll_fn(|context| {
+            // Give an already-published panic priority over polling the task.
+            if interruption_open {
+                match panicked.as_mut().poll(context) {
+                    Poll::Ready(Ok(panic)) => resume_unwind(panic),
+                    Poll::Ready(Err(_)) => interruption_open = false,
+                    Poll::Pending => {}
                 }
-                // If there can never be a panic (oneshot is closed), wait for the task to complete
-                // and return the output
-                Err(_) => task.await,
-            },
-            Either::Right((output, _)) => {
-                // Return the output
-                output
             }
-        }
+
+            if task_result.is_none() {
+                match task.as_mut().poll(context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(result) => task_result = Some(result),
+                }
+            }
+
+            if interruption_open {
+                // Atomically arbitrate root completion against a sender claim.
+                // A claimed sender may publish after this poll, so retain the
+                // completed root result until the channel resolves.
+                let unclaimed = sender.lock().take();
+                let Some(unclaimed) = unclaimed else {
+                    return Poll::Pending;
+                };
+                // Dropping the unclaimed sender may invoke the root waker.
+                drop(unclaimed);
+            }
+
+            match task_result
+                .take()
+                .expect("root task result disappeared before completion")
+            {
+                Ok(output) => Poll::Ready(output),
+                Err(panic) => resume_unwind(panic),
+            }
+        })
+        .await
     }
 }
 
@@ -437,11 +489,19 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::Handle;
-    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use super::{Handle, Panicker, extract_panic_message};
+    use crate::{
+        Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
+        telemetry::traces::collector::{CollectingLayer, TraceStorage},
+        utils::resume_reported_panic,
+    };
     use commonware_utils::channel::oneshot;
     use futures::future;
-
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        task::Poll,
+    };
+    use tracing_subscriber::{Registry, layer::SubscriberExt as _};
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
@@ -454,6 +514,165 @@ mod tests {
                 None
             }
         })
+    }
+
+    #[test]
+    fn fatal_notification_bypasses_catch() {
+        // Configure ordinary task panics to be caught, then verify an ordinary
+        // notification leaves the root-interruption sender available.
+        let (panicker, panicked) = Panicker::new(true);
+        panicker.notify(Box::new("caught task panic"));
+
+        // Infrastructure failures bypass the ordinary catch policy.
+        panicker
+            .claim_fatal()
+            .expect("fatal notification must remain available")
+            .notify(Box::new("fatal infrastructure failure"));
+
+        // The fatal payload reaches the receiver despite `catch = true`.
+        let panic = futures::executor::block_on(panicked.receiver).unwrap();
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"fatal infrastructure failure")
+        );
+    }
+
+    #[test]
+    fn claimed_fatal_notification_precedes_root_completion_before_publish() {
+        // Claim fatal interruption, then let the root task complete before publication.
+        let (panicker, panicked) = Panicker::new(true);
+        let notification = panicker
+            .claim_fatal()
+            .expect("fatal notification must remain available");
+        let mut interrupted = Box::pin(panicked.interrupt(future::ready(7)));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // Root completion must wait while a claimed fatal payload is in flight.
+        assert_eq!(
+            std::future::Future::poll(interrupted.as_mut(), &mut context),
+            Poll::Pending
+        );
+        notification.notify(Box::new("delayed fatal infrastructure failure"));
+
+        // Publication must still replace the otherwise successful root result.
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            futures::executor::block_on(interrupted)
+        }))
+        .expect_err("root completion discarded its claimed fatal notification");
+        assert_eq!(
+            extract_panic_message(&*panic),
+            "delayed fatal infrastructure failure"
+        );
+    }
+
+    #[test]
+    fn already_reported_panic_skips_generic_task_log() {
+        let storage = TraceStorage::default();
+        let subscriber = Registry::default().with(CollectingLayer::new(storage.clone()));
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            resume_reported_panic("reported infrastructure failure");
+        }))
+        .expect_err("reported infrastructure failure did not unwind");
+        let (panicker, _panicked) = Panicker::new(true);
+
+        // Route the payload through the ordinary spawned-task panic path.
+        tracing::subscriber::with_default(subscriber, || panicker.notify(panic));
+
+        assert!(storage.is_empty());
+    }
+
+    #[test]
+    fn fatal_notification_during_final_task_poll_wins_arbitration() {
+        for root_panics in [false, true] {
+            // Publish a fatal failure during the final poll, then either complete
+            // the root task or raise a generic panic from that same poll.
+            let (panicker, panicked) = Panicker::new(true);
+            let task = async move {
+                panicker
+                    .claim_fatal()
+                    .expect("fatal notification must remain available")
+                    .notify(Box::new("detailed fatal failure"));
+                if root_panics {
+                    panic!("generic root panic");
+                }
+                7
+            };
+
+            // The actionable infrastructure diagnostic must win over either root outcome.
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                futures::executor::block_on(panicked.interrupt(task))
+            }))
+            .expect_err("root outcome discarded its fatal notification");
+            assert_eq!(
+                extract_panic_message(&*panic),
+                "detailed fatal failure",
+                "root_panics={root_panics}"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_root_completion_closes_unclaimed_interruption() {
+        // Keep interruption unclaimed while polling an otherwise ready root task.
+        let (panicker, panicked) = Panicker::new(false);
+
+        // Root completion claims and drops the sender before preserving the task output.
+        let output = futures::executor::block_on(panicked.interrupt(future::ready(7)));
+        assert_eq!(output, 7);
+        assert!(panicker.claim_fatal().is_none());
+    }
+
+    #[test]
+    fn abandoned_fatal_notification_releases_ready_root() {
+        let (panicker, panicked) = Panicker::new(false);
+        let notification = panicker
+            .claim_fatal()
+            .expect("fatal notification must remain available");
+        let mut interrupted = Box::pin(panicked.interrupt(future::ready(7)));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // Retain the ready root result until the claimed sender resolves.
+        assert_eq!(
+            std::future::Future::poll(interrupted.as_mut(), &mut context),
+            Poll::Pending
+        );
+        drop(notification);
+
+        // Sender abandonment closes interruption and releases the retained result.
+        assert_eq!(futures::executor::block_on(interrupted), 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_cooperative_budget_allows_ready_task_completion() {
+        // Build enough ready Tokio receivers for the root task to exhaust its
+        // cooperative budget and still return Ready from that same poll.
+        let (_panicker, panicked) = Panicker::new(false);
+        let mut budget_consumers = std::collections::VecDeque::new();
+        for _ in 0..1_024 {
+            let (sender, receiver) = oneshot::channel();
+            sender.send(()).unwrap();
+            budget_consumers.push_back(receiver);
+        }
+        let task = future::poll_fn(move |context| {
+            loop {
+                let receiver = budget_consumers
+                    .front_mut()
+                    .expect("Tokio cooperative budget exceeded test capacity");
+                match std::future::Future::poll(std::pin::Pin::new(receiver), context) {
+                    Poll::Ready(Ok(())) => {
+                        budget_consumers.pop_front();
+                    }
+                    Poll::Ready(Err(_)) => panic!("budget-consumer sender closed without a value"),
+                    Poll::Pending => return Poll::Ready(7),
+                }
+            }
+        });
+
+        // Final interruption arbitration must not poll the budget-aware channel.
+        let output = panicked.interrupt(task).await;
+        assert_eq!(output, 7);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
+    tokio::timer::{self, Timer},
     utils::{self, Panicker, signal::Stopper, supervision::Tree},
 };
 #[cfg(feature = "iouring-network")]
@@ -338,6 +339,8 @@ impl Default for Config {
 pub struct Executor {
     registry: Registry,
     metrics: Arc<Metrics>,
+    // Timer teardown must begin while the Tokio reactor still exists.
+    timer: Timer,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
@@ -376,19 +379,27 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
-        let mut builder = Builder::new_multi_thread();
-        builder
+        let mut runtime_builder = Builder::new_multi_thread();
+        runtime_builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
             .thread_stack_size(self.cfg.thread_stack_size)
             .enable_all();
         if let Some(global_queue_interval) = self.cfg.global_queue_interval {
-            builder.global_queue_interval(global_queue_interval);
+            runtime_builder.global_queue_interval(global_queue_interval);
         }
-        let runtime = builder.build().expect("failed to create Tokio runtime");
+        // Install timer affinity before building Tokio so the worker callback is
+        // present from the first lifecycle event.
+        let timer_builder = timer::Builder::install(&mut runtime_builder, self.cfg.worker_threads);
+        let runtime = runtime_builder
+            .build()
+            .expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
+
+        // Build timer shards against this runtime before invoking user code.
+        let timer = timer_builder.build(&runtime, panicker.clone());
 
         // Collect process metrics.
         //
@@ -492,6 +503,7 @@ impl crate::Runner for Runner {
         let executor = Arc::new(Executor {
             registry,
             metrics,
+            timer,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
@@ -734,12 +746,11 @@ impl Clock for Context {
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        tokio::time::sleep(duration)
+        self.executor.timer.sleep(duration)
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        let duration_until_deadline = deadline.duration_since(self.current()).unwrap_or_default();
-        tokio::time::sleep(duration_until_deadline)
+        self.executor.timer.sleep_until(deadline)
     }
 }
 
@@ -848,6 +859,8 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(feature = "loom")))]
+    use crate::tokio::timer::{allocator_claims, current_assignment, heap_lengths};
     use crate::{
         Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
         tokio::telemetry,
@@ -860,6 +873,97 @@ mod tests {
         str::FromStr,
     };
     use tracing::{Level, error};
+
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(feature = "loom")))]
+    #[test]
+    fn test_timer_timeout_winner_restores_exact_heap_occupancy() {
+        let runner = Runner::new(Config::default().with_worker_threads(1));
+        runner.start(|context| async move {
+            // Let the user future win so the losing timeout is dropped.
+            let output = context
+                .timeout(Duration::from_secs(60), async { 7 })
+                .await
+                .expect("ready future should win its timeout");
+
+            // Timeout cleanup removes its timer before returning.
+            assert_eq!(output, 7);
+            assert_eq!(heap_lengths(&context.executor.timer), vec![0]);
+        });
+    }
+
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(feature = "loom")))]
+    #[test]
+    fn test_timer_affinity_separates_workers_and_fallback_callers() {
+        const WORKERS: usize = 2;
+
+        let runner = Runner::new(Config::default().with_worker_threads(WORKERS));
+        runner.start(|context| async move {
+            // The block_on caller is not a Tokio worker. Its first timer selects
+            // one cached fallback shard without consuming a worker index.
+            assert!(current_assignment(&context.executor.timer).is_none());
+            let block_on_sleep = context.sleep(Duration::from_secs(60));
+            let index = current_assignment(&context.executor.timer)
+                .expect("block_on assignment should be cached");
+            assert!(index < WORKERS);
+            drop(block_on_sleep);
+
+            // Runtime startup completes every worker claim independently of
+            // the block_on caller's fallback use.
+            let claims_before = allocator_claims(&context.executor.timer);
+            assert_eq!(claims_before.0, WORKERS);
+            assert_eq!(claims_before.1, 1);
+
+            // Tasks scheduled after all workers have parked must observe stable
+            // worker assignments and cannot advance either allocator again.
+            let mut tasks = Vec::new();
+            for _ in 0..WORKERS * 4 {
+                let executor = Arc::clone(&context.executor);
+                tasks.push(tokio::spawn(async move {
+                    let sleep = executor.timer.sleep(Duration::from_secs(60));
+                    let assignment = current_assignment(&executor.timer)
+                        .expect("worker assignment should already exist");
+                    drop(sleep);
+                    assignment
+                }));
+            }
+            for task in tasks {
+                let index = task.await.expect("worker task should complete");
+                assert!(index < WORKERS);
+            }
+            assert_eq!(allocator_claims(&context.executor.timer), claims_before);
+
+            // A blocking-pool thread gets a fallback assignment without
+            // consuming another runtime worker slot.
+            let executor = Arc::clone(&context.executor);
+            let index = tokio::task::spawn_blocking(move || {
+                let sleep = executor.timer.sleep(Duration::from_secs(60));
+                let assignment = current_assignment(&executor.timer)
+                    .expect("blocking assignment should be cached");
+                drop(sleep);
+                assignment
+            })
+            .await
+            .expect("blocking task should complete");
+            assert!(index < WORKERS);
+            assert_eq!(allocator_claims(&context.executor.timer), (WORKERS, 2));
+
+            // A dedicated external thread follows the same fallback path and
+            // likewise leaves the worker allocator untouched.
+            let executor = Arc::clone(&context.executor);
+            let index = std::thread::spawn(move || {
+                let sleep = executor.timer.sleep(Duration::from_secs(60));
+                let assignment = current_assignment(&executor.timer)
+                    .expect("dedicated-thread assignment should be cached");
+                drop(sleep);
+                assignment
+            })
+            .join()
+            .expect("dedicated thread should complete");
+            assert!(index < WORKERS);
+            assert_eq!(allocator_claims(&context.executor.timer), (WORKERS, 3));
+            assert_eq!(heap_lengths(&context.executor.timer), vec![0; WORKERS]);
+        });
+    }
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
