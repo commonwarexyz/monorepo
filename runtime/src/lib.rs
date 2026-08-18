@@ -690,7 +690,8 @@ stability_scope!(BETA {
         /// Advise that data brought in by this read need not remain in the OS page cache.
         ///
         /// This is a best-effort performance hint for callers that retain the data or
-        /// do not expect to read it again soon. Implementations may ignore it.
+        /// do not expect to read it again soon. Implementations may ignore it, and it
+        /// does not guarantee that the range is absent from the OS page cache.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
         /// Return whether all of `options` are set.
@@ -730,13 +731,15 @@ stability_scope!(BETA {
     impl WriteOptions {
         /// Durably persist the submitted bytes before returning.
         ///
-        /// This is not a durability barrier for earlier operations.
+        /// This is not a durability barrier for earlier writes without
+        /// [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
         pub const SYNC: Self = Self(1 << 0);
 
         /// Advise that the submitted bytes need not remain in the OS page cache.
         ///
         /// This is a best-effort performance hint for callers that maintain their own cache.
-        /// Implementations may ignore it. It does not change visibility or durability.
+        /// Implementations may ignore it. It does not change visibility or durability, or
+        /// guarantee that the range is absent from the OS page cache.
         pub const DONT_CACHE: Self = Self(1 << 1);
 
         /// Return whether all of `options` are set.
@@ -782,19 +785,9 @@ stability_scope!(BETA {
     /// before dropping to ensure all changes are durably persisted.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
-        /// Read `len` bytes at `offset` into caller-provided buffer(s).
+        /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
-        /// The caller provides the buffer(s), and the implementation fills it with
-        /// exactly `len` bytes of data read from the blob starting at `offset`.
-        /// Returns the same buffer(s), filled with data.
-        ///
-        /// # Contract
-        ///
-        /// - The returned buffers reuse caller-provided storage, with exactly `len`
-        ///   bytes filled from `offset`.
-        /// - Caller-provided chunk layout is preserved.
-        /// - [`ReadOptions::DONT_CACHE`] is a best-effort hint and does not guarantee
-        ///   that the range is absent from the OS page cache.
+        /// Returns the same buffers with their chunk layout preserved.
         ///
         /// # Panics
         ///
@@ -807,16 +800,9 @@ stability_scope!(BETA {
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
-        /// of data read from the blob starting at `offset`.
+        /// Read exactly `len` bytes at `offset`.
         ///
         /// To reuse a buffer(s), use [`Blob::read_at_buf`].
-        ///
-        /// # Contract
-        ///
-        /// - A successful read returns exactly `len` bytes beginning at `offset`.
-        /// - [`ReadOptions::DONT_CACHE`] is a best-effort hint and does not guarantee
-        ///   that the range is absent from the OS page cache.
         fn read_at(
             &self,
             offset: u64,
@@ -824,19 +810,9 @@ stability_scope!(BETA {
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
+        /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
-        ///
-        /// # Contract
-        ///
-        /// - A successful write stores every remaining byte from `bufs`, in chunk order,
-        ///   beginning at `offset`.
-        /// - [`WriteOptions::SYNC`] durably persists the submitted bytes before this operation
-        ///   returns. It is not a durability barrier for earlier writes without
-        ///   [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
-        /// - [`WriteOptions::DONT_CACHE`] is a best-effort hint and does not change visibility
-        ///   or durability, or guarantee that the range is absent from the OS page cache.
         fn write_at(
             &self,
             offset: u64,
