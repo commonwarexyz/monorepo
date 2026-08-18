@@ -25,7 +25,36 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use core::iter;
-use std::sync::{Arc, Weak};
+use std::{
+    ops::Deref,
+    sync::{Arc, Weak},
+};
+
+/// A database reference proven to be on a batch chain's own states, required for every
+/// committed read through the chain.
+///
+/// Committed-read helpers take this instead of a bare database reference, so a read path
+/// that skips the check fails to compile. It can only be minted by [`Bounds::on_chain`]
+/// and [`Commitment::on_chain`]. Holding the wrapped reference also freezes the database
+/// for the duration of the call: every state mutation takes the database by value, so no
+/// apply, prune, or rewind can interleave with a checked read.
+pub(crate) struct OnChain<'a, T>(&'a T);
+
+impl<T> Clone for OnChain<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for OnChain<'_, T> {}
+
+impl<T> Deref for OnChain<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.0
+    }
+}
 
 /// Identifies a QMDB state by its operation `size` and authenticated `root`.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +69,21 @@ impl<F: Family, D: Digest> Commitment<F, D> {
     /// Create a [`Commitment`] from an operation `size` and its committing `root` digest.
     pub(crate) const fn new(size: Location<F>, root: D) -> Self {
         Self { size, root }
+    }
+
+    /// Check a committed read for a batch built directly on the database at this
+    /// commitment: with no ancestors to account for applies, only the unchanged state is
+    /// readable. Returns [`Error::StaleRead`] otherwise.
+    pub(crate) fn on_chain<'a, T>(
+        &self,
+        db: &'a T,
+        current: Self,
+    ) -> Result<OnChain<'a, T>, Error<F>> {
+        if *self == current {
+            Ok(OnChain(db))
+        } else {
+            Err(Error::StaleRead)
+        }
     }
 }
 
@@ -91,6 +135,34 @@ impl<F: Family, D: Digest> Bounds<F, D> {
             tip: state,
             ancestors: Vec::new(),
             inactivity_floor,
+        }
+    }
+
+    /// Check a committed read through a chain with these bounds: the live state must be
+    /// one the chain accounts for -- this batch's own tip (reads through an already
+    /// applied batch stay valid), the chain's database boundary, or an ancestor's tip.
+    /// Anything else means a batch from a different fork was applied, and reading through
+    /// it would mix two forks, so the read is refused with [`Error::StaleRead`].
+    ///
+    /// Every member state is reachable only by applying this chain's own batches, whose
+    /// diffs shadow every key they touched, so a read that passes this check is exact.
+    /// Membership compares full commitments (size and root), never sizes alone: a sibling
+    /// fork can commit the same operation count with different contents.
+    pub(crate) fn on_chain<'a, T>(
+        &self,
+        db: &'a T,
+        current: Commitment<F, D>,
+    ) -> Result<OnChain<'a, T>, Error<F>> {
+        if current == self.tip
+            || current == self.db
+            || self
+                .ancestors
+                .iter()
+                .any(|ancestor| ancestor.state == current)
+        {
+            Ok(OnChain(db))
+        } else {
+            Err(Error::StaleRead)
         }
     }
 
@@ -288,6 +360,48 @@ mod tests {
         let ancestors = vec![ancestor(loc(14), 16, 16)];
         let result = validate_batch_applicable::<F, D>(state(16, 99), state(10, 1), &ancestors);
         assert!(matches!(result, Err(Error::StaleBatch)));
+    }
+
+    #[test]
+    fn on_chain_accepts_own_states_only() {
+        let bounds = Bounds::<F, D> {
+            base: state(10, 1),
+            db: state(10, 1),
+            tip: state(18, 18),
+            ancestors: vec![ancestor(loc(10), 12, 12), ancestor(loc(14), 16, 16)],
+            inactivity_floor: loc(11),
+        };
+        // Own tip, database boundary, and ancestor tips are readable.
+        assert!(bounds.on_chain(&(), state(18, 18)).is_ok());
+        assert!(bounds.on_chain(&(), state(10, 1)).is_ok());
+        assert!(bounds.on_chain(&(), state(16, 16)).is_ok());
+        // Foreign states are not, including at sizes the chain also reaches.
+        assert!(matches!(
+            bounds.on_chain(&(), state(19, 19)),
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            bounds.on_chain(&(), state(16, 99)),
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            bounds.on_chain(&(), state(18, 99)),
+            Err(Error::StaleRead)
+        ));
+    }
+
+    #[test]
+    fn on_chain_from_base_commitment_requires_unchanged_state() {
+        let base = state(10, 1);
+        assert!(base.on_chain(&(), state(10, 1)).is_ok());
+        assert!(matches!(
+            base.on_chain(&(), state(10, 2)),
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            base.on_chain(&(), state(11, 1)),
+            Err(Error::StaleRead)
+        ));
     }
 
     #[test]

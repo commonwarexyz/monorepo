@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        batch_chain::{self, Bounds, Commitment, OnChain},
     },
 };
 use commonware_codec::EncodeShared;
@@ -144,6 +144,23 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// Check that the live database is on this chain's own states before a committed read
+    /// (see [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    fn on_chain<'a, E, C>(
+        &self,
+        db: &'a Keyless<F, E, V, C, H, S>,
+    ) -> Result<OnChain<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+    {
+        self.parent.as_ref().map_or_else(
+            || self.base.on_chain(db, db.commitment()),
+            |parent| parent.bounds.on_chain(db, db.commitment()),
+        )
+    }
+
     /// Append a value.
     pub fn append(mut self, value: V::Value) -> Self {
         self.appends.push(value);
@@ -162,6 +179,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.on_chain(db)?;
         let loc_val = *loc;
 
         // Check this batch's pending appends.
@@ -207,6 +225,7 @@ where
             locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
+        let db = self.on_chain(db)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -257,16 +276,18 @@ where
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
+    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, V, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.on_chain(db)?;
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -300,7 +321,7 @@ where
             |batch| batch.commitment(),
         );
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
@@ -310,7 +331,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -339,6 +360,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let loc_val = *loc;
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
@@ -374,6 +396,7 @@ where
             locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();

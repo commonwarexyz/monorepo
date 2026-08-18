@@ -197,7 +197,8 @@ mod tests {
             .new_batch()
             .set(key, value)
             .merkleize(&db, None, floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -401,7 +402,8 @@ mod tests {
                 .new_batch()
                 .set(key, value)
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -524,6 +526,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_empty(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_fixed_stale_fork_refuses() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = open::<mmr::Family>(ctx).await;
+            test::test_immutable_stale_fork_refuses(db).await;
         });
     }
 
@@ -677,13 +688,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 

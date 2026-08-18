@@ -1591,6 +1591,52 @@ mod tests {
         });
     }
 
+    /// Once a sibling batch is applied, reads and merkleization through the losing fork
+    /// refuse with [`Error::StaleRead`], covering the current layer's delegation to the
+    /// inner batch and its bitmap work.
+    #[test_traced]
+    fn test_stale_fork_reads_and_merkleize_refuse() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("stale-fork-refuse", &ctx),
+            )
+            .await
+            .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 8).await;
+
+            let hot = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let winner = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"winner"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let loser = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"loser"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert_ne!(winner.root(), loser.root());
+
+            let child = loser
+                .new_batch::<Sha256>()
+                .write(hot, Some(Sha256::hash(&[b"child"])));
+            let (db, _) = db.apply_batch(winner).await.unwrap();
+
+            assert!(matches!(child.get(&hot, &db).await, Err(Error::StaleRead)));
+            assert!(matches!(loser.get(&hot, &db).await, Err(Error::StaleRead)));
+            assert!(matches!(
+                child.merkleize(&db, None).await,
+                Err(Error::StaleRead)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A snapshot's ops proofs stay byte-stable and verifiable against the captured ops root
     /// while the live database updates keys (flipping activity bits and raising the floor),
     /// commits, and prunes past it.

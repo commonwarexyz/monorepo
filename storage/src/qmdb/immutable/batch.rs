@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        batch_chain::{self, Bounds, Commitment},
+        batch_chain::{self, Bounds, Commitment, OnChain},
         immutable::operation::Operation,
         operation::Key,
     },
@@ -120,6 +120,25 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// Check that the live database is on this chain's own states before a committed read
+    /// (see [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    fn on_chain<'a, E, C, T>(
+        &self,
+        db: &'a Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<OnChain<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        C::Item: EncodeShared,
+        T: Translator,
+    {
+        self.parent.as_ref().map_or_else(
+            || self.base.on_chain(db, db.commitment()),
+            |parent| parent.bounds.on_chain(db, db.commitment()),
+        )
+    }
+
     /// Set a key to a value.
     ///
     /// If the key already exists in the database or an ancestor batch, reads
@@ -141,6 +160,7 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
+        let db = self.on_chain(db)?;
         // Check this batch's pending mutations.
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
@@ -178,6 +198,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let db = self.on_chain(db)?;
 
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
@@ -233,18 +254,20 @@ where
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
+    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
+        let db = self.on_chain(db)?;
         let base = self.base.size;
 
         let live_ancestors: Vec<_> =
@@ -291,7 +314,7 @@ where
             });
         }
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
@@ -303,7 +326,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -344,6 +367,7 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(Some(entry.value.clone()));
         }
@@ -373,6 +397,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let db = self.bounds.on_chain(db, db.commitment())?;
 
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();

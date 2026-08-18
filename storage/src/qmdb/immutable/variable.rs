@@ -359,13 +359,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 

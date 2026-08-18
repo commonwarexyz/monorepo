@@ -15,7 +15,7 @@ use crate::{
             operation::{Operation, update},
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
         },
-        batch_chain::{self, Bounds, Commitment},
+        batch_chain::{self, Bounds, Commitment, OnChain},
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
@@ -260,6 +260,9 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
 ///
 /// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
 /// parameter, so the batch is lifetime-free and can be stored independently of the DB.
+/// Every such method first checks that the database is on this chain's own states and
+/// refuses the operation with [`crate::qmdb::Error::StaleRead`] otherwise (see
+/// [`crate::qmdb::batch_chain`]).
 pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update,
@@ -332,7 +335,8 @@ where
 /// not an immutable snapshot. Reads through the chain, constructing child batches, and applying
 /// the batch later are only valid while every batch applied to the DB since this batch was
 /// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
-/// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for more details).
+/// with [`crate::qmdb::Error::StaleBatch`], and reading through it is refused with
+/// [`crate::qmdb::Error::StaleRead`] (see [`crate::qmdb::batch_chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
@@ -743,7 +747,12 @@ where
         let loc = *loc;
 
         if loc >= self.base_state.size {
-            return Some(batch_ops[(loc - *self.base_state.size) as usize].clone());
+            let idx = (loc - *self.base_state.size) as usize;
+            debug_assert!(
+                idx < batch_ops.len(),
+                "location {loc} beyond batch tip; on-chain checks make this unreachable"
+            );
+            return Some(batch_ops[idx].clone());
         }
 
         if loc >= self.db_state.size {
@@ -863,7 +872,7 @@ where
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
         include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
     where
@@ -953,7 +962,7 @@ where
         metadata: Option<U::Value>,
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1330,6 +1339,24 @@ where
         };
         (self.mutations, m)
     }
+
+    /// Check that the live database is on this chain's own states before a committed read
+    /// (see [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_chain<'a, E, C, I, const N: usize>(
+        &self,
+        db: &'a Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<OnChain<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        match &self.base {
+            Base::Db { state, .. } => state.on_chain(db, db.commitment()),
+            Base::Child(parent) => parent.bounds.on_chain(db, db.commitment()),
+        }
+    }
 }
 
 impl<F: Family, H, U, S: Strategy> Staged<F, H, U, S>
@@ -1373,10 +1400,26 @@ where
         let end = start
             .checked_add(keys.len())
             .expect("staged read index overflow");
+        let db = self.batch.on_chain(db)?;
         let (values, keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
         self.keys.extend(keys);
         self.resolutions.append(&mut resolutions);
         Ok((start..end, values, self))
+    }
+
+    /// Check that the live database is on the underlying batch's chain (see
+    /// [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_chain<'a, E, C, I, const N: usize>(
+        &self,
+        db: &'a Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<OnChain<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        self.batch.on_chain(db)
     }
 
     fn apply_upserts(
@@ -1542,6 +1585,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let db = self.batch.on_chain(db)?;
         let (batch, staged_updates, prefetched) = self
             .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1579,7 +1623,7 @@ where
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<
         (
@@ -1682,6 +1726,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
+        let db = self.batch.on_chain(db)?;
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
@@ -1740,7 +1785,7 @@ where
     /// Read unresolved slots from the committed DB and merge them back into `results`.
     async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
         results: &mut [Option<U::Value>],
         map: impl Fn(&U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
@@ -1798,6 +1843,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let db = self.on_chain(db)?;
         if self.reads_committed_only() {
             return db.get_many(keys).await;
         }
@@ -1840,7 +1886,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let (results, keys, resolutions) = self.stage_reads(keys, db).await?;
+        let (results, keys, resolutions) = self.stage_reads(keys, self.on_chain(db)?).await?;
         Ok((
             results,
             Staged {
@@ -1858,7 +1904,7 @@ where
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<
         (
             Vec<Option<U::Value>>,
@@ -1942,6 +1988,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let db = self.on_chain(db)?;
         self.merkleize_with_floor_scan(
             db,
             metadata,
@@ -1964,9 +2011,10 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
+    #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
@@ -2160,6 +2208,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
+        let db = self.on_chain(db)?;
         self.merkleize_with_floor_scan(
             db,
             metadata,
@@ -2180,9 +2229,10 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
+    #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: OnChain<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
@@ -2623,6 +2673,7 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(entry.value().cloned());
         }
@@ -2653,6 +2704,7 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let db = self.bounds.on_chain(db, db.commitment())?;
 
         let ancestors: Vec<_> = self.ancestors().collect();
         let diffs: Vec<_> = ancestors
@@ -3852,14 +3904,12 @@ mod tests {
         });
     }
 
-    /// A batch on a losing fork keeps being read and merkleized after a
-    /// competing batch is applied, which is outside the branch-validity
-    /// contract. This pins down what actually happens, because callers that do
-    /// not cancel such work depend on it: no panic, keys the fork covers keep
-    /// their own branch's values, and only fallback reads of keys the fork does
-    /// not cover see the competing state.
+    /// A batch on a losing fork refuses reads and merkleization once a competing batch is
+    /// applied: every operation returns [`Error::StaleRead`] instead of answering from a
+    /// state the chain does not account for. The forks write the same key with different
+    /// values, the shape where an unchecked read would silently tear.
     #[test]
-    fn stale_fork_batch_reads_and_merkleizes_without_panicking() {
+    fn stale_fork_reads_and_merkleizes_refuse() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = UnorderedFixedDb<
@@ -3908,42 +3958,197 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The loser's child, forked before anything is applied.
+            // The loser's child, forked before anything is applied, reads and
+            // merkleizes normally.
             let child_write = Sha256::hash(&[b"child"]);
             let build = || loser.new_batch::<Sha256>().write(cold, Some(child_write));
             let before = build();
-            let covered_before = before.get(&hot, &db).await.unwrap();
-            let uncovered_before = before.get(&winner_only, &db).await.unwrap();
-            let root_before = before.merkleize(&db, None).await.unwrap().root();
-            assert_eq!(covered_before, Some(loser_write));
-            assert_eq!(uncovered_before, None);
+            assert_eq!(before.get(&hot, &db).await.unwrap(), Some(loser_write));
+            assert_eq!(before.get(&winner_only, &db).await.unwrap(), None);
+            before.merkleize(&db, None).await.unwrap();
 
-            // The winner lands. The loser's chain is now stale.
+            // The winner lands. The loser's chain is now stale, and every operation
+            // through it refuses, covered and uncovered keys alike.
             let child = build();
             let (db, _) = db.apply_batch(winner).await.unwrap();
+            assert!(matches!(
+                child.get(&hot, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                child.get(&winner_only, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                child.get_many(&[&hot, &cold], &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                child.stage(&[&hot], &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            let child = build();
+            assert!(matches!(
+                child.merkleize(&db, None).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
 
-            // Reads still answer. Keys the fork covers keep the fork's value;
-            // keys it does not cover fall through to the applied winner.
-            assert_eq!(
-                child.get(&hot, &db).await.unwrap(),
-                Some(loser_write),
-                "a covered key must keep the fork's own value",
-            );
-            assert_eq!(
-                child.get(&winner_only, &db).await.unwrap(),
-                Some(winner_write),
-                "an uncovered key falls through to the applied state",
-            );
+            // The merkleized loser refuses reads too, and applying it stays
+            // separately rejected (see `batch_chain`).
+            assert!(matches!(
+                loser.get(&hot, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                db.validate_batch(&loser),
+                Err(crate::qmdb::Error::StaleBatch)
+            ));
 
-            // Merkleizing does not panic and stays on the fork's own chain.
-            let stale = child.merkleize(&db, None).await.unwrap();
-            assert_eq!(
-                stale.root(),
-                root_before,
-                "a stale fork merkleizes over its own chain, not the winner's",
-            );
+            db.destroy().await.unwrap();
+        });
+    }
 
-            // Applying it is separately rejected (see `batch_chain`).
+    /// Sibling forks with the same operation count still refuse: the check compares full
+    /// commitments, never sizes alone.
+    #[test]
+    fn equal_size_sibling_reads_refuse() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("equal-size-sibling", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let hot = Sha256::hash(&[b"hot"]);
+            let winner = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"winner"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let loser = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"loser"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert_eq!(winner.bounds().tip.size, loser.bounds().tip.size);
+            assert_ne!(winner.root(), loser.root());
+
+            let (db, _) = db.apply_batch(winner).await.unwrap();
+            assert!(matches!(
+                loser.get(&hot, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                loser.new_batch::<Sha256>().merkleize(&db, None).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Reading through a batch stays valid after the batch itself is applied (the live
+    /// state is then the chain's own tip), for the batch and for a child forked from it.
+    #[test]
+    fn merkleized_batch_reads_after_own_apply() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("own-apply-reads", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let hot = Sha256::hash(&[b"hot"]);
+            let write = Sha256::hash(&[b"write"]);
+            let batch = db
+                .new_batch()
+                .write(hot, Some(write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(Arc::clone(&batch)).await.unwrap();
+
+            assert_eq!(batch.get(&hot, &db).await.unwrap(), Some(write));
+            let child = batch.new_batch::<Sha256>();
+            assert_eq!(child.get(&hot, &db).await.unwrap(), Some(write));
+            child.merkleize(&db, None).await.unwrap();
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding moves the live state off a tip chain's states, so its reads refuse; a
+    /// chain forked at the rewind target reads again, because a commitment identifies
+    /// state by content and the rewound database is that state.
+    #[test]
+    fn rewind_stales_tip_chains_and_revives_target_chains() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("rewind-stale", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let hot = Sha256::hash(&[b"hot"]);
+            let old_write = Sha256::hash(&[b"old"]);
+            let first = db
+                .new_batch()
+                .write(hot, Some(old_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(first).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let target = db.bounds().end;
+            let old_chain = db.new_batch();
+
+            let second = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"new"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(second).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let tip_chain = db.new_batch();
+            assert!(matches!(
+                old_chain.get(&hot, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+
+            let db = db.rewind(target).await.unwrap();
+            assert!(matches!(
+                tip_chain.get(&hot, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert_eq!(old_chain.get(&hot, &db).await.unwrap(), Some(old_write));
+
             db.destroy().await.unwrap();
         });
     }

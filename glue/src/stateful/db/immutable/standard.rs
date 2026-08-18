@@ -228,7 +228,7 @@ where
         } = self;
         let inner = batch
             .merkleize(&*reader.read().await, metadata, inactivity_floor)
-            .await;
+            .await?;
         Ok(ImmutableMerkleized { inner, reader })
     }
 }
