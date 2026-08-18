@@ -253,7 +253,7 @@ where
     /// result is cached as pending state. If the implementor produces a
     /// block with mismatched targets, this function will panic.
     ///
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
+    /// Applications using [`qmdb::current`]
     /// must still ensure the proposed block commits to the merkleized batch's
     /// canonical root. The wrapper's sync-target check only verifies the ops
     /// root and operation range used by replay sync.
@@ -297,7 +297,7 @@ where
     /// this by checking that any returned merkleized state matches the block
     /// before it is cached as pending state.
     ///
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
+    /// Applications using [`qmdb::current`]
     /// must still reject blocks whose committed canonical root differs from the
     /// merkleized batch root. The wrapper's sync-target check only verifies the
     /// ops root and operation range used by replay sync.
