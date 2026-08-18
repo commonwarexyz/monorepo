@@ -13,6 +13,10 @@
 //! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
 //! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid objects:
 //! do not read through them, do not build children from them, and do not attempt to apply them.
+//! Merkleization checks this and returns [`Error::Stale`](crate::qmdb::Error::Stale) rather
+//! than computing a torn root. Unlike [`crate::qmdb::any`], this family exposes no
+//! generation views (`view`/`get_at`): its canonical root covers the live activity bitmap,
+//! so reads are deliberately fresh-only.
 //!
 //! A short rule of thumb:
 //! - A batch is only usable while it stays on the winning branch.
