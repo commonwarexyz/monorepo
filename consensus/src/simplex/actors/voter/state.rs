@@ -373,10 +373,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Sets the leader for the given view if it is not already set.
     fn set_leader(&mut self, view: View, certificate: Option<&S::Certificate>) {
+        let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
+        self.set_leader_once(view, leader);
+    }
+
+    /// Stamps `leader` on `view`'s round unless one is already set, keeping
+    /// every leader source (election, inheritance, early handoff) idempotent.
+    fn set_leader_once(&mut self, view: View, leader: Participant) {
         if self.leader_is_set(view) {
             return;
         }
-        let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
         self.create_round(view).set_leader(leader);
     }
 
@@ -397,13 +403,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Copies the same-term stable leader into an optimistic successor.
     fn inherit_leader(&mut self, from: View, to: View) {
-        if self.leader_is_set(to) {
-            return;
-        }
-        let Some(leader) = self.views.get(&from).and_then(|round| round.leader()) else {
+        let Some(leader) = self
+            .views
+            .get(&from)
+            .and_then(|round| round.leader())
+            .map(|leader| leader.idx)
+        else {
             return;
         };
-        self.create_round(to).set_leader(leader.idx);
+        self.set_leader_once(to, leader);
     }
 
     /// Ensures a round exists for the given view.
@@ -990,12 +998,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns whether a captured parent remains valid ancestry independent of
     /// the currently preferred parent.
     fn captured_parent_valid(&self, context: &Context<D, S::PublicKey>) -> bool {
-        let view = context.view();
-        let parent = context.parent.0;
-        self.validate_parent_span(view, parent).is_ok()
-            && self
-                .ancestry_payload_for_child(view, parent)
-                .is_some_and(|payload| *payload == context.parent.1)
+        self.parent_payload_for(context.view(), context.parent.0) == Ok(context.parent.1)
     }
 
     /// Records a proposal without applying ancestry checks.
@@ -1525,12 +1528,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
 
-        // Set the early leader once to keep proposal, vote, and replay handling
-        // idempotent.
-        if let Some(leader) = self.handoff_leader(next)
-            && !self.leader_is_set(next)
-        {
-            self.create_round(next).set_leader(leader);
+        if let Some(leader) = self.handoff_leader(next) {
+            self.set_leader_once(next, leader);
         }
     }
 
@@ -1657,7 +1656,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// - It is certified (or finalized, which implies certification).
     /// - All views between it and the proposal view have been nullified.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Result<D, ParentPayloadError> {
-        let (view, parent) = (proposal.view(), proposal.parent);
+        self.parent_payload_for(proposal.view(), proposal.parent)
+    }
+
+    /// [`Self::parent_payload`] for a `(view, parent)` pair, so callers
+    /// without a completed proposal share the same ancestry rule.
+    fn parent_payload_for(&self, view: View, parent: View) -> Result<D, ParentPayloadError> {
         self.validate_parent_span(view, parent)?;
 
         // May return `None` if the parent view is not yet either:
@@ -1689,17 +1693,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let (view, parent) = (proposal.view(), proposal.parent);
         Self::ensure_parent_precedes(view, parent)?;
 
-        if view.is_term_start(self.term_length())
-            && self.required_certification_parent(proposal).is_none()
-        {
+        let Some(required) = self.required_certification_parent(proposal) else {
             return Ok(());
-        }
+        };
 
         // Intra-term views share the structural rules (the nullification check
         // is trivially satisfied once contiguity holds).
         self.validate_parent_span(view, parent)?;
 
-        if self.explicit_parent_ready(proposal) {
+        if self.explicit_ancestry_payload(required).is_some() {
             return Ok(());
         }
 
