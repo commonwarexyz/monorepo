@@ -547,6 +547,16 @@ where
         Ok((self, handle))
     }
 
+    /// Flush buffered state to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [Self::sync]) completes.
+    #[boxed]
+    pub async fn flush(mut self) -> Result<Self, Error> {
+        self.log = self.log.flush().await?;
+        Ok(self)
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, Error> {

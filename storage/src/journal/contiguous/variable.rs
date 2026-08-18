@@ -1620,6 +1620,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((self, handle))
     }
 
+    /// See [Journal::flush].
+    pub(crate) async fn flush(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.metrics.flush_calls.inc();
+        self.blobs.flush().await?;
+        self.offsets = self.offsets.flush().await?;
+        Ok(self)
+    }
+
     /// See [Journal::commit].
     pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
@@ -2328,6 +2336,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((self, pruned))
     }
 
+    /// Flush buffered appends to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. `sync()`) completes. Does not advance the recovery watermark.
+    pub async fn flush(mut self) -> Result<Self, Error> {
+        self.0 = self.0.flush().await?;
+        Ok(self)
+    }
+
     /// Persist data blobs so committed data survives a crash.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it.
@@ -2460,6 +2477,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
+    }
+
+    async fn flush(self) -> Result<Self, Error> {
+        Self::flush(self).await
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -5379,6 +5400,62 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_flush() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "flush".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..3u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Flush leaves the journal fully usable: reads, appends, and a later sync.
+            let journal = journal.flush().await.unwrap();
+            assert_eq!(journal.bounds(), 0..3);
+            assert_eq!(journal.read(0).await.unwrap(), 0);
+            drop(journal);
+
+            // Flush provides no durability: a reopen recovers only durable state.
+            let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+
+            // Appends after a flush become durable through a later sync.
+            for i in 0..6u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let mut journal = journal.flush().await.unwrap();
+            for i in 6..9u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..9);
+            for i in 0..9u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_rewind_commit_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -7706,6 +7783,7 @@ mod tests {
             reader.read_many(&[1, 2]).await.unwrap();
             reader.try_read_sync(3).unwrap();
             drop(reader);
+            journal = journal.flush().await.unwrap();
             journal = journal.commit().await.unwrap();
             journal = journal.sync().await.unwrap();
             let handle;
@@ -7726,6 +7804,7 @@ mod tests {
                 "variable_metrics_read_many_calls_total 1",
                 "variable_metrics_items_read_total 4",
                 "variable_metrics_start_sync_calls_total 1",
+                "variable_metrics_flush_calls_total 1",
                 "variable_metrics_commit_calls_total 1",
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",
@@ -7738,6 +7817,7 @@ mod tests {
                 "variable_metrics_cache_misses_total 0",
                 "variable_metrics_data_tracked",
                 "variable_metrics_offsets_size 4",
+                "variable_metrics_offsets_flush_calls_total 1",
                 "variable_metrics_offsets_blobs_tracked",
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");

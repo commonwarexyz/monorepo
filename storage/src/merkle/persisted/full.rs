@@ -699,8 +699,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
     /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
     /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
-    pub async fn flush(self) -> Result<Self, Error<F>> {
-        self.flush_internal().await
+    pub async fn flush(mut self) -> Result<Self, Error<F>> {
+        self = self.flush_internal().await?;
+        self.journal = self.journal.flush().await.map_err(Error::Journal)?;
+        Ok(self)
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal and make them durable.
