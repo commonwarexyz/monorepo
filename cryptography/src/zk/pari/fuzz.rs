@@ -170,13 +170,7 @@ impl Plan {
         };
         let mut verifier_transcript = Transcript::new(namespace, Version::V1);
         verifier_transcript.commit(CONTEXT);
-        let accepted = verify(
-            &mut verifier_transcript,
-            &verifying_key,
-            relation,
-            &claim,
-            &proof,
-        );
+        let accepted = verify(&mut verifier_transcript, &verifying_key, &claim, &proof);
         assert_eq!(
             accepted,
             matches!(self.mutation, Mutation::None),

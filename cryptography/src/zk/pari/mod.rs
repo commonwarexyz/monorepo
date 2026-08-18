@@ -104,8 +104,9 @@ fn transcript_challenge(
     claim: &Claim,
     t: &crate::bls12381::primitives::group::G1,
 ) -> Scalar {
+    // The key digest covers the relation and commitment-key digests, so this
+    // binds the challenge to the full verification context.
     transcript.commit(TRANSCRIPT_MARKER);
-    transcript.commit(verifying_key.relation_digest.as_slice());
     transcript.commit(verifying_key.digest().as_slice());
     transcript.commit(claim.encode());
     transcript.commit(t.encode());

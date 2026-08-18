@@ -379,20 +379,26 @@ impl Domain {
 
     /// Return all Lagrange basis polynomials evaluated at `point`.
     pub(super) fn lagrange_coefficients(&self, point: &Scalar) -> Result<Vec<Scalar>> {
-        let mut root = Scalar::one();
-        for index in 0..self.size {
-            if &root == point {
-                let mut coefficients = zeroes(self.size)?;
-                coefficients[index] = Scalar::one();
-                return Ok(coefficients);
+        // The domain contains every m-th root of unity, so a vanishing point
+        // is a domain element and its coefficients form an elementary basis.
+        let vanishing = self.evaluate_vanishing(point);
+        if vanishing == Scalar::zero() {
+            let mut coefficients = zeroes(self.size)?;
+            let mut root = Scalar::one();
+            for coefficient in &mut coefficients {
+                if &root == point {
+                    *coefficient = Scalar::one();
+                    break;
+                }
+                root *= &self.generator;
             }
-            root *= &self.generator;
+            return Ok(coefficients);
         }
 
         // Store prefix products, then use one inversion to invert every denominator.
         let mut coefficients = zeroes(self.size)?;
         let mut product = Scalar::one();
-        root = Scalar::one();
+        let mut root = Scalar::one();
         for coefficient in &mut coefficients {
             *coefficient = product.clone();
             let denominator = point.clone() - &root;
@@ -410,7 +416,7 @@ impl Domain {
             root *= &self.generator_inverse;
         }
 
-        let scale = self.evaluate_vanishing(point) * &self.size_inverse;
+        let scale = vanishing * &self.size_inverse;
         root = Scalar::one();
         for coefficient in &mut coefficients {
             let factor = scale.clone() * &root;
@@ -421,6 +427,7 @@ impl Domain {
     }
 
     /// Evaluate the interpolation of `evaluations` at an arbitrary point.
+    #[cfg(test)]
     pub(super) fn lagrange_evaluate(
         &self,
         evaluations: &[Scalar],

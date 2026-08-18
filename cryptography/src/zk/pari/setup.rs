@@ -3,7 +3,7 @@ use super::{
     circuit::SparseRow,
     poly::Domain,
     sample_nonzero_scalar,
-    types::{CommitmentKey, ProvingKey, VerifyingKey},
+    types::{CommitmentKey, ProvingKey, PublicColumn, VerifyingKey},
 };
 use crate::bls12381::primitives::group::{G1, G2, Scalar};
 use commonware_codec::Encode;
@@ -29,9 +29,9 @@ pub fn setup(
     let committed_inputs = relation.committed_inputs();
 
     let domain_size_u32 = u32::try_from(domain_size).map_err(|_| Error::TooLarge)?;
-    let num_vars_u32 = u32::try_from(num_vars).map_err(|_| Error::TooLarge)?;
     let public_inputs_u32 = u32::try_from(public_inputs).map_err(|_| Error::TooLarge)?;
     let committed_inputs_u32 = u32::try_from(committed_inputs).map_err(|_| Error::TooLarge)?;
+    let columns = public_columns(relation)?;
 
     let g = G1::generator();
     let h = G2::generator();
@@ -121,16 +121,17 @@ pub fn setup(
             relation_digest: *relation.digest(),
             commitment_key_digest,
             domain_size: domain_size_u32,
-            num_vars: num_vars_u32,
             public_inputs: public_inputs_u32,
             committed_inputs: committed_inputs_u32,
+            public_columns: columns,
             alpha_g: g * &alpha,
             beta_g: g * &beta,
             delta_committed_h: h * &delta_committed,
             delta_witness_h: h * &delta_witness,
             tau_h: h * &tau,
-            h,
-        };
+            digest: [0u8; 32],
+        }
+        .finalize();
         let proving_key = ProvingKey {
             commitment_key,
             sigma_witness,
@@ -143,6 +144,33 @@ pub fn setup(
         };
         return Ok((proving_key, verifying_key));
     }
+}
+
+/// Extract the sparse public columns of `A` and `B` for the verifying key.
+fn public_columns(relation: &Relation) -> Result<Vec<PublicColumn>, Error> {
+    let columns = relation
+        .public_inputs()
+        .checked_add(1)
+        .ok_or(Error::TooLarge)?;
+    let mut out = vec![PublicColumn::default(); columns];
+    for (row, entries) in relation.rows().iter().enumerate() {
+        let row = u32::try_from(row).map_err(|_| Error::TooLarge)?;
+        for (column, coefficient) in entries
+            .squared
+            .iter()
+            .take_while(|(column, _)| (*column as usize) < columns)
+        {
+            out[*column as usize].a.insert(row, coefficient.clone());
+        }
+        for (column, coefficient) in entries
+            .linear
+            .iter()
+            .take_while(|(column, _)| (*column as usize) < columns)
+        {
+            out[*column as usize].b.insert(row, coefficient.clone());
+        }
+    }
+    Ok(out)
 }
 
 fn evaluate_columns(

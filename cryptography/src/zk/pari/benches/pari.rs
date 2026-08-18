@@ -25,7 +25,6 @@ struct ProvingFixture {
 }
 
 struct VerifyingFixture {
-    relation: Relation,
     verifying_key: VerifyingKey,
     claim: Claim,
     proof: Proof,
@@ -85,12 +84,10 @@ fn make_verifying_fixture(multiplications: usize) -> VerifyingFixture {
     assert!(verify(
         &mut transcript(),
         &fixture.verifying_key,
-        &fixture.relation,
         &fixture.claim,
         &proof,
     ));
     VerifyingFixture {
-        relation: fixture.relation,
         verifying_key: fixture.verifying_key,
         claim: fixture.claim,
         proof,
@@ -173,7 +170,6 @@ fn bench_verify(c: &mut Criterion) {
                         black_box(verify(
                             &mut transcript,
                             &fixture.verifying_key,
-                            &fixture.relation,
                             &fixture.claim,
                             &fixture.proof,
                         ))

@@ -145,13 +145,9 @@ impl Relation {
         })
     }
 
-    /// Size of the padded radix-2 constraint domain.
+    /// Size of the padded radix-2 constraint domain, which also equals the
+    /// number of assignment variables.
     pub const fn domain_size(&self) -> usize {
-        self.size
-    }
-
-    /// Number of assignment variables, including all explicit padding.
-    pub const fn num_vars(&self) -> usize {
         self.size
     }
 

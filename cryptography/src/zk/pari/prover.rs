@@ -133,7 +133,6 @@ fn validate_inputs(
         || proving_key.commitment_key.relation_digest != *relation.digest()
         || verifying_key.commitment_key_digest != proving_key.commitment_key.digest()
         || verifying_key.domain_size as usize != relation.size()
-        || verifying_key.num_vars as usize != relation.size()
         || verifying_key.public_inputs as usize != relation.public_inputs()
         || verifying_key.committed_inputs as usize != relation.committed_inputs()
         || witness.assignment().relation_digest() != relation.digest()
@@ -167,10 +166,7 @@ fn evaluate_relation(relation: &Relation, values: &[Scalar]) -> (Vec<Scalar>, Ve
     (a, b)
 }
 
-pub(super) fn evaluate_public(
-    relation: &Relation,
-    public: &[Scalar],
-) -> (Vec<Scalar>, Vec<Scalar>) {
+fn evaluate_public(relation: &Relation, public: &[Scalar]) -> (Vec<Scalar>, Vec<Scalar>) {
     let mut a = vec![Scalar::zero(); relation.size()];
     let mut b = vec![Scalar::zero(); relation.size()];
     for (row, entries) in relation.rows().iter().enumerate() {

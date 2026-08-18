@@ -5,6 +5,7 @@ use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::algebra::{Additive, Space};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRng;
+use std::collections::BTreeMap;
 
 const COMMITMENT_KEY_DIGEST_NAMESPACE: &[u8] =
     b"_COMMONWARE_CRYPTOGRAPHY_ZK_PARI_COMMITMENT_KEY_DIGEST";
@@ -223,21 +224,78 @@ impl Read for Proof {
     }
 }
 
+/// One public column of the constraint matrices, stored sparsely.
+///
+/// Maps a constraint-row index to that row's coefficient in this column of
+/// `A` and of `B`. Row keys ascend and coefficients are nonzero, so every
+/// column has exactly one encoding.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PublicColumn {
+    pub(crate) a: BTreeMap<u32, Scalar>,
+    pub(crate) b: BTreeMap<u32, Scalar>,
+}
+
+impl PublicColumn {
+    fn max_row(&self) -> Option<u32> {
+        let a = self.a.last_key_value().map(|(&row, _)| row);
+        let b = self.b.last_key_value().map(|(&row, _)| row);
+        a.max(b)
+    }
+}
+
+impl Write for PublicColumn {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.a.write(buf);
+        self.b.write(buf);
+    }
+}
+
+impl EncodeSize for PublicColumn {
+    fn encode_size(&self) -> usize {
+        self.a.encode_size() + self.b.encode_size()
+    }
+}
+
+impl Read for PublicColumn {
+    /// The relation's domain size, bounding row indices and entry counts.
+    type Cfg = u32;
+
+    fn read_cfg(buf: &mut impl Buf, domain_size: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let entries = RangeCfg::new(0..=*domain_size as usize);
+        let cfg = (entries, ((), ScalarReadCfg::RejectZero));
+        let column = Self {
+            a: BTreeMap::read_cfg(buf, &cfg)?,
+            b: BTreeMap::read_cfg(buf, &cfg)?,
+        };
+        if column.max_row().is_some_and(|row| row >= *domain_size) {
+            return Err(commonware_codec::Error::Invalid(
+                "PublicColumn",
+                "row index exceeds the domain",
+            ));
+        }
+        Ok(column)
+    }
+}
+
 /// The succinct key used to verify proofs for one relation.
+///
+/// Embeds the sparse public columns of the constraint matrices, so
+/// verification needs no access to the compiled relation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifyingKey {
     pub(crate) relation_digest: [u8; 32],
     pub(crate) commitment_key_digest: [u8; 32],
     pub(crate) domain_size: u32,
-    pub(crate) num_vars: u32,
     pub(crate) public_inputs: u32,
     pub(crate) committed_inputs: u32,
+    pub(crate) public_columns: Vec<PublicColumn>,
     pub(crate) alpha_g: G1,
     pub(crate) beta_g: G1,
     pub(crate) delta_committed_h: G2,
     pub(crate) delta_witness_h: G2,
     pub(crate) tau_h: G2,
-    pub(crate) h: G2,
+    // Derived from the encoded fields; never encoded itself.
+    pub(crate) digest: [u8; 32],
 }
 
 impl VerifyingKey {
@@ -251,11 +309,17 @@ impl VerifyingKey {
         self.public_inputs as usize
     }
 
-    pub(crate) fn digest(&self) -> [u8; 32] {
+    pub(crate) const fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Populate the cached digest from the other fields.
+    pub(crate) fn finalize(mut self) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(VERIFYING_KEY_DIGEST_NAMESPACE);
         hasher.update(&self.encode());
-        *hasher.finalize().as_bytes()
+        self.digest = *hasher.finalize().as_bytes();
+        self
     }
 }
 
@@ -264,15 +328,14 @@ impl Write for VerifyingKey {
         self.relation_digest.write(buf);
         self.commitment_key_digest.write(buf);
         self.domain_size.write(buf);
-        self.num_vars.write(buf);
         self.public_inputs.write(buf);
         self.committed_inputs.write(buf);
+        self.public_columns.write(buf);
         self.alpha_g.write(buf);
         self.beta_g.write(buf);
         self.delta_committed_h.write(buf);
         self.delta_witness_h.write(buf);
         self.tau_h.write(buf);
-        self.h.write(buf);
     }
 }
 
@@ -281,36 +344,66 @@ impl EncodeSize for VerifyingKey {
         self.relation_digest.encode_size()
             + self.commitment_key_digest.encode_size()
             + self.domain_size.encode_size()
-            + self.num_vars.encode_size()
             + self.public_inputs.encode_size()
             + self.committed_inputs.encode_size()
+            + self.public_columns.encode_size()
             + self.alpha_g.encode_size()
             + self.beta_g.encode_size()
             + self.delta_committed_h.encode_size()
             + self.delta_witness_h.encode_size()
             + self.tau_h.encode_size()
-            + self.h.encode_size()
     }
 }
 
 impl Read for VerifyingKey {
-    type Cfg = ();
+    /// Bound on the number of ordinary public inputs.
+    type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let relation_digest = <[u8; 32]>::read(buf)?;
+        let commitment_key_digest = <[u8; 32]>::read(buf)?;
+        let domain_size = u32::read(buf)?;
+        if !domain_size.is_power_of_two() {
+            return Err(commonware_codec::Error::Invalid(
+                "VerifyingKey",
+                "domain size must be a power of two",
+            ));
+        }
+        let public_inputs = u32::read(buf)?;
+        if !cfg.contains(&(public_inputs as usize)) {
+            return Err(commonware_codec::Error::Invalid(
+                "VerifyingKey",
+                "public input count out of range",
+            ));
+        }
+        let committed_inputs = u32::read(buf)?;
+        let columns = public_inputs as usize + 1;
+        if (committed_inputs as usize)
+            .checked_add(columns)
+            .is_none_or(|inputs| inputs > domain_size as usize)
+        {
+            return Err(commonware_codec::Error::Invalid(
+                "VerifyingKey",
+                "inputs exceed the domain",
+            ));
+        }
+        let public_columns =
+            Vec::<PublicColumn>::read_cfg(buf, &(RangeCfg::exact(columns), domain_size))?;
         Ok(Self {
-            relation_digest: <[u8; 32]>::read(buf)?,
-            commitment_key_digest: <[u8; 32]>::read(buf)?,
-            domain_size: u32::read(buf)?,
-            num_vars: u32::read(buf)?,
-            public_inputs: u32::read(buf)?,
-            committed_inputs: u32::read(buf)?,
+            relation_digest,
+            commitment_key_digest,
+            domain_size,
+            public_inputs,
+            committed_inputs,
+            public_columns,
             alpha_g: G1::read(buf)?,
             beta_g: G1::read(buf)?,
             delta_committed_h: G2::read(buf)?,
             delta_witness_h: G2::read(buf)?,
             tau_h: G2::read(buf)?,
-            h: G2::read(buf)?,
-        })
+            digest: [0u8; 32],
+        }
+        .finalize())
     }
 }
 
@@ -373,22 +466,33 @@ mod arbitrary_impls {
         }
     }
 
+    impl<'a> Arbitrary<'a> for PublicColumn {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self {
+                a: u.arbitrary()?,
+                b: u.arbitrary()?,
+            })
+        }
+    }
+
     impl<'a> Arbitrary<'a> for VerifyingKey {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            // The digest is derived, never sampled.
             Ok(Self {
                 relation_digest: u.arbitrary()?,
                 commitment_key_digest: u.arbitrary()?,
                 domain_size: u.arbitrary()?,
-                num_vars: u.arbitrary()?,
                 public_inputs: u.arbitrary()?,
                 committed_inputs: u.arbitrary()?,
+                public_columns: u.arbitrary()?,
                 alpha_g: u.arbitrary()?,
                 beta_g: u.arbitrary()?,
                 delta_committed_h: u.arbitrary()?,
                 delta_witness_h: u.arbitrary()?,
                 tau_h: u.arbitrary()?,
-                h: u.arbitrary()?,
-            })
+                digest: [0u8; 32],
+            }
+            .finalize())
         }
     }
 }

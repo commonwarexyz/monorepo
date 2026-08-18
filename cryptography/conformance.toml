@@ -224,7 +224,7 @@ hash = "62bb37502e3fc41f74833bd61258cf81822fdc6c462b94618d9fe40eee4bf922"
 
 ["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<VerifyingKey>"]
 n_cases = 1024
-hash = "3c66d3a53f54f2b3ac288da37db370e8e85178a84d08617d1a8617336a6e8d5c"
+hash = "5096b5f6803cf197af0503489f069f36fa8fc68ef3a1e30531df6d091fa5a77e"
 
 ["commonware_cryptography::zk::pedersen_to_plain::conformance::CodecConformance<Claim<TestG>>"]
 n_cases = 65536

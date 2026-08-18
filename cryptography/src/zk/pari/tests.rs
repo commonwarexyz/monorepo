@@ -122,7 +122,6 @@ fn verify_fixture(namespace: &'static [u8], claim: &Claim, proof: &Proof) -> boo
     verify(
         &mut Transcript::new(namespace, Version::V1),
         &parameters.verifying_key,
-        &parameters.relation,
         claim,
         proof,
     )
@@ -137,7 +136,6 @@ fn verify_batch(namespace: &'static [u8], claims_and_proofs: &[(Claim, Proof)]) 
         &mut test_rng(),
         &mut transcripts,
         &parameters.verifying_key,
-        &parameters.relation,
         claims_and_proofs,
         &Sequential,
     )
@@ -249,7 +247,6 @@ fn transcript_mismatch_is_rejected() {
     assert!(!verify(
         &mut verifier_transcript,
         &parameters().verifying_key,
-        &parameters().relation,
         &fixture.claim,
         &fixture.proof,
     ));
@@ -262,13 +259,6 @@ fn relation_and_key_mismatch_are_rejected() {
     let (other_relation, _) = compile_relation(1);
 
     assert_ne!(parameters.relation.digest(), other_relation.digest());
-    assert!(!verify(
-        &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
-        &parameters.verifying_key,
-        &other_relation,
-        &fixture.claim,
-        &fixture.proof,
-    ));
     assert!(matches!(
         prove(
             &mut test_rng(),
@@ -290,7 +280,6 @@ fn relation_and_key_mismatch_are_rejected() {
     assert!(!verify(
         &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
         &alternate_verifying_key,
-        &parameters.relation,
         &fixture.claim,
         &fixture.proof,
     ));
@@ -369,7 +358,6 @@ fn deterministic_batch_verification_accepts_valid_and_rejects_invalid_entries() 
         &mut test_rng(),
         &mut too_few_transcripts,
         &parameters().verifying_key,
-        &parameters().relation,
         &entries,
         &Sequential,
     ));
@@ -437,8 +425,18 @@ fn claim_keys_and_proof_codec_roundtrip_with_bounded_decode() {
     assert!(Proof::decode_cfg(truncated.as_slice(), &()).is_err());
 
     let encoded = parameters.verifying_key.encode();
-    let decoded =
-        VerifyingKey::decode_cfg(encoded.clone(), &()).expect("verification key should decode");
+    let decoded = VerifyingKey::decode_cfg(
+        encoded.clone(),
+        &RangeCfg::exact(parameters.verifying_key.public_input_count()),
+    )
+    .expect("verification key should decode");
     assert_eq!(parameters.verifying_key, decoded);
     assert_eq!(decoded.encode(), encoded);
+    assert!(
+        VerifyingKey::decode_cfg(
+            encoded,
+            &RangeCfg::exact(parameters.verifying_key.public_input_count() + 1),
+        )
+        .is_err()
+    );
 }
