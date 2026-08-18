@@ -31,7 +31,13 @@ use rand::Rng as _;
 
 mod harnesses {
     use super::*;
-    use crate::merkle::{self, mmb, mmr};
+    use crate::{
+        merkle::{self, mmb, mmr},
+        qmdb::any::operation::{
+            Operation,
+            update::{Ordered, Unordered},
+        },
+    };
     use commonware_math::algebra::Random;
     use commonware_utils::TestRng;
 
@@ -80,8 +86,6 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
-
         let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -91,7 +95,7 @@ mod harnesses {
                 ops.push(Operation::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(Update(key, value)));
+                ops.push(Operation::Update(Unordered(key, value)));
                 prev_key = key;
             }
         }
@@ -102,8 +106,6 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
-
         let mut rng = TestRng::new(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -113,7 +115,7 @@ mod harnesses {
                 ops.push(Operation::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(Update(key, value)));
+                ops.push(Operation::Update(Unordered(key, value)));
                 prev_key = key;
             }
         }
@@ -124,8 +126,6 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
-
         let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -136,7 +136,7 @@ mod harnesses {
                 let key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
-                ops.push(Operation::Update(Update {
+                ops.push(Operation::Update(Ordered {
                     key,
                     value,
                     next_key,
@@ -150,8 +150,6 @@ mod harnesses {
         n: usize,
         seed: u64,
     ) -> Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>> {
-        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
-
         let mut rng = TestRng::new(seed);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -161,7 +159,7 @@ mod harnesses {
             } else {
                 let value = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
-                ops.push(Operation::Update(Update {
+                ops.push(Operation::Update(Ordered {
                     key,
                     value,
                     next_key,
@@ -175,13 +173,11 @@ mod harnesses {
         db: UnorderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
     ) -> UnorderedFixedDb<F> {
-        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
-
         let merkleized = {
             let mut batch = db.new_batch();
             for op in ops {
                 match op {
-                    Operation::Update(Update(key, value)) => {
+                    Operation::Update(Unordered(key, value)) => {
                         batch = batch.write(key, Some(value));
                     }
                     Operation::Delete(key) => {
@@ -200,13 +196,11 @@ mod harnesses {
         db: UnorderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
     ) -> UnorderedVariableDb<F> {
-        use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
-
         let merkleized = {
             let mut batch = db.new_batch();
             for op in ops {
                 match op {
-                    Operation::Update(Update(key, value)) => {
+                    Operation::Update(Unordered(key, value)) => {
                         batch = batch.write(key, Some(value));
                     }
                     Operation::Delete(key) => {
@@ -225,13 +219,11 @@ mod harnesses {
         db: OrderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
     ) -> OrderedFixedDb<F> {
-        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
-
         let merkleized = {
             let mut batch = db.new_batch();
             for op in ops {
                 match op {
-                    Operation::Update(Update { key, value, .. }) => {
+                    Operation::Update(Ordered { key, value, .. }) => {
                         batch = batch.write(key, Some(value));
                     }
                     Operation::Delete(key) => {
@@ -250,13 +242,11 @@ mod harnesses {
         db: OrderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
     ) -> OrderedVariableDb<F> {
-        use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
-
         let merkleized = {
             let mut batch = db.new_batch();
             for op in ops {
                 match op {
-                    Operation::Update(Update { key, value, .. }) => {
+                    Operation::Update(Ordered { key, value, .. }) => {
                         batch = batch.write(key, Some(value));
                     }
                     Operation::Delete(key) => {
@@ -619,7 +609,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
-                &db.any.log.journal,
+                &db.any.log.items,
             )
             .await
             .unwrap()
@@ -635,7 +625,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
-                &db.any.log.journal,
+                &db.any.log.items,
             )
             .await
             .unwrap()

@@ -6,8 +6,8 @@ use crate::{
     Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        Error as JournalError,
-        contiguous::{Contiguous, Mutable},
+        Error as JournalError, authenticated,
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{
         self, Graftable, Location, Position, hasher::Hasher as _, mem::Mem,
@@ -253,7 +253,7 @@ where
     ///
     /// Positions and `size()` use ops-tree coordinates. Positions at or above the grafting height
     /// return bitmap-authenticated grafted nodes, while positions below it use the ops tree.
-    pub fn grafted_storage(&self) -> impl MerkleStorage<F, Digest = H::Digest> + '_ {
+    pub fn grafted_storage(&self) -> impl MerkleStorage<Family = F, Digest = H::Digest> + '_ {
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
@@ -807,6 +807,29 @@ where
     }
 }
 
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context,
+    C: Snapshottable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. It serves the ops-tree proofs state sync needs. Grafted
+    /// proofs require the live bitmap, which keeps no history, so those remain live-only.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let ops;
+        (self.any, ops) = self.any.snapshot().await?;
+        Ok((self, ops))
+    }
+}
+
 /// Compute the safe sync boundary from the chunk-aligned inactivity floor and the current
 /// ops-tree size.
 ///
@@ -983,7 +1006,7 @@ pub(super) async fn compute_db_root<
     F: merkle::Graftable,
     H: Hasher,
     B: bitmap::Readable<N>,
-    S: MerkleStorage<F, Digest = H::Digest>,
+    S: MerkleStorage<Family = F, Digest = H::Digest>,
     const N: usize,
 >(
     status: &B,
@@ -1016,7 +1039,7 @@ pub(super) async fn compute_db_root<
 pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
-    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    ops_tree: &impl MerkleStorage<Family = F, Digest = H::Digest>,
     inactivity_floor: Location<F>,
     ops_root: H::Digest,
     strategy: &S,
@@ -1058,7 +1081,7 @@ pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
     B: bitmap::Readable<N>,
-    S: MerkleStorage<F, Digest = H::Digest>,
+    S: MerkleStorage<Family = F, Digest = H::Digest>,
     const N: usize,
 >(
     status: &B,
@@ -1104,7 +1127,7 @@ pub(super) async fn compute_grafted_root<
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
 /// [`merkle::Graftable::subtree_root_position`].
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
-    ops_tree: &impl MerkleStorage<F, Digest = D>,
+    ops_tree: &impl MerkleStorage<Family = F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
 ) -> Result<Vec<(usize, D, [u8; N])>, Error<F>> {
     let grafting_height = grafting::height::<N>();
@@ -1143,7 +1166,7 @@ pub(super) async fn compute_grafted_leaves<
     S: Strategy,
     const N: usize,
 >(
-    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    ops_tree: &impl MerkleStorage<Family = F, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     strategy: &S,
 ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
@@ -1173,7 +1196,7 @@ pub(super) async fn build_grafted_tree<
 >(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
-    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    ops_tree: &impl MerkleStorage<Family = F, Digest = H::Digest>,
     ops_leaves: Location<F>,
     strategy: &S,
 ) -> Result<Mem<F, H::Digest>, Error<F>> {
@@ -1292,11 +1315,11 @@ mod tests {
         },
         translator::OneCap,
     };
-    use commonware_codec::FixedSize;
+    use commonware_codec::{Encode as _, FixedSize};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap};
 
     const N: usize = sha256::Digest::SIZE;
 
@@ -1495,6 +1518,142 @@ mod tests {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    /// A compatible child batch must read and merkleize to the same canonical
+    /// root whether its ancestor is still pending or already applied, including
+    /// the grafted and bitmap layers. This is the property that lets a paused
+    /// verification resume against post-apply state.
+    #[test_traced]
+    fn test_merkleize_after_compatible_ancestor_apply_matches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("resume-after-apply", &ctx),
+            )
+            .await
+            .unwrap();
+            // Churn so activity bits and the floor have real work to do.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+
+            let hot = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let cold = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let untouched = Sha256::hash(&[&2u64.to_be_bytes()]);
+
+            // The parent the child forks from, merkleized but not yet applied.
+            let parent_write = Sha256::hash(&[b"parent-write"]);
+            let parent = db
+                .new_batch()
+                .write(hot, Some(parent_write))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Two identical children forked from the pending parent.
+            let child_write = Sha256::hash(&[b"child-write"]);
+            let build =
+                |parent: &Arc<crate::qmdb::current::batch::MerkleizedBatch<_, _, _, 32, _>>| {
+                    parent
+                        .new_batch::<Sha256>()
+                        .write(cold, Some(child_write))
+                        .write(hot, Some(child_write))
+                };
+
+            // Path A, today's order: merkleize while the parent is pending.
+            let child_pre = build(&parent);
+            let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+            let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
+
+            // Apply the parent.
+            let (db, _) = db.apply_batch(parent.clone()).await.unwrap();
+
+            // Path B, the resume order: an identical child reads and merkleizes
+            // against the post-apply database.
+            let child_post = build(&parent);
+            let read_post = child_post.get(&untouched, &db).await.unwrap();
+            assert_eq!(read_pre, read_post, "fallback reads must not change");
+            let child_post = child_post.merkleize(&db, None).await.unwrap();
+            assert_eq!(
+                root_pre,
+                child_post.root(),
+                "canonical root must be order-independent for compatible batches",
+            );
+
+            // The post-merkleized child applies cleanly and lands the same root.
+            let (db, _) = db.apply_batch(child_post).await.unwrap();
+            assert_eq!(db.root(), root_pre);
+            assert_eq!(db.get(&hot).await.unwrap(), Some(child_write));
+            assert_eq!(db.get(&cold).await.unwrap(), Some(child_write));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot's ops proofs stay byte-stable and verifiable against the captured ops root
+    /// while the live database updates keys (flipping activity bits and raising the floor),
+    /// commits, and prunes past it.
+    #[test_traced]
+    fn test_snapshot_stable_across_bitmap_churn() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("proof-snapshot-churn", &ctx),
+            )
+            .await
+            .unwrap();
+            let mut db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            let canonical_root = db.root();
+            let ops_root = db.ops_root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            assert_eq!(snapshot.size(), op_count);
+
+            let (proof, ops) =
+                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                    .await
+                    .unwrap();
+            assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &ops,
+                &ops_root,
+            ));
+
+            // Update the same keys so the live bitmap retroactively flips the captured
+            // operations' activity bits, the floor rises, and pruning discards captured
+            // operations. The snapshot must not observe any of it.
+            db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert_ne!(db.root(), canonical_root);
+            assert_ne!(db.ops_root(), ops_root);
+
+            let (proof2, ops2) =
+                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                    .await
+                    .unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                &proof2,
+                Location::new(0),
+                &ops2,
+                &ops_root,
+            ));
+
+            // Anything above the frozen size is rejected.
+            assert!(
+                crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
+                    .await
+                    .is_err()
+            );
+
+            db.destroy().await.unwrap();
+        });
     }
 
     /// State committed via an awaited start_sync handle is recovered on reopen, including the

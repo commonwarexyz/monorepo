@@ -1,6 +1,6 @@
 use super::{
     Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, VerificationProgress, await_or_cancel, fetch_ancestor, is_already_processed,
+    VerificationResult, await_or_cancel, fetch_ancestor, is_already_processed,
 };
 use crate::stateful::{actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
@@ -54,6 +54,9 @@ where
 }
 
 /// Executes one independently-polled verification request.
+///
+/// Carries only read capability and speculative state, so a job outlives any
+/// number of applies. Its batch operations pause while one is running.
 pub(in crate::stateful::actor) struct Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -91,9 +94,8 @@ where
         marshal: MarshalMailbox<S, V>,
         consensus_context: A::Context,
         ancestry: impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
-    ) -> Option<bool>
+    ) -> VerificationResult
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -109,18 +111,18 @@ where
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
                 verification.cancelled().await;
-                return None;
+                return VerificationResult::Cancelled;
             }
             None => {
                 debug!("verification request cancelled before initial block arrived");
-                return None;
+                return VerificationResult::Cancelled;
             }
         };
         let block_digest = block.digest();
 
         if self.execution.pending_contains(&block_digest) {
             timer.observe(context);
-            return Some(true);
+            return VerificationResult::Decided(true);
         }
 
         // A finalized candidate cannot be re-executed against newer database
@@ -132,31 +134,23 @@ where
             ProcessedBlock::Continue => {}
             ProcessedBlock::Accepted => {
                 timer.observe(context);
-                return Some(true);
+                return VerificationResult::Decided(true);
             }
-            ProcessedBlock::Rejected => return Some(false),
-            ProcessedBlock::Cancelled => return None,
+            ProcessedBlock::Rejected => return VerificationResult::Decided(false),
+            ProcessedBlock::Cancelled => return VerificationResult::Cancelled,
         }
 
         // Reconstruct the candidate's parent state. This is the only phase
         // shared across requests, keyed by the acquired parent's block digest.
         let parent = match self
-            .prepare_parent(
-                context,
-                marshal,
-                block_digest,
-                &mut ancestry,
-                progress,
-                verification,
-            )
+            .prepare_parent(context, marshal, block_digest, &mut ancestry, verification)
             .await
         {
             Ok(parent) => parent,
-            Err(PrepareFailure::Invalid) => return Some(false),
-            Err(PrepareFailure::Cancelled) => return None,
+            Err(PrepareFailure::Invalid) => return VerificationResult::Decided(false),
+            Err(PrepareFailure::Cancelled) => return VerificationResult::Cancelled,
         };
 
-        progress.verifying(block_digest, parent.digest, consensus_context.round());
         let result = self
             .verify(
                 context,
@@ -167,7 +161,7 @@ where
                 verification,
             )
             .await;
-        if result == Some(true) {
+        if matches!(result, VerificationResult::Decided(true)) {
             timer.observe(context);
         }
         result
@@ -223,7 +217,6 @@ where
         marshal: MarshalMailbox<S, V>,
         block_digest: PendingDigest<A, E>,
         ancestry: &mut impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
     ) -> Result<PreparedParent<A, E>, PrepareFailure>
     where
@@ -239,8 +232,8 @@ where
                     "verification request waiting on incomplete parent ancestry"
                 );
 
-                // As with incomplete candidate ancestry, only cancellation or
-                // actor-driven invalidation should release this pending request.
+                // As with incomplete candidate ancestry, only the caller
+                // leaving should release this pending request.
                 verification.cancelled().await;
                 return Err(PrepareFailure::Cancelled);
             }
@@ -261,10 +254,7 @@ where
                 marshal,
                 block.clone(),
                 verification,
-                Some(ReplayTracking {
-                    flights: &self.replays,
-                    progress,
-                }),
+                Some(&self.replays),
             )
             .await
         {
@@ -314,7 +304,7 @@ where
         parent: PreparedParent<A, E>,
         ancestry: impl Ancestry<A::Block>,
         verification: &mut Verification,
-    ) -> Option<bool> {
+    ) -> VerificationResult {
         let block_digest = block.digest();
         let round = consensus_context.round();
 
@@ -340,7 +330,7 @@ where
                     parent_digest = ?parent.digest,
                     "verification request cancelled during verify"
                 );
-                return None;
+                return VerificationResult::Cancelled;
             }
         };
 
@@ -348,9 +338,9 @@ where
             warn!(
                 parent_digest = ?parent.digest,
                 ?block_digest,
-                "verification rejected: app.verify returned None"
+                "verification rejected: application returned None"
             );
-            return Some(false);
+            return VerificationResult::Decided(false);
         };
         let tail = info_span!(
             "stateful.processor.match_commitments",
@@ -367,7 +357,7 @@ where
                 ?block_digest,
                 "verification rejected: verified state must match block commitments"
             );
-            return Some(false);
+            return VerificationResult::Decided(false);
         }
         if !self
             .execution
@@ -378,11 +368,11 @@ where
                 ?block_digest,
                 "verification result became incompatible before caching"
             );
-            return Some(false);
+            return VerificationResult::Decided(false);
         }
         self.execution.update_pending_metric();
         drop(block);
         drop(tail);
-        Some(true)
+        VerificationResult::Decided(true)
     }
 }

@@ -59,10 +59,11 @@ use crate::{
     },
     journal::{
         Error as JournalError,
+        authenticated::Authenticated,
         contiguous::{Contiguous, Mutable},
     },
     merkle::{
-        Bagging, Family, Location,
+        Bagging, Family, Location, Proof,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::{Floored, Operation},
@@ -76,7 +77,10 @@ use commonware_utils::{
     cache::Clock,
     channel::mpsc,
 };
-use core::{num::NonZeroUsize, ops::Range};
+use core::{
+    num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
+};
 use futures::{StreamExt as _, future::join_all, pin_mut};
 use std::sync::Arc;
 use thiserror::Error;
@@ -84,7 +88,7 @@ use thiserror::Error;
 pub mod any;
 pub mod batch_chain;
 pub(crate) mod bitmap;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
@@ -166,6 +170,11 @@ where
 }
 
 /// Compute the inactive peak count for a historical operation count.
+///
+/// # Errors
+///
+/// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` exceeds the operations
+/// `reader` holds.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,
@@ -174,12 +183,35 @@ where
     F: Family,
     R: Contiguous<Item: Floored<F>>,
 {
+    if *op_count > reader.bounds().end {
+        return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+    }
     if op_count == Location::new(0) {
         return Ok(0);
     }
 
     let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
     Ok(F::inactive_peaks(op_count, floor))
+}
+
+/// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
+/// operations.
+pub(crate) async fn historical_proof<F, C, M, H>(
+    log: &Authenticated<C, M, H>,
+    op_count: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Floored<F>>,
+    M: crate::merkle::storage::Storage<Family = F, Digest = H::Digest>,
+    H: Hasher,
+{
+    let inactive_peaks = inactive_peaks_at::<F, _>(&log.items, op_count).await?;
+    Ok(log
+        .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+        .await?)
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -889,7 +921,7 @@ pub(crate) struct FloorHelper<
     I: Index<Value = Location<F>>,
     C: Mutable<Item: Operation<F>>,
 > {
-    pub snapshot: &'a mut I,
+    pub index: &'a mut I,
     pub log: C,
 }
 
@@ -913,7 +945,7 @@ where
 
         // If we find a snapshot entry corresponding to the operation, we know it's active.
         let active = {
-            let Some(mut cursor) = self.snapshot.get_mut(key) else {
+            let Some(mut cursor) = self.index.get_mut(key) else {
                 return Ok((self, false));
             };
             if cursor.find(|&loc| loc == old_loc) {

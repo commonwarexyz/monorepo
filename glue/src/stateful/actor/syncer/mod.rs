@@ -25,7 +25,7 @@ mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::Mailbox;
+pub(crate) use mailbox::{Mailbox, UpdateOutcome};
 
 mod plan;
 pub use plan::SyncPlan;
@@ -131,23 +131,10 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The database handle set.
+    /// The owned database set produced by sync.
     pub databases: A::Databases,
     /// The anchor at which state sync completed.
     pub anchor: Anchor<BlockDigest<A, E>>,
-}
-
-impl<E, A> Clone for SyncResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            databases: self.databases.clone(),
-            anchor: self.anchor,
-        }
-    }
 }
 
 /// Resolved state sync floor data derived from the selected finalization and marshal progress.
@@ -418,20 +405,18 @@ where
         .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
         .max();
 
-    let databases = A::Databases::init(context.child("db_set"), db_config).await;
+    let mut databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
 
-    // In the case that the committed targets do not match the marshal floor, we may
+    // In the case that the applied targets do not match the marshal floor, we may
     // have suffered a crash that left the set in an inconsistent state. In this case,
     // we attempt to repair by rewinding the databases back to the marshal floor. If
     // the rewind fails to produce a consistent state, we must crash. This can occur
     // if the databases were corrupted or pruned too aggressively.
-    let committed = databases.committed_targets().await;
-    if committed != processed_targets {
-        databases.rewind_to_targets(processed_targets.clone()).await;
-        let rewound_targets = databases.committed_targets().await;
+    if databases.applied_targets().await != processed_targets {
+        databases = databases.rewind_to_targets(processed_targets.clone()).await;
         assert!(
-            rewound_targets == processed_targets,
+            databases.applied_targets().await == processed_targets,
             "databases must be consistent with marshal floor after rewind"
         );
     }
