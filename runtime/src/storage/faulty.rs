@@ -1,6 +1,8 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::BoxDynRng};
+use crate::{
+    Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions, deterministic::BoxDynRng,
+};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::RngExt as _;
@@ -286,11 +288,16 @@ impl<B: crate::Blob> Blob<B> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
         }
-        self.inner.read_at(offset, len).await
+        self.inner.read_at(offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -298,11 +305,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
         }
-        self.inner.read_at_buf(offset, len, bufs.into()).await
+        self.inner
+            .read_at_buf(offset, len, bufs.into(), options)
+            .await
     }
 
     async fn write_at(
@@ -386,7 +396,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, IoBufMut, Storage as _,
+        mocks::RecordingContext,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -428,6 +439,32 @@ mod tests {
     async fn test_faulty_storage_no_faults() {
         let h = Harness::new(Config::default());
         run_storage_tests(h.storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_faulty_blob_forwards_read_options_without_faults() {
+        let (inner, recordings) = RecordingContext::new(MemStorage::new(test_pool()));
+        let rng = Arc::new(Mutex::new(Box::new(StdRng::seed_from_u64(42)) as BoxDynRng));
+        let storage = Storage::new(inner, rng, Arc::new(RwLock::new(Config::default())));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
+        recordings.clear();
+
+        // With fault rates disabled, both read entry points must preserve DONT_CACHE.
+        let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(read.coalesce(), b"data");
+        let read = blob
+            .read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::DONT_CACHE)
+            .await
+            .unwrap();
+        assert_eq!(read.coalesce(), b"data");
+
+        assert_eq!(
+            recordings.snapshot().reads,
+            vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
+        );
     }
 
     #[tokio::test]
@@ -526,7 +563,10 @@ mod tests {
         // Enable read faults
         h.config.write().read_rate = Some(1.0);
 
-        assert!(matches!(blob.read_at(0, 4).await, Err(Error::Io(_))));
+        assert!(matches!(
+            blob.read_at(0, 4, ReadOptions::default()).await,
+            Err(Error::Io(_))
+        ));
     }
 
     #[tokio::test]
@@ -649,7 +689,10 @@ mod tests {
             data.len()
         );
 
-        let read_result = inner_blob.read_at(0, bytes_written).await.unwrap();
+        let read_result = inner_blob
+            .read_at(0, bytes_written, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_result.coalesce().as_ref(), &data[..bytes_written]);
     }
 
