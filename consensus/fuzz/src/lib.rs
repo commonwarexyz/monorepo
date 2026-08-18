@@ -464,9 +464,9 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub term_length: TermLength,
-    /// Sampled but not yet handed to engines (see [`PINNED_OPTIMISTIC_VIEWS`]).
+    /// Sampled but not yet handed to engines (see `PINNED_OPTIMISTIC_VIEWS`).
     pub optimistic_views: ViewDelta,
-    /// Sampled but not yet handed to engines (see [`PINNED_OPTIMISTIC_VIEWS`]).
+    /// Sampled but not yet handed to engines (see `PINNED_OPTIMISTIC_VIEWS`).
     pub heterogeneous_optimism: bool,
     pub degraded_network: bool,
     pub configuration: Configuration,
