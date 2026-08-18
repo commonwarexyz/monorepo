@@ -1,5 +1,6 @@
 use super::{
     Claim, Error, Proof, ProvingKey, Relation, Witness,
+    circuit::dot,
     poly::{Domain, Polynomial},
     sample_scalar, transcript_challenge,
 };
@@ -78,10 +79,10 @@ pub fn prove(
 
     let challenge =
         transcript_challenge(transcript, &domain, &proving_key.verifying_key, claim, &t);
-    let v_a = z_a_masked.evaluate_at(&challenge) - &x_a.evaluate_at(&challenge);
-    let mut z_at_challenge = v_a.clone() + &x_a.evaluate_at(&challenge);
-    z_at_challenge.square();
-    let v_r = z_at_challenge - &x_b.evaluate_at(&challenge);
+    let mut z_a_at_challenge = z_a_masked.evaluate_at(&challenge);
+    let v_a = z_a_at_challenge.clone() - &x_a.evaluate_at(&challenge);
+    z_a_at_challenge.square();
+    let v_r = z_a_at_challenge - &x_b.evaluate_at(&challenge);
 
     let a_opening_numerator = z_a_masked
         .sub(&x_a)?
@@ -145,8 +146,10 @@ fn validate_inputs(
             actual: claim.public_inputs.len(),
         });
     }
-    if !relation.is_satisfied(witness.assignment()) {
-        return Err(Error::Unsatisfied);
+    // Whether the assignment satisfies the relation is checked by the
+    // divisibility of the masked constraint polynomial during proving.
+    if witness.assignment().values().len() != relation.size() {
+        return Err(Error::RelationMismatch);
     }
     if witness.claim(&proving_key.commitment_key, strategy)? != *claim {
         return Err(Error::ClaimMismatch);
@@ -155,17 +158,12 @@ fn validate_inputs(
 }
 
 fn evaluate_relation(relation: &Relation, values: &[Scalar]) -> (Vec<Scalar>, Vec<Scalar>) {
-    let size = relation.size();
-    let a = relation
-        .a()
-        .chunks_exact(size)
-        .map(|row| dot(row, values))
-        .collect();
-    let b = relation
-        .b()
-        .chunks_exact(size)
-        .map(|row| dot(row, values))
-        .collect();
+    let mut a = vec![Scalar::zero(); relation.size()];
+    let mut b = vec![Scalar::zero(); relation.size()];
+    for (row, entries) in relation.rows().iter().enumerate() {
+        a[row] = dot(&entries.squared, values);
+        b[row] = dot(&entries.linear, values);
+    }
     (a, b)
 }
 
@@ -173,25 +171,22 @@ pub(super) fn evaluate_public(
     relation: &Relation,
     public: &[Scalar],
 ) -> (Vec<Scalar>, Vec<Scalar>) {
-    let size = relation.size();
-    let a = relation
-        .a()
-        .chunks_exact(size)
-        .map(|row| dot(&row[..public.len()], public))
-        .collect();
-    let b = relation
-        .b()
-        .chunks_exact(size)
-        .map(|row| dot(&row[..public.len()], public))
-        .collect();
+    let mut a = vec![Scalar::zero(); relation.size()];
+    let mut b = vec![Scalar::zero(); relation.size()];
+    for (row, entries) in relation.rows().iter().enumerate() {
+        a[row] = dot_public(&entries.squared, public);
+        b[row] = dot_public(&entries.linear, public);
+    }
     (a, b)
 }
 
-fn dot(coefficients: &[Scalar], values: &[Scalar]) -> Scalar {
-    coefficients
+/// Dot the public prefix of a sparse row with the public assignment. Row
+/// entries are sorted by column, so the public columns form a prefix.
+fn dot_public(entries: &[(u32, Scalar)], public: &[Scalar]) -> Scalar {
+    entries
         .iter()
-        .zip(values)
-        .fold(Scalar::zero(), |sum, (coefficient, value)| {
-            sum + &(coefficient.clone() * value)
+        .take_while(|(column, _)| (*column as usize) < public.len())
+        .fold(Scalar::zero(), |sum, (column, coefficient)| {
+            sum + &(coefficient.clone() * &public[*column as usize])
         })
 }

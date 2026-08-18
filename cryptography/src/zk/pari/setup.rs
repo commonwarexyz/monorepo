@@ -1,5 +1,6 @@
 use super::{
     Error, Relation,
+    circuit::SparseRow,
     poly::Domain,
     sample_nonzero_scalar,
     types::{CommitmentKey, ProvingKey, VerifyingKey},
@@ -48,8 +49,7 @@ pub fn setup(
         };
 
         let lagrange = domain.lagrange_coefficients(&tau)?;
-        let (a_at_tau, b_at_tau) =
-            evaluate_columns(relation.a(), relation.b(), &lagrange, num_vars);
+        let (a_at_tau, b_at_tau) = evaluate_columns(relation.rows(), &lagrange, num_vars);
         let vanishing_at_tau = domain.evaluate_vanishing(&tau);
         let delta_committed_inv = delta_committed.inv();
         let delta_witness_inv = delta_witness.inv();
@@ -146,23 +146,18 @@ pub fn setup(
 }
 
 fn evaluate_columns(
-    a: &[Scalar],
-    b: &[Scalar],
+    rows: &[SparseRow],
     lagrange: &[Scalar],
     num_vars: usize,
 ) -> (Vec<Scalar>, Vec<Scalar>) {
     let mut a_at_tau = vec![Scalar::zero(); num_vars];
     let mut b_at_tau = vec![Scalar::zero(); num_vars];
-    for ((a_row, b_row), coefficient) in a
-        .chunks_exact(num_vars)
-        .zip(b.chunks_exact(num_vars))
-        .zip(lagrange)
-    {
-        for (value, entry) in a_at_tau.iter_mut().zip(a_row) {
-            *value += &(entry.clone() * coefficient);
+    for (entries, coefficient) in rows.iter().zip(lagrange) {
+        for (column, value) in &entries.squared {
+            a_at_tau[*column as usize] += &(value.clone() * coefficient);
         }
-        for (value, entry) in b_at_tau.iter_mut().zip(b_row) {
-            *value += &(entry.clone() * coefficient);
+        for (column, value) in &entries.linear {
+            b_at_tau[*column as usize] += &(value.clone() * coefficient);
         }
     }
     (a_at_tau, b_at_tau)

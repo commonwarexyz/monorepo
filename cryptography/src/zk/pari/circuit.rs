@@ -45,8 +45,6 @@ pub(super) enum Error {
     },
     #[error("compiled valued relation does not match the expected shape and digest")]
     RelationMismatch,
-    #[error("compiled assignment plan is inconsistent")]
-    AssignmentPlan,
 }
 
 /// Ordered public and committed selections from a generic circuit.
@@ -103,15 +101,26 @@ impl InputLayout {
     }
 }
 
+/// One constraint row stored sparsely, enforcing `(squared . z)^2 = linear . z`.
+///
+/// Entries are sorted by strictly ascending column and never hold a zero
+/// coefficient, so every row has exactly one representation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SparseRow {
+    pub(super) squared: Vec<(u32, Scalar)>,
+    pub(super) linear: Vec<(u32, Scalar)>,
+}
+
 /// A square relation whose rows enforce `(A z)^2 = B z`.
+///
+/// Rows are stored sparsely; every row past `rows.len()` up to the padded
+/// domain size is implicitly zero and trivially satisfied.
 pub struct Relation {
     size: usize,
-    rows_used: usize,
     public_inputs: usize,
     committed_start: usize,
     committed_inputs: usize,
-    a: Vec<Scalar>,
-    b: Vec<Scalar>,
+    rows: Vec<SparseRow>,
     digest: [u8; 32],
     value_sources: Vec<ValueSource>,
 }
@@ -164,14 +173,9 @@ impl Relation {
         self.committed_start
     }
 
-    /// Return the square A matrix in row-major order.
-    pub(super) fn a(&self) -> &[Scalar] {
-        &self.a
-    }
-
-    /// Return the square B matrix in row-major order.
-    pub(super) fn b(&self) -> &[Scalar] {
-        &self.b
+    /// Return the sparse constraint rows.
+    pub(super) fn rows(&self) -> &[SparseRow] {
+        &self.rows
     }
 
     /// Canonical digest binding keys and witnesses to this relation.
@@ -179,20 +183,19 @@ impl Relation {
         &self.digest
     }
 
-    /// Check an assignment against every row, including explicit zero padding rows.
+    /// Check an assignment against every row. Padding rows past the stored
+    /// rows are all-zero and satisfied by construction.
+    #[cfg(test)]
     pub(super) fn is_satisfied(&self, assignment: &Assignment) -> bool {
         if assignment.relation_digest != self.digest || assignment.values.len() != self.size {
             return false;
         }
 
-        self.a
-            .chunks_exact(self.size)
-            .zip(self.b.chunks_exact(self.size))
-            .all(|(a_row, b_row)| {
-                let a_value = dot(a_row, &assignment.values);
-                let b_value = dot(b_row, &assignment.values);
-                a_value.clone() * &a_value == b_value
-            })
+        self.rows.iter().all(|row| {
+            let a_value = dot(&row.squared, &assignment.values);
+            let b_value = dot(&row.linear, &assignment.values);
+            a_value.clone() * &a_value == b_value
+        })
     }
 }
 
@@ -321,7 +324,6 @@ enum ValueSource {
     One,
     Circuit(CircuitIdx),
     DifferenceSquare(CircuitIdx, CircuitIdx),
-    CoordinateSquare(usize),
     Zero,
 }
 
@@ -350,7 +352,6 @@ impl<'a> Compiler<'a> {
             .nodes
             .len()
             .checked_mul(2)
-            .and_then(|count| count.checked_add(layout.committed.len()))
             .ok_or(Error::SizeOverflow)?;
         let value_capacity = next_column
             .checked_add(additional_columns)
@@ -386,8 +387,7 @@ impl<'a> Compiler<'a> {
         let selected_rows = layout
             .committed
             .len()
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(layout.public.len()))
+            .checked_add(layout.public.len())
             .ok_or(Error::SizeOverflow)?;
         let row_capacity = node_rows
             .checked_add(circuit.assertions.len())
@@ -413,7 +413,6 @@ impl<'a> Compiler<'a> {
         self.compile_nodes()?;
         self.compile_assertions()?;
         self.link_inputs()?;
-        self.anchor_committed()?;
         self.finish()
     }
 
@@ -477,23 +476,16 @@ impl<'a> Compiler<'a> {
             });
         }
 
+        // These rows keep the committed columns of A linearly independent, as
+        // commitment binding requires: expressions never reference committed
+        // columns (each is a fresh copy of a circuit value expressed over
+        // witness columns and constants), so each row below is the only row
+        // with a nonzero entry in its committed column.
         for (position, &idx) in self.layout.committed.iter().enumerate() {
             let column = checked_add(self.committed_start, position)?;
             self.rows.push(Row {
                 squared: LinearCombination::coordinate(column).sub(&self.expression(idx)?),
                 linear: LinearCombination::zero(),
-            });
-        }
-        Ok(())
-    }
-
-    fn anchor_committed(&mut self) -> Result<(), Error> {
-        for position in 0..self.layout.committed.len() {
-            let committed = checked_add(self.committed_start, position)?;
-            let square = self.allocate(ValueSource::CoordinateSquare(committed))?;
-            self.rows.push(Row {
-                squared: LinearCombination::coordinate(committed),
-                linear: LinearCombination::coordinate(square),
             });
         }
         Ok(())
@@ -545,24 +537,23 @@ impl<'a> Compiler<'a> {
             .map_err(|_| Error::AllocationFailed)?;
         self.value_sources.resize(size, ValueSource::Zero);
 
-        let matrix_len = size.checked_mul(size).ok_or(Error::SizeOverflow)?;
-        let mut a = zero_vector(matrix_len)?;
-        let mut b = zero_vector(matrix_len)?;
-        for (row_index, row) in self.rows.iter().enumerate() {
-            write_row(&mut a, size, row_index, &row.squared)?;
-            write_row(&mut b, size, row_index, &row.linear)?;
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.rows.len())
+            .map_err(|_| Error::AllocationFailed)?;
+        for row in &self.rows {
+            rows.push(SparseRow {
+                squared: to_sparse(&row.squared)?,
+                linear: to_sparse(&row.linear)?,
+            });
         }
 
-        let rows_used = self.rows.len();
-        let digest = relation_digest(size, rows_used, self.layout, &a, &b)?;
+        let digest = relation_digest(size, &rows, self.layout)?;
         Ok(Relation {
             size,
-            rows_used,
             public_inputs: self.layout.public.len(),
             committed_start: self.committed_start,
             committed_inputs: self.layout.committed.len(),
-            a,
-            b,
+            rows,
             digest,
             value_sources: self.value_sources,
         })
@@ -599,10 +590,10 @@ pub(super) fn compile_valued(
 
     let compiled = compile(&valued.circuit, layout)?;
     if compiled.size != expected.size
-        || compiled.rows_used != expected.rows_used
         || compiled.public_inputs != expected.public_inputs
         || compiled.committed_start != expected.committed_start
         || compiled.committed_inputs != expected.committed_inputs
+        || compiled.rows != expected.rows
         || compiled.digest != expected.digest
     {
         return Err(Error::RelationMismatch);
@@ -619,10 +610,6 @@ pub(super) fn compile_valued(
             ValueSource::DifferenceSquare(left, right) => {
                 let difference = circuit_value(valued, left)? - &circuit_value(valued, right)?;
                 difference.clone() * &difference
-            }
-            ValueSource::CoordinateSquare(column) => {
-                let value = values.get(column).cloned().ok_or(Error::AssignmentPlan)?;
-                value.clone() * &value
             }
             ValueSource::Zero => Scalar::zero(),
         };
@@ -696,11 +683,13 @@ fn circuit_value(valued: &ValuedCircuit<Scalar>, idx: CircuitIdx) -> Result<Scal
     })
 }
 
-fn dot(row: &[Scalar], values: &[Scalar]) -> Scalar {
-    row.iter()
-        .zip(values)
-        .fold(Scalar::zero(), |acc, (coefficient, value)| {
-            acc + &(coefficient.clone() * value)
+/// Dot a sparse row with a full assignment. Callers guarantee every stored
+/// column index is in range for `values`.
+pub(super) fn dot(entries: &[(u32, Scalar)], values: &[Scalar]) -> Scalar {
+    entries
+        .iter()
+        .fold(Scalar::zero(), |acc, (column, coefficient)| {
+            acc + &(coefficient.clone() * &values[*column as usize])
         })
 }
 
@@ -708,53 +697,49 @@ fn checked_add(left: usize, right: usize) -> Result<usize, Error> {
     left.checked_add(right).ok_or(Error::SizeOverflow)
 }
 
-fn zero_vector(len: usize) -> Result<Vec<Scalar>, Error> {
-    let mut out = Vec::new();
-    out.try_reserve_exact(len)
+/// Convert a compiled linear combination into sorted sparse entries.
+///
+/// `LinearCombination` stores its terms in a `BTreeMap` and strips zero
+/// coefficients on insert, so the output is canonical by construction.
+fn to_sparse(combination: &LinearCombination) -> Result<Vec<(u32, Scalar)>, Error> {
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(combination.terms.len())
         .map_err(|_| Error::AllocationFailed)?;
-    out.resize_with(len, Scalar::zero);
-    Ok(out)
-}
-
-fn write_row(
-    matrix: &mut [Scalar],
-    size: usize,
-    row: usize,
-    combination: &LinearCombination,
-) -> Result<(), Error> {
-    let row_start = row.checked_mul(size).ok_or(Error::SizeOverflow)?;
     for (&column, coefficient) in &combination.terms {
-        let offset = row_start
-            .checked_add(column)
-            .filter(|&offset| offset < matrix.len())
-            .ok_or(Error::SizeOverflow)?;
-        matrix[offset] = coefficient.clone();
+        let column = u32::try_from(column).map_err(|_| Error::SizeOverflow)?;
+        entries.push((column, coefficient.clone()));
     }
-    Ok(())
+    Ok(entries)
 }
 
 fn relation_digest(
     size: usize,
-    rows_used: usize,
+    rows: &[SparseRow],
     layout: &InputLayout,
-    a: &[Scalar],
-    b: &[Scalar],
 ) -> Result<[u8; 32], Error> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DIGEST_NAMESPACE);
     hash_usize(&mut hasher, size)?;
-    hash_usize(&mut hasher, rows_used)?;
+    hash_usize(&mut hasher, rows.len())?;
     hash_indices(&mut hasher, &layout.public)?;
     hash_indices(&mut hasher, &layout.committed)?;
-    hasher.update(b"A");
-    for value in a {
-        hasher.update(&value.encode());
-    }
-    hasher.update(b"B");
-    for value in b {
-        hasher.update(&value.encode());
+    for row in rows {
+        hasher.update(b"A");
+        hash_entries(&mut hasher, &row.squared)?;
+        hasher.update(b"B");
+        hash_entries(&mut hasher, &row.linear)?;
     }
     Ok(*hasher.finalize().as_bytes())
+}
+
+fn hash_entries(hasher: &mut blake3::Hasher, entries: &[(u32, Scalar)]) -> Result<(), Error> {
+    hash_usize(hasher, entries.len())?;
+    for (column, coefficient) in entries {
+        hasher.update(&column.to_be_bytes());
+        hasher.update(&coefficient.encode());
+    }
+    Ok(())
 }
 
 fn hash_usize(hasher: &mut blake3::Hasher, value: usize) -> Result<(), Error> {
@@ -789,15 +774,17 @@ mod tests {
 
     fn committed_a_rank(relation: &Relation) -> usize {
         let columns = relation.committed_inputs;
-        let mut matrix = (0..relation.size)
-            .map(|row| {
-                (0..columns)
-                    .map(|column| {
-                        relation.a[row * relation.size + relation.committed_start + column].clone()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        let mut matrix = vec![vec![Scalar::zero(); columns]; relation.size];
+        for (row, entries) in relation.rows.iter().enumerate() {
+            for (column, coefficient) in &entries.squared {
+                let column = *column as usize;
+                if let Some(offset) = column.checked_sub(relation.committed_start)
+                    && offset < columns
+                {
+                    matrix[row][offset] = coefficient.clone();
+                }
+            }
+        }
         let mut rank = 0;
         for column in 0..columns {
             let Some(pivot) =
@@ -845,14 +832,14 @@ mod tests {
         assert_eq!(assignment.public_assignment(), &[scalar(1), scalar(63)]);
         assert_eq!(assignment.committed_inputs(), &[scalar(3), scalar(4)]);
         assert!(relation.size.is_power_of_two());
-        for row in relation.rows_used..relation.size {
-            let range = row * relation.size..(row + 1) * relation.size;
-            assert!(
-                relation.a[range.clone()]
-                    .iter()
-                    .all(|x| *x == Scalar::zero())
-            );
-            assert!(relation.b[range].iter().all(|x| *x == Scalar::zero()));
+        assert!(relation.rows.len() <= relation.size);
+        for row in &relation.rows {
+            for entries in [&row.squared, &row.linear] {
+                assert!(entries.iter().all(|(column, coefficient)| {
+                    (*column as usize) < relation.size && *coefficient != Scalar::zero()
+                }));
+                assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            }
         }
     }
 
@@ -876,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_anchors_keep_duplicate_expressions_full_rank() {
+    fn committed_link_rows_keep_duplicate_expressions_full_rank() {
         let (valued, selected) = build_with_values(|ctx| {
             let x = Var::witness(ctx, |_| scalar(7));
             let y = Var::witness(ctx, |_| scalar(11));
@@ -996,8 +983,7 @@ mod tests {
         let prover_relation = compile(&valued.circuit, &layout).expect("circuit should compile");
         assert_eq!(verifier_relation.digest, prover_relation.digest);
         assert_eq!(verifier_relation.size, prover_relation.size);
-        assert_eq!(verifier_relation.a, prover_relation.a);
-        assert_eq!(verifier_relation.b, prover_relation.b);
+        assert_eq!(verifier_relation.rows, prover_relation.rows);
 
         let assignment = compile_valued(&valued, &layout, &verifier_relation)
             .expect("relation shape and digest should match");
