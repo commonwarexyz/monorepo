@@ -530,6 +530,15 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_fixed_merkleize_across_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = open::<mmr::Family>(ctx).await;
+            test::test_immutable_merkleize_across_prune(db).await;
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_fixed_stale_fork_refuses() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {

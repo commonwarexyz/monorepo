@@ -4153,6 +4153,76 @@ mod tests {
         });
     }
 
+    /// A surviving child chain merkleizes across a prune whose floor passed the chain
+    /// base without losing the nodes its graft needs.
+    #[test]
+    fn merkleize_across_prune_past_chain_base() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("across-prune", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            // Seed committed keys.
+            let key = |i: u8| Sha256::hash(&[&[i]]);
+            let mut seed = db.new_batch();
+            for i in 0..100u8 {
+                seed = seed.write(key(i), Some(Sha256::fill(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let base_floor = db.sync_boundary();
+
+            // The parent rewrites every live key, so its floor raise moves past the
+            // whole committed prefix.
+            let mut parent = db.new_batch();
+            for i in 0..100u8 {
+                parent = parent.write(key(i), Some(Sha256::fill(i + 10)));
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+            assert!(
+                parent.bounds().inactivity_floor > db.bounds().end,
+                "parent floor must pass the chain base for this test to bite"
+            );
+
+            // Two identical children forked before the apply, writing enough fresh
+            // keys that their merkleize merges deep over the committed prefix.
+            let build = |parent: &Arc<MerkleizedBatch<_, _, _, _>>| {
+                let mut child = parent.new_batch::<Sha256>();
+                for i in 100..200u8 {
+                    child = child.write(key(i), Some(Sha256::fill(i)));
+                }
+                child
+            };
+            let child = build(&parent);
+            let expected = build(&parent).merkleize(&db, None).await.unwrap().root();
+
+            // Apply the parent, drop it (the child now reads the committed prefix
+            // through the live tree), and prune past the old chain base.
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let floor = db.sync_boundary();
+            assert!(floor > base_floor);
+            let db = db.prune(floor).await.unwrap();
+
+            // The surviving child still merkleizes to the same root.
+            let merkleized = child.merkleize(&db, None).await.unwrap();
+            assert_eq!(merkleized.root(), expected);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Instantiate the staged-vs-explicit bulk-update parity test for one `any` DB kind.
     ///
     /// The staged path (`stage` + `Staged::merkleize`) must produce a byte-identical root to an

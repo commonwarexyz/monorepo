@@ -873,6 +873,60 @@ pub(super) mod test {
         commonware_parallel::Sequential,
     >;
 
+    /// A surviving child chain merkleizes across a prune whose floor passed the chain
+    /// base: the chain hashes against its chain-base mem capture, so the prune cannot
+    /// starve it of boundary nodes.
+    #[boxed]
+    pub(crate) async fn test_immutable_merkleize_across_prune<F: Family, V, C>(db: TestDb<F, V, C>)
+    where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        // Seed committed state so the chain base sits above zero.
+        let seed = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(11u8))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        // The parent declares a floor at its own commit, past the chain base.
+        let parent_floor = db.bounds().end + 1;
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(2u8), Sha256::fill(12u8))
+            .merkleize(&db, None, parent_floor)
+            .await
+            .unwrap();
+
+        // Two identical children forked before the apply; one merkleizes now to
+        // record the expected root.
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3u8), Sha256::fill(13u8));
+        let twin = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3u8), Sha256::fill(13u8));
+        let expected = twin
+            .merkleize(&db, None, parent_floor)
+            .await
+            .unwrap()
+            .root();
+
+        // Apply the parent and prune to its floor.
+        let (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let floor = db.inactivity_floor_loc();
+        let db = db.prune(floor).await.unwrap();
+
+        // The surviving child still merkleizes to the same root.
+        let merkleized = child.merkleize(&db, None, parent_floor).await.unwrap();
+        assert_eq!(merkleized.root(), expected);
+    }
+
     /// Once a sibling batch is applied, reads and merkleization through the losing fork
     /// refuse with [`Error::StaleRead`], while applying it is separately rejected.
     #[boxed]

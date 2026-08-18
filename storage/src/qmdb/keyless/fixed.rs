@@ -506,6 +506,14 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    fn test_keyless_fixed_merkleize_across_prune() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("storage")).await;
+            tests::test_keyless_merkleize_across_prune(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_keyless_fixed_stale_fork_refuses() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("storage")).await;

@@ -659,6 +659,64 @@ pub(crate) mod tests {
         }
     }
 
+    /// A surviving child chain merkleizes across a prune whose floor passed the chain
+    /// base without losing the nodes its graft needs.
+    #[boxed]
+    pub(crate) async fn test_keyless_merkleize_across_prune<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared + std::fmt::Debug,
+    {
+        // Seed committed state so the chain base sits above zero.
+        let mut seed = db.new_batch();
+        for i in 0..80 {
+            seed = seed.append(V::Value::make(i));
+        }
+        let seed = seed
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        (db, _) = db.apply_batch(seed).await.unwrap();
+        db = db.commit().await.unwrap();
+
+        // The parent declares a floor at its own commit, past the chain base.
+        let parent_floor = db.bounds().end + 1;
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(100))
+            .merkleize(&db, None, parent_floor)
+            .await
+            .unwrap();
+
+        // Two identical children forked before the apply, appending enough that
+        // their merkleize merges deep over the committed prefix.
+        let build = |parent: &Arc<batch::MerkleizedBatch<F, _, V, S>>| {
+            let mut child = parent.new_batch::<Sha256>();
+            for i in 200..280 {
+                child = child.append(V::Value::make(i));
+            }
+            child
+        };
+        let child = build(&parent);
+        let expected = build(&parent)
+            .merkleize(&db, None, parent_floor)
+            .await
+            .unwrap()
+            .root();
+
+        // Apply the parent and prune to its floor.
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let floor = db.inactivity_floor_loc();
+        let db = db.prune(floor).await.unwrap();
+
+        // The surviving child still merkleizes to the same root.
+        let merkleized = child.merkleize(&db, None, parent_floor).await.unwrap();
+        assert_eq!(merkleized.root(), expected);
+    }
+
     /// Once a sibling batch is applied, reads and merkleization through the losing fork
     /// refuse with [`Error::StaleRead`], while applying it is separately rejected.
     #[boxed]
