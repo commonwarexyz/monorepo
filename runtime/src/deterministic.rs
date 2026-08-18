@@ -1644,13 +1644,13 @@ mod tests {
     use crate::FutureExt;
     use crate::{
         Blob, Metrics as _, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, WriteOptions, deterministic, reschedule, storage::faulty::ScriptedRng,
+        Supervisor as _, WriteOptions, deterministic, reschedule,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
-    use commonware_utils::{NZUsize, Probability, channel::oneshot};
+    use commonware_utils::{NZUsize, Probability, ScriptedRng, channel::oneshot};
     #[cfg(feature = "external")]
     use futures::StreamExt;
     #[cfg(not(feature = "external"))]
@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn test_recover_retained_successful_resize() {
-        let retained_resize = [ScriptedRng::EVENT_DOES_NOT_OCCUR, ScriptedRng::EVENT_OCCURS];
+        let retained_resize = [u64::MAX, 0];
         let cfg = deterministic::Config::default()
             .with_rng(Box::new(ScriptedRng::new(retained_resize)))
             .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
