@@ -1,0 +1,58 @@
+[package]
+name = "commonware-privacy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Build privacy-preserving applications."
+readme = "README.md"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/privacy"
+documentation = "https://docs.rs/commonware-privacy"
+
+[dependencies]
+bytes = { workspace = true, optional = true }
+commonware-codec = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, optional = true }
+commonware-macros.workspace = true
+commonware-math = { workspace = true, optional = true }
+commonware-parallel.workspace = true
+commonware-utils = { workspace = true, optional = true }
+rand_core.workspace = true
+
+[features]
+default = [ "std" ]
+codec = [
+    "dep:bytes",
+    "dep:commonware-codec",
+]
+mocks = []
+parallel = [ "commonware-parallel/std" ]
+simulator = []
+zkpari = [
+    "dep:commonware-cryptography",
+    "dep:commonware-codec",
+    "dep:commonware-math",
+    "dep:commonware-utils",
+    "parallel",
+    "std",
+]
+std = [
+    "bytes?/std",
+    "commonware-codec?/std",
+    "commonware-cryptography?/std",
+    "commonware-macros/std",
+    "commonware-math?/std",
+    "commonware-parallel/std",
+    "commonware-utils?/std",
+]
+
+[dev-dependencies]
+rand_chacha.workspace = true
+
+[[example]]
+name = "payments_bench"
+required-features = [ "codec", "zkpari" ]
+
+[lints]
+workspace = true

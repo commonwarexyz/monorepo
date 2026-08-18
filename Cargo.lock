@@ -1799,6 +1799,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-privacy"
+version = "2026.7.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-utils",
+ "rand_chacha 0.10.0",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "commonware-reshare"
 version = "2026.7.0"
 dependencies = [
