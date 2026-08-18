@@ -39,7 +39,13 @@ pub fn prove(
     let eta_1 = sample_scalar(rng);
     let eta_2 = sample_scalar(rng);
     let a_mask = Polynomial::from_coefficients(vec![eta_1.clone(), eta_2.clone()])?;
-    let b_mask = Polynomial::from_coefficients(vec![witness.opening().scalar().clone()])?;
+    // Every block's opening randomness contributes to the B-side mask, since
+    // each block commitment carries its own rho * Z_H(tau) term.
+    let openings_sum = witness
+        .openings()
+        .iter()
+        .fold(Scalar::zero(), |sum, opening| sum + opening.scalar());
+    let b_mask = Polynomial::from_coefficients(vec![openings_sum])?;
     let z_a_masked = z_a.mask_vanishing(&a_mask, &domain)?;
     let z_b_masked = z_b.mask_vanishing(&b_mask, &domain)?;
 
@@ -130,11 +136,20 @@ fn validate_inputs(
 ) -> Result<(), Error> {
     let verifying_key = &proving_key.verifying_key;
     if verifying_key.relation_digest != *relation.digest()
-        || proving_key.commitment_key.relation_digest != *relation.digest()
-        || verifying_key.commitment_key_digest != proving_key.commitment_key.digest()
+        || proving_key
+            .commitment_keys
+            .iter()
+            .any(|key| key.relation_digest != *relation.digest())
+        || verifying_key.commitment_key_digest
+            != super::types::commitment_keys_digest(&proving_key.commitment_keys)
         || verifying_key.domain_size as usize != relation.size()
         || verifying_key.public_inputs as usize != relation.public_inputs()
-        || verifying_key.committed_inputs as usize != relation.committed_inputs()
+        || verifying_key.blocks.len() != relation.blocks().len()
+        || verifying_key
+            .blocks
+            .iter()
+            .zip(relation.blocks())
+            .any(|(&size, &expected)| size as usize != expected)
         || witness.assignment().relation_digest() != relation.digest()
     {
         return Err(Error::RelationMismatch);
@@ -150,7 +165,7 @@ fn validate_inputs(
     if witness.assignment().values().len() != relation.size() {
         return Err(Error::RelationMismatch);
     }
-    if witness.claim(&proving_key.commitment_key, strategy)? != *claim {
+    if witness.claim(&proving_key.commitment_keys, strategy)? != *claim {
         return Err(Error::ClaimMismatch);
     }
     Ok(())

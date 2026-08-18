@@ -32,7 +32,7 @@ fn build_case(left: Scalar, right: Scalar) -> (ValuedCircuit<Scalar>, InputLayou
         sum.assert_eq(&public);
         vec![public, left, right]
     });
-    let layout = InputLayout::new(vec![indices[0]], vec![indices[1], indices[2]])
+    let layout = InputLayout::new(vec![indices[0]], vec![vec![indices[1], indices[2]]])
         .expect("fixed fuzz layout is valid");
     (valued, layout)
 }
@@ -124,10 +124,10 @@ impl Plan {
             self.opening
         };
         let witness = relation
-            .witness(&valued, &layout, Opening::new(opening))
+            .witness(&valued, &layout, vec![Opening::new(opening)])
             .expect("honest fuzz witness should match the fixed relation");
         let mut claim = witness
-            .claim(proving_key.commitment_key(), &Sequential)
+            .claim(proving_key.commitment_keys(), &Sequential)
             .expect("honest fuzz claim should match its witness");
 
         let mut prover_rng = TestRng::new(self.prover_seed);
@@ -156,7 +156,7 @@ impl Plan {
             Mutation::PublicInput => claim.public_inputs[0] += &delta,
             Mutation::MissingPublicInput => claim.public_inputs.clear(),
             Mutation::ExtraPublicInput => claim.public_inputs.push(delta),
-            Mutation::Commitment => claim.commitment += &group_delta,
+            Mutation::Commitment => claim.commitments[0] += &group_delta,
             Mutation::ProofT => proof.t += &group_delta,
             Mutation::ProofU => proof.u += &group_delta,
             Mutation::ProofValue => proof.v_a += &delta,

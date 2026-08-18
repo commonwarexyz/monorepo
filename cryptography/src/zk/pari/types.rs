@@ -77,7 +77,23 @@ impl CommitmentKey {
         self.basis.is_empty()
     }
 
+    /// The generator committing each value slot, in slot order.
+    ///
+    /// Exposed so protocols can maintain commitments homomorphically outside
+    /// the proof system (e.g. ledger balances in this key's basis).
+    pub fn generators(&self) -> &[G1] {
+        &self.basis
+    }
+
+    /// The generator committing the opening randomness.
+    pub const fn blinding(&self) -> &G1 {
+        &self.blinding
+    }
+
     /// Commit to an ordered vector of field elements.
+    ///
+    /// The identity is a valid commitment (e.g. to all-zero values with zero
+    /// randomness) and homomorphic arithmetic may produce it.
     pub fn commit(
         &self,
         values: &[Scalar],
@@ -90,12 +106,7 @@ impl CommitmentKey {
                 actual: values.len(),
             });
         }
-        let commitment =
-            G1::msm(&self.basis, values, strategy) + &(self.blinding * opening.scalar());
-        if commitment == G1::zero() {
-            return Err(Error::IdentityPoint { kind: "commitment" });
-        }
-        Ok(commitment)
+        Ok(G1::msm(&self.basis, values, strategy) + &(self.blinding * opening.scalar()))
     }
 
     pub(crate) fn digest(&self) -> [u8; 32] {
@@ -104,6 +115,17 @@ impl CommitmentKey {
         hasher.update(&self.encode());
         *hasher.finalize().as_bytes()
     }
+}
+
+/// Digest binding the ordered set of per-block commitment keys.
+pub(crate) fn commitment_keys_digest(keys: &[CommitmentKey]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(COMMITMENT_KEY_DIGEST_NAMESPACE);
+    hasher.update(&(keys.len() as u64).to_be_bytes());
+    for key in keys {
+        hasher.update(&key.digest());
+    }
+    *hasher.finalize().as_bytes()
 }
 
 impl Write for CommitmentKey {
@@ -132,39 +154,48 @@ impl Read for CommitmentKey {
     }
 }
 
-/// Public inputs and the expected native committed-input commitment.
+/// Public inputs and the expected per-block committed-input commitments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {
     /// Public inputs in the relation's declared order.
     pub public_inputs: Vec<Scalar>,
-    /// Commitment to the relation's ordered committed inputs.
-    pub commitment: G1,
+    /// One commitment per committed-input block, in declared order.
+    pub commitments: Vec<G1>,
 }
 
-/// Prover-only assignment and commitment opening for a compiled relation.
+/// Prover-only assignment and per-block commitment openings for a compiled
+/// relation.
 #[derive(Clone)]
 pub struct Witness {
     pub(super) assignment: Assignment,
-    pub(super) opening: Opening,
+    pub(super) openings: Vec<Opening>,
 }
 
 impl Witness {
     /// Construct the public claim corresponding to this witness.
     pub fn claim(
         &self,
-        commitment_key: &CommitmentKey,
+        commitment_keys: &[CommitmentKey],
         strategy: &impl Strategy,
     ) -> Result<Claim, Error> {
-        if self.assignment.relation_digest() != commitment_key.relation_digest() {
+        if commitment_keys.len() != self.openings.len()
+            || commitment_keys
+                .iter()
+                .any(|key| self.assignment.relation_digest() != key.relation_digest())
+        {
             return Err(Error::RelationMismatch);
+        }
+        let mut commitments = Vec::with_capacity(commitment_keys.len());
+        for ((key, values), opening) in commitment_keys
+            .iter()
+            .zip(self.assignment.block_values())
+            .zip(&self.openings)
+        {
+            commitments.push(key.commit(values, opening, strategy)?);
         }
         Ok(Claim {
             public_inputs: self.assignment.public_inputs().to_vec(),
-            commitment: commitment_key.commit(
-                self.assignment.committed_inputs(),
-                &self.opening,
-                strategy,
-            )?,
+            commitments,
         })
     }
 
@@ -172,17 +203,17 @@ impl Witness {
         &self.assignment
     }
 
-    pub(crate) const fn opening(&self) -> &Opening {
-        &self.opening
+    pub(crate) fn openings(&self) -> &[Opening] {
+        &self.openings
     }
 }
 
 impl Claim {
     /// Construct a public Pari claim.
-    pub const fn new(public_inputs: Vec<Scalar>, commitment: G1) -> Self {
+    pub const fn new(public_inputs: Vec<Scalar>, commitments: Vec<G1>) -> Self {
         Self {
             public_inputs,
-            commitment,
+            commitments,
         }
     }
 }
@@ -190,23 +221,35 @@ impl Claim {
 impl Write for Claim {
     fn write(&self, buf: &mut impl BufMut) {
         self.public_inputs.write(buf);
-        self.commitment.write(buf);
+        self.commitments.write(buf);
     }
 }
 
 impl EncodeSize for Claim {
     fn encode_size(&self) -> usize {
-        self.public_inputs.encode_size() + self.commitment.encode_size()
+        self.public_inputs.encode_size() + self.commitments.encode_size()
     }
 }
 
 impl Read for Claim {
-    type Cfg = RangeCfg<usize>;
+    /// Bounds on the number of public inputs and committed-input blocks.
+    type Cfg = (RangeCfg<usize>, RangeCfg<usize>);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (publics, blocks): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let public_inputs = Vec::<Scalar>::read_cfg(buf, &(*publics, ScalarReadCfg::AllowZero))?;
+        // Block commitments may legitimately be the identity (e.g. homomorphic
+        // commitments to zero), so bypass the identity-rejecting point codec.
+        let count = usize::read_cfg(buf, blocks)?;
+        let mut commitments = Vec::with_capacity(count);
+        for _ in 0..count {
+            commitments.push(G1::read_maybe_identity(buf)?);
+        }
         Ok(Self {
-            public_inputs: Vec::<Scalar>::read_cfg(buf, &(*cfg, ScalarReadCfg::AllowZero))?,
-            commitment: G1::read(buf)?,
+            public_inputs,
+            commitments,
         })
     }
 }
@@ -311,11 +354,11 @@ pub struct VerifyingKey {
     pub(crate) commitment_key_digest: [u8; 32],
     pub(crate) domain_size: u32,
     pub(crate) public_inputs: u32,
-    pub(crate) committed_inputs: u32,
+    pub(crate) blocks: Vec<u32>,
     pub(crate) public_columns: Vec<PublicColumn>,
     pub(crate) alpha_g: G1,
     pub(crate) beta_g: G1,
-    pub(crate) delta_committed_h: G2,
+    pub(crate) delta_committed_h: Vec<G2>,
     pub(crate) delta_witness_h: G2,
     pub(crate) tau_h: G2,
     // Derived from the encoded fields; never encoded itself.
@@ -353,7 +396,7 @@ impl Write for VerifyingKey {
         self.commitment_key_digest.write(buf);
         self.domain_size.write(buf);
         self.public_inputs.write(buf);
-        self.committed_inputs.write(buf);
+        self.blocks.write(buf);
         self.public_columns.write(buf);
         self.alpha_g.write(buf);
         self.beta_g.write(buf);
@@ -369,7 +412,7 @@ impl EncodeSize for VerifyingKey {
             + self.commitment_key_digest.encode_size()
             + self.domain_size.encode_size()
             + self.public_inputs.encode_size()
-            + self.committed_inputs.encode_size()
+            + self.blocks.encode_size()
             + self.public_columns.encode_size()
             + self.alpha_g.encode_size()
             + self.beta_g.encode_size()
@@ -380,49 +423,51 @@ impl EncodeSize for VerifyingKey {
 }
 
 impl Read for VerifyingKey {
-    /// Bound on the number of ordinary public inputs.
-    type Cfg = RangeCfg<usize>;
+    /// Bounds on the number of ordinary public inputs and committed-input
+    /// blocks.
+    type Cfg = (RangeCfg<usize>, RangeCfg<usize>);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (publics_cfg, blocks_cfg): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let invalid =
+            |message: &'static str| commonware_codec::Error::Invalid("VerifyingKey", message);
+
         let relation_digest = <[u8; 32]>::read(buf)?;
         let commitment_key_digest = <[u8; 32]>::read(buf)?;
         let domain_size = u32::read(buf)?;
         if !domain_size.is_power_of_two() {
-            return Err(commonware_codec::Error::Invalid(
-                "VerifyingKey",
-                "domain size must be a power of two",
-            ));
+            return Err(invalid("domain size must be a power of two"));
         }
         let public_inputs = u32::read(buf)?;
-        if !cfg.contains(&(public_inputs as usize)) {
-            return Err(commonware_codec::Error::Invalid(
-                "VerifyingKey",
-                "public input count out of range",
-            ));
+        if !publics_cfg.contains(&(public_inputs as usize)) {
+            return Err(invalid("public input count out of range"));
         }
-        let committed_inputs = u32::read(buf)?;
+        let blocks = Vec::<u32>::read_cfg(buf, &(*blocks_cfg, ()))?;
+        if blocks.is_empty() || blocks.contains(&0) {
+            return Err(invalid("committed-input blocks must be non-empty"));
+        }
         let columns = public_inputs as usize + 1;
-        if (committed_inputs as usize)
-            .checked_add(columns)
-            .is_none_or(|inputs| inputs > domain_size as usize)
-        {
-            return Err(commonware_codec::Error::Invalid(
-                "VerifyingKey",
-                "inputs exceed the domain",
-            ));
+        let committed = blocks.iter().map(|&size| u64::from(size)).sum::<u64>();
+        if committed + columns as u64 > u64::from(domain_size) {
+            return Err(invalid("inputs exceed the domain"));
         }
         let public_columns =
             Vec::<PublicColumn>::read_cfg(buf, &(RangeCfg::exact(columns), domain_size))?;
+        let alpha_g = G1::read(buf)?;
+        let beta_g = G1::read(buf)?;
+        let delta_committed_h = Vec::<G2>::read_cfg(buf, &(RangeCfg::exact(blocks.len()), ()))?;
         Ok(Self {
             relation_digest,
             commitment_key_digest,
             domain_size,
             public_inputs,
-            committed_inputs,
+            blocks,
             public_columns,
-            alpha_g: G1::read(buf)?,
-            beta_g: G1::read(buf)?,
-            delta_committed_h: G2::read(buf)?,
+            alpha_g,
+            beta_g,
+            delta_committed_h,
             delta_witness_h: G2::read(buf)?,
             tau_h: G2::read(buf)?,
             digest: [0u8; 32],
@@ -434,7 +479,7 @@ impl Read for VerifyingKey {
 /// The relation-specific key used to create proofs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvingKey {
-    pub(crate) commitment_key: CommitmentKey,
+    pub(crate) commitment_keys: Vec<CommitmentKey>,
     pub(crate) sigma_witness: Vec<G1>,
     pub(crate) sigma_mask_constant: G1,
     pub(crate) sigma_mask_linear: G1,
@@ -445,9 +490,10 @@ pub struct ProvingKey {
 }
 
 impl ProvingKey {
-    /// Return the key for creating claims that this proving key can prove.
-    pub const fn commitment_key(&self) -> &CommitmentKey {
-        &self.commitment_key
+    /// Return the per-block keys for creating claims that this proving key
+    /// can prove.
+    pub fn commitment_keys(&self) -> &[CommitmentKey] {
+        &self.commitment_keys
     }
 
     /// Return the corresponding verification key.
@@ -471,7 +517,7 @@ impl ProvingKey {
 impl Write for ProvingKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.verifying_key.write(buf);
-        self.commitment_key.write(buf);
+        self.commitment_keys.write(buf);
         self.witness_entries().count().write(buf);
         for (index, point) in self.witness_entries() {
             index.write(buf);
@@ -488,7 +534,7 @@ impl Write for ProvingKey {
 impl EncodeSize for ProvingKey {
     fn encode_size(&self) -> usize {
         let mut size = self.verifying_key.encode_size()
-            + self.commitment_key.encode_size()
+            + self.commitment_keys.encode_size()
             + self.witness_entries().count().encode_size()
             + self.sigma_mask_constant.encode_size()
             + self.sigma_mask_linear.encode_size()
@@ -503,29 +549,42 @@ impl EncodeSize for ProvingKey {
 }
 
 impl Read for ProvingKey {
-    /// Bound on the number of ordinary public inputs of the embedded key.
-    type Cfg = RangeCfg<usize>;
+    /// Bounds on the number of ordinary public inputs and committed-input
+    /// blocks of the embedded key.
+    type Cfg = (RangeCfg<usize>, RangeCfg<usize>);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let invalid =
             |message: &'static str| commonware_codec::Error::Invalid("ProvingKey", message);
 
         let verifying_key = VerifyingKey::read_cfg(buf, cfg)?;
-        let commitment_key = CommitmentKey::read_cfg(
-            buf,
-            &RangeCfg::exact(verifying_key.committed_inputs as usize),
-        )?;
-        if commitment_key.relation_digest != verifying_key.relation_digest
-            || verifying_key.commitment_key_digest != commitment_key.digest()
+        let mut commitment_keys = Vec::with_capacity(verifying_key.blocks.len());
+        let keys_len = usize::read_cfg(buf, &RangeCfg::exact(verifying_key.blocks.len()))?;
+        for &block in verifying_key.blocks.iter().take(keys_len) {
+            commitment_keys.push(CommitmentKey::read_cfg(
+                buf,
+                &RangeCfg::exact(block as usize),
+            )?);
+        }
+        if commitment_keys
+            .iter()
+            .any(|key| key.relation_digest != verifying_key.relation_digest)
+            || verifying_key.commitment_key_digest != commitment_keys_digest(&commitment_keys)
         {
-            return Err(invalid("commitment key does not match the verifying key"));
+            return Err(invalid("commitment keys do not match the verifying key"));
         }
 
         // The verifying key bounds every remaining length: the assignment
         // holds the constant one, the inputs, and then the witness columns.
         let domain_size = verifying_key.domain_size as usize;
+        let committed = verifying_key
+            .blocks
+            .iter()
+            .map(|&size| size as usize)
+            .try_fold(0usize, |sum, size| sum.checked_add(size))
+            .ok_or_else(|| invalid("inputs overflow"))?;
         let inputs = (verifying_key.public_inputs as usize)
-            .checked_add(verifying_key.committed_inputs as usize)
+            .checked_add(committed)
             .and_then(|inputs| inputs.checked_add(1))
             .ok_or_else(|| invalid("inputs overflow"))?;
         let witness_len = domain_size
@@ -565,7 +624,7 @@ impl Read for ProvingKey {
         }
 
         Ok(Self {
-            commitment_key,
+            commitment_keys,
             sigma_witness,
             sigma_mask_constant,
             sigma_mask_linear,
@@ -591,7 +650,7 @@ mod arbitrary_impls {
     impl<'a> Arbitrary<'a> for ProvingKey {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             Ok(Self {
-                commitment_key: u.arbitrary()?,
+                commitment_keys: u.arbitrary()?,
                 sigma_witness: u.arbitrary()?,
                 sigma_mask_constant: u.arbitrary()?,
                 sigma_mask_linear: u.arbitrary()?,
@@ -617,7 +676,7 @@ mod arbitrary_impls {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             Ok(Self {
                 public_inputs: u.arbitrary()?,
-                commitment: u.arbitrary()?,
+                commitments: u.arbitrary()?,
             })
         }
     }
@@ -649,7 +708,7 @@ mod arbitrary_impls {
                 commitment_key_digest: u.arbitrary()?,
                 domain_size: u.arbitrary()?,
                 public_inputs: u.arbitrary()?,
-                committed_inputs: u.arbitrary()?,
+                blocks: u.arbitrary()?,
                 public_columns: u.arbitrary()?,
                 alpha_g: u.arbitrary()?,
                 beta_g: u.arbitrary()?,

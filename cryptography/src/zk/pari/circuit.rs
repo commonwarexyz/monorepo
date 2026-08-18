@@ -47,23 +47,28 @@ pub(super) enum Error {
     RelationMismatch,
 }
 
-/// Ordered public and committed selections from a generic circuit.
+/// Ordered public selections and committed-input blocks from a generic circuit.
 ///
-/// PARI currently supports exactly one non-empty committed input vector.
+/// Committed inputs are grouped into blocks; each block is committed under an
+/// independently keyed commitment. Every block must be non-empty and at least
+/// one block is required.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputLayout {
     public: Vec<CircuitIdx>,
-    committed: Vec<CircuitIdx>,
+    blocks: Vec<Vec<CircuitIdx>>,
 }
 
 impl InputLayout {
     /// Create a checked input layout.
-    pub fn new(public: Vec<CircuitIdx>, committed: Vec<CircuitIdx>) -> Result<Self, super::Error> {
-        Self::checked(public, committed).map_err(Into::into)
+    pub fn new(
+        public: Vec<CircuitIdx>,
+        blocks: Vec<Vec<CircuitIdx>>,
+    ) -> Result<Self, super::Error> {
+        Self::checked(public, blocks).map_err(Into::into)
     }
 
-    fn checked(public: Vec<CircuitIdx>, committed: Vec<CircuitIdx>) -> Result<Self, Error> {
-        if committed.is_empty() {
+    fn checked(public: Vec<CircuitIdx>, blocks: Vec<Vec<CircuitIdx>>) -> Result<Self, Error> {
+        if blocks.is_empty() || blocks.iter().any(Vec::is_empty) {
             return Err(Error::EmptyCommittedInputs);
         }
 
@@ -75,7 +80,7 @@ impl InputLayout {
         }
 
         let mut committed_set = BTreeSet::new();
-        for &idx in &committed {
+        for &idx in blocks.iter().flatten() {
             if matches!(idx, CircuitIdx::Constant(_)) {
                 return Err(Error::CommittedConstant(idx));
             }
@@ -87,7 +92,7 @@ impl InputLayout {
             }
         }
 
-        Ok(Self { public, committed })
+        Ok(Self { public, blocks })
     }
 
     /// Public inputs in their declared order.
@@ -95,9 +100,17 @@ impl InputLayout {
         &self.public
     }
 
-    /// Committed inputs in their declared order.
-    pub fn committed(&self) -> &[CircuitIdx] {
-        &self.committed
+    /// Committed-input blocks in their declared order.
+    pub fn blocks(&self) -> &[Vec<CircuitIdx>] {
+        &self.blocks
+    }
+
+    fn committed(&self) -> impl Iterator<Item = &CircuitIdx> {
+        self.blocks.iter().flatten()
+    }
+
+    fn committed_len(&self) -> usize {
+        self.blocks.iter().map(Vec::len).sum()
     }
 }
 
@@ -119,7 +132,7 @@ pub struct Relation {
     size: usize,
     public_inputs: usize,
     committed_start: usize,
-    committed_inputs: usize,
+    blocks: Vec<usize>,
     rows: Vec<SparseRow>,
     digest: [u8; 32],
     value_sources: Vec<ValueSource>,
@@ -132,16 +145,24 @@ impl Relation {
     }
 
     /// Compile concrete circuit values into a prover witness.
+    ///
+    /// One opening is required per committed-input block, in declared order.
     pub fn witness(
         &self,
         valued: &ValuedCircuit<Scalar>,
         layout: &InputLayout,
-        opening: super::Opening,
+        openings: Vec<super::Opening>,
     ) -> Result<super::Witness, super::Error> {
+        if openings.len() != self.blocks.len() {
+            return Err(super::Error::OpeningCount {
+                expected: self.blocks.len(),
+                actual: openings.len(),
+            });
+        }
         let assignment = compile_valued(valued, layout, self)?;
         Ok(super::Witness {
             assignment,
-            opening,
+            openings,
         })
     }
 
@@ -160,9 +181,14 @@ impl Relation {
         self.public_inputs
     }
 
-    /// Number of values in the committed input vector.
-    pub const fn committed_inputs(&self) -> usize {
-        self.committed_inputs
+    /// Total number of committed values across all blocks.
+    pub fn committed_inputs(&self) -> usize {
+        self.blocks.iter().sum()
+    }
+
+    /// Sizes of the committed-input blocks in their declared order.
+    pub fn blocks(&self) -> &[usize] {
+        &self.blocks
     }
 
     pub(super) const fn committed_start(&self) -> usize {
@@ -201,7 +227,7 @@ pub(super) struct Assignment {
     values: Vec<Scalar>,
     public_inputs: usize,
     committed_start: usize,
-    committed_inputs: usize,
+    blocks: Vec<usize>,
     relation_digest: [u8; 32],
 }
 
@@ -221,8 +247,19 @@ impl Assignment {
         &self.values[1..1 + self.public_inputs]
     }
 
-    pub(super) fn committed_inputs(&self) -> &[Scalar] {
-        &self.values[self.committed_start..self.committed_start + self.committed_inputs]
+    /// Return the committed values of every block in declared order.
+    pub(super) fn block_values(&self) -> impl Iterator<Item = &[Scalar]> {
+        let mut start = self.committed_start;
+        self.blocks.iter().map(move |&len| {
+            let block = &self.values[start..start + len];
+            start += len;
+            block
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn committed_inputs(&self) -> Vec<Scalar> {
+        self.block_values().flatten().cloned().collect()
     }
 
     pub(super) const fn relation_digest(&self) -> &[u8; 32] {
@@ -329,7 +366,7 @@ impl<'a> Compiler<'a> {
 
         let public_end = checked_add(1, layout.public.len())?;
         let committed_start = public_end;
-        let committed_end = checked_add(committed_start, layout.committed.len())?;
+        let committed_end = checked_add(committed_start, layout.committed_len())?;
         let witnesses = usize::try_from(circuit.witnesses).map_err(|_| Error::SizeOverflow)?;
         let next_column = checked_add(committed_end, witnesses)?;
 
@@ -347,7 +384,7 @@ impl<'a> Compiler<'a> {
             .map_err(|_| Error::AllocationFailed)?;
         value_sources.push(ValueSource::One);
         value_sources.extend(layout.public.iter().copied().map(ValueSource::Circuit));
-        value_sources.extend(layout.committed.iter().copied().map(ValueSource::Circuit));
+        value_sources.extend(layout.committed().copied().map(ValueSource::Circuit));
         value_sources.extend(
             (0..circuit.witnesses)
                 .map(CircuitIdx::Witness)
@@ -370,8 +407,7 @@ impl<'a> Compiler<'a> {
             .checked_mul(2)
             .ok_or(Error::SizeOverflow)?;
         let selected_rows = layout
-            .committed
-            .len()
+            .committed_len()
             .checked_add(layout.public.len())
             .ok_or(Error::SizeOverflow)?;
         let row_capacity = node_rows
@@ -466,7 +502,7 @@ impl<'a> Compiler<'a> {
         // columns (each is a fresh copy of a circuit value expressed over
         // witness columns and constants), so each row below is the only row
         // with a nonzero entry in its committed column.
-        for (position, &idx) in self.layout.committed.iter().enumerate() {
+        for (position, &idx) in self.layout.committed().enumerate() {
             let column = checked_add(self.committed_start, position)?;
             self.rows.push(Row {
                 squared: LinearCombination::coordinate(column).sub(&self.expression(idx)?),
@@ -537,7 +573,7 @@ impl<'a> Compiler<'a> {
             size,
             public_inputs: self.layout.public.len(),
             committed_start: self.committed_start,
-            committed_inputs: self.layout.committed.len(),
+            blocks: self.layout.blocks.iter().map(Vec::len).collect(),
             rows,
             digest,
             value_sources: self.value_sources,
@@ -577,7 +613,7 @@ pub(super) fn compile_valued(
     if compiled.size != expected.size
         || compiled.public_inputs != expected.public_inputs
         || compiled.committed_start != expected.committed_start
-        || compiled.committed_inputs != expected.committed_inputs
+        || compiled.blocks != expected.blocks
         || compiled.rows != expected.rows
         || compiled.digest != expected.digest
     {
@@ -605,13 +641,13 @@ pub(super) fn compile_valued(
         values,
         public_inputs: compiled.public_inputs,
         committed_start: compiled.committed_start,
-        committed_inputs: compiled.committed_inputs,
+        blocks: compiled.blocks,
         relation_digest: compiled.digest,
     })
 }
 
 fn validate_circuit(circuit: &Circuit<Scalar>, layout: &InputLayout) -> Result<(), Error> {
-    for &idx in layout.public.iter().chain(&layout.committed) {
+    for &idx in layout.public.iter().chain(layout.committed()) {
         validate_index(circuit, idx, "input layout")?;
     }
 
@@ -708,7 +744,10 @@ fn relation_digest(
     hash_usize(&mut hasher, size)?;
     hash_usize(&mut hasher, rows.len())?;
     hash_indices(&mut hasher, &layout.public)?;
-    hash_indices(&mut hasher, &layout.committed)?;
+    hash_usize(&mut hasher, layout.blocks.len())?;
+    for block in &layout.blocks {
+        hash_indices(&mut hasher, block)?;
+    }
     for row in rows {
         hasher.update(b"A");
         hash_entries(&mut hasher, &row.squared)?;
@@ -758,7 +797,7 @@ mod tests {
     }
 
     fn committed_a_rank(relation: &Relation) -> usize {
-        let columns = relation.committed_inputs;
+        let columns = relation.committed_inputs();
         let mut matrix = vec![vec![Scalar::zero(); columns]; relation.size];
         for (row, entries) in relation.rows.iter().enumerate() {
             for (column, coefficient) in &entries.squared {
@@ -807,7 +846,7 @@ mod tests {
             product.assert_eq(&Var::constant(ctx, scalar(63)));
             vec![x, y, product]
         });
-        let layout = InputLayout::new(vec![selected[2]], vec![selected[0], selected[1]])
+        let layout = InputLayout::new(vec![selected[2]], vec![vec![selected[0], selected[1]]])
             .expect("layout is valid");
         let relation = compile(&valued.circuit, &layout).expect("circuit should compile");
         let assignment =
@@ -837,7 +876,7 @@ mod tests {
             vec![x, sum]
         });
         let layout =
-            InputLayout::new(vec![selected[1]], vec![selected[0]]).expect("layout is valid");
+            InputLayout::new(vec![selected[1]], vec![vec![selected[0]]]).expect("layout is valid");
         let relation = compile(&valued.circuit, &layout).expect("circuit should compile");
         let mut assignment =
             compile_valued(&valued, &layout, &relation).expect("values should compile");
@@ -857,14 +896,15 @@ mod tests {
             vec![left, right]
         });
         assert_ne!(selected[0], selected[1]);
-        let layout = InputLayout::new(Vec::new(), selected).expect("layout is valid");
+        let layout = InputLayout::new(Vec::new(), vec![vec![selected[0]], vec![selected[1]]])
+            .expect("layout is valid");
         let relation = compile(&valued.circuit, &layout).expect("circuit should compile");
         let assignment =
             compile_valued(&valued, &layout, &relation).expect("values should compile");
 
         assert!(relation.is_satisfied(&assignment));
         assert_eq!(assignment.committed_inputs(), &[scalar(18), scalar(18)]);
-        assert_eq!(committed_a_rank(&relation), relation.committed_inputs);
+        assert_eq!(committed_a_rank(&relation), relation.committed_inputs());
     }
 
     #[test]
@@ -878,7 +918,7 @@ mod tests {
         });
         let layout = InputLayout::new(
             vec![selected[1], selected[0]],
-            vec![selected[3], selected[2]],
+            vec![vec![selected[3], selected[2]]],
         )
         .expect("layout is valid");
         let relation = compile(&valued.circuit, &layout).expect("circuit should compile");
@@ -901,19 +941,19 @@ mod tests {
             Err(Error::EmptyCommittedInputs)
         );
         assert_eq!(
-            InputLayout::checked(vec![witness, witness], vec![other]),
+            InputLayout::checked(vec![witness, witness], vec![vec![other]]),
             Err(Error::DuplicatePublic(witness))
         );
         assert_eq!(
-            InputLayout::checked(Vec::new(), vec![witness, witness]),
+            InputLayout::checked(Vec::new(), vec![vec![witness], vec![witness]]),
             Err(Error::DuplicateCommitted(witness))
         );
         assert_eq!(
-            InputLayout::checked(vec![witness], vec![witness]),
+            InputLayout::checked(vec![witness], vec![vec![witness]]),
             Err(Error::PublicCommittedOverlap(witness))
         );
         assert_eq!(
-            InputLayout::checked(Vec::new(), vec![constant]),
+            InputLayout::checked(Vec::new(), vec![vec![constant]]),
             Err(Error::CommittedConstant(constant))
         );
 
@@ -923,7 +963,7 @@ mod tests {
             })]
         });
         let invalid = CircuitIdx::Witness(1);
-        let layout = InputLayout::new(Vec::new(), vec![invalid]).expect("shape is valid");
+        let layout = InputLayout::new(Vec::new(), vec![vec![invalid]]).expect("shape is valid");
         assert_eq!(
             compile(&circuit, &layout).err(),
             Some(Error::InvalidIndex {
@@ -960,7 +1000,7 @@ mod tests {
         let (valued, _, valued_selected) = build_circuit(true);
         let (_, circuit, circuit_selected) = build_circuit(false);
         assert_eq!(valued_selected, circuit_selected);
-        let layout = InputLayout::new(vec![circuit_selected[1]], vec![circuit_selected[0]])
+        let layout = InputLayout::new(vec![circuit_selected[1]], vec![vec![circuit_selected[0]]])
             .expect("layout is valid");
         let valued = valued.expect("valued branch");
         let verifier_relation =
@@ -981,13 +1021,14 @@ mod tests {
             let x = Var::witness(ctx, |_| scalar(2));
             vec![x]
         });
-        let layout = InputLayout::new(Vec::new(), selected).expect("layout is valid");
+        let layout = InputLayout::new(Vec::new(), vec![selected]).expect("layout is valid");
         let (other, other_selected) = build::<Scalar>(|ctx| {
             let x = Var::witness(ctx, |_| unreachable!("not evaluated"));
             let y = x.clone() * &x;
             vec![y]
         });
-        let other_layout = InputLayout::new(Vec::new(), other_selected).expect("layout is valid");
+        let other_layout =
+            InputLayout::new(Vec::new(), vec![other_selected]).expect("layout is valid");
         let other_relation = compile(&other, &other_layout).expect("circuit should compile");
         assert_eq!(
             compile_valued(&valued, &layout, &other_relation).err(),

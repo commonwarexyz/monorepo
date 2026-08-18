@@ -41,7 +41,7 @@ fn circuit(ctx: Context<'_, Scalar>, multiplications: usize) -> Vec<Var<'_, Scal
 
 fn make_relation(multiplications: usize) -> (Relation, InputLayout) {
     let (circuit, selected) = build(|ctx| circuit(ctx, multiplications));
-    let layout = InputLayout::new(vec![selected[0]], vec![selected[1]])
+    let layout = InputLayout::new(vec![selected[0]], vec![vec![selected[1]]])
         .expect("benchmark layout should be valid");
     let relation = Relation::compile(&circuit, &layout).expect("benchmark circuit should compile");
     (relation, layout)
@@ -54,10 +54,10 @@ fn make_proving_fixture(multiplications: usize) -> ProvingFixture {
     let (proving_key, verifying_key) =
         setup(&relation, &mut rng, &Sequential).expect("setup should succeed");
     let witness = relation
-        .witness(&valued, &layout, Opening::random(&mut rng))
+        .witness(&valued, &layout, vec![Opening::random(&mut rng)])
         .expect("benchmark witness should compile");
     let claim = witness
-        .claim(proving_key.commitment_key(), &Sequential)
+        .claim(proving_key.commitment_keys(), &Sequential)
         .expect("benchmark claim should be valid");
     ProvingFixture {
         relation,

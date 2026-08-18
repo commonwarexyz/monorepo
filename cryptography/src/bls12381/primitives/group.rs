@@ -1255,10 +1255,19 @@ impl Write for G1 {
     }
 }
 
-impl Read for G1 {
-    type Cfg = ();
+impl G1 {
+    /// Read a point, permitting the canonical identity encoding.
+    ///
+    /// The [`Read`] implementation rejects the identity to prevent its use
+    /// where a nontrivial point is expected (e.g. public keys). Protocols in
+    /// which the identity is a legal value (e.g. homomorphic commitments to
+    /// zero) decode through this method instead. Subgroup membership is still
+    /// enforced.
+    pub fn read_maybe_identity(buf: &mut impl Buf) -> Result<Self, Error> {
+        Self::read_point(buf, true)
+    }
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_point(buf: &mut impl Buf, allow_identity: bool) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
         // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
@@ -1278,7 +1287,7 @@ impl Read for G1 {
             blst_p1_from_affine(&mut ret, &affine);
 
             // Verify that deserialized element isn't infinite
-            if blst_p1_is_inf(&ret) {
+            if !allow_identity && blst_p1_is_inf(&ret) {
                 return Err(Invalid("G1", "Infinity"));
             }
 
@@ -1288,6 +1297,14 @@ impl Read for G1 {
             }
         }
         Ok(Self(ret))
+    }
+}
+
+impl Read for G1 {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        Self::read_point(buf, false)
     }
 }
 

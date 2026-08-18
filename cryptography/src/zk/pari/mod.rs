@@ -48,6 +48,9 @@ pub enum Error {
     /// The supplied committed-input count does not match the commitment key.
     #[error("expected {expected} committed inputs, got {actual}")]
     CommittedInputCount { expected: usize, actual: usize },
+    /// The supplied opening count does not match the committed-input blocks.
+    #[error("expected {expected} openings, got {actual}")]
+    OpeningCount { expected: usize, actual: usize },
     /// The claim does not match the witness and opening.
     #[error("claim does not match the witness")]
     ClaimMismatch,

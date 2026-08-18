@@ -2,7 +2,7 @@ use super::{
     Error, Relation,
     circuit::SparseRow,
     poly::Domain,
-    types::{CommitmentKey, ProvingKey, PublicColumn, VerifyingKey},
+    types::{CommitmentKey, ProvingKey, PublicColumn, VerifyingKey, commitment_keys_digest},
 };
 use crate::bls12381::primitives::group::{G1, G2, Scalar};
 use commonware_codec::Encode;
@@ -29,7 +29,11 @@ pub fn setup(
 
     let domain_size_u32 = u32::try_from(domain_size).map_err(|_| Error::TooLarge)?;
     let public_inputs_u32 = u32::try_from(public_inputs).map_err(|_| Error::TooLarge)?;
-    let committed_inputs_u32 = u32::try_from(committed_inputs).map_err(|_| Error::TooLarge)?;
+    let blocks_u32 = relation
+        .blocks()
+        .iter()
+        .map(|&size| u32::try_from(size).map_err(|_| Error::TooLarge))
+        .collect::<Result<Vec<_>, _>>()?;
     let columns = public_columns(relation)?;
 
     let g = G1::generator();
@@ -38,8 +42,10 @@ pub fn setup(
     loop {
         let alpha = Scalar::random(&mut *rng);
         let beta = Scalar::random(&mut *rng);
-        let delta_committed = Scalar::random(&mut *rng);
         let delta_witness = Scalar::random(&mut *rng);
+        let deltas = (0..relation.blocks().len())
+            .map(|_| Scalar::random(&mut *rng))
+            .collect::<Vec<_>>();
         let tau = loop {
             let candidate = Scalar::random(&mut *rng);
             if domain.evaluate_vanishing(&candidate) != Scalar::zero() {
@@ -50,35 +56,40 @@ pub fn setup(
         let lagrange = domain.lagrange_coefficients(&tau)?;
         let (a_at_tau, b_at_tau) = evaluate_columns(relation.rows(), &lagrange, num_vars);
         let vanishing_at_tau = domain.evaluate_vanishing(&tau);
-        let delta_committed_inv = delta_committed.inv();
         let delta_witness_inv = delta_witness.inv();
 
         let committed_end = relation
             .committed_start()
             .checked_add(committed_inputs)
             .ok_or(Error::TooLarge)?;
-        let committed_scalars = (relation.committed_start()..committed_end)
-            .map(|index| {
-                (alpha.clone() * &a_at_tau[index] + &(beta.clone() * &b_at_tau[index]))
-                    * &delta_committed_inv
-            })
-            .collect::<Vec<_>>();
-        let basis = strategy.map_collect_vec(committed_scalars, |scalar| g * &scalar);
-        let blinding = g * &((beta.clone() * &vanishing_at_tau) * &delta_committed_inv);
+        let mut commitment_keys = Vec::with_capacity(relation.blocks().len());
+        let mut block_start = relation.committed_start();
+        for (&size, delta) in relation.blocks().iter().zip(&deltas) {
+            let delta_inv = delta.inv();
+            let committed_scalars = (block_start..block_start + size)
+                .map(|index| {
+                    (alpha.clone() * &a_at_tau[index] + &(beta.clone() * &b_at_tau[index]))
+                        * &delta_inv
+                })
+                .collect::<Vec<_>>();
+            let basis = strategy.map_collect_vec(committed_scalars, |scalar| g * &scalar);
+            let blinding = g * &((beta.clone() * &vanishing_at_tau) * &delta_inv);
+            commitment_keys.push(CommitmentKey {
+                relation_digest: *relation.digest(),
+                basis,
+                blinding,
+            });
+            block_start += size;
+        }
 
         // The compiler guarantees formal column independence. These checks reject
         // the negligible set of trapdoors where evaluating those columns collapses
-        // an actual commitment basis.
-        if !valid_commitment_basis(&basis, &blinding) {
+        // an actual commitment basis, jointly across every block.
+        if !valid_commitment_basis(&commitment_keys) {
             continue;
         }
 
-        let commitment_key = CommitmentKey {
-            relation_digest: *relation.digest(),
-            basis,
-            blinding,
-        };
-        let commitment_key_digest = commitment_key.digest();
+        let commitment_key_digest = commitment_keys_digest(&commitment_keys);
 
         let ordinary_scalars = (committed_end..relation.size())
             .map(|index| {
@@ -121,18 +132,18 @@ pub fn setup(
             commitment_key_digest,
             domain_size: domain_size_u32,
             public_inputs: public_inputs_u32,
-            committed_inputs: committed_inputs_u32,
+            blocks: blocks_u32,
             public_columns: columns,
             alpha_g: g * &alpha,
             beta_g: g * &beta,
-            delta_committed_h: h * &delta_committed,
+            delta_committed_h: deltas.iter().map(|delta| h * delta).collect(),
             delta_witness_h: h * &delta_witness,
             tau_h: h * &tau,
             digest: [0u8; 32],
         }
         .finalize();
         let proving_key = ProvingKey {
-            commitment_key,
+            commitment_keys,
             sigma_witness,
             sigma_mask_constant,
             sigma_mask_linear,
@@ -200,13 +211,14 @@ fn powers(base: &Scalar, len: usize) -> Vec<Scalar> {
     values
 }
 
-fn valid_commitment_basis(basis: &[G1], blinding: &G1) -> bool {
-    if *blinding == G1::zero() {
-        return false;
-    }
+fn valid_commitment_basis(keys: &[CommitmentKey]) -> bool {
     let mut encoded = BTreeSet::new();
-    encoded.insert(blinding.encode());
-    basis
-        .iter()
-        .all(|point| *point != G1::zero() && encoded.insert(point.encode()))
+    keys.iter().all(|key| {
+        *key.blinding() != G1::zero()
+            && encoded.insert(key.blinding().encode())
+            && key
+                .generators()
+                .iter()
+                .all(|point| *point != G1::zero() && encoded.insert(point.encode()))
+    })
 }
