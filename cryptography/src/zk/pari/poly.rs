@@ -35,7 +35,6 @@ pub(super) enum Error {
         domain_size: usize,
     },
     /// The requested domain element does not exist.
-    #[cfg(test)]
     #[error("domain index {index} is out of range for size {size}")]
     DomainIndex { index: usize, size: usize },
     /// Polynomial size arithmetic overflowed.
@@ -442,6 +441,63 @@ impl Domain {
         Ok(coefficients)
     }
 
+    /// Return the Lagrange basis polynomials for `indices` evaluated at `point`.
+    ///
+    /// The output is aligned with `indices`. Uses the closed form
+    /// `L_i(X) = Z_H(X) g^i / (m (X - g^i))` with one batched inversion, so the
+    /// cost is `O(|indices| log m)` rather than the `O(m)` of
+    /// [`Self::lagrange_coefficients`].
+    pub(super) fn lagrange_coefficients_at(
+        &self,
+        point: &Scalar,
+        indices: &[u32],
+    ) -> Result<Vec<Scalar>> {
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(indices.len())
+            .map_err(|_| Error::Allocation {
+                requested: indices.len(),
+            })?;
+        for &index in indices {
+            if (index as usize) >= self.size {
+                return Err(Error::DomainIndex {
+                    index: index as usize,
+                    size: self.size,
+                });
+            }
+            roots.push(self.generator.exp(&[u64::from(index)]));
+        }
+
+        let vanishing = self.evaluate_vanishing(point);
+        let mut coefficients = zeroes(indices.len())?;
+        if vanishing == Scalar::zero() {
+            // The point is a domain element: the basis is elementary.
+            for (coefficient, root) in coefficients.iter_mut().zip(&roots) {
+                if root == point {
+                    *coefficient = Scalar::one();
+                }
+            }
+            return Ok(coefficients);
+        }
+
+        // Store prefix products, then use one inversion to invert every denominator.
+        let scale = vanishing * &self.size_inverse;
+        let mut product = Scalar::one();
+        for (coefficient, root) in coefficients.iter_mut().zip(&roots) {
+            *coefficient = product.clone();
+            let denominator = point.clone() - root;
+            product *= &denominator;
+        }
+        let mut product_inverse = product.inv();
+        for (coefficient, root) in coefficients.iter_mut().zip(&roots).rev() {
+            let prefix = coefficient.clone();
+            *coefficient = ((scale.clone() * root) * &prefix) * &product_inverse;
+            let denominator = point.clone() - root;
+            product_inverse *= &denominator;
+        }
+        Ok(coefficients)
+    }
+
     /// Evaluate the interpolation of `evaluations` at an arbitrary point.
     #[cfg(test)]
     pub(super) fn lagrange_evaluate(
@@ -726,6 +782,41 @@ mod tests {
                 assert_eq!(*coefficient, expected_coefficient);
             }
         }
+    }
+
+    #[test]
+    fn targeted_lagrange_coefficients_match_full_basis() {
+        let domain = Domain::new(8).unwrap();
+        let indices = [0u32, 3, 5, 7];
+
+        let point = scalar(23);
+        let full = domain.lagrange_coefficients(&point).unwrap();
+        let targeted = domain.lagrange_coefficients_at(&point, &indices).unwrap();
+        for (slot, &index) in indices.iter().enumerate() {
+            assert_eq!(targeted[slot], full[index as usize]);
+        }
+
+        let inside = domain.element(5).unwrap();
+        let targeted = domain.lagrange_coefficients_at(&inside, &indices).unwrap();
+        for (slot, &index) in indices.iter().enumerate() {
+            let expected = if index == 5 {
+                Scalar::one()
+            } else {
+                Scalar::zero()
+            };
+            assert_eq!(targeted[slot], expected);
+        }
+
+        assert!(
+            domain
+                .lagrange_coefficients_at(&point, &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            domain.lagrange_coefficients_at(&point, &[8]),
+            Err(Error::DomainIndex { index: 8, size: 8 })
+        );
     }
 
     #[test]

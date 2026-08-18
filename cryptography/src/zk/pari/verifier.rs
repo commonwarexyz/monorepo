@@ -156,15 +156,26 @@ fn public_evaluation(
         return None;
     }
 
-    let lagrange = domain.lagrange_coefficients(challenge).ok()?;
+    // Evaluate the Lagrange basis only at the rows the public columns touch,
+    // keeping verification independent of the domain size.
+    let mut rows = verifying_key
+        .public_columns
+        .iter()
+        .flat_map(|column| column.a.keys().chain(column.b.keys()).copied())
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+    rows.dedup();
+    let lagrange = domain.lagrange_coefficients_at(challenge, &rows).ok()?;
+    let coefficient_at = |row: u32| rows.binary_search(&row).ok().map(|slot| &lagrange[slot]);
+
     let mut x_a = Scalar::zero();
     let mut x_b = Scalar::zero();
     for (column, value) in verifying_key.public_columns.iter().zip(&values) {
         for (&row, coefficient) in &column.a {
-            x_a += &((coefficient.clone() * value) * lagrange.get(row as usize)?);
+            x_a += &((coefficient.clone() * value) * coefficient_at(row)?);
         }
         for (&row, coefficient) in &column.b {
-            x_b += &((coefficient.clone() * value) * lagrange.get(row as usize)?);
+            x_b += &((coefficient.clone() * value) * coefficient_at(row)?);
         }
     }
 
