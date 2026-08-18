@@ -142,8 +142,10 @@ pub mod partitioned {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::{index::Unordered as _, mmr, translator::TwoCap};
-    use commonware_cryptography::{Sha256, sha256::Digest};
+    use crate::{
+        index::Unordered as _, mmr, qmdb::any::batch::MerkleizedBatch, translator::TwoCap,
+    };
+    use commonware_cryptography::{Sha256, sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
@@ -155,6 +157,7 @@ pub(crate) mod test {
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
     use rand::Rng;
     use std::{
+        collections::HashMap,
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
     };
@@ -646,7 +649,7 @@ pub(crate) mod test {
             let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
-            let snapshot_items = db.snapshot.items();
+            let snapshot_items = db.index.items();
 
             db.sync().await.unwrap();
 
@@ -655,7 +658,7 @@ pub(crate) mod test {
             assert_eq!(root, db.root());
             assert_eq!(db.bounds(), bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
-            assert_eq!(db.snapshot.items(), snapshot_items);
+            assert_eq!(db.index.items(), snapshot_items);
 
             db.destroy().await.unwrap();
         });
@@ -975,7 +978,7 @@ pub(crate) mod test {
             type Merkle = TestMmr;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.merkle, self.log.items)
             }
 
             async fn pinned_nodes_at(&self, loc: mmr::Location) -> Vec<Digest> {
@@ -1199,10 +1202,6 @@ pub(crate) mod test {
     /// Batches can be stored in a homogeneous collection.
     #[test_traced("WARN")]
     fn test_owned_batch_homogeneous_collection() {
-        use crate::qmdb::any::batch::MerkleizedBatch;
-        use commonware_cryptography::sha256;
-        use std::collections::HashMap;
-
         type Snap = MerkleizedBatch<
             mmr::Family,
             sha256::Digest,

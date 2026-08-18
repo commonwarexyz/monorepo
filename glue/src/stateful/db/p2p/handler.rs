@@ -21,7 +21,7 @@ pub(super) enum EngineMessage<F: Family> {
         response: oneshot::Sender<bool>,
     },
     /// A peer requested data for `key`.
-    /// The actor queries the local database and sends the encoded
+    /// The actor serves the latest published snapshot and sends the encoded
     /// [`Response`](commonware_storage::qmdb::sync::Response) back through `response`.
     Produce {
         key: Request<F>,
@@ -84,7 +84,7 @@ impl<F: Family> Policy for EngineMessage<F> {
 ///
 /// Every callback from the resolver engine is converted into an
 /// [`EngineMessage`] and sent to the actor. This keeps all mutable
-/// state (pending subscribers, database handle) on the actor task,
+/// state (pending subscribers, the serving source) on the actor task,
 /// while the engine runs independently.
 #[derive(Clone)]
 pub(super) struct Handler<F: Family> {

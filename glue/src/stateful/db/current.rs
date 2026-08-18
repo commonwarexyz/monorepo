@@ -7,8 +7,8 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    BatchContext, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -521,6 +521,8 @@ where
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot =
+        LogSnapshot<F, E, FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>, H>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -548,9 +550,19 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -622,6 +634,8 @@ where
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot =
+        LogSnapshot<F, E, FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>, H>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -649,9 +663,19 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -801,6 +825,12 @@ where
         S,
     >;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<
+        F,
+        E,
+        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
+        H,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         open::variable(context, config).await
@@ -828,9 +858,19 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -907,6 +947,12 @@ where
         S,
     >;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<
+        F,
+        E,
+        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
+        H,
+    >;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         open::ordered_variable(context, config).await
@@ -934,9 +980,19 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn finalize(
+        self,
+        batch: Self::Merkleized,
+    ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        let (db, handle) = db.start_sync().await?;
+        let (db, snapshot) = db.snapshot().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -1185,7 +1241,7 @@ mod tests {
     /// ([`ManagedDb::finalize`] embeds the database in its state machine).
     #[boxed]
     async fn finalize<D: ManagedDb<deterministic::Context>>(db: D, batch: D::Merkleized) -> D {
-        let (db, sync) = D::finalize(db, batch).await.unwrap();
+        let (db, _snapshot, sync) = D::finalize(db, batch).await.unwrap();
         sync.await.expect("finalize flush failed");
         db
     }

@@ -76,7 +76,7 @@ use crate::{
     index::{Unordered as _, unordered::Index},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
@@ -174,7 +174,7 @@ pub struct Immutable<
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Set].
-    pub(crate) snapshot: Index<T, Location<F>>,
+    pub(crate) index: Index<T, Location<F>>,
 
     /// The location of the last commit operation.
     pub(crate) last_commit_loc: Location<F>,
@@ -240,15 +240,15 @@ where
             journal = journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.child("snapshot"), translator);
+        let mut index = Index::new(context.child("snapshot"), translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.journal.bounds();
+            let bounds = journal.items.bounds();
             let last_commit_loc =
                 Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
 
             // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
+            let last_op = journal.items.read(*last_commit_loc).await?;
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
@@ -259,8 +259,8 @@ where
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &journal.journal,
-                &mut snapshot,
+                &journal.items,
+                &mut index,
                 init_buffer,
                 cache_size,
                 |_, _| {},
@@ -276,7 +276,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             last_commit_loc,
             inactivity_floor_loc,
             metrics,
@@ -325,7 +325,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        let iter = self.snapshot.get(key);
+        let iter = self.index.get(key);
         let oldest = self.journal.bounds().start;
         let mut result = None;
         for &loc in iter {
@@ -358,7 +358,7 @@ where
         let oldest = self.journal.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
+            for &loc in self.index.get(key) {
                 if loc < oldest {
                     continue;
                 }
@@ -421,8 +421,7 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
         let last_commit_loc = self.last_commit_loc;
-        let Operation::Commit(metadata, _floor) =
-            self.journal.journal.read(*last_commit_loc).await?
+        let Operation::Commit(metadata, _floor) = self.journal.items.read(*last_commit_loc).await?
         else {
             unreachable!("no commit operation at location of last commit {last_commit_loc}");
         };
@@ -466,17 +465,7 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        if op_count > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
-        }
-
-        let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
-
-        Ok(self
-            .journal
-            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
-            .await?)
+        crate::qmdb::historical_proof(&self.journal, op_count, start_loc, max_ops).await
     }
 
     /// Generate and return:
@@ -593,7 +582,7 @@ where
         let rewind_loc = Location::<F>::new(rewind_size);
         for key in &rewound_keys {
             // Filter by location to make sure we don't also prune keys that happen to collide.
-            self.snapshot.retain(key, |loc| *loc < rewind_loc);
+            self.index.retain(key, |loc| *loc < rewind_loc);
         }
 
         // If the rewind target has a lower floor than the current snapshot was
@@ -604,8 +593,8 @@ where
         if rewind_floor < old_floor {
             let gap_end = core::cmp::min(*old_floor, rewind_size);
             for loc in *rewind_floor..gap_end {
-                if let Operation::Set(key, _) = self.journal.journal.read(loc).await? {
-                    self.snapshot.insert(&key, Location::new(loc));
+                if let Operation::Set(key, _) = self.journal.items.read(loc).await? {
+                    self.index.insert(&key, Location::new(loc));
                 }
             }
         }
@@ -631,11 +620,7 @@ where
 
     /// Return the pinned Merkle nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -778,7 +763,7 @@ where
             if track_shadow {
                 seen.insert(key);
             }
-            self.snapshot
+            self.index
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
@@ -787,7 +772,7 @@ where
             }
             for (key, entry) in ancestor_diff.iter() {
                 if seen.insert(key) {
-                    self.snapshot
+                    self.index
                         .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
                 }
             }
@@ -837,6 +822,29 @@ where
     }
 }
 
+impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>> + Snapshottable<Item = Operation<F, K, V>>,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let log;
+        (self.journal, log) = self.journal.snapshot().await?;
+        Ok((self, log))
+    }
+}
+
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
@@ -845,7 +853,7 @@ pub(super) mod test {
         qmdb::verify_proof,
         translator::TwoCap,
     };
-    use commonware_codec::EncodeShared;
+    use commonware_codec::{Encode as _, EncodeShared};
     use commonware_cryptography::{Sha256, sha256, sha256::Digest};
     use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
@@ -1051,6 +1059,93 @@ pub(super) mod test {
             &ops,
             &root
         ));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database applies batches, commits, and prunes past it.
+    #[boxed]
+    pub(crate) async fn test_immutable_snapshot<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Snapshottable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.child("first")).await;
+
+        {
+            let mut batch = db.new_batch();
+            for i in 0..20u8 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(100)));
+            }
+            let merkleized = batch.merkleize(&db, None, Location::new(0)).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let root = db.root();
+        let op_count = db.bounds().end;
+
+        let snapshot;
+        (db, snapshot) = db.snapshot().await.unwrap();
+        assert_eq!(snapshot.size(), op_count);
+
+        let (proof, ops) =
+            crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                .await
+                .unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &root,
+        ));
+
+        // Advance the live database past the capture by setting more keys with a raised inactivity
+        // floor, commit, and prune.
+        {
+            let mut batch = db.new_batch();
+            for i in 20..40u8 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(100)));
+            }
+            let merkleized = batch.merkleize(&db, None, Location::new(15)).await;
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        db = db.prune(boundary).await.unwrap();
+        assert_ne!(db.root(), root);
+        assert!(db.bounds().start > Location::new(0));
+
+        // The snapshot still serves the identical proof, verifiable against the captured
+        // root, including for operations the live database has since pruned.
+        let (proof2, ops2) =
+            crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                .await
+                .unwrap();
+        assert_eq!(proof.encode(), proof2.encode());
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof2,
+            Location::new(0),
+            &ops2,
+            &root,
+        ));
+
+        // Anything at or above the frozen size is rejected.
+        assert!(
+            crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
+                .await
+                .is_err()
+        );
 
         db.destroy().await.unwrap();
     }
@@ -3601,7 +3696,7 @@ pub(super) mod test {
 
         let bad_key = Sha256::fill(99u8);
         let bad_loc = db.last_commit_loc;
-        db.snapshot.insert(&bad_key, bad_loc);
+        db.index.insert(&bad_key, bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();
         assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
