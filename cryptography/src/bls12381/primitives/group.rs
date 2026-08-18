@@ -1104,6 +1104,7 @@ impl G1 {
     /// most 8) of each one-byte coefficient. Uses blst's Pippenger routine,
     /// whose bucket accumulation sums points batch-affine (one field inversion
     /// per bucket), so this is far cheaper than a sequence of point additions.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn small_msm(affine: &[blst_p1_affine], coefficients: &[u8], bits: usize) -> Self {
         assert_eq!(affine.len(), coefficients.len());
         assert!(bits <= 8);
@@ -1276,6 +1277,7 @@ impl G1 {
     /// This is the exact per-point test (blst's endomorphism-based check). When
     /// checking many points at once,
     /// [`subgroup::batch_in_g1`](super::subgroup::batch_in_g1) is faster.
+    #[commonware_macros::stability(ALPHA)]
     pub fn in_subgroup(&self) -> bool {
         // SAFETY: self.0 is a valid blst_p1.
         unsafe { blst_p1_in_g1(&self.0) }
@@ -1293,6 +1295,7 @@ impl G1 {
     /// [`subgroup::batch_in_g1`](super::subgroup::batch_in_g1) — before relying
     /// on it. This exists so that many points can be decoded cheaply and then
     /// subgroup-checked together.
+    #[commonware_macros::stability(ALPHA)]
     pub fn read_unchecked(buf: &mut impl Buf) -> Result<Self, Error> {
         Self::read_point(buf, false)
     }

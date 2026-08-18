@@ -49,7 +49,8 @@
 pub mod group;
 pub mod ops;
 pub mod sharing;
-pub mod subgroup;
+// ALPHA until the batched subgroup check has had sufficient review.
+commonware_macros::stability_mod!(ALPHA, pub mod subgroup);
 pub mod variant;
 
 use thiserror::Error;
