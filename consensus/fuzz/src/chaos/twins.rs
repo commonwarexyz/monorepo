@@ -530,7 +530,9 @@ fn check_safety<P: Simplex>(
     // suite. The retained audit log stamps each durable incarnation, so
     // replay-order-sensitive checks remain incarnation-local while
     // order-independent safety and healing evidence survives journal pruning.
-    invariants::check::<P>(term_length, honest);
+    // The chaos-twins runner pins `input.configuration = N4F1C3` before
+    // spawning, so the safety suite always judges that configuration.
+    invariants::check::<P>(crate::N4F1C3, term_length, honest);
 
     let honest_summaries = summaries(honest);
     let mut observers = honest_summaries.clone();
@@ -624,7 +626,7 @@ where
         // shows `byz` leading `target_view` (entry into the Byzantine term).
         let crash = (0..n).find(|&idx| idx != byz).expect("an honest index exists");
         let target_view = View::new(CHAOS_TWINS_BYZ_ROUND * term_length.get() + 1);
-        let elector = twins::Elector::new(P::elector(term_length), &scenario, n);
+        let elector = twins::Elector::new(P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS), &scenario, n);
 
         // Byzantine twin on `byz` (never crashed).
         let twin_channels = registrations

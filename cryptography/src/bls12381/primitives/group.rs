@@ -260,8 +260,8 @@ const SCALAR_BITS: usize = 255;
 
 /// Number of scalar bits for SmallScalar (128 bits).
 ///
-/// 128 bits provides sufficient security (2^-128 collision probability)
-/// while roughly halving MSM computation time compared to full 255-bit scalars.
+/// 128 bits provides a soundness error of at most 2^-128 for random
+/// linear-combination checks while roughly halving MSM computation time.
 const SMALL_SCALAR_BITS: usize = 128;
 
 /// Number of bytes for SmallScalar (16 bytes = 128 bits).
@@ -273,11 +273,10 @@ const IKM_LENGTH: usize = 64;
 /// Minimum number of points required to use parallel MSM.
 const MIN_PARALLEL_POINTS: usize = 32;
 
-/// A 128-bit scalar for use in batch verification random challenges.
+/// A 128-bit scalar in `[0, 2^128)`.
 ///
-/// This provides 128-bit security which is sufficient for preventing
-/// forgery attacks in batch verification while reducing computational cost
-/// compared to full 255-bit scalars.
+/// Every `SmallScalar` can be converted to a valid [`Scalar`]. Its reduced width
+/// roughly halves MSM computation time compared to full 255-bit scalars.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmallScalar {
     /// Stored as blst_scalar with only lower 128 bits populated.
@@ -285,14 +284,20 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random 128-bit scalar.
+    /// Generates a uniformly random scalar in `[0, 2^128)`.
+    ///
+    /// Zero is intentionally included. Predictable challenges are unsafe regardless of their value,
+    /// but zero from uniform, independent sampling does not weaken the check. An invalid random
+    /// linear-combination check has at least one non-zero error term. Fixing every other challenge
+    /// leaves at most one value in this range for that term that can make the check pass, so the
+    /// soundness error remains at most `2^-128`.
     pub fn random(mut rng: impl CryptoRng) -> Self {
-        // blst_scalar is 32 bytes
-        let mut bytes = [0u8; 32];
+        // blst_scalar is 32 bytes.
+        let mut bytes = [0u8; SCALAR_LENGTH];
         // Fill the last 16 bytes (128 bits) with entropy.
         // In big-endian, bytes[16..32] are the least significant.
         // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
-        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+        rng.fill_bytes(&mut bytes[(SCALAR_LENGTH - SMALL_SCALAR_LENGTH)..]);
 
         let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array.
@@ -1904,8 +1909,10 @@ mod tests {
     use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
+    use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},
+        convert::Infallible,
         num::NonZeroUsize,
     };
 
@@ -2520,6 +2527,38 @@ mod tests {
         let scalar = Scalar::from(small.clone());
         let round_tripped = scalar.as_blst_scalar();
         assert_eq!(small.as_bytes(), round_tripped.b.as_slice());
+    }
+
+    #[test]
+    fn test_small_scalar_random_includes_zero() {
+        struct ZeroOnce(bool);
+
+        impl TryRng for ZeroOnce {
+            type Error = Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(u64::from(self.try_next_u32()?))
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                assert!(!self.0, "random sampled more than once");
+                self.0 = true;
+                fill_bytes_via_next_word(dst, || self.try_next_u64())
+            }
+        }
+
+        impl TryCryptoRng for ZeroOnce {}
+
+        let mut rng = ZeroOnce(false);
+        let scalar = SmallScalar::random(&mut rng);
+
+        assert!(rng.0);
+        assert_eq!(scalar, SmallScalar::zero());
+        assert_eq!(Scalar::from(scalar), Scalar::zero());
     }
 
     #[test]

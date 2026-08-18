@@ -99,7 +99,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             scheme.clone(),
             required_containers,
             relay.clone(),
-            P::elector(term_length),
+            P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS),
             channels,
         );
         Self {
@@ -157,7 +157,7 @@ impl<P: Simplex> RoleMultiplexer<P> {
             self.scheme.clone(),
             self.required_containers,
             self.relay.clone(),
-            P::elector(self.term_length),
+            P::elector(self.term_length, crate::PINNED_OPTIMISTIC_VIEWS),
             channels,
         ));
         self.role = new_role;

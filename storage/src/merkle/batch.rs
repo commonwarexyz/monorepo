@@ -140,6 +140,20 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         &self.parent.strategy
     }
 
+    /// Retain the live parent chain up to the first dropped weak link.
+    ///
+    /// Nodes beyond that link are read from committed state.
+    #[cfg(feature = "std")]
+    pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
+        let mut ancestors = Vec::new();
+        let mut current = Some(Arc::clone(&self.parent));
+        while let Some(batch) = current {
+            current = batch.parent.as_ref().and_then(Weak::upgrade);
+            ancestors.push(batch);
+        }
+        ancestors
+    }
+
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position<F> {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -247,7 +261,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a run of pre-computed leaf digests, in order.
     #[cfg(feature = "std")]
-    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+    pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
@@ -555,7 +569,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             parent_size: mem.size(),
             base_size: mem.size(),
             ancestor_base_size: mem.size(),
-            pruning_boundary: Readable::pruning_boundary(mem),
+            pruning_boundary: mem.pruning_boundary(),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
             strategy,
@@ -685,7 +699,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
     type Family = F;
     type Digest = D;
-    type Error = Error<F>;
 
     fn size(&self) -> Position<F> {
         Self::size(self)
@@ -693,10 +706,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         Self::get_node(self, pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        Self::pruning_boundary(self)
     }
 }
 

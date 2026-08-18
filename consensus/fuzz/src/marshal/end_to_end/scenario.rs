@@ -590,7 +590,7 @@ pub fn run_scenario<P: Simplex>(
                 &oracle,
                 validator.clone(),
                 scheme,
-                P::elector(TermLength::ONE),
+                P::elector(TermLength::ONE, crate::PINNED_OPTIMISTIC_VIEWS),
                 builder.clone(),
                 builder,
                 marshal_node.mailbox.clone(),

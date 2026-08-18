@@ -18,7 +18,7 @@ use commonware_consensus::{
             Proposal, Vote,
         },
     },
-    types::{Epoch, Round, TermLength, View},
+    types::{Epoch, Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
 use commonware_p2p::{Receiver as _, Recipients, Sender as _, simulated};
@@ -1515,6 +1515,8 @@ where
         raw_bytes: input.raw_bytes.clone(),
         required_containers: MAX_REQUIRED_CONTAINERS,
         term_length: input.term_length,
+        optimistic_views: ViewDelta::zero(),
+        heterogeneous_optimism: false,
         degraded_network: false,
         configuration: N4F3C1,
         partition: Partition::Connected,
@@ -1579,7 +1581,7 @@ where
         &participants,
         honest_scheme,
         honest.clone(),
-        P::elector(term_length),
+        P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS),
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -1594,7 +1596,8 @@ where
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
     // The driver's leader-gating heuristic follows the same term structure as
     // the honest engine so leader-path branches fire at term-consistent views.
-    let elector = simplex::round_robin(term_length).build(fuzzer_schemes[0].participants());
+    let elector = simplex::round_robin(term_length, crate::PINNED_OPTIMISTIC_VIEWS)
+        .build(fuzzer_schemes[0].participants());
 
     let mut driver = NodeDriver::<P::Scheme>::new(
         context.child("simplex_node_driver"),
@@ -1701,7 +1704,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             &participants,
             schemes[HONEST_ID].clone(),
             honest.clone(),
-            P::elector(term_length),
+            P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS),
             relay.clone(),
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -1720,7 +1723,8 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
         // exercised against live votes, certificates, and resolver requests,
         // not just a bare restart.
         let (fuzzer_schemes, _) = schemes.split_at(BYZANTINE_COUNT);
-        let elector = simplex::round_robin(term_length).build(fuzzer_schemes[0].participants());
+        let elector = simplex::round_robin(term_length, crate::PINNED_OPTIMISTIC_VIEWS)
+            .build(fuzzer_schemes[0].participants());
         let mut driver = NodeDriver::<P::Scheme>::new(
             context.child("simplex_node_recovery_driver"),
             honest,

@@ -10,9 +10,8 @@
 //! [`aggregate`](super::aggregate) verification. Without weights, an attacker could forge invalid
 //! signatures that cancel out when aggregated (e.g., one signature "too high" and another "too low"
 //! by the same amount). With random weights `r_i`, the errors must satisfy `sum(r_i * err_i) = 0`,
-//! which requires predicting the weights before they're generated (probability ~1/2^255 per invalid
-//! signature). Note, the weights must be unpredictable to the attacker for this to work (i.e. they
-//! must be generated securely).
+//! which an attacker cannot arrange without predicting the weights. The soundness error is at most
+//! `2^-128` per check.
 use super::{
     super::{Error, group::SmallScalar, variant::Variant},
     hash_with_namespace,

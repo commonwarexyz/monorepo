@@ -47,6 +47,8 @@ pub struct Config<C: Signer> {
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
+    /// The largest supported value is [`crate::authenticated::MAX_SIZE`].
+    ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.
     ///

@@ -1,126 +1,81 @@
 //! Striped global freelist for one buffer-pool size class.
 //!
-//! A [`Freelist`] owns the allocation layout for one [`super::pool::BufferPool`]
-//! size class and is responsible for deallocating every tracked buffer created
-//! with that layout. Buffers that are not owned by pooled views and not held in
-//! a thread-local cache are parked in the freelist, making them available for
-//! reuse by any thread in the pool. Each tracked buffer has a stable slot id
-//! within its size class.
+//! Each size class has a fixed number of slots. A slot combines one stable
+//! [`PooledOwner`] record with one data allocation after that slot is created.
+//! The [`Freelist`] owns the slot table, the allocation layout, and every
+//! buffer currently available for global reuse.
 //!
-//! A [`PooledBuffer`] does not carry its allocation layout. Any buffer created
-//! by this freelist, or taken from it, must eventually be returned to the same
-//! freelist before the freelist is finally dropped. [`Freelist::drain`] and
-//! [`Drop`] only release buffers currently parked here. **An outstanding buffer
-//! that is never returned will leak**.
-//!
-//! The buffer pool keeps this requirement by pairing every pooled backing
-//! outside the freelist with a size-class lease, and by banking one strong
-//! size-class reference for every buffer held in a thread-local cache. Those
-//! leases and banked references keep the owning size class, and therefore this
-//! freelist, alive until the buffer returns here.
-//!
-//! This is intentionally narrower than a general multi-producer, multi-consumer
-//! queue:
-//!
-//! - Capacity is fixed when the size class is created.
-//! - Callers only need to take any free slot, not preserve order.
-//! - Slot ownership is managed by the buffer pool.
-//! - Refill and spill paths naturally move buffers in batches.
-//!
-//! Each slot has two pieces of freelist state: a parking cell and a free bit.
-//! The parking cell holds the [`PooledBuffer`] while the slot is globally free.
-//! The bit records whether that cell currently contains an initialized buffer
-//! that can be taken. The bit transition is the synchronization boundary:
-//! returning a buffer writes the cell and then sets the bit, while taking a
-//! buffer clears a set bit and then reads the cell.
-//!
-//! Free bits are split across cache-line-padded atomic words. The pool passes
-//! its expected parallelism so the freelist can size this bitmap for the
-//! expected contention level. The freelist rounds that target up to a power of
-//! two, caps it so every word can contain at least one slot, and grows it when
-//! needed so no bitmap word tracks more than 64 slots.
-//!
-//! Consecutive slot ids are not packed into the same word. Instead low slot-id
-//! bits choose the word and high slot-id bits choose the bit inside that word.
-//! With a power-of-two word count, the mapping is:
-//!
-//! - `word_mask = word_count - 1`
-//! - `word_shift = log2(word_count)`
-//! - `word_index = slot & word_mask`
-//! - `bit_index = slot >> word_shift`
-//! - `bit_mask = 1 << bit_index`
-//!
-//! For an eight-word freelist, slots are arranged like this:
+//! A buffer moves through these ownership states:
 //!
 //! ```text
-//!            word 0   word 1   word 2   word 3   word 4   word 5   word 6   word 7
-//! bit 0:     slot 0   slot 1   slot 2   slot 3   slot 4   slot 5   slot 6   slot 7
-//! bit 1:     slot 8   slot 9   slot 10  slot 11  slot 12  slot 13  slot 14  slot 15
-//! bit 2:     slot 16  slot 17  slot 18  slot 19  slot 20  slot 21  slot 22  slot 23
-//! ...
+//!                        create or take
+//!  +----------------+ --------------------> +-----------------------+
+//!  | global stripe  |                       | checked out or in TLS |
+//!  | Vec<slot id>   | <-------------------- | cache                 |
+//!  +----------------+          put          +-----------------------+
 //! ```
 //!
-//! This gives concurrent threads more independent atomic words to target
-//! without changing the slot ids handed back to the pool.
-//!
-//! Each thread also gets a stable probe id. The probe id uses the same
-//! power-of-two split as slot ids:
-//!
-//! - low id bits choose the thread's home word
-//! - higher id bits identify the home-word collision group
-//! - the low six bits of that group are reversed to choose the starting bit
-//!
-//! The first `word_count` long-lived workers therefore start on different
-//! bitmap words. Workers that already start on different words do not need
-//! distinct bit offsets. When more workers share the same home word, their bit
-//! offsets spread by halves, quarters, and so on.
+//! The global representation is deliberately small. Stripes store only `u32`
+//! slot ids. The corresponding owner records never move:
 //!
 //! ```text
-//! word_count = 8
+//!  Freelist
+//!  +-- slots:   [ PooledOwner ][ PooledOwner ][ PooledOwner ] ...
+//!  +-- stripes: [ available | Mutex<Vec<u32>> | hard limit ] ...
 //!
-//! thread id:       0  1  2  3  4  5  6  7 |  8  9 10 11 12 13 14 15
-//! home word:       0  1  2  3  4  5  6  7 |  0  1  2  3  4  5  6  7
-//! group:           0  0  0  0  0  0  0  0 |  1  1  1  1  1  1  1  1
-//! bit offset:      0  0  0  0  0  0  0  0 | 32 32 32 32 32 32 32 32
-//!
-//! home_word = thread_id & word_mask
-//! group     = thread_id >> word_shift
-//! offset    = reverse_low_6(group)
-//!
-//! home-word collision sequence:
-//!
-//! thread id:   0   8  16  24  32  40  48  56
-//! group:       0   1   2   3   4   5   6   7
-//! bit offset:  0  32  16  48   8  40  24  56
+//!                      slot 5
+//!  stripe vector  --------------------->  slots[5]
 //! ```
 //!
-//! The hot paths are fast for a few concrete reasons:
+//! # Striping
 //!
-//! - `put` is just "write buffer into the parking cell, then `fetch_or` one bit".
-//! - `take` uses a stable per-thread home word before scanning others, so
-//!   threads tend to start from different stripes.
-//! - `take` and `take_batch` rotate bit selection inside each word, so threads
-//!   that share a word do not all probe bit 0 first.
-//! - `take` claims bits with `fetch_and` instead of a compare-and-swap loop.
-//!   Two threads removing different bits from the same word can both succeed
-//!   without one having to restart from scratch.
-//! - `put_batch` coalesces returned slots per word, turning many logical
-//!   inserts into one atomic `fetch_or` per touched stripe.
-//! - `take_batch` claims several bits from one word with one atomic operation,
-//!   which matches the refill behavior of the thread-local caches.
+//! Every thread receives a stable process-local id. The low bits select that
+//! thread's home stripe. A put starts at the home stripe and continues in
+//! wrapped order only when a stripe has reached its hard limit. A take follows
+//! the same wrapped order and may claim any available slot. Slot ids can
+//! therefore migrate between stripes as buffers are returned by different
+//! threads.
 //!
-//! The shared bitmap operations are lock-free, but the structure is not a
-//! standalone general-purpose container. It relies on the buffer pool's
-//! ownership discipline: a slot is either owned by a pooled backing, parked in a
-//! thread-local cache, or available in this freelist. Only the thread that owns
-//! a slot outside the freelist may access that slot's parking cell.
-use super::buffer::PooledBuffer;
+//! Stripe limits are fixed at construction and sum to the freelist capacity.
+//! Each vector requests its limit as initial capacity, and operations enforce
+//! that limit even if the allocator reserves more. A valid put therefore does
+//! not grow a vector while holding its lock. If racing operations move the
+//! remaining room during a complete scan, the put yields and retries.
+//!
+//! # Availability hints and locking
+//!
+//! Each stripe has an [`AtomicBool`] that avoids locking a stripe observed to
+//! be empty. The vector remains authoritative. The first put into an empty
+//! vector publishes `true`, and the take that removes the final slot publishes
+//! `false`. Both transitions happen while the stripe is locked. A taker may
+//! observe a stale `false` and skip that stripe unless it has synchronized with
+//! the thread that completed the put.
+//!
+//! Stripe locks are blocking. A take that observes a positive hint waits for
+//! that stripe even if a later stripe could satisfy it. A failed scan is one
+//! bounded concurrent miss, not a linearizable snapshot of global emptiness.
+//! A retry may succeed after an overlapping return completes.
+//!
+//! # Caller contract
+//!
+//! This is not a general-purpose container. It relies on the buffer pool to
+//! maintain exclusive ownership. Callers must return only buffers created by
+//! this freelist, return each buffer exactly once, and provide distinct buffers
+//! in each batch. Violating that contract can duplicate a slot or exceed a
+//! stripe's aggregate capacity.
+//!
+//! [`PooledBuffer`] does not carry its allocation layout. Every created or
+//! claimed buffer must eventually return before this freelist is dropped. An
+//! outstanding buffer that never returns leaks. Buffer-pool leases keep the
+//! owning size class and this freelist alive until valid returns complete.
+
+use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::Cell,
-    mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
+    ptr,
     sync::atomic::Ordering,
 };
 
@@ -128,79 +83,145 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::{
             cell::UnsafeCell,
-            sync::atomic::{AtomicU64, AtomicUsize},
+            sync::{
+                Mutex,
+                MutexGuard,
+                atomic::{AtomicBool, AtomicUsize},
+            },
+            thread,
         };
     } else {
+        use commonware_utils::sync::{Mutex, MutexGuard};
         use std::{
             cell::UnsafeCell,
-            sync::atomic::{AtomicU64, AtomicUsize},
+            sync::atomic::{AtomicBool, AtomicUsize},
+            thread,
         };
     }
 }
 
-/// Number of slot bits tracked in each bitmap word.
-const SLOT_BITMAP_WORD_BITS: usize = u64::BITS as usize;
-/// Number of low-order bits needed to address bits within one bitmap word.
-const SLOT_BITMAP_WORD_SHIFT: u32 = SLOT_BITMAP_WORD_BITS.trailing_zeros();
-/// Number of word masks stored on the stack before falling back to heap scratch.
-const INLINE_PUT_BATCH_MASKS: usize = 128;
+/// Preferred minimum stripe count when the capacity can support it.
+///
+/// The floor prevents a low or underestimated parallelism setting from
+/// collapsing ordinary pools onto one hot lock. Capacity still bounds the
+/// count, so small size classes never allocate empty stripes.
+const MIN_STRIPES: usize = 8;
 
-/// Bounded lock-free freelist of tracked buffers for one size class.
+/// Maximum number of cache-isolated stripes in one freelist.
 ///
-/// The freelist owns the [`Layout`] shared by every tracked buffer in the size
-/// class. Pooled backing values and thread-local caches may temporarily hold
-/// [`PooledBuffer`] handles, but those handles must eventually return here so
-/// they can be released with the correct layout. The buffer pool keeps the
-/// freelist alive for those outstanding handles with pooled-backing leases
-/// or TLS-banked size-class references. Draining or dropping the freelist
-/// only deallocates buffers currently parked in it.
-///
-/// The bitmap is intentionally striped over a power-of-two number of words.
-/// That makes the slot-to-word mapping cheap and keeps small freelists from
-/// degenerating into a single hot atomic word.
-pub struct Freelist {
-    /// Allocation layout shared by every tracked buffer.
-    layout: Layout,
-    /// Number of slot ids reserved for created buffers.
+/// The cap bounds both cache-padded metadata and the cost of an empty scan when
+/// configured parallelism is extremely large.
+const MAX_STRIPES: usize = 4_096;
+
+/// One cache-isolated collection of globally free slots with a fixed slot limit.
+struct Stripe {
+    /// Advisory nonempty hint used to skip stripe locks.
     ///
-    /// This is a monotonic high-water mark for slot assignment. Draining
-    /// globally-free buffers does not decrement it because higher slot ids may
-    /// still be owned by a pooled backing or parked in thread-local caches.
-    created: AtomicUsize,
-    /// Cache-line-padded striped bitmap of free slots.
+    /// The value changes only while `free` is locked. `true` requires locking
+    /// and inspecting authoritative `free`. A taker may observe a stale `false`
+    /// unless it has synchronized with the thread that completed the insertion.
+    available: AtomicBool,
+    /// Slot ids currently owned by the global freelist in this stripe.
+    free: Mutex<Vec<u32>>,
+    /// Maximum number of slot ids that `free` may contain.
     ///
-    /// Padding matters here because threads often target different words in
-    /// steady state. Without padding, different bitmap words could still share
-    /// a cache line even when they represent disjoint slot stripes.
-    words: Box<[CachePadded<AtomicU64>]>,
-    /// Per-slot parking place for returned buffers.
-    ///
-    /// A bit transition is the synchronization boundary. `put` writes the
-    /// buffer into the parking cell before setting the bit, and `take` clears
-    /// the bit before reading the buffer back out.
-    storage: Box<[UnsafeCell<MaybeUninit<PooledBuffer>>]>,
-    /// Mask used to map a slot id to its striped bitmap word.
-    word_mask: usize,
-    /// Number of low slot-id bits consumed by the word index.
-    word_shift: u32,
+    /// The vector is created with this requested capacity during construction.
+    limit: usize,
 }
 
-// SAFETY: parking cells are only accessed by the thread that currently
-// owns their slot id. Publication and removal from the global free set are
-// synchronized via bitmap bit transitions.
+impl Stripe {
+    /// Creates a stripe from its preallocated initial free-slot vector.
+    fn new(free: Vec<u32>, limit: usize) -> Self {
+        assert!(free.len() <= limit);
+        assert!(free.capacity() >= limit);
+        Self {
+            available: AtomicBool::new(!free.is_empty()),
+            free: Mutex::new(free),
+            limit,
+        }
+    }
+
+    /// Locks the authoritative free-slot vector.
+    ///
+    /// Production mutexes do not expose poisoning. Loom uses the standard
+    /// poisoning API, and a poisoned model indicates a prior test panic rather
+    /// than a recoverable freelist state.
+    #[inline(always)]
+    fn lock(&self) -> MutexGuard<'_, Vec<u32>> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                self.free.lock().expect("freelist mutex must not be poisoned")
+            } else {
+                self.free.lock()
+            }
+        }
+    }
+
+    /// Removes one slot while maintaining the availability hint.
+    ///
+    /// `free` must be the guard obtained from [`Self::lock`] for this stripe.
+    #[inline(always)]
+    fn pop(&self, free: &mut MutexGuard<'_, Vec<u32>>) -> Option<u32> {
+        // A taker can load `true` before another taker removes the final slot,
+        // so the locked vector may already be empty.
+        let slot = free.pop()?;
+
+        // Publish the last removal before releasing the stripe lock.
+        if free.is_empty() {
+            self.available.store(false, Ordering::Release);
+        }
+        Some(slot)
+    }
+}
+
+/// Fixed-capacity striped freelist for one buffer-pool size class.
+///
+/// The freelist owns every stable pooled-owner slot and the exact layout used
+/// for its data allocation. Globally available slots are stored as compact ids
+/// in stripes with fixed slot limits. Checked-out buffers and thread-local
+/// caches may temporarily own slots, but their leases keep this freelist alive
+/// until they return.
+pub struct Freelist {
+    /// Exact layout shared by every data allocation in this size class.
+    layout: Layout,
+    /// Number of permanent creation permits consumed so far.
+    ///
+    /// The cache padding isolates concurrent lazy creation from stripe state.
+    created: CachePadded<AtomicUsize>,
+    /// Stable owner record for every possible slot in this size class.
+    ///
+    /// Boxing prevents the records from moving after pointers escape.
+    slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
+    /// Cache-isolated free-slot vectors selected by thread home.
+    stripes: Box<[CachePadded<Stripe>]>,
+    /// `stripes.len() - 1`, used for power-of-two wrapped indexing.
+    stripe_mask: usize,
+}
+
+// SAFETY: slot storage is stable for the lifetime of the freelist. The buffer
+// pool contract places each created slot either outside the global freelist or
+// in exactly one mutex-protected stripe.
 unsafe impl Send for Freelist {}
-// SAFETY: Same slot-ownership and bit-transition synchronization as above.
+// SAFETY: same ownership and locking discipline as the Send implementation.
 unsafe impl Sync for Freelist {}
 
 impl Freelist {
-    /// Creates a new fixed-capacity freelist.
+    /// Creates a fixed-capacity freelist for one allocation layout.
     ///
-    /// `parallelism` is the expected number of threads contending for the
-    /// freelist. The actual word count is rounded to a power of two and capped
-    /// so every word can contain at least one slot.
+    /// `parallelism` selects a power-of-two stripe target. When capacity allows,
+    /// the target is at least [`MIN_STRIPES`] and never exceeds
+    /// [`MAX_STRIPES`]. The count also never exceeds the greatest power of two
+    /// no larger than `capacity`, which ensures every stripe has a nonzero hard
+    /// limit.
     ///
-    /// If `prefill` is true, creates `capacity` buffers and makes them
-    /// immediately available in the freelist.
+    /// Each stripe preallocates its exact share of total capacity. If `prefill`
+    /// is `true`, every slot's data allocation is created and parked before
+    /// this method returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `layout` is zero-sized. Allocation failure invokes the
+    /// process allocation error handler.
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -209,505 +230,410 @@ impl Freelist {
     ) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
         let capacity = capacity.get() as usize;
+        let stripe_count = Self::stripe_count(capacity, parallelism.get());
+        let stripe_mask = stripe_count - 1;
 
-        // Keep the caller-facing knob as expected parallelism, then derive an
-        // implementation-friendly stripe count here. Capping at capacity avoids
-        // permanently empty stripes when a small pool is used with a large
-        // parallelism setting.
-        let max_stripes = 1usize << capacity.ilog2();
-        let target_stripes = parallelism
-            .get()
-            .checked_next_power_of_two()
-            .unwrap_or(max_stripes)
-            .min(max_stripes);
-
-        // Small freelists reserve the target number of striped words when
-        // capacity allows it, so different threads can start from different
-        // cache lines. Large freelists are constrained by the number of bits
-        // required to represent all slots.
-        let word_count = target_stripes
-            .max(capacity.div_ceil(SLOT_BITMAP_WORD_BITS))
-            .next_power_of_two();
-        // `word_count` is always a power of two, so slot mapping can use the
-        // low bits as a word index and the remaining high bits as the bit
-        // index inside that word.
-        let word_shift = word_count.trailing_zeros();
-        let word_mask = word_count - 1;
-
-        let words = (0..word_count)
-            .map(|_| CachePadded::new(AtomicU64::new(0)))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let storage = (0..capacity)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+        let slots = (0..capacity)
+            .map(|slot| {
+                CachePadded::new(UnsafeCell::new(PooledOwner::new(
+                    u32::try_from(slot).expect("slot must fit in u32"),
+                    layout.size(),
+                )))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
-        let freelist = Self {
-            layout,
-            created: AtomicUsize::new(0),
-            words,
-            storage,
-            word_mask,
-            word_shift,
-        };
+        // Build the free vectors before their mutexes exist. This keeps prefill
+        // allocation and initialization outside every stripe lock.
+        let mut free = (0..stripe_count)
+            .map(|stripe| Vec::with_capacity(Self::stripe_capacity(capacity, stripe_count, stripe)))
+            .collect::<Vec<_>>();
 
         if prefill {
-            freelist.put_batch((0..capacity).map(|_| {
-                freelist
-                    .try_create(false)
-                    .expect("prefill creates exactly capacity buffers")
-            }));
+            for slot in 0..capacity {
+                // SAFETY: construction exclusively initializes this stable slot.
+                let buffer =
+                    unsafe { PooledBuffer::new(Self::cell_ptr(&slots[slot]), layout, false) };
+                free[slot & stripe_mask].push(buffer.into_slot());
+            }
         }
 
-        freelist
+        let stripes = free
+            .into_iter()
+            .enumerate()
+            .map(|(stripe, free)| {
+                let limit = Self::stripe_capacity(capacity, stripe_count, stripe);
+                CachePadded::new(Stripe::new(free, limit))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        Self {
+            layout,
+            created: CachePadded::new(AtomicUsize::new(if prefill { capacity } else { 0 })),
+            slots,
+            stripes,
+            stripe_mask,
+        }
     }
 
-    /// Creates a new buffer and reserves a stable slot id for it.
+    /// Selects a power-of-two stripe count from capacity and parallelism.
     ///
-    /// Returns `None` once every slot id in the fixed-capacity freelist has
-    /// been reserved.
+    /// The minimum protects low parallelism estimates from a single hot lock.
+    /// The maximum bounds metadata and empty scans. The capacity ceiling keeps
+    /// every stripe useful and makes wrapped indexing a mask operation.
+    #[inline]
+    fn stripe_count(capacity: usize, parallelism: usize) -> usize {
+        let capacity_ceiling = 1usize << capacity.ilog2();
+        parallelism
+            .checked_next_power_of_two()
+            .unwrap_or(MAX_STRIPES)
+            .max(MIN_STRIPES.min(capacity_ceiling))
+            .min(MAX_STRIPES)
+            .min(capacity_ceiling)
+    }
+
+    /// Returns the exact hard limit for one stripe.
     ///
-    /// The returned buffer does not deallocate itself. The `(slot, buffer)`
-    /// pair must be returned to this same freelist before the freelist is
-    /// finally dropped, otherwise the buffer leaks.
+    /// Slots are distributed by `slot & (stripes - 1)` during prefill. This
+    /// formula gives the matching quotient plus remainder distribution, whose
+    /// limits sum exactly to `capacity`.
     #[inline(always)]
-    pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
-        // Loom's atomic implementation does not provide `try_update`.
+    const fn stripe_capacity(capacity: usize, stripes: usize, stripe: usize) -> usize {
+        (capacity - stripe).div_ceil(stripes)
+    }
+
+    /// Creates a new tracked buffer and assigns its permanent slot id.
+    ///
+    /// Returns `None` after all creation permits have been consumed. Draining
+    /// does not reopen permits because each slot is initialized at most once.
+    #[inline(always)]
+    pub(super) fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
+        let capacity = self.slots.len();
+
+        // The successful old counter value is a unique permanent slot id. This
+        // admission does not publish slot state, so relaxed ordering is enough.
         #[allow(deprecated)]
         let slot = self
             .created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                (created < self.storage.len()).then_some(created + 1)
+                (created < capacity).then_some(created + 1)
             })
-            .ok()? as u32;
+            .ok()?;
 
-        let buffer = if zeroed {
-            PooledBuffer::new_zeroed(self.layout)
-        } else {
-            PooledBuffer::new(self.layout)
-        };
-
-        Some((slot, buffer))
+        // SAFETY: creation admission assigns this slot exactly once. Its
+        // address remains stable for the freelist lifetime.
+        Some(unsafe { PooledBuffer::new(self.slot(slot as u32), self.layout, zeroed) })
     }
 
-    /// Returns the bitmap word index and bit mask for a slot id.
+    /// Returns one uniquely owned buffer to global availability.
     ///
-    /// Low slot-id bits choose the cache-line-padded word. High slot-id bits
-    /// choose the bit inside that word, spreading consecutive slots across
-    /// stripes instead of packing them into one atomic word.
-    #[inline(always)]
-    const fn slot_word(&self, slot: u32) -> (usize, u64) {
-        let slot = slot as usize;
-        let word_index = slot & self.word_mask;
-        let bit = slot >> self.word_shift;
-        (word_index, 1u64 << bit)
-    }
-
-    /// Returns the slot id represented by a bitmap word index and bit index.
-    ///
-    /// This is the inverse of [`Self::slot_word`] and is used after a bit has
-    /// been claimed from the bitmap.
-    #[inline(always)]
-    const fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
-        let slot = (bit << self.word_shift) | word_index;
-        slot as u32
-    }
-
-    /// Puts one tracked buffer into the global freelist.
-    ///
-    /// The buffer is first written back into its parking cell, then the slot's
-    /// free bit is set with `Release` ordering. A successful `take` performs
-    /// the matching `Acquire` operation before reading the buffer back out.
-    ///
-    /// The caller must own `slot`, and `slot` must not already be available in
-    /// this freelist. `buffer` must belong to this freelist and must have been
-    /// allocated by this freelist.
-    #[inline]
-    pub fn put(&self, slot: u32, buffer: PooledBuffer) {
-        // Park the buffer before marking the slot free.
-        self.park(slot, buffer);
-
-        // Setting the slot bit makes the parked buffer available. `Release` pairs
-        // with the taker's `Acquire` clear before it reads the parking cell.
-        let (word_index, mask) = self.slot_word(slot);
-        let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
-        assert_eq!(
-            previous & mask,
-            0,
-            "returned slot must not already be marked free"
-        );
-    }
-
-    /// Puts several tracked buffers into the global freelist.
-    ///
-    /// Batch insertion groups returned slots by bitmap word so each touched
-    /// stripe needs only one atomic `fetch_or`, regardless of how many entries
-    /// in the batch map to that word.
-    ///
-    /// The caller must own every slot in the batch. Slots must be unique within
-    /// the batch and must not already be available in this freelist. Each
-    /// buffer must belong to this freelist.
-    ///
-    /// The iterator **must not panic** after yielding an entry.
-    ///
-    /// `BufferPool` callers use simple drain and array iterators, avoiding
-    /// per-entry guards keeps this path allocation-free for ordinary batches.
-    #[inline]
-    pub fn put_batch(&self, entries: impl IntoIterator<Item = (u32, PooledBuffer)>) {
-        let mut entries = entries.into_iter();
-
-        // Keep empty and single-entry batches on the cheapest path. The mask
-        // scratch space is only needed once there are multiple slots to
-        // coalesce.
-        let Some((slot, buffer)) = entries.next() else {
-            return;
-        };
-        let Some((next_slot, next_buffer)) = entries.next() else {
-            self.put(slot, buffer);
-            return;
-        };
-
-        let word_count = self.words.len();
-        if word_count <= INLINE_PUT_BATCH_MASKS {
-            let mut masks = MaybeUninit::<[u64; INLINE_PUT_BATCH_MASKS]>::uninit();
-            // Only the active bitmap words need scratch space. Avoid clearing
-            // the whole inline array for small freelists.
-            //
-            // SAFETY: `word_count <= INLINE_PUT_BATCH_MASKS`, so the
-            // initialized prefix is in bounds. `u64` has no drop glue, and the
-            // uninitialized tail is never exposed.
-            let masks = unsafe {
-                let ptr = masks.as_mut_ptr().cast::<u64>();
-                ptr.write_bytes(0, word_count);
-                std::slice::from_raw_parts_mut(ptr, word_count)
-            };
-            self.put_entries(masks, slot, buffer, next_slot, next_buffer, entries);
-        } else {
-            // Very large freelists are uncommon, so keep the common case on the
-            // stack and fall back to heap scratch only when the bitmap is wider
-            // than the fixed inline staging area.
-            let mut masks = vec![0u64; word_count];
-            self.put_entries(
-                masks.as_mut_slice(),
-                slot,
-                buffer,
-                next_slot,
-                next_buffer,
-                entries,
-            );
-        }
-    }
-
-    /// Inserts a multi-entry batch using per-word scratch masks.
-    ///
-    /// `put_batch` peels the first two entries before calling this helper, so
-    /// this path only handles batches large enough to benefit from coalescing.
-    /// `masks` must contain exactly one zeroed entry per bitmap word. Each slot
-    /// is parked first and ORed into its word's scratch mask. Once all entries
-    /// are staged, one `Release` `fetch_or` per non-empty mask makes the
-    /// corresponding parked buffers available.
-    ///
-    /// The caller must own every slot, slots must be unique, none of the slots
-    /// may already be available in this freelist, and every buffer must belong
-    /// to this freelist. The iterator must not panic after yielding an entry,
-    /// because staged-but-not-inserted buffers would no longer be owned by the
-    /// caller and would not yet be reachable through the bitmap.
-    #[inline(always)]
-    fn put_entries(
-        &self,
-        masks: &mut [u64],
-        slot: u32,
-        buffer: PooledBuffer,
-        next_slot: u32,
-        next_buffer: PooledBuffer,
-        entries: impl Iterator<Item = (u32, PooledBuffer)>,
-    ) {
-        // Masks are staged by word after parking the buffers. The later
-        // Release `fetch_or` makes every staged slot in that word available.
-        self.stage_put(masks, slot, buffer);
-        self.stage_put(masks, next_slot, next_buffer);
-        for (slot, buffer) in entries {
-            self.stage_put(masks, slot, buffer);
-        }
-
-        for (word_index, &mask) in masks.iter().enumerate() {
-            if mask == 0 {
-                continue;
-            }
-
-            // One Release operation makes every parked buffer represented
-            // by this word mask.
-            let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
-            assert_eq!(
-                previous & mask,
-                0,
-                "returned slot batch must not already contain a free slot"
-            );
-        }
-    }
-
-    /// Parks one buffer and records its slot in the batch scratch mask.
-    ///
-    /// This helper intentionally does not touch the atomic bitmap. The caller
-    /// later inserts the accumulated mask for each word, so multiple slots that
-    /// map to the same bitmap word share a single `Release` operation. Parking
-    /// happens before the bit is staged, preserving the same order as `put`.
-    ///
-    /// `masks` must contain the scratch word for `slot`.
-    #[inline(always)]
-    fn stage_put(&self, masks: &mut [u64], slot: u32, buffer: PooledBuffer) {
-        // Park first, then stage the bit for the later per-word insert.
-        self.park(slot, buffer);
-        let (word_index, mask) = self.slot_word(slot);
-        masks[word_index] |= mask;
-    }
-
-    /// Takes any one available slot from the global freelist.
-    ///
-    /// On success, ownership of the returned `(slot, buffer)` pair is
-    /// transferred to the caller. The pair must be returned to this same
-    /// freelist before the freelist is finally dropped, otherwise the buffer
-    /// leaks.
-    ///
-    /// The search starts from a stable per-thread home word and scans the other
-    /// stripes only on miss. Within a word, `fetch_and` claims one bit. That is
-    /// important: unlike a full-word CAS loop, two threads removing different
-    /// bits from the same word can both succeed.
-    #[inline]
-    pub fn take(&self) -> Option<(u32, PooledBuffer)> {
-        // Capture this thread's probe state once so the inner loop does not
-        // repeatedly touch thread-local storage.
-        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
-
-        for scanned in 0..self.words.len() {
-            let word_index = probe.word_index(scanned);
-            let word_ref = &self.words[word_index];
-            // This relaxed load only chooses candidate bits. The Acquire
-            // `fetch_and` below claims the bit if it is still present.
-            let mut word = word_ref.load(Ordering::Relaxed);
-
-            while word != 0 {
-                // Probe a thread-specific bit order inside the chosen word so
-                // colliding threads do not all stampede bit 0 first.
-                let bit = probe.select_set_bit(word);
-                let mask = 1u64 << bit;
-                let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
-                if observed & mask != 0 {
-                    let slot = self.slot_index(word_index, bit);
-                    // Clear the bit before reading the parked buffer. The
-                    // Acquire `fetch_and` above synchronizes with the put-side
-                    // Release operation.
-                    return Some((slot, self.unpark(slot)));
+    /// The scan starts at the current thread's home stripe. Full stripes are
+    /// skipped in wrapped order. Under the caller contract, aggregate room
+    /// exists for every returned buffer, although racing operations can move
+    /// that room during a scan.
+    pub fn put(&self, buffer: PooledBuffer) {
+        let start = self.home_stripe();
+        let slot = buffer.into_slot();
+        loop {
+            for offset in 0..self.stripes.len() {
+                let stripe = &self.stripes[(start + offset) & self.stripe_mask];
+                let mut free = stripe.lock();
+                if free.len() == stripe.limit {
+                    continue;
                 }
 
-                // Another thread removed that bit first. Reuse the returned
-                // word value instead of restarting the whole scan from the
-                // beginning.
-                word = observed & !mask;
+                let was_empty = free.is_empty();
+                free.push(slot);
+                if was_empty {
+                    // Publish the first insertion before releasing the lock.
+                    stripe.available.store(true, Ordering::Release);
+                }
+                return;
+            }
+
+            // Aggregate room exists for every valid outside buffer, but racing
+            // operations can move that room during one scan.
+            thread::yield_now();
+        }
+    }
+
+    /// Returns several uniquely owned buffers to global availability.
+    ///
+    /// The iterator is consumed into compact slot ids before any slot is
+    /// published. Publication starts at the current thread's home and fills
+    /// each stripe only to its fixed slot limit. No two stripe locks are held
+    /// together.
+    ///
+    /// The iterator must contain distinct buffers created by this freelist. It
+    /// should not panic because buffers yielded before a panic may leak.
+    pub fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
+        // Keep empty and singleton batches off the staging path. Internal
+        // slot-id scratch is needed only when publishing multiple buffers.
+        let mut buffers = buffers.into_iter();
+        let Some(first) = buffers.next() else {
+            return;
+        };
+        let Some(second) = buffers.next() else {
+            self.put(first);
+            return;
+        };
+
+        let reserve = buffers
+            .size_hint()
+            .0
+            .saturating_add(2)
+            .min(self.slots.len());
+        let mut slots = Vec::with_capacity(reserve);
+        slots.push(first.into_slot());
+        slots.push(second.into_slot());
+        slots.extend(buffers.map(PooledBuffer::into_slot));
+
+        // The iterator is fully staged, so publication performs no caller work
+        // or scratch allocation while a stripe is locked.
+        let start = self.home_stripe();
+        while !slots.is_empty() {
+            let before = slots.len();
+            for offset in 0..self.stripes.len() {
+                // Fill only the stripe's fixed remaining room so pushes cannot
+                // allocate under the lock. Publish an empty-to-nonempty
+                // transition before unlocking.
+                let stripe = &self.stripes[(start + offset) & self.stripe_mask];
+                let mut free = stripe.lock();
+                let count = (stripe.limit - free.len()).min(slots.len());
+                let was_empty = free.is_empty();
+                for _ in 0..count {
+                    free.push(slots.pop().expect("count is bounded by length"));
+                }
+                if was_empty && count != 0 {
+                    stripe.available.store(true, Ordering::Release);
+                }
+                if slots.is_empty() {
+                    return;
+                }
+            }
+
+            // Valid returns guarantee aggregate room, but racing operations can
+            // move it throughout a pass. Yield only when the pass parks nothing.
+            if slots.len() == before {
+                thread::yield_now();
             }
         }
+    }
 
+    /// Takes any one globally available buffer, if observed.
+    ///
+    /// The scan starts at the current thread's home. Stripes with a negative
+    /// availability hint are skipped without locking. A positive stripe is
+    /// locked and checked authoritatively.
+    ///
+    /// `None` means this bounded scan found no slot. It is not a linearizable
+    /// empty snapshot because a concurrent put may still be in progress.
+    #[inline]
+    pub fn take(&self) -> Option<PooledBuffer> {
+        // A negative hint can skip locking. A positive hint requires an
+        // authoritative check under the mutex because another taker may have
+        // emptied the stripe.
+        let start = self.home_stripe();
+        for offset in 0..self.stripes.len() {
+            let stripe = &self.stripes[(start + offset) & self.stripe_mask];
+            if !stripe.available.load(Ordering::Acquire) {
+                continue;
+            }
+            let mut free = stripe.lock();
+            if let Some(slot) = stripe.pop(&mut free) {
+                // Reconstructing the buffer touches only stable slot state, so
+                // keep it outside the critical section.
+                drop(free);
+                return Some(self.claim(slot));
+            }
+        }
         None
     }
 
-    /// Takes up to `max` available slots from the global freelist.
+    /// Takes up to `max` globally available buffers.
     ///
-    /// Ownership of each claimed `(slot, buffer)` pair is transferred to
-    /// `on_entry`. Each pair must be returned to this same freelist before the
-    /// freelist is finally dropped, otherwise the buffer leaks.
+    /// Slot ids are detached while each stripe is locked. All buffers are
+    /// reconstructed and passed to `on_buffer` only after every lock has been
+    /// released. A short result means the bounded scan found fewer than `max`
+    /// slots, not that no overlapping put can make more available.
     ///
-    /// `on_entry` receives each claimed `(slot, buffer)` pair. This avoids
-    /// internal allocation and lets callers fill an existing spill/refill
-    /// buffer directly. `on_entry` **must not panic**: for batch claims, bits
-    /// are cleared before buffers are handed to the callback, so a panic could
-    /// strand already-claimed slots outside the freelist.
-    ///
-    /// For `max > 1`, the implementation tries to claim several bits from the
-    /// same word in a single atomic `fetch_and`, which amortizes the shared
-    /// synchronization cost across the batch.
+    /// `on_buffer` must not panic because any remaining detached slots would be
+    /// stranded outside both the freelist and the caller.
     #[inline]
-    pub fn take_batch(&self, max: usize, mut on_entry: impl FnMut(u32, PooledBuffer)) -> usize {
-        if max == 1 {
-            // Keep single-slot takes on the cheaper path.
-            let Some((slot, buffer)) = self.take() else {
-                return 0;
-            };
-            on_entry(slot, buffer);
-            return 1;
-        }
+    pub fn take_batch(&self, max: usize, mut on_buffer: impl FnMut(PooledBuffer)) -> usize {
+        // Clamp oversized requests to the freelist capacity. Empty requests
+        // return immediately, while singleton requests reuse the scalar path
+        // and avoid batch scratch allocation.
+        let max = match max.min(self.slots.len()) {
+            0 => return 0,
+            1 => {
+                let Some(buffer) = self.take() else {
+                    return 0;
+                };
+                on_buffer(buffer);
+                return 1;
+            }
+            max => max,
+        };
 
-        // Capture this thread's probe state once so the inner loop does not
-        // repeatedly touch thread-local storage.
-        let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
-        let mut filled = 0;
+        // Keep scans that observe only negative hints allocation-free. Reserve
+        // detached-slot scratch after the first positive hint but before locking.
+        let mut detached = Vec::new();
+        let start = self.home_stripe();
+        for offset in 0..self.stripes.len() {
+            let stripe = &self.stripes[(start + offset) & self.stripe_mask];
+            if !stripe.available.load(Ordering::Acquire) {
+                continue;
+            }
+            if detached.capacity() == 0 {
+                detached = Vec::with_capacity(max);
+            }
 
-        for scanned in 0..self.words.len() {
-            if filled == max {
+            // Detach only compact slot ids while this stripe is locked. Buffer
+            // reconstruction and caller callbacks remain outside every lock.
+            let mut free = stripe.lock();
+            while detached.len() < max {
+                let Some(slot) = stripe.pop(&mut free) else {
+                    break;
+                };
+                detached.push(slot);
+            }
+            if detached.len() == max {
                 break;
             }
-
-            let word_index = probe.word_index(scanned);
-            let word_ref = &self.words[word_index];
-            // This relaxed load only chooses candidate bits. The Acquire
-            // `fetch_and` below claims whichever candidates are still present.
-            let mut word = word_ref.load(Ordering::Relaxed);
-
-            while word != 0 && filled < max {
-                // Stage several candidate bits from the current word, then try
-                // to clear all of them with one atomic operation.
-                let claim = probe.select_set_bits(word, max - filled);
-                let observed = word_ref.fetch_and(!claim, Ordering::Acquire);
-                // `claim` is speculative. Intersect it with the observed word
-                // to keep only the bits this thread actually cleared.
-                let mut claimed = observed & claim;
-
-                while claimed != 0 {
-                    let bit = claimed.trailing_zeros() as usize;
-                    let slot = self.slot_index(word_index, bit);
-                    // These bits were cleared by the Acquire `fetch_and` above,
-                    // so each corresponding parked buffer is now owned by this
-                    // caller.
-                    on_entry(slot, self.unpark(slot));
-                    claimed &= claimed - 1;
-                    filled += 1;
-                }
-
-                // Continue from the word snapshot returned by `fetch_and`.
-                word = observed & !claim;
-            }
         }
 
-        filled
+        // A positive hint can become stale before its stripe is locked, leaving
+        // the scan with allocated scratch but no detached slots.
+        if detached.is_empty() {
+            return 0;
+        }
+
+        // No stripe locks remain held, so callbacks may safely reenter the
+        // freelist while ownership of each detached slot is transferred.
+        let count = detached.len();
+        for slot in detached {
+            on_buffer(self.claim(slot));
+        }
+        count
     }
 
-    /// Drops every currently available buffer from the global freelist.
+    /// Deallocates every buffer currently parked in this freelist.
     ///
-    /// This is a teardown operation. Drained slot ids are not made available for
-    /// new creations. Buffers currently owned by a pooled backing or parked in
-    /// thread-local caches are not visible to this method and remain the
-    /// responsibility of their current owner until they are returned.
+    /// Buffers still checked out or held in a thread-local cache may return during
+    /// or after this call. Each stripe is therefore replaced under lock with an
+    /// empty vector reserved to its original limit, so a return never grows the
+    /// vector while holding the stripe lock. Detached buffers are deallocated
+    /// after the lock is released.
     ///
-    /// Returns the number of drained slots.
-    #[inline]
+    /// Draining does not restore creation permits, so deallocated buffers cannot
+    /// be recreated through this freelist.
     pub fn drain(&self) -> usize {
         let mut drained = 0;
+        for stripe in &self.stripes {
+            // Allocate before locking so late returns never wait for allocator
+            // work that is independent of the protected vector swap.
+            let replacement = Vec::with_capacity(stripe.limit);
+            let detached = {
+                let mut free = stripe.lock();
+                let detached = std::mem::replace(&mut *free, replacement);
+                stripe.available.store(false, Ordering::Release);
+                detached
+            };
 
-        for (word_index, word) in self.words.iter().enumerate() {
-            // Drain clears each whole word directly instead of using the
-            // probe-based take path. That keeps destruction independent from
-            // thread-local probe state, which may already be unavailable while
-            // TLS caches are being destroyed.
-            let mut claimed = word.swap(0, Ordering::Acquire);
-
-            while claimed != 0 {
-                let bit = claimed.trailing_zeros() as usize;
-                let slot = self.slot_index(word_index, bit);
-                let buffer = self.unpark(slot);
-                // SAFETY: every buffer inserted into this freelist must have been
-                // allocated with this freelist's layout.
-                unsafe { buffer.deallocate(self.layout) };
-                claimed &= claimed - 1;
-                drained += 1;
-            }
+            drained += self.deallocate_detached(detached);
         }
 
         drained
     }
 
-    /// Parks a buffer in the storage cell for a slot outside the freelist.
-    ///
-    /// The caller must own `slot` and mark the corresponding bit only after
-    /// this write completes.
-    #[inline(always)]
-    fn park(&self, slot: u32, buffer: PooledBuffer) {
-        let cell = self
-            .storage
-            .get(slot as usize)
-            .expect("slot id must refer to an allocated slot");
+    /// Deallocates buffers whose slots are no longer owned by a stripe.
+    fn deallocate_detached(&self, detached: Vec<u32>) -> usize {
+        let count = detached.len();
+        for slot in detached {
+            // SAFETY: detachment gives this method unique ownership of the buffer,
+            // which this freelist allocated with `self.layout`.
+            unsafe { self.claim(slot).deallocate(self.layout) };
+        }
+        count
+    }
 
+    /// Returns the stable owner pointer for one slot id.
+    #[inline(always)]
+    fn slot(&self, slot: u32) -> ptr::NonNull<PooledOwner> {
+        let owner = self
+            .slots
+            .get(slot as usize)
+            .expect("slot must belong to this freelist");
+        Self::cell_ptr(owner)
+    }
+
+    /// Obtains the stable pointer stored by one platform-specific cell.
+    #[inline(always)]
+    #[allow(clippy::missing_const_for_fn)]
+    fn cell_ptr(owner: &UnsafeCell<PooledOwner>) -> ptr::NonNull<PooledOwner> {
         cfg_if::cfg_if! {
             if #[cfg(not(feature = "loom"))] {
-                // SAFETY: the caller owns this slot while it is outside the
-                // freelist, so no other thread can access the parking cell until
-                // the slot bit is set.
-                unsafe {
-                    (*cell.get()).write(buffer);
-                }
+                ptr::NonNull::new(owner.get()).expect("slot pointers are non-null")
             } else {
-                // Use loom's tracked cell API so the model can detect a
-                // parking-cell access that is not synchronized by the bitmap bit
-                // transition.
-                cell.with_mut(|ptr| {
-                    // SAFETY: the caller owns this slot while it is outside the
-                    // freelist, so no other thread can access the parking cell
-                    // until the slot bit is set.
-                    unsafe { (*ptr).write(buffer) };
-                });
+                owner.with(|owner| {
+                    ptr::NonNull::new(owner.cast_mut()).expect("slot pointers are non-null")
+                })
             }
         }
     }
 
-    /// Removes the parked buffer from a slot whose free bit was just claimed.
-    ///
-    /// The caller must have cleared the slot's bit before reading the cell.
+    /// Returns the current thread's stable home stripe in this freelist.
     #[inline(always)]
-    fn unpark(&self, slot: u32) -> PooledBuffer {
-        let cell = self
-            .storage
-            .get(slot as usize)
-            .expect("slot id must refer to an allocated slot");
-
-        cfg_if::cfg_if! {
-            if #[cfg(not(feature = "loom"))] {
-                // SAFETY: a successful bit clear removes this slot from the free
-                // set, so we have exclusive access to the initialized buffer that
-                // was made available by the matching put.
-                unsafe { (*cell.get()).assume_init_read() }
-            } else {
-                // Use loom's tracked cell API so the model can detect a
-                // parking-cell access that is not synchronized by the bitmap bit
-                // transition.
-                cell.with_mut(|ptr| {
-                    // SAFETY: a successful bit clear removes this slot from the
-                    // free set, so we have exclusive access to the initialized
-                    // buffer that was made available by the matching put.
-                    unsafe { (*ptr).assume_init_read() }
-                })
-            }
+    fn home_stripe(&self) -> usize {
+        if self.stripe_mask == 0 {
+            return 0;
         }
+        current_thread_id() & self.stripe_mask
+    }
+
+    /// Reconstructs unique ownership after removing a slot from a stripe.
+    #[inline(always)]
+    fn claim(&self, slot: u32) -> PooledBuffer {
+        // SAFETY: the buffer-pool contract makes a globally stored slot unique,
+        // and the caller removed this slot from its stripe.
+        let buffer = unsafe { PooledBuffer::from_owner(self.slot(slot)) };
+        #[cfg(feature = "loom")]
+        buffer.assert_parked_sentinel();
+        buffer
     }
 }
 
 impl Drop for Freelist {
     fn drop(&mut self) {
-        // Any slot still free in the freelist owns an initialized parked
-        // buffer in its parking cell. Drain them explicitly so the underlying
-        // pooled allocations are released before the raw storage backing the
-        // freelist itself goes away.
-        self.drain();
+        // Every checked-out or TLS-cached slot keeps the size class alive until it
+        // returns. Final destruction therefore owns every live allocation and
+        // needs no replacement capacity for a later return.
+        for index in 0..self.stripes.len() {
+            #[cfg(feature = "loom")]
+            let detached = std::mem::take(
+                self.stripes[index]
+                    .free
+                    .get_mut()
+                    .expect("freelist mutex must not be poisoned"),
+            );
+            #[cfg(not(feature = "loom"))]
+            let detached = std::mem::take(self.stripes[index].free.get_mut());
+
+            self.deallocate_detached(detached);
+        }
     }
 }
 
-/// Per-call probe state for choosing bitmap words and bits.
-///
-/// Keeping this logic in one place makes the claim path easier to read and
-/// keeps the freelist API focused on putting and taking slots.
-struct SlotBitmapProbe {
-    start_word: usize,
-    word_mask: usize,
-    bit_offset: u32,
-}
-
-// Monotonic source for per-thread probe ids.
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
-        static NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+        /// Next process-local id assigned to a thread that touches a freelist.
+        static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
     } else {
         loom::lazy_static! {
-            // Loom's `AtomicUsize::new` is not const, so the modeled global
-            // counter has to be initialized through `lazy_static!`.
-            static ref NEXT_SLOT_BITMAP_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+            /// Next model-local id assigned to a thread that touches a freelist.
+            static ref NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
         }
     }
 }
@@ -715,1597 +641,742 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "loom"))] {
         thread_local! {
-            // The per-thread probe id gives each thread a stable starting point for
-            // bitmap scans.
-            //
-            // Keep this const-initialized so the TLS value has no destructor. The
-            // cold path initializes the id explicitly instead of using a lazy TLS
-            // initializer.
-            static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
+            /// Stable id used to select this thread's home in every freelist.
+            static THREAD_ID: Cell<Option<usize>> = const { Cell::new(None) };
         }
     } else {
         loom::thread_local! {
-            // Loom's `thread_local!` macro does not accept const initializers.
-            static TLS_SLOT_BITMAP_THREAD_ID: Cell<Option<usize>> = Cell::new(None);
+            /// Stable id used to select this modeled thread's freelist home.
+            static THREAD_ID: Cell<Option<usize>> = Cell::new(None);
         }
     }
 }
 
-impl SlotBitmapProbe {
-    /// Builds probe state for the current thread and freelist layout.
-    ///
-    /// The thread's stable id chooses both its home word and its preferred bit
-    /// offset inside each word.
-    #[inline(always)]
-    fn new(word_mask: usize, word_shift: u32) -> Self {
-        let thread_id = TLS_SLOT_BITMAP_THREAD_ID.with(|thread_id| {
-            if let Some(id) = thread_id.get() {
-                return id;
-            }
-
-            // Relaxed ordering is enough because probe ids only spread starting
-            // points across bitmap words, they do not synchronize buffer
-            // ownership.
-            let id = NEXT_SLOT_BITMAP_THREAD_ID.fetch_add(1, Ordering::Relaxed);
-            thread_id.set(Some(id));
-            id
-        });
-
-        Self {
-            // Low id bits choose the first bitmap word this thread probes.
-            // With a power-of-two word count, masking is equivalent to modulo
-            // but avoids a division on the hot path.
-            start_word: thread_id & word_mask,
-            word_mask,
-            // Threads that share a home word should start from well-separated
-            // bits within that word.
-            bit_offset: Self::bit_offset(thread_id, word_shift),
-        }
-    }
-
-    /// Returns the bit offset for this thread's home-word collision group.
-    #[inline(always)]
-    const fn bit_offset(thread_id: usize, word_shift: u32) -> u32 {
-        // `word_shift` is `log2(word_count)`, so shifting drops the id bits
-        // used to choose the home word. Bit-reversing the low six group bits
-        // gives offsets `0, 32, 16, 48, ...`, spreading home-word collisions
-        // across the 64-bit word for power-of-two batch sizes.
-        let group = thread_id >> word_shift;
-        (group.reverse_bits() >> (usize::BITS - SLOT_BITMAP_WORD_SHIFT)) as u32
-    }
-
-    /// Returns the word index to inspect after `scanned` words.
-    #[inline(always)]
-    const fn word_index(&self, scanned: usize) -> usize {
-        (self.start_word + scanned) & self.word_mask
-    }
-
-    /// Selects one set bit from `word` using a rotated probe order.
-    ///
-    /// This probe's bit offset becomes the first position checked. The returned
-    /// index is in the original, unrotated word.
-    #[inline(always)]
-    const fn select_set_bit(&self, word: u64) -> usize {
-        // Rotate the word so the thread's preferred probe offset becomes bit 0,
-        // select the first set bit in that rotated view, then rotate the answer
-        // back into the original word numbering.
-        let rotated = word.rotate_right(self.bit_offset);
-        ((rotated.trailing_zeros() + self.bit_offset) & (SLOT_BITMAP_WORD_BITS as u32 - 1)) as usize
-    }
-
-    /// Selects up to `limit` set bits from `word` using a rotated probe order.
-    ///
-    /// The returned mask is in the original, unrotated word and can be used
-    /// directly in a `fetch_and`.
-    #[inline]
-    const fn select_set_bits(&self, word: u64, limit: usize) -> u64 {
-        // Gather up to `limit` set bits using the same rotated probe order as
-        // `select_set_bit`. The result is rotated back so callers can apply it
-        // directly as a mask against the original word.
-        let mut remaining = word.rotate_right(self.bit_offset);
-        let mut selected = 0u64;
-        let mut taken = 0;
-
-        while remaining != 0 && taken < limit {
-            let bit = remaining.trailing_zeros();
-            let mask = 1u64 << bit;
-            selected |= mask;
-            remaining &= !mask;
-            taken += 1;
+/// Returns one stable process-local id for the current thread.
+#[inline(always)]
+fn current_thread_id() -> usize {
+    THREAD_ID.with(|thread_id| {
+        if let Some(id) = thread_id.get() {
+            return id;
         }
 
-        selected.rotate_left(self.bit_offset)
-    }
+        // The id is used only for load distribution, so wraparound and ordering
+        // relative to freelist contents have no correctness significance.
+        let id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        thread_id.set(Some(id));
+        id
+    })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 pub(super) mod tests {
     use super::*;
-    use commonware_utils::{NZU32, NZUsize};
-    use std::sync::{
-        Arc, Barrier,
-        atomic::{AtomicUsize as StdAtomicUsize, Ordering as AtomicOrdering},
+    use crate::{BufferPool, BufferPoolConfig, IoBufMut, iobuf::PoolError};
+    use std::{
+        alloc::{GlobalAlloc, System},
+        cell::Cell,
+        collections::HashSet,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool as StdAtomicBool, Ordering as StdOrdering},
+        },
     };
 
+    /// Allocation layout shared by native freelist tests.
+    const TEST_LAYOUT: Layout = match Layout::from_size_align(64, 64) {
+        Ok(layout) => layout,
+        Err(_) => panic!("valid test layout"),
+    };
+
+    /// Returns the number of permanent creation permits consumed.
     pub fn created(freelist: &Freelist) -> usize {
         freelist.created.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of slots currently parked across all stripes.
     pub fn len(freelist: &Freelist) -> usize {
         freelist
-            .words
+            .stripes
             .iter()
-            .map(|word| word.load(Ordering::Acquire).count_ones() as usize)
+            .map(|stripe| stripe.lock().len())
             .sum()
     }
 
-    pub fn num_words(freelist: &Freelist) -> usize {
-        freelist.words.len()
+    /// Returns the number of stripes selected during construction.
+    pub fn num_stripes(freelist: &Freelist) -> usize {
+        freelist.stripes.len()
     }
 
-    const TEST_LAYOUT: Layout = match Layout::from_size_align(64, 64) {
-        Ok(layout) => layout,
-        Err(_) => unreachable!(),
-    };
-
-    #[test]
-    fn test_freelist_try_create_tracks_capacity_and_prefill() {
-        let set = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, false);
-        assert_eq!(created(&set), 0);
-
-        // Without prefill, slots are reserved lazily as buffers are created.
-        let (slot0, buffer0) = set.try_create(false).expect("first creation");
-        let (slot1, buffer1) = set.try_create(false).expect("second creation");
-        assert_eq!(slot0, 0);
-        assert_eq!(slot1, 1);
-        assert_eq!(created(&set), 2);
-
-        // Slot reservation is bounded by capacity, even if the created
-        // buffers have not yet been returned to the freelist.
-        assert!(set.try_create(false).is_none());
-
-        // Returning created buffers makes them available for reuse, but does
-        // not reopen slot creation beyond the fixed capacity.
-        set.put(slot0, buffer0);
-        set.put(slot1, buffer1);
-        assert_eq!(len(&set), 2);
-
-        assert_eq!(created(&set), 2);
-        assert!(set.try_create(false).is_none());
-
-        // Prefill reserves and publishes every slot during construction.
-        let prefilled = Freelist::new(NZU32!(2), NZUsize!(1), TEST_LAYOUT, true);
-        assert_eq!(created(&prefilled), 2);
-        assert_eq!(len(&prefilled), 2);
+    /// Creates an empty freelist whose slots are allocated lazily.
+    fn lazy(capacity: u32, parallelism: usize) -> Freelist {
+        Freelist::new(
+            NonZeroU32::new(capacity).expect("positive capacity"),
+            NonZeroUsize::new(parallelism).expect("positive parallelism"),
+            TEST_LAYOUT,
+            false,
+        )
     }
 
-    #[test]
-    fn test_freelist_returns_each_slot_once() {
-        // Use a non-power-of-two capacity to cover partial final words while
-        // keeping the expected slot set easy to inspect.
-        let set = Freelist::new(NZU32!(3), NZUsize!(1), TEST_LAYOUT, false);
-
-        let (slot0, buffer0) = set.try_create(false).unwrap();
-        let (slot1, buffer1) = set.try_create(false).unwrap();
-        let (slot2, buffer2) = set.try_create(false).unwrap();
-        assert_eq!([slot0, slot1, slot2], [0, 1, 2]);
-        set.put(slot0, buffer0);
-        set.put(slot1, buffer1);
-        set.put(slot2, buffer2);
-
-        // Every free slot should be returned exactly once, and the
-        // freelist should report empty afterward.
-        let mut seen = [false; 3];
-        let mut taken = Vec::new();
-        for _ in 0..3 {
-            let (slot, buffer) = set.take().expect("slot should be available");
-            assert!(!seen[slot as usize]);
-            seen[slot as usize] = true;
-            taken.push((slot, buffer));
-        }
-
-        assert_eq!(len(&set), 0);
-        assert!(seen.into_iter().all(|seen| seen));
-        assert!(set.take().is_none());
-
-        // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
-        }
+    /// Creates a freelist with every slot allocated and globally available.
+    fn prefilled(capacity: u32, parallelism: usize) -> Freelist {
+        Freelist::new(
+            NonZeroU32::new(capacity).expect("positive capacity"),
+            NonZeroUsize::new(parallelism).expect("positive parallelism"),
+            TEST_LAYOUT,
+            true,
+        )
     }
 
-    #[test]
-    fn test_freelist_uses_striped_power_of_two_words() {
-        // Covers target parallelism, capping when capacity is too small, and
-        // capacity-driven word growth for large slot counts.
-        let cases = [
-            (1, 1, 1),
-            (2, 2, 2),
-            (3, 4, 2),
-            (4, 4, 4),
-            (12, 9, 8),
-            (16, 8, 8),
-            (64, 8, 8),
-            (512, 8, 8),
-            (513, 8, 16),
-            (4097, 8, 128),
-        ];
-
-        for (capacity, parallelism, expected_words) in cases {
-            let set = Freelist::new(NZU32!(capacity), NZUsize!(parallelism), TEST_LAYOUT, false);
-            assert_eq!(num_words(&set), expected_words);
-            assert!(num_words(&set).is_power_of_two());
-
-            // Validate the striped mapping and its inverse for every slot that
-            // can actually be handed out by this freelist.
-            for slot in 0..capacity {
-                let (word_index, mask) = set.slot_word(slot);
-                let bit = mask.trailing_zeros() as usize;
-                assert!(word_index < expected_words);
-                assert_eq!(set.slot_index(word_index, bit), slot);
+    /// Takes every slot visible through repeated bounded batch scans.
+    fn take_all(freelist: &Freelist) -> Vec<PooledBuffer> {
+        let mut buffers = Vec::new();
+        loop {
+            let taken = freelist.take_batch(usize::MAX, |buffer| buffers.push(buffer));
+            if taken == 0 {
+                return buffers;
             }
         }
     }
 
+    /// Verifies lazy creation, prefill, fixed permits, and explicit draining.
     #[test]
-    fn test_freelist_put_batch_handles_empty_single_and_multi_entry_paths() {
-        let set = Freelist::new(NZU32!(8), NZUsize!(8), TEST_LAYOUT, false);
-
-        // Empty batches are a no-op and must not make anything available.
-        set.put_batch(Vec::new());
-        assert_eq!(len(&set), 0);
-
-        // Reserve the full slot range
-        let mut created = Vec::new();
-        for expected in 0..8 {
-            let (slot, buffer) = set.try_create(false).unwrap();
-            assert_eq!(slot, expected);
-            created.push(Some(buffer));
-        }
-
-        // A single-entry batch delegates to `put`, preserving the cheaper
-        // one-buffer path.
-        let buffer = created[3].take().unwrap();
-        set.put_batch(vec![(3, buffer)]);
-        assert_eq!(len(&set), 1);
-
-        let mut taken = Vec::new();
+    fn test_creation_prefill_and_drain() {
+        let set = lazy(3, 2);
+        let buffers = (0..3)
+            .map(|_| set.try_create(false).expect("creation permit"))
+            .collect::<Vec<_>>();
         assert_eq!(
-            set.take_batch(1, |slot, buffer| taken.push((slot, buffer))),
-            1
+            buffers.iter().map(PooledBuffer::slot).collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
-        assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].0, 3);
-        let single = taken.pop().expect("single entry was taken");
+        assert!(format!("{:?}", buffers[0]).contains("slot"));
+        assert!(set.try_create(false).is_none());
+        assert_eq!(created(&set), 3);
 
-        // Multi-entry batches should make every slot available and preserve ownership
-        // of each parked buffer until it is taken.
-        let mut batch = Vec::new();
-        for slot in [1, 5, 7] {
-            let buffer = created[slot as usize].take().unwrap();
-            batch.push((slot, buffer));
-        }
-        set.put_batch(batch);
+        set.put_batch(buffers);
         assert_eq!(len(&set), 3);
-
-        assert_eq!(
-            set.take_batch(3, |slot, buffer| taken.push((slot, buffer))),
-            3
-        );
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
-        slots.sort_unstable();
-        assert_eq!(slots, vec![1, 5, 7]);
-        assert_eq!(len(&set), 0);
-
-        // Return taken test buffers so the freelist owns deallocation.
-        set.put(single.0, single.1);
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
-        }
-        for (slot, buffer) in created.into_iter().enumerate() {
-            if let Some(buffer) = buffer {
-                set.put(slot as u32, buffer);
-            }
-        }
-    }
-
-    #[test]
-    fn test_freelist_put_batch_uses_heap_masks_when_word_count_exceeds_inline_capacity() {
-        // A capacity of 8193 requires more than 128 bitmap words after rounding,
-        // forcing `put_batch` to use heap scratch for its per-word masks.
-        let set = Freelist::new(NZU32!(8193), NZUsize!(65), TEST_LAYOUT, false);
-        assert!(num_words(&set) > INLINE_PUT_BATCH_MASKS);
-
-        // Reserve through the highest slot so the original sparse slots are
-        // valid while only those slots are published to the freelist.
-        let mut created = Vec::new();
-        for expected in 0..8193 {
-            let (slot, buffer) = set.try_create(false).expect("slot");
-            assert_eq!(slot, expected);
-            created.push(Some(buffer));
-        }
-
-        let mut batch = Vec::new();
-        for slot in [0, 1, 64, 8192] {
-            let buffer = created[slot as usize].take().expect("slot buffer");
-            batch.push((slot, buffer));
-        }
-        set.put_batch(batch);
-        assert_eq!(len(&set), 4);
-
-        let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(8, |slot, buffer| taken.push((slot, buffer))),
-            4
-        );
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
-        slots.sort_unstable();
-        assert_eq!(slots, vec![0, 1, 64, 8192]);
-        assert_eq!(len(&set), 0);
-
-        // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
-        }
-        for (slot, buffer) in created.into_iter().enumerate() {
-            if let Some(buffer) = buffer {
-                set.put(slot as u32, buffer);
-            }
-        }
-    }
-
-    #[test]
-    fn test_freelist_drain_returns_all_available_slots() {
-        let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
-        let (slot0, buffer0) = set.try_create(false).unwrap();
-        let (slot1, buffer1) = set.try_create(false).unwrap();
-        let (slot2, buffer2) = set.try_create(false).unwrap();
-        let (slot3, buffer3) = set.try_create(false).unwrap();
-        assert_eq!([slot0, slot1, slot2, slot3], [0, 1, 2, 3]);
-
-        set.put(slot0, buffer0);
-        set.put(slot2, buffer2);
-        set.put(slot3, buffer3);
-
         assert_eq!(set.drain(), 3);
         assert_eq!(len(&set), 0);
+        assert!(set.try_create(false).is_none());
 
-        // Return taken test buffer so the freelist owns deallocation.
-        set.put(slot1, buffer1);
+        let set = prefilled(3, 2);
+        assert_eq!(created(&set), 3);
+        assert_eq!(len(&set), 3);
+        assert!(set.try_create(false).is_none());
     }
 
+    /// Verifies that zeroed lazy creation initializes every data byte.
     #[test]
-    fn test_freelist_take_batch_handles_zero_single_and_partial_fill() {
-        // Put fewer slots than the largest requested batch to cover exact,
-        // partial, and empty refill behavior in one setup.
-        let set = Freelist::new(NZU32!(4), NZUsize!(4), TEST_LAYOUT, false);
-        for expected in [0, 1, 2] {
-            let (slot, buffer) = set.try_create(false).expect("slot");
-            assert_eq!(slot, expected);
-            set.put(slot, buffer);
-        }
-
-        let mut taken = Vec::new();
-        let mut record = |slot, buffer| taken.push((slot, buffer));
-
-        // `max == 0` must return immediately and must not call the callback.
-        assert_eq!(set.take_batch(0, &mut record), 0);
-
-        // `max == 1` should still claim exactly one slot.
-        assert_eq!(set.take_batch(1, &mut record), 1);
-
-        // A request larger than the remaining occupancy should return only
-        // the slots that were actually available.
-        assert_eq!(set.take_batch(8, &mut record), 2);
-
-        // Once empty, neither the batch nor single path may invoke the callback.
-        assert_eq!(set.take_batch(8, &mut record), 0);
-        assert_eq!(set.take_batch(1, &mut record), 0);
-        assert_eq!(taken.len(), 3);
-
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
-        slots.sort_unstable();
-        assert_eq!(slots, vec![0, 1, 2]);
-
-        // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
-        }
+    fn test_zeroed_creation() {
+        let set = lazy(1, 1);
+        let buffer = set.try_create(true).expect("creation permit");
+        // SAFETY: the buffer owns a live allocation with TEST_LAYOUT bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), TEST_LAYOUT.size()) };
+        assert!(bytes.iter().all(|&byte| byte == 0));
+        set.put(buffer);
     }
 
+    /// Verifies stripe-count bounds, exact limits, and preallocated capacity.
     #[test]
-    fn test_freelist_take_batch_breaks_after_filling_target_in_home_word() {
-        let set = Freelist::new(NZU32!(16), NZUsize!(8), TEST_LAYOUT, true);
-        let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
-        let slot0 = set.slot_index(start_word, 0);
-        let slot1 = set.slot_index(start_word, 1);
+    fn test_stripe_geometry_is_bounded_and_preallocated() {
+        assert_eq!(Freelist::stripe_count(1, usize::MAX), 1);
+        assert_eq!(Freelist::stripe_count(3, 1), 2);
+        assert_eq!(Freelist::stripe_count(12, 1), MIN_STRIPES);
+        assert_eq!(Freelist::stripe_count(12, 9), 8);
+        assert_eq!(Freelist::stripe_count(65_536, usize::MAX), MAX_STRIPES);
 
-        // A two-slot batch should fill from this thread's first probed word
-        // and stop immediately.
-        let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(2, |slot, buffer| taken.push((slot, buffer))),
-            2
-        );
-
-        let mut slots = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
-        slots.sort_unstable();
-        assert_eq!(slots, vec![slot0, slot1]);
-        assert_eq!(len(&set), 14);
-
-        // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
+        let set = prefilled(19, 8);
+        assert_eq!(num_stripes(&set), 8);
+        for (index, stripe) in set.stripes.iter().enumerate() {
+            let free = stripe.lock();
+            let expected = Freelist::stripe_capacity(19, 8, index);
+            assert_eq!(stripe.limit, expected);
+            assert_eq!(free.len(), expected);
+            assert!(free.capacity() >= expected);
+            assert!(
+                free.iter()
+                    .all(|slot| *slot as usize & set.stripe_mask == index)
+            );
         }
     }
 
+    /// Verifies that a batch spills past its home stripe's hard limit.
     #[test]
-    fn test_freelist_take_batch_stops_mid_word_when_limit_is_reached() {
-        let set = Freelist::new(NZU32!(24), NZUsize!(8), TEST_LAYOUT, true);
-        let start_word = SlotBitmapProbe::new(set.word_mask, set.word_shift).word_index(0);
-        // This thread's first probed word contains three slots, so the batch
-        // claim has to stop after clearing only the requested number of bits.
-        let slots = [
-            set.slot_index(start_word, 0),
-            set.slot_index(start_word, 1),
-            set.slot_index(start_word, 2),
-        ];
+    fn test_returner_home_batch_spills_past_hard_limit() {
+        let set = lazy(19, 8);
+        let home = set.home_stripe();
+        let count = set.stripes[home].limit + 1;
+        let buffers = (0..count)
+            .map(|_| set.try_create(false).expect("creation permit"))
+            .collect::<Vec<_>>();
 
-        let mut taken = Vec::new();
-        assert_eq!(
-            set.take_batch(2, |slot, buffer| taken.push((slot, buffer))),
-            2
-        );
-        assert_eq!(len(&set), 22);
-
-        // The third slot should remain free and be retrievable normally.
-        let remaining = set.take().expect("one slot should remain free");
-        let mut seen = taken.iter().map(|(slot, _)| *slot).collect::<Vec<_>>();
-        seen.push(remaining.0);
-        seen.sort_unstable();
-        assert_eq!(seen, slots);
-
-        // Return taken test buffers so the freelist owns deallocation.
-        for (slot, buffer) in taken {
-            set.put(slot, buffer);
-        }
-        set.put(remaining.0, remaining.1);
+        set.put_batch(buffers);
+        assert_eq!(set.stripes[home].lock().len(), set.stripes[home].limit);
+        assert_eq!(len(&set), count);
+        assert_eq!(set.drain(), count);
     }
 
+    /// Verifies that one thread keeps a stable, in-range home stripe.
     #[test]
-    fn test_slot_bitmap_probe_selectors_respect_offset_and_limit() {
-        // The probe offset should rotate priority without selecting bits that
-        // are not present in the original word.
-        let word = (1u64 << 1) | (1u64 << 5) | (1u64 << 9) | (1u64 << 20);
-
-        let probe_0 = SlotBitmapProbe {
-            start_word: 0,
-            word_mask: 0,
-            bit_offset: 0,
-        };
-        let probe_6 = SlotBitmapProbe {
-            start_word: 0,
-            word_mask: 0,
-            bit_offset: 6,
-        };
-
-        assert_eq!(probe_0.select_set_bit(word), 1);
-        assert_eq!(probe_6.select_set_bit(word), 9);
-
-        let selected = probe_6.select_set_bits(word, 2);
-        // Starting after bit 6, the first two set bits are 9 and 20.
-        assert_eq!(selected.count_ones(), 2);
-        assert_eq!(selected & !word, 0);
-        assert_eq!(selected, (1u64 << 9) | (1u64 << 20));
-
-        let probe_32 = SlotBitmapProbe {
-            start_word: 0,
-            word_mask: 0,
-            bit_offset: 32,
-        };
-        let wrap_word = (1u64 << 4) | (1u64 << 40);
-        let selected = probe_32.select_set_bits(wrap_word, 2);
-        // Starting after bit 32, selection should wrap after taking bit 40.
-        assert_eq!(selected, wrap_word);
-    }
-
-    #[test]
-    fn test_slot_bitmap_probe_offsets_spread_home_word_collisions() {
-        // For an 8-word freelist, thread ids spaced by 8 share home word 0.
-        // Spread their bit offsets across the word instead of assigning
-        // adjacent offsets.
-        assert_eq!(
-            [
-                SlotBitmapProbe::bit_offset(0, 3),
-                SlotBitmapProbe::bit_offset(8, 3),
-                SlotBitmapProbe::bit_offset(16, 3),
-                SlotBitmapProbe::bit_offset(24, 3),
-                SlotBitmapProbe::bit_offset(32, 3),
-                SlotBitmapProbe::bit_offset(40, 3),
-                SlotBitmapProbe::bit_offset(48, 3),
-                SlotBitmapProbe::bit_offset(56, 3),
-            ],
-            [0, 32, 16, 48, 8, 40, 24, 56]
-        );
-
-        // The same collision groups should spread for the 64-word network
-        // geometry.
-        assert_eq!(
-            [
-                SlotBitmapProbe::bit_offset(0, 6),
-                SlotBitmapProbe::bit_offset(64, 6),
-                SlotBitmapProbe::bit_offset(128, 6),
-                SlotBitmapProbe::bit_offset(192, 6),
-                SlotBitmapProbe::bit_offset(256, 6),
-                SlotBitmapProbe::bit_offset(320, 6),
-                SlotBitmapProbe::bit_offset(384, 6),
-                SlotBitmapProbe::bit_offset(448, 6),
-            ],
-            [0, 32, 16, 48, 8, 40, 24, 56]
-        );
-    }
-
-    #[test]
-    fn test_freelist_take_retries_after_losing_a_same_bit_race() {
-        // Force repeated same-word contention on a single free slot. Some
-        // contenders should observe a stale non-zero word and follow the retry
-        // path before discovering that another thread already claimed the slot.
+    fn test_thread_home_is_stable_and_bounded() {
+        let set = lazy(64, 8);
+        let home = set.home_stripe();
+        assert!(home < set.stripes.len());
         for _ in 0..32 {
-            let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
-            let (slot, buffer) = set.try_create(false).unwrap();
-            assert_eq!(slot, 0);
-            set.put(slot, buffer);
-
-            // Align the contenders so several can race on the same observed
-            // word instead of serializing before `take`.
-            let barrier = Arc::new(Barrier::new(16));
-            let successes = Arc::new(StdAtomicUsize::new(0));
-            let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
-            let mut handles = Vec::new();
-
-            for _ in 0..16 {
-                let set = Arc::clone(&set);
-                let barrier = Arc::clone(&barrier);
-                let successes = Arc::clone(&successes);
-                let claimed_tx = claimed_tx.clone();
-                handles.push(std::thread::spawn(move || {
-                    barrier.wait();
-                    if let Some(entry) = set.take() {
-                        successes.fetch_add(1, AtomicOrdering::Relaxed);
-                        claimed_tx.send(entry).expect("send claimed entry");
-                    }
-                }));
-            }
-
-            for handle in handles {
-                handle.join().expect("worker should not panic");
-            }
-
-            assert_eq!(successes.load(AtomicOrdering::Relaxed), 1);
-            assert_eq!(len(&set), 0);
-
-            let claimed = claimed_rx.recv().expect("one thread claimed the slot");
-            assert!(claimed_rx.try_recv().is_err());
-            // Return the claimed buffer so the freelist owns deallocation.
-            set.put(claimed.0, claimed.1);
+            assert_eq!(set.home_stripe(), home);
         }
     }
 
+    /// Verifies multi-stripe batch scans and callbacks after all unlocks.
     #[test]
-    fn test_freelist_drop_drains_remaining_buffers() {
-        // Dropping a non-empty freelist must drop any buffers still parked in
-        // globally free slots.
-        let set = Freelist::new(NZU32!(2), NZUsize!(2), TEST_LAYOUT, false);
-        for expected in [0, 1] {
-            let (slot, buffer) = set.try_create(false).expect("slot");
-            assert_eq!(slot, expected);
-            set.put(slot, buffer);
+    fn test_take_batch_scans_stripes_and_calls_back_after_unlock() {
+        let set = prefilled(8, 4);
+        let count = set.take_batch(8, |buffer| set.put(buffer));
+        assert_eq!(count, 8);
+        assert_eq!(len(&set), 8);
+        assert_eq!(set.take_batch(0, |_| unreachable!()), 0);
+    }
+
+    /// Verifies empty and singleton put and take batch paths.
+    #[test]
+    fn test_empty_and_singleton_batches() {
+        let set = lazy(1, 1);
+        set.put_batch(std::iter::empty());
+        assert_eq!(set.take_batch(1, |_| unreachable!()), 0);
+
+        let buffer = set.try_create(false).expect("creation permit");
+        set.put_batch([buffer]);
+
+        let mut taken = None;
+        assert_eq!(set.take_batch(1, |buffer| taken = Some(buffer)), 1);
+        set.put(taken.expect("singleton callback receives the buffer"));
+    }
+
+    /// Verifies unique ownership across contended scalar take and put cycles.
+    #[test]
+    fn test_concurrent_take_and_put_preserve_unique_ownership() {
+        const CAPACITY: usize = 64;
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 1_000;
+
+        let set = Arc::new(prefilled(CAPACITY as u32, THREADS));
+        let outside = Arc::new(
+            (0..CAPACITY)
+                .map(|_| StdAtomicBool::new(false))
+                .collect::<Vec<_>>(),
+        );
+        let start = Arc::new(Barrier::new(THREADS));
+        let mut workers = Vec::new();
+
+        for _ in 0..THREADS {
+            let set = Arc::clone(&set);
+            let outside = Arc::clone(&outside);
+            let start = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..ROUNDS {
+                    let buffer = loop {
+                        if let Some(buffer) = set.take() {
+                            break buffer;
+                        }
+                        std::thread::yield_now();
+                    };
+                    let slot = buffer.slot() as usize;
+                    assert!(!outside[slot].swap(true, StdOrdering::Relaxed));
+                    assert!(outside[slot].swap(false, StdOrdering::Relaxed));
+                    set.put(buffer);
+                }
+            }));
         }
-        drop(set);
+
+        for worker in workers {
+            worker.join().expect("worker must not panic");
+        }
+        assert_eq!(len(&set), CAPACITY);
+        assert_eq!(set.drain(), CAPACITY);
+    }
+
+    /// Verifies concurrent batch publication respects every hard stripe limit.
+    #[test]
+    fn test_concurrent_batches_respect_hard_stripe_limits() {
+        const CAPACITY: usize = 64;
+        const THREADS: usize = 8;
+
+        let set = Arc::new(lazy(CAPACITY as u32, THREADS));
+        let buffers = (0..CAPACITY)
+            .map(|_| set.try_create(false).expect("creation permit"))
+            .collect::<Vec<_>>();
+        let mut batches = (0..THREADS).map(|_| Vec::new()).collect::<Vec<_>>();
+        for (index, buffer) in buffers.into_iter().enumerate() {
+            batches[index % THREADS].push(buffer);
+        }
+        let start = Arc::new(Barrier::new(THREADS));
+        let mut workers = Vec::new();
+
+        for batch in batches {
+            let set = Arc::clone(&set);
+            let start = Arc::clone(&start);
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                set.put_batch(batch);
+            }));
+        }
+
+        for worker in workers {
+            worker.join().expect("worker must not panic");
+        }
+        assert_eq!(len(&set), CAPACITY);
+        for stripe in &set.stripes {
+            let free = stripe.lock();
+            assert_eq!(free.len(), stripe.limit);
+            assert!(free.len() <= free.capacity());
+        }
+        assert_eq!(set.drain(), CAPACITY);
+    }
+
+    /// Verifies concurrent lazy creation assigns each slot exactly once.
+    #[test]
+    fn test_concurrent_creation_assigns_unique_slots() {
+        const CAPACITY: usize = 64;
+        let set = Arc::new(lazy(CAPACITY as u32, 8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let set = Arc::clone(&set);
+            workers.push(std::thread::spawn(move || {
+                let mut slots = Vec::new();
+                while let Some(buffer) = set.try_create(false) {
+                    slots.push(buffer.slot());
+                    set.put(buffer);
+                }
+                slots
+            }));
+        }
+
+        let slots = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("worker must not panic"))
+            .collect::<HashSet<_>>();
+        assert_eq!(slots.len(), CAPACITY);
+        assert_eq!(created(&set), CAPACITY);
+        assert_eq!(len(&set), CAPACITY);
+    }
+
+    /// Verifies drain preserves reserved room for an outstanding late return.
+    #[test]
+    fn test_drain_leaves_room_for_late_return() {
+        let set = prefilled(4, 2);
+        let outside = set.take().expect("one outside buffer");
+        assert_eq!(set.drain(), 3);
+        set.put(outside);
+        assert_eq!(set.drain(), 1);
+    }
+
+    /// Verifies repeated maximum batches return every slot exactly once.
+    #[test]
+    fn test_take_all_covers_every_slot_once() {
+        let set = prefilled(19, 8);
+        let buffers = take_all(&set);
+        assert_eq!(buffers.len(), 19);
+        assert_eq!(
+            buffers
+                .iter()
+                .map(PooledBuffer::slot)
+                .collect::<HashSet<_>>()
+                .len(),
+            19
+        );
+        set.put_batch(buffers);
+    }
+
+    /// Verifies the final removal clears and the next put restores the hint.
+    #[test]
+    fn test_last_take_clears_nonempty_hint() {
+        let set = prefilled(1, 1);
+        let buffer = set.take().expect("prefilled buffer");
+        assert!(!set.stripes[0].available.load(Ordering::Relaxed));
+        assert!(set.take().is_none());
+
+        set.put(buffer);
+        assert!(set.stripes[0].available.load(Ordering::Acquire));
+    }
+
+    struct TrackingAllocator;
+
+    std::thread_local! {
+        static ALLOCATION_CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+    fn record_allocation() {
+        ALLOCATION_CALLS.with(|calls| {
+            if let Some(count) = calls.get() {
+                calls.set(Some(count + 1));
+            }
+        });
+    }
+
+    // SAFETY: Every operation delegates to the system allocator with unchanged
+    // arguments. Recording an allocation only updates a thread-local cell.
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: The pointer was allocated through this wrapper, which
+            // delegates every allocation to System with the same layout.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The pointer and layout came from System through this wrapper,
+            // and the caller supplies the new size required by GlobalAlloc.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    fn allocation_calls_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_CALLS.with(|calls| assert!(calls.replace(Some(0)).is_none()));
+        let result = f();
+        let calls = ALLOCATION_CALLS.with(|calls| calls.replace(None).expect("tracking enabled"));
+        (result, calls)
+    }
+
+    /// Verifies populated final destruction does not reserve replacement capacity.
+    #[test]
+    fn test_populated_final_drop_is_allocation_free() {
+        let set = prefilled(19, 8);
+
+        let ((), allocation_calls) = allocation_calls_during(|| drop(set));
+        assert_eq!(
+            allocation_calls, 0,
+            "final destruction must not allocate replacement capacity"
+        );
+    }
+
+    /// Verifies an exhausted TLS batch probe does not allocate result scratch.
+    #[test]
+    fn test_exhausted_batched_tls_miss_is_allocation_free() {
+        const BUFFER_SIZE: usize = 64;
+        const CAPACITY: usize = 4;
+
+        let size = NonZeroUsize::new(BUFFER_SIZE).expect("positive buffer size");
+        let config = BufferPoolConfig::for_network()
+            .with_size_class_range(
+                size,
+                size,
+                NonZeroU32::new(CAPACITY as u32).expect("positive capacity"),
+            )
+            .with_max_thread_cache_capacity(
+                NonZeroUsize::new(CAPACITY).expect("positive cache capacity"),
+            );
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let pool = BufferPool::new(config, &mut registry);
+
+        // Exhaust the class before tracking allocations. Measuring only the
+        // repeated miss excludes pool setup and lazy buffer creation.
+        let _held: [IoBufMut; CAPACITY] = std::array::from_fn(|_| {
+            pool.try_alloc(BUFFER_SIZE)
+                .expect("lazy allocation within capacity")
+        });
+        assert!(matches!(
+            pool.try_alloc(BUFFER_SIZE),
+            Err(PoolError::Exhausted)
+        ));
+
+        let (result, allocation_calls) = allocation_calls_during(|| pool.try_alloc(BUFFER_SIZE));
+        assert!(matches!(result, Err(PoolError::Exhausted)));
+        assert_eq!(
+            allocation_calls, 0,
+            "an exhausted TLS batch probe must not allocate scratch"
+        );
     }
 }
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
-    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
-    use loom::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        thread,
+    use commonware_utils::{NZU32, NZUsize};
+    use loom::{sync::Arc, thread};
+
+    /// Small allocation layout used to keep model state compact.
+    const TEST_LAYOUT: Layout = match Layout::from_size_align(8, 8) {
+        Ok(layout) => layout,
+        Err(_) => panic!("valid test layout"),
     };
 
-    // This module uses loom to model the freelist's ownership protocol between
-    // bitmap bits and parking cells: a producer parks a buffer, publishes its
-    // bit, and exactly one consumer clears that bit before reading the cell.
-    // The models keep capacities small so loom can exhaustively explore the
-    // interleavings that stress this protocol: same-word RMW composition,
-    // striped scans across independent bitmap words, stale relaxed candidate
-    // loads, and the Release/Acquire edge that makes a parked buffer visible
-    // after its bit is claimed. Geometry-matrix tests cover single-word/single-bit,
-    // single-word/multi-bit, multi-word/single-bit, and multi-word/multi-bit
-    // layouts so both degenerate and striped cases stay exercised.
+    const OPERATION_STARTED: usize = 1;
+    const OPERATION_FINISHED: usize = 2;
 
-    fn single_word_freelist(capacity: u32) -> Freelist {
-        Freelist::new(
-            NZU32!(capacity),
-            NZUsize!(1),
-            Layout::from_size_align(64, 64).unwrap(),
-            false,
-        )
+    /// Creates an empty freelist for one Loom model.
+    fn empty(capacity: u32) -> Freelist {
+        Freelist::new(NZU32!(capacity), NZUsize!(1), TEST_LAYOUT, false)
     }
 
-    // Each geometry gives a model a small bitmap layout: one or more active
-    // bitmap words, with either one or multiple free bits per active word.
-    #[derive(Clone, Copy, Debug)]
-    enum Geometry {
-        SingleWordSingleBit,
-        SingleWordMultiBit,
-        MultiWordSingleBit,
-        MultiWordMultiBit,
+    /// Creates a fully available freelist for one Loom model.
+    fn prefilled(capacity: u32) -> Freelist {
+        Freelist::new(NZU32!(capacity), NZUsize!(1), TEST_LAYOUT, true)
     }
 
-    impl Geometry {
-        // Builds a freelist with this geometry's bitmap shape.
-        fn freelist(self) -> Freelist {
-            match self {
-                Self::SingleWordSingleBit => single_word_freelist(1),
-                Self::SingleWordMultiBit => single_word_freelist(2),
-                Self::MultiWordSingleBit => Freelist::new(
-                    NZU32!(4),
-                    NZUsize!(4),
-                    Layout::from_size_align(64, 64).unwrap(),
-                    false,
-                ),
-                Self::MultiWordMultiBit => Freelist::new(
-                    NZU32!(4),
-                    NZUsize!(2),
-                    Layout::from_size_align(64, 64).unwrap(),
-                    false,
-                ),
-            }
-        }
-
-        // Returns the slot ids that are active in this geometry. The order is
-        // used by batch tests, so layouts with multiple bits in a word keep
-        // same-word slots adjacent.
-        fn slots(self) -> &'static [u32] {
-            match self {
-                Self::SingleWordSingleBit => &[0],
-                Self::SingleWordMultiBit => &[0, 1],
-                Self::MultiWordSingleBit => &[0, 1, 2, 3],
-                Self::MultiWordMultiBit => &[0, 2, 1, 3],
-            }
-        }
-
-        // Returns a bit mask of active slot ids for duplicate and completeness
-        // checks in the models.
-        fn slot_mask(self) -> usize {
-            self.slots()
-                .iter()
-                .fold(0usize, |mask, &slot| mask | (1usize << slot))
-        }
+    /// Parks one test buffer in a chosen stripe without exercising routing.
+    fn park_in_stripe(set: &Freelist, index: usize, buffer: PooledBuffer) {
+        let stripe = &set.stripes[index];
+        let mut free = stripe.lock();
+        assert!(free.len() < stripe.limit);
+        free.push(buffer.into_slot());
+        stripe.available.store(true, Ordering::Release);
     }
 
-    const ALL_GEOMETRIES: [Geometry; 4] = [
-        Geometry::SingleWordSingleBit,
-        Geometry::SingleWordMultiBit,
-        Geometry::MultiWordSingleBit,
-        Geometry::MultiWordMultiBit,
-    ];
-
-    const BATCH_GEOMETRIES: [Geometry; 3] = [
-        Geometry::SingleWordMultiBit,
-        Geometry::MultiWordSingleBit,
-        Geometry::MultiWordMultiBit,
-    ];
-
-    const STRIPED_GEOMETRIES: [Geometry; 2] =
-        [Geometry::MultiWordSingleBit, Geometry::MultiWordMultiBit];
-
-    const MULTI_BIT_GEOMETRIES: [Geometry; 2] =
-        [Geometry::SingleWordMultiBit, Geometry::MultiWordMultiBit];
-
-    fn model<F>(geometries: &[Geometry], test: F)
-    where
-        F: Fn(Geometry, Arc<Freelist>) + Clone + Send + Sync + 'static,
-    {
-        for &geometry in geometries {
-            let test = test.clone();
-            loom::model(move || {
-                test(geometry, Arc::new(geometry.freelist()));
-            });
+    /// Requires a modeled operation to remain incomplete while its home guard is held.
+    fn assert_waiting(phase: &AtomicUsize) {
+        while phase.load(Ordering::Acquire) == 0 {
+            thread::yield_now();
         }
+        thread::yield_now();
+        assert_eq!(
+            phase.load(Ordering::Acquire),
+            OPERATION_STARTED,
+            "operation skipped its locked home stripe"
+        );
     }
 
-    // Owns buffers that a loom model has taken from the freelist. This
-    // keeps the test-side ownership rule in one place: every created buffer
-    // must be returned to the same freelist before that freelist is dropped.
-    struct Leases {
-        freelist: Arc<Freelist>,
-        buffers: Mutex<Vec<(u32, PooledBuffer)>>,
-    }
-
-    impl Leases {
-        fn new(freelist: Arc<Freelist>) -> Arc<Self> {
-            Arc::new(Self {
-                freelist,
-                buffers: Mutex::new(Vec::new()),
-            })
-        }
-
-        fn reserve(freelist: Arc<Freelist>) -> (Arc<Self>, Vec<(u32, PooledBuffer)>) {
-            let entries = Self::entries(&freelist);
-            (Self::new(freelist), entries)
-        }
-
-        fn entries(freelist: &Freelist) -> Vec<(u32, PooledBuffer)> {
-            let mut entries = Vec::new();
-            while let Some(entry) = freelist.try_create(false) {
-                entries.push(entry);
-            }
-            entries
-        }
-
-        fn push(&self, slot: u32, buffer: PooledBuffer) {
-            self.buffers.lock().push((slot, buffer));
-        }
-
-        fn push_expected(
-            &self,
-            seen: &AtomicUsize,
-            expected: usize,
-            slot: u32,
-            buffer: PooledBuffer,
-        ) {
-            let mask = 1usize << slot;
-            assert_ne!(expected & mask, 0);
-            let previous = seen.fetch_or(mask, Ordering::Relaxed);
-            assert_eq!(previous & mask, 0);
-            self.push(slot, buffer);
-        }
-    }
-
-    impl Drop for Leases {
-        fn drop(&mut self) {
-            for (slot, buffer) in self.buffers.lock().drain(..) {
-                self.freelist.put(slot, buffer);
-            }
-        }
-    }
-
+    /// Verifies that a release/acquire handoff makes a completed return
+    /// discoverable.
     #[test]
-    fn put_publishes_before_take() {
-        // `put` writes the parking cell before publishing the bit with a
-        // Release RMW. The taker spins until it can clear that bit with an
-        // Acquire RMW, then reads the same cell.
-        //
-        // If the publish/claim edge is weakened, loom should be able to
-        // schedule the cell read without seeing the prior cell write.
-        model(&ALL_GEOMETRIES, |geometry, freelist| {
-            let slot = geometry.slots()[0];
-            let (_, buffer) = freelist.try_create(false).unwrap();
-            let leases = Leases::new(freelist.clone());
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put(slot, buffer)
-            });
-
-            let reader = thread::spawn({
-                let freelist = freelist.clone();
-                let leases = leases.clone();
-                move || loop {
-                    if let Some((taken, buffer)) = freelist.take() {
-                        assert_eq!(taken, slot);
-                        leases.push(taken, buffer);
-                        break;
-                    }
-                    thread::yield_now();
-                }
-            });
-
-            writer.join().unwrap();
-            reader.join().unwrap();
-        });
-    }
-
-    #[test]
-    fn concurrent_puts_merge_disjoint_bits() {
-        // Two producers return different slots that live in the same bitmap
-        // word. Their atomic `fetch_or` operations must merge the bits: neither
-        // producer may overwrite the other's publication.
-        //
-        // The consumer runs after both producers finish so this test isolates
-        // lost producer updates from consumer-side claim races and from the
-        // publish/claim visibility tests below.
+    fn completed_put_is_discoverable_after_handoff() {
         loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(2));
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b11;
-            let (leases, mut entries) = Leases::reserve(freelist.clone());
-            let (slot0, buffer0) = entries.pop().unwrap();
-            let (slot1, buffer1) = entries.pop().unwrap();
+            let set = Arc::new(empty(1));
+            let buffer = set.try_create(false).expect("creation permit");
+            let returned = Arc::new(AtomicBool::new(false));
 
-            let first = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put(slot0, buffer0)
-            });
+            let worker = {
+                let set = Arc::clone(&set);
+                let returned = Arc::clone(&returned);
+                thread::spawn(move || {
+                    set.put(buffer);
+                    returned.store(true, Ordering::Release);
+                })
+            };
 
-            let second = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put(slot1, buffer1)
-            });
-
-            first.join().unwrap();
-            second.join().unwrap();
-
-            assert_eq!(
-                freelist.take_batch(2, |slot, buffer| {
-                    leases.push_expected(&seen, expected, slot, buffer)
-                }),
-                2
-            );
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn concurrent_put_batches_merge_disjoint_bits() {
-        // Each producer stages two slots and then publishes its per-word mask
-        // with one Release `fetch_or`. Because all four slots share a word,
-        // this specifically checks that two batch producers merge their masks
-        // instead of losing either batch.
-        loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(4));
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b1111;
-            let (leases, mut entries) = Leases::reserve(freelist.clone());
-            let second_entries = entries.split_off(2);
-
-            let first = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
-            });
-
-            let second = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put_batch(second_entries)
-            });
-
-            first.join().unwrap();
-            second.join().unwrap();
-
-            assert_eq!(
-                freelist.take_batch(4, |slot, buffer| {
-                    leases.push_expected(&seen, expected, slot, buffer)
-                }),
-                4
-            );
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn put_and_take_compose_on_partially_free_word() {
-        // Slot 0 starts free, then a producer returns slot 1 while `take` races
-        // on the same bitmap word. The producer's `fetch_or` must compose with
-        // the consumer's `fetch_and`: clearing the existing bit must not lose
-        // the newly published bit, and publishing the new bit must not
-        // resurrect a claimed bit.
-        loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(2));
-            let (leases, mut entries) = Leases::reserve(freelist.clone());
-            let initial_entry = entries.pop().unwrap();
-            let writer_entry = entries.pop().unwrap();
-            assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
-
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b11;
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put(writer_entry.0, writer_entry.1)
-            });
-
-            let taker = thread::spawn({
-                let freelist = freelist.clone();
-                let seen = seen.clone();
-                let leases = leases.clone();
-                move || {
-                    let (slot, buffer) = freelist.take().expect("slot 0 starts free");
-                    leases.push_expected(&seen, expected, slot, buffer);
-                }
-            });
-
-            writer.join().unwrap();
-            taker.join().unwrap();
-
-            // The taker may run before slot 1 is published. After the writer
-            // has joined, any slot not claimed during the race must still be
-            // available exactly once.
-            while let Some((slot, buffer)) = freelist.take() {
-                leases.push_expected(&seen, expected, slot, buffer);
+            // The release/acquire handoff orders the hint publication before
+            // the scan.
+            while !returned.load(Ordering::Acquire) {
+                thread::yield_now();
             }
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
+            let buffer = set.take().expect("completed put must be found");
+            worker.join().expect("worker must not panic");
+            set.put(buffer);
         });
     }
 
-    #[test]
-    fn put_and_take_batch_compose_on_partially_free_word() {
-        // This is the batch-claim version of the partially-free word race:
-        // `take_batch` may speculatively choose candidates from a stale relaxed
-        // load while a producer publishes a different bit in the same word.
-        // Only bits actually cleared by the batch taker may drive callbacks,
-        // and missed bits must remain available.
-        loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(2));
-            let (leases, mut entries) = Leases::reserve(freelist.clone());
-            let initial_entry = entries.pop().unwrap();
-            let writer_entry = entries.pop().unwrap();
-            assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
-
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b11;
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put(writer_entry.0, writer_entry.1)
-            });
-
-            let batch_taker = thread::spawn({
-                let freelist = freelist.clone();
-                let seen = seen.clone();
-                let leases = leases.clone();
-                move || {
-                    let count = freelist.take_batch(2, |slot, buffer| {
-                        leases.push_expected(&seen, expected, slot, buffer);
-                    });
-                    assert!((1..=2).contains(&count));
-                }
-            });
-
-            writer.join().unwrap();
-            batch_taker.join().unwrap();
-
-            // If the batch taker ran before slot 1 was published, the slot must
-            // still be visible after the writer completes.
-            while let Some((slot, buffer)) = freelist.take() {
-                leases.push_expected(&seen, expected, slot, buffer);
-            }
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn put_batch_and_drain_compose_on_partially_free_word() {
-        // Slot 0 starts free, then a batch producer stages slots 1 and 2 and
-        // publishes them with one `fetch_or`. A concurrent `drain` clears the
-        // whole word with `swap(0)`. The two RMWs must compose: the drainer may
-        // get only slot 0 or all three slots, but the slots it misses must
-        // remain available after the writer completes.
-        loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(3));
-            let mut entries = Leases::entries(&freelist);
-            let writer_entry0 = entries.pop().unwrap();
-            let writer_entry1 = entries.pop().unwrap();
-            let initial_entry = entries.pop().unwrap();
-            assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
-
-            let drained = Arc::new(AtomicUsize::new(0));
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put_batch([writer_entry0, writer_entry1])
-            });
-
-            let drainer = thread::spawn({
-                let freelist = freelist.clone();
-                let drained = drained.clone();
-                move || {
-                    let count = freelist.drain();
-                    assert!(matches!(count, 1 | 3));
-                    drained.store(count, Ordering::Relaxed);
-                }
-            });
-
-            writer.join().unwrap();
-            drainer.join().unwrap();
-
-            let total = drained.load(Ordering::Relaxed) + freelist.drain();
-            assert_eq!(total, 3);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
+    /// Verifies that two concurrent takers cannot claim one slot twice.
     #[test]
     fn two_takers_cannot_claim_one_slot() {
-        // Both takers may observe the same relaxed non-zero candidate word.
-        // Only one may win the later `fetch_and` claim.
-        //
-        // This is the minimal stale-candidate case: the relaxed load is allowed
-        // to be old, but the returned value from `fetch_and` must decide
-        // ownership.
         loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(2));
-            let (_, buffer) = freelist.try_create(false).unwrap();
-            freelist.put(0, buffer);
+            let set = Arc::new(prefilled(1));
+            let first = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.take())
+            };
+            let second = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.take())
+            };
 
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b1;
-            let mut handles = Vec::new();
-            let leases = Leases::new(freelist.clone());
-
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let seen = seen.clone();
-                    let leases = leases.clone();
-                    move || {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            leases.push_expected(&seen, expected, slot, buffer);
-                        }
-                    }
-                }));
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
+            let first = first.join().expect("first taker must not panic");
+            let second = second.join().expect("second taker must not panic");
+            assert_ne!(first.is_some(), second.is_some());
+            set.put(first.or(second).expect("one taker must succeed"));
         });
     }
 
+    /// Verifies that concurrent returns preserve both distinct slots.
     #[test]
-    fn stale_candidate_can_claim_republished_same_slot() {
-        // A relaxed candidate load is not a reservation. One taker may observe
-        // slot 0 as free, lose the first claim race, and later clear a
-        // re-published bit for the same slot. The valid outcome is two
-        // sequential ownership transfers of slot 0, each synchronized by the
-        // Acquire claim that actually cleared the bit it returns.
+    fn concurrent_puts_preserve_both_slots() {
         loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(1));
-            let (leases, mut entries) = Leases::reserve(freelist.clone());
-            let entry = entries.pop().unwrap();
-            assert!(entries.pop().is_none());
-            freelist.put(entry.0, entry.1);
+            let set = Arc::new(empty(2));
+            let first = set.try_create(false).expect("first permit");
+            let second = set.try_create(false).expect("second permit");
 
-            let transfers = Arc::new(AtomicUsize::new(0));
-            let mut handles = Vec::new();
+            let first_put = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(first))
+            };
+            let second_put = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.put(second))
+            };
+            first_put.join().expect("first put must not panic");
+            second_put.join().expect("second put must not panic");
 
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let transfers = transfers.clone();
-                    let leases = leases.clone();
-                    move || loop {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            assert_eq!(slot, 0);
-                            let transfer = transfers.fetch_add(1, Ordering::Relaxed) + 1;
-                            if transfer == 1 {
-                                freelist.put(slot, buffer);
-                            } else {
-                                leases.push(slot, buffer);
-                            }
-                            break;
-                        }
-                        thread::yield_now();
-                    }
-                }));
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert_eq!(transfers.load(Ordering::Relaxed), 2);
-            assert_eq!(freelist.drain(), 0);
+            let first = set.take().expect("first slot");
+            let second = set.take().expect("second slot");
+            assert_ne!(first.slot(), second.slot());
+            set.put_batch([first, second]);
         });
     }
 
+    /// Verifies that a take waits for its positive home before a later stripe.
     #[test]
-    fn batch_claims_survive_intervening_rmw_sequence() {
-        // `put_batch` publishes both bits with one Release RMW. This model
-        // starts takers after publication to keep the state space small. The
-        // writer/reader visibility edge for batch publication is covered by
-        // `put_batch_publishes_to_take_batch`.
-        //
-        // What this case isolates is the two-taker claim sequence on the same
-        // word: one taker may clear one bit, then the other taker reads the
-        // word through that intervening RMW. Both slots must still be
-        // transferred exactly once.
+    fn take_waits_for_home_before_later_stripe() {
         loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(2));
-            let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            let set = Arc::new(prefilled(2));
+            let phase = Arc::new(AtomicUsize::new(0));
+            let guard = set.stripes[0].lock();
+            let taker = {
+                let set = Arc::clone(&set);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    let buffer = set.take();
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                    buffer
+                })
+            };
 
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b11;
-            let mut handles = Vec::new();
+            assert_waiting(&phase);
+            drop(guard);
 
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let seen = seen.clone();
-                    let leases = leases.clone();
-                    move || {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            leases.push_expected(&seen, expected, slot, buffer);
-                        }
-                    }
-                }));
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
+            let buffer = taker
+                .join()
+                .expect("taker must not panic")
+                .expect("home stripe must remain productive");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            assert_eq!(buffer.slot(), 0);
+            set.put(buffer);
         });
     }
 
+    /// Verifies that a return waits for its full home before a later stripe.
     #[test]
-    fn take_and_take_batch_do_not_duplicate_slots() {
-        // A single-slot claim and a batch claim race over the same free set.
-        // Each claimed slot is recorded once, any duplicate ownership transfer
-        // trips the `previous & mask == 0` assertion.
-        //
-        // This covers the speculative batch claim path, where `take_batch`
-        // first chooses candidate bits and then intersects them with the word
-        // value returned by `fetch_and`.
-        model(&BATCH_GEOMETRIES, |geometry, freelist| {
-            let slots = geometry.slots();
-            let expected = geometry.slot_mask();
-            let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
-
-            let seen = Arc::new(AtomicUsize::new(0));
-            let batch_count = Arc::new(AtomicUsize::new(0));
-            let batch_callbacks = Arc::new(AtomicUsize::new(0));
-
-            let batch_taker = thread::spawn({
-                let freelist = freelist.clone();
-                let seen = seen.clone();
-                let batch_count = batch_count.clone();
-                let batch_callbacks = batch_callbacks.clone();
-                let leases = leases.clone();
-                move || {
-                    let count = freelist.take_batch(slots.len(), |slot, buffer| {
-                        batch_callbacks.fetch_add(1, Ordering::Relaxed);
-                        leases.push_expected(&seen, expected, slot, buffer);
-                    });
-                    batch_count.store(count, Ordering::Relaxed);
-                }
-            });
-
-            let single_taker = thread::spawn({
-                let freelist = freelist.clone();
-                let seen = seen.clone();
-                let leases = leases.clone();
-                move || {
-                    if let Some((slot, buffer)) = freelist.take() {
-                        leases.push_expected(&seen, expected, slot, buffer);
-                    }
-                }
-            });
-
-            batch_taker.join().unwrap();
-            single_taker.join().unwrap();
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert!(batch_count.load(Ordering::Relaxed) <= slots.len());
-            assert_eq!(
-                batch_count.load(Ordering::Relaxed),
-                batch_callbacks.load(Ordering::Relaxed)
-            );
-        });
-    }
-
-    #[test]
-    fn two_take_batches_do_not_duplicate_slots() {
-        // Two batch refill paths can speculatively choose stale candidate bits
-        // from relaxed word loads. Each callback must still be driven only by
-        // bits that caller actually cleared with `fetch_and`.
-        model(&MULTI_BIT_GEOMETRIES, |geometry, freelist| {
-            let slots = geometry.slots();
-            let expected = geometry.slot_mask();
-            let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
-
-            let seen = Arc::new(AtomicUsize::new(0));
-            let total = Arc::new(AtomicUsize::new(0));
-            let mut handles = Vec::new();
-
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let seen = seen.clone();
-                    let total = total.clone();
-                    let leases = leases.clone();
-                    move || {
-                        let count = freelist.take_batch(slots.len(), |slot, buffer| {
-                            leases.push_expected(&seen, expected, slot, buffer);
-                        });
-                        total.fetch_add(count, Ordering::Relaxed);
-                    }
-                }));
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(total.load(Ordering::Relaxed), slots.len());
-        });
-    }
-
-    #[test]
-    fn two_take_batches_continue_after_losing_selected_bits() {
-        // Both batch takers can speculatively select the same first two bits
-        // from a stale relaxed word load. If one taker clears those bits first,
-        // the other must use the word value returned by `fetch_and` and
-        // continue on to the still-set third bit instead of stopping after a
-        // zero-sized successful claim.
+    fn put_waits_for_full_home_before_later_stripe() {
         loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(3));
-            let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            let set = Arc::new(empty(2));
+            let parked = set.try_create(false).expect("first creation permit");
+            let returning = set.try_create(false).expect("second creation permit");
+            park_in_stripe(&set, 0, parked);
 
-            let seen = Arc::new(AtomicUsize::new(0));
-            let total = Arc::new(AtomicUsize::new(0));
-            let expected = 0b111;
-            let mut handles = Vec::new();
+            let phase = Arc::new(AtomicUsize::new(0));
+            let guard = set.stripes[0].lock();
+            let returner = {
+                let set = Arc::clone(&set);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    set.put(returning);
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                })
+            };
 
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let seen = seen.clone();
-                    let total = total.clone();
-                    let leases = leases.clone();
-                    move || {
-                        let count = freelist.take_batch(2, |slot, buffer| {
-                            leases.push_expected(&seen, expected, slot, buffer);
-                        });
-                        total.fetch_add(count, Ordering::Relaxed);
-                    }
-                }));
+            assert_waiting(&phase);
+            drop(guard);
+            returner.join().expect("returner must not panic");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            assert_eq!(set.stripes[0].lock().len(), 1);
+            assert_eq!(set.stripes[1].lock().len(), 1);
+        });
+    }
+
+    /// Verifies that a batch return waits for its full home before spilling.
+    #[test]
+    fn put_batch_waits_for_full_home_before_later_stripes() {
+        loom::model(|| {
+            let set = Arc::new(empty(4));
+            let first = set.try_create(false).expect("first creation permit");
+            let second = set.try_create(false).expect("second creation permit");
+            let third = set.try_create(false).expect("third creation permit");
+            let fourth = set.try_create(false).expect("fourth creation permit");
+            park_in_stripe(&set, 0, first);
+
+            let phase = Arc::new(AtomicUsize::new(0));
+            let guard = set.stripes[0].lock();
+            let returner = {
+                let set = Arc::clone(&set);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    set.put_batch([second, third, fourth]);
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                })
+            };
+
+            assert_waiting(&phase);
+            drop(guard);
+            returner.join().expect("returner must not panic");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            for stripe in &set.stripes {
+                assert_eq!(stripe.lock().len(), 1);
             }
+        });
+    }
 
-            for handle in handles {
-                handle.join().unwrap();
+    /// Verifies that a batch take waits for its home before scanning onward.
+    #[test]
+    fn take_batch_waits_for_home_before_later_stripe() {
+        loom::model(|| {
+            let set = Arc::new(prefilled(2));
+            let phase = Arc::new(AtomicUsize::new(0));
+            let guard = set.stripes[0].lock();
+            let taker = {
+                let set = Arc::clone(&set);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    assert_eq!(set.home_stripe(), 0);
+                    phase.store(OPERATION_STARTED, Ordering::Release);
+                    let mut buffers = Vec::new();
+                    let count = set.take_batch(2, |buffer| buffers.push(buffer));
+                    phase.store(OPERATION_FINISHED, Ordering::Release);
+                    (count, buffers)
+                })
+            };
+
+            assert_waiting(&phase);
+            drop(guard);
+            let (count, mut buffers) = taker.join().expect("taker must not panic");
+            assert_eq!(phase.load(Ordering::Acquire), OPERATION_FINISHED);
+            assert_eq!(count, 2);
+            buffers.sort_by_key(PooledBuffer::slot);
+            assert_eq!(buffers[0].slot(), 0);
+            assert_eq!(buffers[1].slot(), 1);
+            set.put_batch(buffers);
+        });
+    }
+
+    /// Verifies that concurrent take and drain partition all parked slots.
+    #[test]
+    fn take_and_drain_partition_slots() {
+        loom::model(|| {
+            let set = Arc::new(prefilled(2));
+            let taker = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.take())
+            };
+            let drainer = {
+                let set = Arc::clone(&set);
+                thread::spawn(move || set.drain())
+            };
+
+            let taken = taker.join().expect("taker must not panic");
+            let drained = drainer.join().expect("drainer must not panic");
+            assert_eq!(usize::from(taken.is_some()) + drained, 2);
+            if let Some(buffer) = taken {
+                set.put(buffer);
+                assert_eq!(set.drain(), 1);
             }
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(total.load(Ordering::Relaxed), 3);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn put_batch_publishes_to_take_batch() {
-        // This exercises the batch-specific publish and claim path end to end
-        // across selected bitmap geometries: Release `fetch_or` publications
-        // make parked cells visible, and Acquire `fetch_and` claims may
-        // transfer one or more bits per word.
-        //
-        // The reader loops because loom may run it before the writer has
-        // published anything. A zero-sized claim is just a retry, not an
-        // observable failure.
-        model(&BATCH_GEOMETRIES, |geometry, freelist| {
-            let seen = Arc::new(AtomicUsize::new(0));
-            let slots = geometry.slots();
-            let expected = geometry.slot_mask();
-            let (leases, entries) = Leases::reserve(freelist.clone());
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
-            });
-
-            let reader = thread::spawn({
-                let freelist = freelist.clone();
-                let seen = seen.clone();
-                let leases = leases.clone();
-                move || {
-                    while seen.load(Ordering::Relaxed) != expected {
-                        let claimed = freelist.take_batch(slots.len(), |slot, buffer| {
-                            leases.push_expected(&seen, expected, slot, buffer);
-                        });
-
-                        if claimed == 0 {
-                            thread::yield_now();
-                        }
-                    }
-                }
-            });
-
-            writer.join().unwrap();
-            reader.join().unwrap();
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-        });
-    }
-
-    #[test]
-    fn put_publishes_to_drain() {
-        // `drain` uses an Acquire whole-word swap. Run it concurrently with
-        // publication so this model checks the put-side Release edge rather
-        // than relying on thread-spawn visibility from pre-populated state.
-        //
-        // If the swap does not synchronize with the successful put, loom's
-        // tracked parking cell can observe the drainer reading the buffer
-        // without seeing the writer's earlier cell initialization.
-        model(&ALL_GEOMETRIES, |geometry, freelist| {
-            let drained = Arc::new(AtomicUsize::new(0));
-            let slot = geometry.slots()[0];
-            let (_, buffer) = freelist.try_create(false).unwrap();
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put(slot, buffer)
-            });
-
-            let drainer = thread::spawn({
-                let freelist = freelist.clone();
-                let drained = drained.clone();
-                move || {
-                    while drained.load(Ordering::Relaxed) == 0 {
-                        let count = freelist.drain();
-                        if count == 0 {
-                            // The drainer may run before the writer publishes.
-                            // A zero drain is a retry, not a failed assertion.
-                            thread::yield_now();
-                        } else {
-                            assert_eq!(count, 1);
-                            drained.store(count, Ordering::Relaxed);
-                        }
-                    }
-                }
-            });
-
-            writer.join().unwrap();
-            drainer.join().unwrap();
-
-            assert_eq!(drained.load(Ordering::Relaxed), 1);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn put_batch_publishes_to_drain() {
-        // A batch publish parks multiple cells before publishing the touched
-        // bitmap word masks. The drainer loops until its Acquire swaps have
-        // observed every publication and dropped every parked buffer.
-        //
-        // This is the drain analogue of `put_batch_publishes_to_take_batch`:
-        // each whole-word swap must make all cells represented by the returned
-        // word visible before they are dropped.
-        model(&BATCH_GEOMETRIES, |geometry, freelist| {
-            let drained = Arc::new(AtomicUsize::new(0));
-            let slots = geometry.slots();
-            let expected = slots.len();
-            let entries = Leases::entries(&freelist);
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
-            });
-
-            let drainer = thread::spawn({
-                let freelist = freelist.clone();
-                let drained = drained.clone();
-                move || {
-                    while drained.load(Ordering::Relaxed) < expected {
-                        let count = freelist.drain();
-                        if count == 0 {
-                            // The drainer may run before the batch is published.
-                            thread::yield_now();
-                        } else {
-                            let previous = drained.fetch_add(count, Ordering::Relaxed);
-                            assert!(previous + count <= expected);
-                        }
-                    }
-                }
-            });
-
-            writer.join().unwrap();
-            drainer.join().unwrap();
-
-            assert_eq!(drained.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn puts_and_take_scan_across_stripes() {
-        // Publish slots across multiple bitmap words using the single-entry
-        // `put` path. The reader uses repeated `take` calls, not `take_batch`,
-        // so this checks that the single-slot scan path reaches every occupied
-        // stripe and that each independent Release publication synchronizes
-        // with the later Acquire claim.
-        model(&STRIPED_GEOMETRIES, |geometry, freelist| {
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = geometry.slot_mask();
-            let (leases, entries) = Leases::reserve(freelist.clone());
-
-            let writer = thread::spawn({
-                let freelist = freelist.clone();
-                move || {
-                    for (slot, buffer) in entries {
-                        freelist.put(slot, buffer);
-                    }
-                }
-            });
-
-            let reader = thread::spawn({
-                let freelist = freelist.clone();
-                let seen = seen.clone();
-                let leases = leases.clone();
-                move || {
-                    while seen.load(Ordering::Relaxed) != expected {
-                        if let Some((slot, buffer)) = freelist.take() {
-                            leases.push_expected(&seen, expected, slot, buffer);
-                        } else {
-                            thread::yield_now();
-                        }
-                    }
-                }
-            });
-
-            writer.join().unwrap();
-            reader.join().unwrap();
-
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn drain_and_take_do_not_duplicate_or_lose_slots() {
-        // `drain` clears a whole word with `swap(0)` while `take` clears one
-        // bit with `fetch_and`. Racing them should transfer ownership of each
-        // parked buffer exactly once and leave no free bits behind.
-        //
-        // This also covers the synchronization shape used by `Drop`, which
-        // drains any buffers that remain globally free.
-        model(&BATCH_GEOMETRIES, |geometry, freelist| {
-            let slots = geometry.slots();
-            let expected = slots.len();
-            let expected_mask = geometry.slot_mask();
-            let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
-
-            let drained = Arc::new(AtomicUsize::new(0));
-            let taken = Arc::new(AtomicUsize::new(0));
-
-            let drainer = thread::spawn({
-                let freelist = freelist.clone();
-                let drained = drained.clone();
-                move || {
-                    drained.store(freelist.drain(), Ordering::Relaxed);
-                }
-            });
-
-            let taker = thread::spawn({
-                let freelist = freelist.clone();
-                let taken = taken.clone();
-                let leases = leases.clone();
-                move || {
-                    if let Some((slot, buffer)) = freelist.take() {
-                        leases.push_expected(&taken, expected_mask, slot, buffer);
-                    }
-                }
-            });
-
-            drainer.join().unwrap();
-            taker.join().unwrap();
-
-            assert_eq!(freelist.drain(), 0);
-            assert_eq!(
-                drained.load(Ordering::Relaxed)
-                    + taken.load(Ordering::Relaxed).count_ones() as usize,
-                expected
-            );
-        });
-    }
-
-    #[test]
-    fn two_drains_do_not_duplicate_or_lose_slots() {
-        // `drain` is a public whole-word `swap(0)` operation over every bitmap
-        // word. Two drainers racing over the same free set must split ownership
-        // according to the values returned by their swaps, and the total must
-        // be exactly the original occupancy.
-        model(&BATCH_GEOMETRIES, |geometry, freelist| {
-            let slots = geometry.slots();
-            let expected = slots.len();
-            let entries = Leases::entries(&freelist);
-            freelist.put_batch(entries);
-
-            let total = Arc::new(AtomicUsize::new(0));
-            let mut handles = Vec::new();
-
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let total = total.clone();
-                    move || {
-                        total.fetch_add(freelist.drain(), Ordering::Relaxed);
-                    }
-                }));
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
-
-            assert_eq!(total.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.drain(), 0);
-        });
-    }
-
-    #[test]
-    fn drain_and_take_batch_do_not_duplicate_or_lose_slots() {
-        // This is the same whole-word `swap(0)` race as the single-slot drain
-        // test, but the competing operation clears a speculative multi-bit
-        // claim. It makes sure `take_batch` uses the word value returned by
-        // `fetch_and`, not just the earlier relaxed load.
-        model(&BATCH_GEOMETRIES, |geometry, freelist| {
-            let slots = geometry.slots();
-            let expected = slots.len();
-            let expected_mask = geometry.slot_mask();
-            let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
-
-            let drained = Arc::new(AtomicUsize::new(0));
-            let taken = Arc::new(AtomicUsize::new(0));
-            let taken_slots = Arc::new(AtomicUsize::new(0));
-
-            let drainer = thread::spawn({
-                let freelist = freelist.clone();
-                let drained = drained.clone();
-                move || {
-                    drained.store(freelist.drain(), Ordering::Relaxed);
-                }
-            });
-
-            let batch_taker = thread::spawn({
-                let freelist = freelist.clone();
-                let taken = taken.clone();
-                let taken_slots = taken_slots.clone();
-                let leases = leases.clone();
-                move || {
-                    let count = freelist.take_batch(expected, |slot, buffer| {
-                        leases.push_expected(&taken_slots, expected_mask, slot, buffer);
-                    });
-                    taken.store(count, Ordering::Relaxed);
-                }
-            });
-
-            drainer.join().unwrap();
-            batch_taker.join().unwrap();
-
-            assert_eq!(freelist.drain(), 0);
-            assert_eq!(
-                taken.load(Ordering::Relaxed),
-                taken_slots.load(Ordering::Relaxed).count_ones() as usize
-            );
-            assert_eq!(
-                drained.load(Ordering::Relaxed) + taken.load(Ordering::Relaxed),
-                expected
-            );
         });
     }
 }

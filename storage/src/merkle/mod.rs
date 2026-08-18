@@ -415,10 +415,6 @@ pub enum Error<F: Family> {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
-    /// A required grafted leaf digest is missing.
-    #[error("missing grafted leaf digest: {0}")]
-    MissingGraftedLeaf(Position<F>),
-
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
