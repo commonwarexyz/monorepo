@@ -7043,8 +7043,7 @@ mod tests {
                 },
                 mut state,
             ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
-            let tip =
-                prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
+            let tip = prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
 
             let child_context = state
                 .try_propose()
@@ -7086,8 +7085,7 @@ mod tests {
                 },
                 mut state,
             ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
-            let tip =
-                prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
+            let tip = prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
 
             let child_context = state
                 .try_propose()

@@ -130,8 +130,7 @@ type VerifyObserver<H, P> =
 
 /// Handler that takes ownership of a certification response so tests can
 /// decide when it completes.
-type CertificationController<D> =
-    Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
+type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
 
 /// Behavior used to resolve application certification requests.
 pub enum Certifier<D: Digest> {
