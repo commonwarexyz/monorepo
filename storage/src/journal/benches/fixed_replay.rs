@@ -1,11 +1,8 @@
-use crate::{
-    ITEM_SIZE, ITEMS_PER_BLOB, REPLAY_POLICIES, ReplayPolicy, append_fixed_random_data,
-    get_fixed_journal,
-};
+use crate::{ITEM_SIZE, ITEMS_PER_BLOB, append_fixed_random_data, get_fixed_journal};
 use commonware_runtime::{
-    Supervisor as _,
+    ReadOptions, Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
-    tokio::{Config, Context},
+    tokio::{Config, Context, Runner},
 };
 use commonware_storage::journal::contiguous::{Contiguous as _, fixed::Journal};
 use commonware_utils::{NZUsize, sequence::FixedBytes};
@@ -23,11 +20,11 @@ const PARTITION: &str = "test-partition";
 async fn bench_run(
     journal: Journal<Context, FixedBytes<ITEM_SIZE>>,
     buffer: usize,
-    policy: ReplayPolicy,
+    read_options: ReadOptions,
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let stream = reader
-        .replay(0, NZUsize!(buffer), policy.options())
+        .replay(0, NZUsize!(buffer), read_options)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
@@ -47,9 +44,13 @@ async fn bench_run(
 fn bench_fixed_replay(c: &mut Criterion) {
     for items in [1_000, 10_000, 100_000, 500_000] {
         let cfg = Config::default();
+        let mut initialized = false;
         let runner = tokio::Runner::new(cfg.clone());
         for buffer in [16_384, 65_536, 1_048_576] {
-            for policy in REPLAY_POLICIES {
+            for (read_options, label) in [
+                (ReadOptions::default(), "cache"),
+                (ReadOptions::DONT_CACHE, "dont_cache"),
+            ] {
                 c.bench_function(
                     &format!(
                         "{}/items={} buffer={} size={} read_options={}",
@@ -57,35 +58,43 @@ fn bench_fixed_replay(c: &mut Criterion) {
                         items,
                         buffer,
                         ITEM_SIZE,
-                        policy.label()
+                        label
                     ),
                     |b| {
+                        // Setup: populate journal (once, on first sample).
+                        if !initialized {
+                            Runner::new(cfg.clone()).start(|ctx| async move {
+                                let j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+                                append_fixed_random_data::<_, ITEM_SIZE>(j, items).await;
+                            });
+                            initialized = true;
+                        }
+
+                        // Benchmark: measure replay time.
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let mut j =
+                                get_fixed_journal(ctx.child("storage"), PARTITION, ITEMS_PER_BLOB)
+                                    .await;
                             let mut duration = Duration::ZERO;
                             for _ in 0..iters {
-                                // A fresh journal and page cache give both arms equivalent
-                                // initial state before the one-pass replay.
-                                let journal = get_fixed_journal(
-                                    ctx.child("storage"),
-                                    PARTITION,
-                                    ITEMS_PER_BLOB,
-                                )
-                                .await;
-                                let journal =
-                                    append_fixed_random_data::<_, ITEM_SIZE>(journal, items).await;
-
                                 let start = Instant::now();
-                                let journal = bench_run(journal, buffer, policy).await;
+                                j = bench_run(j, buffer, read_options).await;
                                 duration += start.elapsed();
-
-                                journal.destroy().await.unwrap();
                             }
                             duration
                         });
                     },
                 );
             }
+        }
+
+        // Cleanup: destroy journal.
+        if initialized {
+            Runner::new(cfg).start(|context| async move {
+                let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+                j.destroy().await.unwrap();
+            });
         }
     }
 }

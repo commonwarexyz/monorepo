@@ -1,4 +1,4 @@
-use commonware_runtime::{ReadOptions, buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::journal::contiguous::{
     Mutable,
     fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -40,31 +40,6 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
-
-/// Cache policy compared by replay benchmarks.
-#[derive(Clone, Copy)]
-enum ReplayPolicy {
-    Default,
-    DontCache,
-}
-
-impl ReplayPolicy {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::DontCache => "dont_cache",
-        }
-    }
-
-    fn options(self) -> ReadOptions {
-        match self {
-            Self::Default => ReadOptions::default(),
-            Self::DontCache => ReadOptions::DONT_CACHE,
-        }
-    }
-}
-
-const REPLAY_POLICIES: [ReplayPolicy; 2] = [ReplayPolicy::Default, ReplayPolicy::DontCache];
 
 /// Open and return a temp fixed journal with the given config parameters and items of size ITEM_SIZE.
 async fn get_fixed_journal<const ITEM_SIZE: usize>(
