@@ -38,6 +38,7 @@
 use super::group::G1;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRng;
 
 /// One thousand times a strict lower bound on `log2(3)`.
@@ -66,8 +67,18 @@ pub const fn rounds_for_security(security: usize) -> usize {
 /// `rng` must be a cryptographically secure source the prover cannot predict:
 /// the coefficients are the verifier's private randomness, exactly as in a
 /// batched signature check.
+///
+/// The independent rounds are run through `strategy`; an adaptive strategy such
+/// as [`commonware_parallel::Rayon`] runs them serially for small inputs and
+/// across threads once the work is large enough. Pass
+/// [`commonware_parallel::Sequential`] to stay single-threaded.
 #[must_use]
-pub fn batch_in_g1(points: &[G1], security: usize, rng: &mut impl CryptoRng) -> bool {
+pub fn batch_in_g1(
+    points: &[G1],
+    security: usize,
+    strategy: &impl Strategy,
+    rng: &mut impl CryptoRng,
+) -> bool {
     let rounds = rounds_for_security(security);
     // Batching pays a fixed cost of one subgroup check per round regardless of
     // the input size, so for few points the exact per-point path is cheaper.
@@ -77,18 +88,20 @@ pub fn batch_in_g1(points: &[G1], security: usize, rng: &mut impl CryptoRng) -> 
     // One shared inversion converts every point to affine; the per-round
     // combinations then reuse them.
     let affine = G1::batch_to_affine(points);
-    let mut coefficients = vec![0u8; points.len()];
+    // The RNG is sequential, so draw every round's coefficients up front; the
+    // rounds themselves are independent and run through the strategy.
     let mut trits = Trits::new(rng);
-    for _ in 0..rounds {
-        for coefficient in &mut coefficients {
-            *coefficient = trits.next();
-        }
-        // Two-bit MSM: coefficients are 0, 1, or 2.
-        if !G1::small_msm(&affine, &coefficients, 2).in_subgroup() {
-            return false;
-        }
-    }
-    true
+    let coefficient_sets: Vec<Vec<u8>> = (0..rounds)
+        .map(|_| (0..points.len()).map(|_| trits.next()).collect())
+        .collect();
+    // Each round is a two-bit MSM over `points.len()` points, so weight the
+    // per-round cost by that size for the adaptive serial/parallel choice.
+    strategy
+        .map_collect_vec_with_multiplier(coefficient_sets.iter(), points.len(), |coefficients| {
+            G1::small_msm(&affine, coefficients, 2).in_subgroup()
+        })
+        .into_iter()
+        .all(|in_subgroup| in_subgroup)
 }
 
 /// A stream of uniform trits over a cryptographic RNG.
@@ -152,6 +165,7 @@ mod tests {
     use crate::bls12381::primitives::group::{G1, Scalar};
     use commonware_codec::FixedSize;
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
+    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
 
     /// Standard soundness target for the tests.
@@ -193,7 +207,7 @@ mod tests {
 
     #[test]
     fn empty_batch_is_accepted() {
-        assert!(batch_in_g1(&[], SECURITY, &mut test_rng()));
+        assert!(batch_in_g1(&[], SECURITY, &Sequential, &mut test_rng()));
     }
 
     #[test]
@@ -217,10 +231,10 @@ mod tests {
         for point in &points {
             assert!(point.in_subgroup());
         }
-        assert!(batch_in_g1(&points, SECURITY, &mut rng));
+        assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
         // A single valid point, and the identity, are both accepted.
-        assert!(batch_in_g1(&points[..1], SECURITY, &mut rng));
-        assert!(batch_in_g1(&[G1::zero()], SECURITY, &mut rng));
+        assert!(batch_in_g1(&points[..1], SECURITY, &Sequential, &mut rng));
+        assert!(batch_in_g1(&[G1::zero()], SECURITY, &Sequential, &mut rng));
     }
 
     #[test]
@@ -229,7 +243,7 @@ mod tests {
         let bad = off_subgroup_point(&mut rng);
         assert!(!bad.in_subgroup());
         // The exact and batched checks agree on the single bad point.
-        assert!(!batch_in_g1(&[bad], SECURITY, &mut rng));
+        assert!(!batch_in_g1(&[bad], SECURITY, &Sequential, &mut rng));
     }
 
     #[test]
@@ -237,7 +251,24 @@ mod tests {
         let mut rng = test_rng();
         let mut points: Vec<G1> = (0..32).map(|_| in_subgroup_point(&mut rng)).collect();
         points.insert(17, off_subgroup_point(&mut rng));
-        assert!(!batch_in_g1(&points, SECURITY, &mut rng));
+        assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+    }
+
+    #[test]
+    fn parallel_strategy_agrees_with_serial() {
+        use commonware_parallel::Rayon;
+        use core::num::NonZeroUsize;
+        let mut rng = test_rng();
+        // Large enough to exceed the per-point fallback and exercise the
+        // adaptive strategy's parallel path.
+        let mut points: Vec<G1> = (0..400).map(|_| in_subgroup_point(&mut rng)).collect();
+        let rayon = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+        assert!(batch_in_g1(&points, SECURITY, &rayon, &mut rng));
+        assert!(batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
+
+        points[123] = off_subgroup_point(&mut rng);
+        assert!(!batch_in_g1(&points, SECURITY, &rayon, &mut rng));
+        assert!(!batch_in_g1(&points, SECURITY, &Sequential, &mut rng));
     }
 
     #[test]
@@ -254,7 +285,10 @@ mod tests {
                 })
                 .collect();
             let all_valid = points.iter().all(G1::in_subgroup);
-            assert_eq!(batch_in_g1(&points, SECURITY, &mut rng), all_valid);
+            assert_eq!(
+                batch_in_g1(&points, SECURITY, &Sequential, &mut rng),
+                all_valid
+            );
         }
     }
 }

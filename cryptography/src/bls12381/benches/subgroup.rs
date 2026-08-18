@@ -3,12 +3,16 @@ use commonware_cryptography::bls12381::primitives::{
     subgroup::batch_in_g1,
 };
 use commonware_math::algebra::{CryptoGroup, Random};
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::test_rng;
 use criterion::{BatchSize, Criterion, criterion_group};
-use std::hint::black_box;
+use std::{hint::black_box, num::NonZeroUsize, thread::available_parallelism};
 
-/// Compare batched subgroup verification against per-point checking.
+/// Compare batched subgroup verification (serial and parallel) against
+/// per-point checking.
 fn bench_subgroup(c: &mut Criterion) {
+    let threads = available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap());
+    let rayon = Rayon::new(threads).unwrap();
     for n in [100usize, 1000, 6000] {
         let make = || {
             let mut rng = test_rng();
@@ -25,10 +29,18 @@ fn bench_subgroup(c: &mut Criterion) {
             );
         });
 
-        c.bench_function(&format!("{}/method=batched n={n}", module_path!()), |b| {
+        c.bench_function(&format!("{}/method=serial n={n}", module_path!()), |b| {
             b.iter_batched(
                 make,
-                |points| black_box(batch_in_g1(&points, 128, &mut test_rng())),
+                |points| black_box(batch_in_g1(&points, 128, &Sequential, &mut test_rng())),
+                BatchSize::SmallInput,
+            );
+        });
+
+        c.bench_function(&format!("{}/method=parallel n={n}", module_path!()), |b| {
+            b.iter_batched(
+                make,
+                |points| black_box(batch_in_g1(&points, 128, &rayon, &mut test_rng())),
                 BatchSize::SmallInput,
             );
         });
