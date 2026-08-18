@@ -82,12 +82,8 @@ where
         self.requested_build = true;
     }
 
-    /// Clears the build request unless the slot already has a proposal.
+    /// Clears the build request.
     pub const fn clear_request(&mut self) {
-        // A recorded proposal already prevents another local build.
-        if self.proposal.is_some() {
-            return;
-        }
         self.requested_build = false;
     }
 
