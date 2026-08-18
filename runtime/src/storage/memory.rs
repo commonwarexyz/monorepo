@@ -1,5 +1,8 @@
 use super::Header;
-use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::AuditHasher};
+use crate::{
+    Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    deterministic::AuditHasher,
+};
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
@@ -367,8 +370,14 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, crate::Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, crate::Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+            .await
     }
 
     async fn read_at_buf(
@@ -376,6 +385,7 @@ impl crate::Blob for Blob {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        _options: ReadOptions,
     ) -> Result<IoBufsMut, crate::Error> {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
@@ -512,11 +522,14 @@ mod tests {
         })
         .unwrap();
 
-        let live = blob.read_at(0, 8).await.unwrap();
+        let live = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
         assert_eq!(live.coalesce(), b"ABCDEFGH");
         let (reopened, len) = storage.open("partition", b"blob").await.unwrap();
         assert_eq!(len, 8);
-        let durable = reopened.read_at(0, 8).await.unwrap();
+        let durable = reopened
+            .read_at(0, 8, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(durable.coalesce(), b"a2c4e6g8");
 
         let (sparse, _) = storage.open("partition", b"sparse").await.unwrap();
@@ -531,7 +544,11 @@ mod tests {
         let (sparse, len) = storage.open("partition", b"sparse").await.unwrap();
         assert_eq!(len, 6);
         assert_eq!(
-            sparse.read_at(0, 6).await.unwrap().coalesce(),
+            sparse
+                .read_at(0, 6, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
             b"\0\0\0\0\0y"
         );
 
@@ -547,7 +564,14 @@ mod tests {
             .unwrap();
         let (replacement, len) = storage.open("partition", b"removed").await.unwrap();
         assert_eq!(len, 4);
-        assert_eq!(replacement.read_at(0, 4).await.unwrap().coalesce(), b"new!");
+        assert_eq!(
+            replacement
+                .read_at(0, 4, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"new!"
+        );
     }
 
     #[tokio::test]
@@ -589,7 +613,10 @@ mod tests {
         }
 
         // Read at logical offset 0 returns data from the data offset
-        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        let read_buf = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // A legacy V0 blob (fabricated raw: creation is always V1) places data immediately
@@ -605,7 +632,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(size, data.len() as u64);
-        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        let read_buf = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_buf.coalesce(), data);
         blob.write_at(data.len() as u64, b"!", WriteOptions::default())
             .await
@@ -719,7 +749,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size, 4);
-            let read = blob.read_at(0, 4).await.unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
         }

@@ -89,7 +89,7 @@ use crate::journal::{
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Handle, IoBuf, Metrics, Storage,
+    Blob, Buf, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{collections::VecDeque, io::Cursor, num::NonZeroUsize};
@@ -399,19 +399,22 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
     /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
-    /// are allocated lazily as the reader advances.
+    /// are allocated lazily as the reader advances. Every backing blob read performed by
+    /// the returned replay uses `read_options`, including reads after advancing to
+    /// another section.
     pub async fn replay(
         mut self,
         start_section: u64,
         start_offset: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<Replay<E, V>, Error> {
         let mut sections = VecDeque::new();
         for (&section, blob) in self.0.manager.sections_from(start_section) {
             if section == start_section && start_offset > blob.size() {
                 return Err(Error::ItemOutOfRange(start_offset));
             }
-            let reader = blob.replay(buffer).await?;
+            let reader = blob.replay(buffer, read_options).await?;
             let skip_bytes = if section == start_section {
                 start_offset
             } else {
@@ -799,13 +802,79 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Blob, BufMut, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, release_pending_syncs},
+        mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, release_pending_syncs},
     };
     use commonware_utils::{NZU16, NZUsize, Probability};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    #[test_traced]
+    fn test_segmented_variable_replay_propagates_read_options() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            for section in 1..=2 {
+                (journal, _, _) = journal
+                    .append(section, &section)
+                    .await
+                    .expect("failed to append");
+            }
+
+            let mut replay = journal
+                .replay(1, 0, NZUsize!(1036), ReadOptions::DONT_CACHE)
+                .await
+                .expect("failed to replay");
+            recordings.clear();
+
+            // The first lazy refill must carry the caller's policy.
+            let (section, offset, _, item) = replay
+                .next()
+                .await
+                .expect("missing first replay item")
+                .expect("failed to read first replay item");
+            assert_eq!((section, offset, item), (1, 0, 1));
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
+            );
+
+            // Crossing into the next section must preserve the same policy.
+            recordings.clear();
+            let (section, offset, _, item) = replay
+                .next()
+                .await
+                .expect("missing second replay item")
+                .expect("failed to read second replay item");
+            assert_eq!((section, offset, item), (2, 0, 2));
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
+            );
+            assert!(replay.next().await.is_none());
+
+            let journal = replay.finish().expect("failed to finish replay");
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
 
     #[test_traced]
     fn test_journal_append_and_read() {
@@ -848,7 +917,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::new();
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             while let Some(result) = replay.next().await {
@@ -915,7 +984,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("unable to setup replay");
                 while let Some(result) = replay.next().await {
@@ -1001,7 +1070,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("unable to setup replay");
                 while let Some(result) = replay.next().await {
@@ -1282,7 +1351,7 @@ mod tests {
 
             // Attempt to replay the journal
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             let mut items = Vec::<(u64, u64)>::new();
@@ -1313,7 +1382,7 @@ mod tests {
 
             // An empty journal's reader is exhausted from the start
             let replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to replay");
             let journal = replay.finish().expect("failed to finish replay");
@@ -1339,7 +1408,7 @@ mod tests {
             journal = journal.sync(1).await.expect("Failed to sync");
 
             let replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to replay");
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
@@ -1393,7 +1462,7 @@ mod tests {
             };
 
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
 
@@ -1458,7 +1527,7 @@ mod tests {
             };
 
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             let _ = replay
@@ -1515,7 +1584,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             let _ = replay
@@ -1547,7 +1616,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             let first = replay
@@ -1603,7 +1672,7 @@ mod tests {
 
             // Attempt to replay the journal
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             let mut items = Vec::<(u64, u64)>::new();
@@ -1662,7 +1731,7 @@ mod tests {
             //
             // This will truncate the leftover bytes from our manual write.
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             let mut items = Vec::<(u64, u64)>::new();
@@ -1722,7 +1791,7 @@ mod tests {
             // Attempt to replay the journal
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("unable to setup replay");
                 let mut items = Vec::<(u64, u64)>::new();
@@ -1803,7 +1872,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("unable to setup replay");
                 while let Some(result) = replay.next().await {
@@ -1837,7 +1906,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("unable to setup replay");
                 while let Some(result) = replay.next().await {
@@ -1874,7 +1943,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("unable to setup replay");
                 while let Some(result) = replay.next().await {
@@ -1949,7 +2018,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("unable to setup replay");
             while let Some(result) = replay.next().await {
@@ -2144,7 +2213,7 @@ mod tests {
 
             // Replay and verify all items
             let mut replay = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .expect("Failed to setup replay");
 
@@ -2206,7 +2275,10 @@ mod tests {
 
             // Verify data integrity via replay
             {
-                let mut replay = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut items = Vec::new();
                 while let Some(result) = replay.next().await {
                     let (section, _, _, item) = result.unwrap();
@@ -2257,7 +2329,10 @@ mod tests {
 
             // Verify first 3 items via replay
             {
-                let mut replay = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut items = Vec::new();
                 while let Some(result) = replay.next().await {
                     let (_, _, _, item) = result.unwrap();
@@ -2306,7 +2381,10 @@ mod tests {
 
             // Verify replay returns nothing
             {
-                let mut replay = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 assert!(replay.next().await.is_none());
                 journal = replay.finish().expect("failed to finish replay");
             }
@@ -2361,7 +2439,10 @@ mod tests {
 
             // Verify data integrity via replay
             {
-                let mut replay = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut items = Vec::new();
                 while let Some(result) = replay.next().await {
                     let (section, _, _, item) = result.unwrap();
@@ -2413,7 +2494,10 @@ mod tests {
 
             // Verify replay returns nothing
             {
-                let mut replay = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 assert!(replay.next().await.is_none());
                 journal = replay.finish().expect("failed to finish replay");
             }
@@ -2468,7 +2552,7 @@ mod tests {
                     .unwrap();
 
                 let mut replay = journal
-                    .replay(1, start_offset, NZUsize!(1024))
+                    .replay(1, start_offset, NZUsize!(1024), ReadOptions::default())
                     .await
                     .unwrap();
 
@@ -2508,7 +2592,9 @@ mod tests {
             (journal, _, _) = journal.append(1, &7i32).await.unwrap();
 
             // A failed replay consumes the journal
-            let result = journal.replay(1, u64::MAX, NZUsize!(1024)).await;
+            let result = journal
+                .replay(1, u64::MAX, NZUsize!(1024), ReadOptions::default())
+                .await;
             assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
         });
     }
@@ -2568,7 +2654,7 @@ mod tests {
             // Replay and verify the large item
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay");
 
@@ -2653,7 +2739,7 @@ mod tests {
 
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay");
 
@@ -2732,7 +2818,7 @@ mod tests {
             // Replay and verify all items in order
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay");
 
@@ -2752,7 +2838,7 @@ mod tests {
             // Test replay starting from middle section (5)
             {
                 let mut replay = journal
-                    .replay(5, 0, NZUsize!(1024))
+                    .replay(5, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay from section 5");
 
@@ -2771,7 +2857,7 @@ mod tests {
             // Test replay starting from non-existent section (should skip to next)
             {
                 let mut replay = journal
-                    .replay(3, 0, NZUsize!(1024))
+                    .replay(3, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay from section 3");
 
@@ -2840,7 +2926,7 @@ mod tests {
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay");
 
@@ -2863,7 +2949,7 @@ mod tests {
             // Replay starting from empty section 2 - should get only section 3
             {
                 let mut replay = journal
-                    .replay(2, 0, NZUsize!(1024))
+                    .replay(2, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay from section 2");
 
@@ -2934,7 +3020,7 @@ mod tests {
             // Replay and verify
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay");
 
@@ -3016,7 +3102,7 @@ mod tests {
             // Replay and verify all items
             {
                 let mut replay = journal
-                    .replay(0, 0, NZUsize!(64))
+                    .replay(0, 0, NZUsize!(64), ReadOptions::default())
                     .await
                     .expect("Failed to setup replay");
 

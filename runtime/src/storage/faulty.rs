@@ -1,6 +1,8 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::BoxDynRng};
+use crate::{
+    Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions, deterministic::BoxDynRng,
+};
 use bytes::Buf;
 use commonware_utils::{
     Probability,
@@ -688,11 +690,16 @@ impl<B: crate::Blob> Blob<B> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
         }
-        self.inner.read_at(offset, len).await
+        self.inner.read_at(offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -700,11 +707,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
         }
-        self.inner.read_at_buf(offset, len, bufs.into()).await
+        self.inner
+            .read_at_buf(offset, len, bufs.into(), options)
+            .await
     }
 
     async fn write_at(
@@ -846,7 +856,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, IoBufMut, Storage as _,
+        mocks::RecordingContext,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -884,12 +895,18 @@ mod tests {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, bufs).await
+            self.inner.read_at_buf(offset, len, bufs, options).await
         }
 
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len).await
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len, options).await
         }
 
         async fn write_at(
@@ -1082,7 +1099,14 @@ mod tests {
         }
         let (durable, len) = h.inner.open("partition", b"overlap").await.unwrap();
         assert_eq!(len, 4);
-        assert_eq!(durable.read_at(0, 4).await.unwrap().coalesce(), b"late");
+        assert_eq!(
+            durable
+                .read_at(0, 4, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"late"
+        );
     }
 
     #[tokio::test]
@@ -1155,7 +1179,14 @@ mod tests {
         }
         let (durable, len) = h.inner.open("partition", b"late-record").await.unwrap();
         assert_eq!(len, 5);
-        assert_eq!(durable.read_at(0, 5).await.unwrap().coalesce(), b"fresh");
+        assert_eq!(
+            durable
+                .read_at(0, 5, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"fresh"
+        );
     }
 
     async fn run_subset_overwrite(seed: u64, original: &[u8], replacement: &[u8]) -> Vec<u8> {
@@ -1192,7 +1223,7 @@ mod tests {
         let (inner_blob, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, original.len() as u64);
         inner_blob
-            .read_at(0, original.len())
+            .read_at(0, original.len(), ReadOptions::default())
             .await
             .unwrap()
             .coalesce()
@@ -1223,7 +1254,7 @@ mod tests {
 
         let (blob, durable_len) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(durable_len, len as u64);
-        blob.read_at(0, len)
+        blob.read_at(0, len, ReadOptions::default())
             .await
             .unwrap()
             .coalesce()
@@ -1255,7 +1286,11 @@ mod tests {
         let (blob, len) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(len, 5);
         assert_eq!(
-            blob.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+            blob.read_at(0, 5, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
             b"fresh"
         );
     }
@@ -1292,7 +1327,11 @@ mod tests {
         let (blob, len) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(len, 10);
         assert_eq!(
-            blob.read_at(0, 10).await.unwrap().coalesce().as_ref(),
+            blob.read_at(0, 10, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
             b"freshlater"
         );
     }
@@ -1317,7 +1356,14 @@ mod tests {
 
         let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(len, 8);
-        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"A......Z");
+        assert_eq!(
+            durable
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"A......Z"
+        );
     }
 
     #[tokio::test]
@@ -1347,9 +1393,23 @@ mod tests {
         h.storage.crash().unwrap();
 
         let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"ABCxyFGH");
+        assert_eq!(
+            durable
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"ABCxyFGH"
+        );
         let (durable, _) = h.inner.open("partition", b"other").await.unwrap();
-        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"12345678");
+        assert_eq!(
+            durable
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"12345678"
+        );
     }
 
     #[tokio::test]
@@ -1375,7 +1435,11 @@ mod tests {
 
             h.storage.crash().unwrap();
             let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
-            let durable = durable.read_at(0, 8).await.unwrap().coalesce();
+            let durable = durable
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             if durable.as_ref()[..3].contains(&b'.') {
                 exercised = true;
                 assert_eq!(&durable.as_ref()[5..], b"...");
@@ -1423,10 +1487,24 @@ mod tests {
 
         let (first, len) = h.inner.open("partition", b"first").await.unwrap();
         assert_eq!(len, 5);
-        assert_eq!(first.read_at(0, 5).await.unwrap().coalesce(), b"abc\0\0");
+        assert_eq!(
+            first
+                .read_at(0, 5, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"abc\0\0"
+        );
         let (second, len) = h.inner.open("partition", b"second").await.unwrap();
         assert_eq!(len, 6);
-        assert_eq!(second.read_at(0, 6).await.unwrap().coalesce(), b"abc\0\0X");
+        assert_eq!(
+            second
+                .read_at(0, 6, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"abc\0\0X"
+        );
     }
 
     #[tokio::test]
@@ -1458,7 +1536,11 @@ mod tests {
 
         assert!(blob.write_at(6, b"WXYZ", WriteOptions::SYNC).await.is_err());
         let (before, _) = h.inner.open("partition", b"test").await.unwrap();
-        let before = before.read_at(0, 10).await.unwrap().coalesce();
+        let before = before
+            .read_at(0, 10, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         let mut expected = b"abc".to_vec();
         for (index, replacement) in b"WXYZ".iter().copied().enumerate() {
             let index = index + 6;
@@ -1476,7 +1558,7 @@ mod tests {
         assert_eq!(len, expected.len() as u64);
         assert_eq!(
             durable
-                .read_at(0, expected.len())
+                .read_at(0, expected.len(), ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce()
@@ -1523,7 +1605,12 @@ mod tests {
         expected.resize(10, 0);
         expected.push(b'X');
         assert_eq!(
-            durable.read_at(0, 11).await.unwrap().coalesce().as_ref(),
+            durable
+                .read_at(0, 11, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
             expected
         );
     }
@@ -1554,10 +1641,18 @@ mod tests {
 
             assert!(blob.write_at(2, b"wxyz", WriteOptions::SYNC).await.is_err());
             let (before, _) = h.inner.open("partition", b"test").await.unwrap();
-            let before = before.read_at(0, 8).await.unwrap().coalesce();
+            let before = before
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             h.storage.crash().unwrap();
             let (after, _) = h.inner.open("partition", b"test").await.unwrap();
-            let after = after.read_at(0, 8).await.unwrap().coalesce();
+            let after = after
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             for (index, (&before, &after)) in before
                 .as_ref()
                 .iter()
@@ -1668,7 +1763,40 @@ mod tests {
         ));
         let (durable, len) = h.inner.open("partition", b"blob").await.unwrap();
         assert_eq!(len, 1);
-        assert_eq!(durable.read_at(0, 1).await.unwrap().coalesce(), b"x");
+        assert_eq!(
+            durable
+                .read_at(0, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"x"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_faulty_blob_forwards_read_options_without_faults() {
+        let (inner, recordings) = RecordingContext::new(MemStorage::new(test_pool()));
+        let rng = Arc::new(Mutex::new(Box::new(StdRng::seed_from_u64(42)) as BoxDynRng));
+        let storage = Storage::new(inner, rng, Arc::new(RwLock::new(Config::default())));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
+        recordings.clear();
+
+        // With fault rates disabled, both read entry points must preserve DONT_CACHE.
+        let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(read.coalesce(), b"data");
+        let read = blob
+            .read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::DONT_CACHE)
+            .await
+            .unwrap();
+        assert_eq!(read.coalesce(), b"data");
+
+        assert_eq!(
+            recordings.snapshot().reads,
+            vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
+        );
     }
 
     #[tokio::test]
@@ -1798,7 +1926,10 @@ mod tests {
         // Enable read faults
         h.config.write().read_rate = Some(Probability!(1.0));
 
-        assert!(matches!(blob.read_at(0, 4).await, Err(Error::Io(_))));
+        assert!(matches!(
+            blob.read_at(0, 4, ReadOptions::default()).await,
+            Err(Error::Io(_))
+        ));
     }
 
     #[tokio::test]
@@ -1944,12 +2075,26 @@ mod tests {
 
         h.storage.crash().unwrap();
         let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"AXY.....");
+        assert_eq!(
+            durable
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"AXY....."
+        );
 
         durable.write_at(0, b"Q", WriteOptions::SYNC).await.unwrap();
         h.storage.crash().unwrap();
         let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
-        assert_eq!(durable.read_at(0, 8).await.unwrap().coalesce(), b"QXY.....");
+        assert_eq!(
+            durable
+                .read_at(0, 8, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"QXY....."
+        );
     }
 
     #[tokio::test]
@@ -2012,7 +2157,11 @@ mod tests {
                 h.storage.crash().unwrap();
 
                 let (durable, _) = h.inner.open("partition", b"test").await.unwrap();
-                let durable = durable.read_at(0, 4).await.unwrap().coalesce();
+                let durable = durable
+                    .read_at(0, 4, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
                 saw_old |= durable.as_ref().contains(&b'.');
                 saw_new |= durable.as_ref().contains(&b'A');
             }
@@ -2053,7 +2202,11 @@ mod tests {
 
             let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
             assert_eq!(len, 7);
-            let durable = durable.read_at(0, 4).await.unwrap().coalesce();
+            let durable = durable
+                .read_at(0, 4, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             saw_old |= durable.as_ref().contains(&b'.');
             saw_new |= durable.as_ref().contains(&b'A');
         }
@@ -2131,7 +2284,14 @@ mod tests {
         h.storage.crash().unwrap();
         let (durable, len) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(len, 4);
-        assert_eq!(durable.read_at(0, 4).await.unwrap().coalesce(), b"data");
+        assert_eq!(
+            durable
+                .read_at(0, 4, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"data"
+        );
     }
 
     #[tokio::test]
@@ -2203,7 +2363,14 @@ mod tests {
                 let (durable, len) = failed.inner.open("partition", b"failed").await.unwrap();
                 if retention_rate.is_one() {
                     assert_eq!(len, 3);
-                    assert_eq!(durable.read_at(0, 3).await.unwrap().coalesce(), expected);
+                    assert_eq!(
+                        durable
+                            .read_at(0, 3, ReadOptions::default())
+                            .await
+                            .unwrap()
+                            .coalesce(),
+                        expected
+                    );
                 } else {
                     assert_eq!(len, 0);
                 }
@@ -2221,7 +2388,14 @@ mod tests {
                 crashed.storage.crash().unwrap();
                 let (durable, len) = crashed.inner.open("partition", b"crashed").await.unwrap();
                 assert_eq!(len, 3);
-                assert_eq!(durable.read_at(0, 3).await.unwrap().coalesce(), expected);
+                assert_eq!(
+                    durable
+                        .read_at(0, 3, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce(),
+                    expected
+                );
             }
         }
     }
