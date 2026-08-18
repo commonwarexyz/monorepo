@@ -77,7 +77,7 @@ pub(super) type QmdbB<E> =
 /// A full and a compact QMDB as a tuple.
 pub(crate) type MultiDatabaseSet<E> = (Single<QmdbA<E>>, Single<QmdbB<E>>);
 
-/// Readers over the set's published snapshots.
+/// The set's published snapshot captures.
 type MultiSnapshot<E> = SnapshotsOf<MultiDatabaseSet<E>, E>;
 
 /// Builds the full and compact QMDB configurations used by multi-database tests.

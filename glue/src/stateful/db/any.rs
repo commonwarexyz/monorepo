@@ -1,14 +1,14 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. The wrapper types here hold a [`ReadHandle`]
+//! read-through to applied state. The wrapper types here hold a [`Reader`]
 //! to their database and lease it for each such call, so a batch stays usable
 //! across applies of compatible batches and never delays a mutation by more
 //! than one storage call.
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -65,7 +65,7 @@ where
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
     metadata: Option<U::Value>,
-    handle: ReadHandle<AnyDb<F, E, C, I, H, U, S>>,
+    reader: Reader<AnyDb<F, E, C, I, H, U, S>>,
 }
 
 /// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`].
@@ -86,7 +86,7 @@ where
 {
     staged: Staged<F, H, U, S>,
     metadata: Option<U::Value>,
-    handle: ReadHandle<AnyDb<F, E, C, I, H, U, S>>,
+    reader: Reader<AnyDb<F, E, C, I, H, U, S>>,
 }
 
 /// Key-value operations shared by both `any` update kinds.
@@ -110,14 +110,14 @@ where
 
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
-        self.batch.get(key, &*self.handle.read().await).await
+        self.batch.get(key, &*self.reader.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
-        self.batch.get_many(keys, &*self.handle.read().await).await
+        self.batch.get_many(keys, &*self.reader.read().await).await
     }
 
     /// Read multiple values and return a staged batch for the same keys.
@@ -130,15 +130,15 @@ where
         let Self {
             batch,
             metadata,
-            handle,
+            reader,
         } = self;
-        let (values, staged) = batch.stage(keys, &*handle.read().await).await?;
+        let (values, staged) = batch.stage(keys, &*reader.read().await).await?;
         Ok((
             values,
             AnyStaged {
                 staged,
                 metadata,
-                handle,
+                reader,
             },
         ))
     }
@@ -163,7 +163,7 @@ where
     Operation<F, U>: Codec,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    handle: ReadHandle<AnyDb<F, E, C, I, H, U, S>>,
+    reader: Reader<AnyDb<F, E, C, I, H, U, S>>,
 }
 
 impl<F, E, C, I, H, U, S> Deref for AnyUnmerkleized<F, E, C, I, H, U, S>
@@ -198,7 +198,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -253,16 +253,16 @@ where
         let Self {
             staged,
             metadata,
-            handle,
+            reader,
         } = self;
-        let (range, values, staged) = staged.expand(keys, &*handle.read().await).await?;
+        let (range, values, staged) = staged.expand(keys, &*reader.read().await).await?;
         Ok((
             range,
             values,
             Self {
                 staged,
                 metadata,
-                handle,
+                reader,
             },
         ))
     }
@@ -283,7 +283,7 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
+    /// Consumes the staged batch and write vectors. Call [`expand`](AnyStaged::expand) before
     /// this method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
@@ -302,12 +302,12 @@ where
         let Self {
             staged,
             metadata,
-            handle,
+            reader,
         } = self;
         let inner = staged
-            .merkleize(updates, upserts, metadata, &*handle.read().await)
+            .merkleize(updates, upserts, metadata, &*reader.read().await)
             .await?;
-        Ok(AnyMerkleized { inner, handle })
+        Ok(AnyMerkleized { inner, reader })
     }
 }
 
@@ -326,7 +326,7 @@ where
 {
     /// Record updates for staged reads and upserts for unread keys, then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
+    /// Consumes the staged batch and write vectors. Call [`expand`](AnyStaged::expand) before
     /// this method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
@@ -345,12 +345,12 @@ where
         let Self {
             staged,
             metadata,
-            handle,
+            reader,
         } = self;
         let inner = staged
-            .merkleize(updates, upserts, metadata, &*handle.read().await)
+            .merkleize(updates, upserts, metadata, &*reader.read().await)
             .await?;
-        Ok(AnyMerkleized { inner, handle })
+        Ok(AnyMerkleized { inner, reader })
     }
 }
 
@@ -368,14 +368,14 @@ where
 {
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
-        self.inner.get(key, &*self.handle.read().await).await
+        self.inner.get(key, &*self.reader.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
-        self.inner.get_many(keys, &*self.handle.read().await).await
+        self.inner.get_many(keys, &*self.reader.read().await).await
     }
 }
 
@@ -400,10 +400,10 @@ where
         let Self {
             batch,
             metadata,
-            handle,
+            reader,
         } = self;
-        let inner = batch.merkleize(&*handle.read().await, metadata).await?;
-        Ok(AnyMerkleized { inner, handle })
+        let inner = batch.merkleize(&*reader.read().await, metadata).await?;
+        Ok(AnyMerkleized { inner, reader })
     }
 }
 
@@ -428,10 +428,10 @@ where
         let Self {
             batch,
             metadata,
-            handle,
+            reader,
         } = self;
-        let inner = batch.merkleize(&*handle.read().await, metadata).await?;
-        Ok(AnyMerkleized { inner, handle })
+        let inner = batch.merkleize(&*reader.read().await, metadata).await?;
+        Ok(AnyMerkleized { inner, reader })
     }
 }
 
@@ -457,7 +457,7 @@ where
         AnyUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             metadata: None,
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -518,12 +518,12 @@ where
         )
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
-        let batch = handle.read().await.new_batch();
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
+        let batch = reader.read().await.new_batch();
         AnyUnmerkleized {
             batch,
             metadata: None,
-            handle,
+            reader,
         }
     }
 
@@ -538,9 +538,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), handle))
+        Ok((db, Arc::new(snapshot), sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -638,12 +638,12 @@ where
         )
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
-        let batch = handle.read().await.new_batch();
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
+        let batch = reader.read().await.new_batch();
         AnyUnmerkleized {
             batch,
             metadata: None,
-            handle,
+            reader,
         }
     }
 
@@ -658,9 +658,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), handle))
+        Ok((db, Arc::new(snapshot), sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -847,7 +847,7 @@ mod tests {
     /// The glue staged wrapper (`AnyUnmerkleized::stage` -> `AnyStaged::expand` ->
     /// `AnyStaged::merkleize`) must return the same values and root as an explicit `get_many` +
     /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
-    /// on the staged handle via `with_metadata` and carried from before staging). This guards
+    /// on the staged batch via `with_metadata` and carried from before staging). This guards
     /// metadata flow through the wrapper.
     #[test]
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
@@ -862,7 +862,7 @@ mod tests {
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and finalize.
-            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle()).await;
+            let mut seed = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.reader()).await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
@@ -879,7 +879,7 @@ mod tests {
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle()).await;
+            let mut explicit = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.reader()).await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (slot, value) in &indexed_updates {
                 explicit = explicit.write(read_keys[*slot], *value);
@@ -893,8 +893,8 @@ mod tests {
                     .unwrap()
                     .root();
 
-            // Staged path, with metadata set on the staged handle.
-            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle()).await;
+            // Staged path, with metadata set on the staged batch.
+            let staged_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.reader()).await;
             let split = 2;
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
@@ -911,7 +911,7 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.handle())
+            let carried_batch = <UnorderedFixedDb as ManagedDb<_>>::new_batch(set.reader())
                 .await
                 .with_metadata(metadata);
             let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
@@ -936,7 +936,7 @@ mod tests {
     >;
 
     /// `finalize` must return, with the batch readable through the set's
-    /// handles, while its flush is still parked at the storage layer.
+    /// readers, while its flush is still parked at the storage layer.
     /// Durability is reported only on the returned barrier, and the captured
     /// snapshot must already prove the post-apply state.
     #[test]
@@ -958,7 +958,7 @@ mod tests {
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
-            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(set.handle())
+            let batch = <DelayedFixedDb as ManagedDb<_>>::new_batch(set.reader())
                 .await
                 .write(key, Some(value));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
@@ -971,7 +971,7 @@ mod tests {
                 pending.starts() > pending.completions(),
                 "finalize must leave its flush parked",
             );
-            let db = set.handle();
+            let db = set.reader();
             assert_eq!(db.read().await.get(&key).await.unwrap(), Some(value));
 
             // The snapshot freezes at the post-apply boundary and proves the

@@ -1,6 +1,6 @@
 //! Serving the latest durable capture of database snapshots.
 //!
-//! [`Publisher::new`] creates a [`Publisher`] and a [`Reader`] over a shared
+//! [`Publisher::new`] creates a [`Publisher`] and a [`Subscriber`] over a shared
 //! cell containing the latest durable capture of snapshots.
 //!
 //! Snapshots are staged as blocks apply, but their flushes finish in any order,
@@ -28,7 +28,7 @@ enum State<S> {
     Closed,
 }
 
-/// Shared between the [`Publisher`] and its [`Reader`]s.
+/// Shared between the [`Publisher`] and its [`Subscriber`]s.
 struct Cell<S> {
     state: Mutex<State<S>>,
     metrics: Metrics,
@@ -71,7 +71,7 @@ struct Staged<S> {
     flushed: bool,
 }
 
-/// Publishes the latest durable capture of snapshots to its [`Reader`]s.
+/// Publishes the latest durable capture of snapshots to its [`Subscriber`]s.
 pub struct Publisher<S> {
     /// The cell readers take the served capture from.
     cell: Arc<Cell<S>>,
@@ -87,8 +87,8 @@ pub struct Publisher<S> {
 }
 
 impl<S> Publisher<S> {
-    /// Create a [`Publisher`] and a [`Reader`] of database set snapshots.
-    pub fn new<E: RuntimeMetrics>(context: &E) -> (Self, Reader<S>) {
+    /// Create a [`Publisher`] and a [`Subscriber`] of database set snapshots.
+    pub fn new<E: RuntimeMetrics>(context: &E) -> (Self, Subscriber<S>) {
         let cell = Arc::new(Cell {
             state: Mutex::new(State::Empty),
             metrics: Metrics::register(context),
@@ -100,7 +100,7 @@ impl<S> Publisher<S> {
                 stale_boundary: None,
                 last_published: None,
             },
-            Reader {
+            Subscriber {
                 cell,
                 view: |snapshots| snapshots,
             },
@@ -229,14 +229,14 @@ impl<S> Drop for Publisher<S> {
 }
 
 /// Reads the latest published capture of snapshots.
-pub struct Reader<S, M = S> {
+pub struct Subscriber<S, M = S> {
     /// The cell containing the latest published capture of snapshots.
     cell: Arc<Cell<S>>,
     /// A function to select a part of the snapshot set.
     view: fn(&S) -> &M,
 }
 
-impl<S, M> Clone for Reader<S, M> {
+impl<S, M> Clone for Subscriber<S, M> {
     fn clone(&self) -> Self {
         Self {
             cell: self.cell.clone(),
@@ -245,17 +245,17 @@ impl<S, M> Clone for Reader<S, M> {
     }
 }
 
-impl<S> Reader<S> {
-    /// Derive a reader for the part of each capture that `view` returns.
-    pub fn view<M>(&self, view: fn(&S) -> &M) -> Reader<S, M> {
-        Reader {
+impl<S> Subscriber<S> {
+    /// Derive a subscriber for the part of each capture that `view` returns.
+    pub fn view<M>(&self, view: fn(&S) -> &M) -> Subscriber<S, M> {
+        Subscriber {
             cell: self.cell.clone(),
             view,
         }
     }
 }
 
-impl<S, M> Reader<S, M> {
+impl<S, M> Subscriber<S, M> {
     /// The latest published capture, or `None` before the first publish or
     /// after the publisher drops.
     pub fn latest(&self) -> Option<M>
@@ -289,22 +289,22 @@ mod tests {
     #[test]
     fn empty_then_live_then_closed() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = Publisher::<u32>::new(&context);
-            assert!(reader.latest().is_none());
+            let (mut publisher, subscriber) = Publisher::<u32>::new(&context);
+            assert!(subscriber.latest().is_none());
             assert_eq!(published_height(&context), -1);
 
             publisher.publish_now(Height::new(1), 7);
-            assert_eq!(reader.latest(), Some(7));
+            assert_eq!(subscriber.latest(), Some(7));
             assert_eq!(published_height(&context), 1);
 
             publisher.publish_now(Height::new(2), 8);
-            assert_eq!(reader.latest(), Some(8));
+            assert_eq!(subscriber.latest(), Some(8));
             assert_eq!(published_height(&context), 2);
 
             // A snapshot taken before the publisher drops keeps working.
-            let held = reader.latest().unwrap();
+            let held = subscriber.latest().unwrap();
             drop(publisher);
-            assert!(reader.latest().is_none());
+            assert!(subscriber.latest().is_none());
             assert_eq!(held, 8);
             assert_eq!(published_height(&context), -1);
         });
@@ -313,8 +313,8 @@ mod tests {
     #[test]
     fn viewed_reader_serves_its_part_of_the_snapshot() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = Publisher::<(u32, u32)>::new(&context);
-            let first_db = reader.view(|set| &set.0);
+            let (mut publisher, subscriber) = Publisher::<(u32, u32)>::new(&context);
+            let first_db = subscriber.view(|set| &set.0);
             assert!(first_db.latest().is_none());
             publisher.publish_now(Height::new(1), (1, 10));
             assert_eq!(first_db.latest(), Some(1));
@@ -326,32 +326,32 @@ mod tests {
     #[test]
     fn publishes_at_the_durable_frontier() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            let (mut publisher, subscriber) = Publisher::<u32>::new(&context);
             publisher.stage(Height::new(5), 50);
             publisher.stage(Height::new(6), 60);
             publisher.stage(Height::new(7), 70);
-            assert!(reader.latest().is_none());
+            assert!(subscriber.latest().is_none());
 
             // Height 6 lands first: the frontier is stuck behind 5.
             assert!(publisher.complete(Height::new(6), true));
-            assert!(reader.latest().is_none());
+            assert!(subscriber.latest().is_none());
 
             // Height 5 lands: the frontier jumps to 6, superseding 5 unseen.
             assert!(publisher.complete(Height::new(5), true));
-            assert_eq!(reader.latest(), Some(60));
+            assert_eq!(subscriber.latest(), Some(60));
 
             assert!(publisher.complete(Height::new(7), true));
-            assert_eq!(reader.latest(), Some(70));
+            assert_eq!(subscriber.latest(), Some(70));
         });
     }
 
     #[test]
     fn non_durable_completion_publishes_nothing() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            let (mut publisher, subscriber) = Publisher::<u32>::new(&context);
             publisher.stage(Height::new(1), 10);
             assert!(!publisher.complete(Height::new(1), false));
-            assert!(reader.latest().is_none());
+            assert!(subscriber.latest().is_none());
         });
     }
 
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn staleness_clears_only_above_the_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            let (mut publisher, subscriber) = Publisher::<u32>::new(&context);
             publisher.stage(Height::new(1), 10);
             publisher.stage(Height::new(2), 20);
             assert!(publisher.complete(Height::new(1), true));
@@ -381,12 +381,12 @@ mod tests {
             assert!(publisher.mark_stale());
             assert!(!publisher.needs_refresh());
             assert!(publisher.complete(Height::new(2), true));
-            assert_eq!(reader.latest(), Some(20));
+            assert_eq!(subscriber.latest(), Some(20));
             assert!(publisher.needs_refresh());
 
             // The fresh capture publishes at the same height.
             publisher.publish_now(Height::new(2), 21);
-            assert_eq!(reader.latest(), Some(21));
+            assert_eq!(subscriber.latest(), Some(21));
             assert!(!publisher.needs_refresh());
         });
     }
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn later_flush_publishes_a_post_prune_capture() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut publisher, reader) = Publisher::<u32>::new(&context);
+            let (mut publisher, subscriber) = Publisher::<u32>::new(&context);
             publisher.stage(Height::new(2), 20);
             assert!(publisher.mark_stale());
 
@@ -404,7 +404,7 @@ mod tests {
             assert!(publisher.complete(Height::new(2), true));
             assert!(!publisher.needs_refresh());
             assert!(publisher.complete(Height::new(3), true));
-            assert_eq!(reader.latest(), Some(30));
+            assert_eq!(subscriber.latest(), Some(30));
             assert!(!publisher.needs_refresh());
         });
     }

@@ -1,26 +1,26 @@
 //! Separates read access to a live database from the authority to mutate it.
 //!
-//! [`gate`] wraps a database and returns two capabilities over it. The
-//! [`Mutator`] is unique and runs consuming mutations. The [`ReadHandle`] is
+//! [`split`] wraps a database and returns two capabilities over it. The
+//! [`Writer`] is unique and runs consuming mutations. The [`Reader`] is
 //! freely cloned into batches, and grants short leases that cover exactly one
 //! storage call.
 //!
-//! Neither value owns the database. The gate does, and both capabilities keep
+//! Neither value owns the database. The cell does, and both capabilities keep
 //! it alive. What distinguishes them is what they permit.
 //!
-//! The gate is a tokio read-write lock, whose documented policy is fair and
+//! The cell is a tokio read-write lock, whose documented policy is fair and
 //! write-preferring: a waiting mutation blocks later leases and cannot be
 //! starved, while leases already granted finish first. The write side covers
 //! the whole take-and-restore of a mutation, so a reader can never observe the
-//! database missing. A mutation that is interrupted mid-flight leaves the gate
+//! database missing. A mutation that is interrupted mid-flight leaves the cell
 //! poisoned, and the only thing that interrupts one here is the owning task
 //! being torn down, so later leases park forever and are dropped along with
 //! the tasks holding them.
 //!
 //! Two rules keep callers out of trouble. The lock is not reentrant, so never
-//! hold a lease while acquiring another on the same gate: a mutation queued
-//! between the two would deadlock both. And a [`Mutator`] must outlive the
-//! handles from the same gate, because it is not what keeps the database
+//! hold a lease while acquiring another on the same cell: a mutation queued
+//! between the two would deadlock both. And a [`Writer`] must outlive the
+//! readers from the same cell, because it is not what keeps the database
 //! alive: readers would go on answering from a database that can never
 //! advance.
 
@@ -34,31 +34,31 @@ enum State<T> {
     Poisoned,
 }
 
-struct Gate<T> {
+struct Cell<T> {
     state: TracedAsyncRwLock<State<T>>,
 }
 
-/// Wrap `db`, returning the sole mutation authority and a cloneable read
-/// capability.
-pub fn gate<T>(db: T) -> (Mutator<T>, ReadHandle<T>) {
-    let gate = Arc::new(Gate {
-        state: TracedAsyncRwLock::new("database_gate", State::Live(db)),
+/// Split access to `db` into the sole mutation authority and a cloneable
+/// read capability.
+pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
+    let cell = Arc::new(Cell {
+        state: TracedAsyncRwLock::new("database_cell", State::Live(db)),
     });
-    (Mutator(gate.clone()), ReadHandle(gate))
+    (Writer(cell.clone()), Reader(cell))
 }
 
 /// The unique capability to mutate the gated database.
 ///
 /// This is the only value with [`mutate`](Self::mutate), and it is deliberately
-/// not [`Clone`], so at most one exists per gate. It does not own the database:
+/// not [`Clone`], so at most one exists per cell. It does not own the database:
 /// dropping it leaves readers on a database that can no longer advance, which is
-/// why it must outlive the handles taken from the same gate.
-pub struct Mutator<T>(Arc<Gate<T>>);
+/// why it must outlive the readers taken from the same cell.
+pub struct Writer<T>(Arc<Cell<T>>);
 
 /// A cloneable read capability over the gated database.
-pub struct ReadHandle<T>(Arc<Gate<T>>);
+pub struct Reader<T>(Arc<Cell<T>>);
 
-impl<T> Clone for ReadHandle<T> {
+impl<T> Clone for Reader<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
@@ -76,7 +76,7 @@ impl<T> Deref for ReadLease<'_, T> {
     }
 }
 
-impl<T> Gate<T> {
+impl<T> Cell<T> {
     async fn read(&self) -> ReadLease<'_, T> {
         let guard = self.state.read().await;
         match AsyncRwLockReadGuard::try_map(guard, |state| match state {
@@ -85,7 +85,7 @@ impl<T> Gate<T> {
         }) {
             Ok(lease) => ReadLease(lease),
             Err(guard) => {
-                // Poisoning is only reachable during mutator teardown. Park until
+                // Poisoning is only reachable during writer teardown. Park until
                 // this task is dropped with the rest of the actor.
                 drop(guard);
                 future::pending().await
@@ -94,14 +94,14 @@ impl<T> Gate<T> {
     }
 }
 
-impl<T> ReadHandle<T> {
+impl<T> Reader<T> {
     /// Acquire a read lease.
     pub async fn read(&self) -> ReadLease<'_, T> {
         self.0.read().await
     }
 }
 
-impl<T> Mutator<T> {
+impl<T> Writer<T> {
     /// Run one consuming mutation to completion, returning the capability.
     ///
     /// New leases queue behind the mutation and leases already granted finish
@@ -110,9 +110,9 @@ impl<T> Mutator<T> {
     /// Consume/produce at both levels. `mutation` takes the database by value and
     /// must produce it back, which is the contract mutable storage operations
     /// already use. This method does the same with the capability, so an
-    /// interrupted mutation takes the mutator with it: dropping this future
-    /// leaves the gate poisoned and hands nothing back, which is what makes a
-    /// second mutation of a poisoned gate unreachable rather than merely
+    /// interrupted mutation takes the writer with it: dropping this future
+    /// leaves the cell poisoned and hands nothing back, which is what makes a
+    /// second mutation of a poisoned cell unreachable rather than merely
     /// documented. Leases taken afterward park forever.
     pub async fn mutate<F, Fut, R>(self, mutation: F) -> (Self, R)
     where
@@ -121,7 +121,7 @@ impl<T> Mutator<T> {
     {
         let mut guard = self.0.state.write().await;
         let State::Live(db) = std::mem::replace(&mut *guard, State::Poisoned) else {
-            unreachable!("a mutator only exists while its gate is live")
+            unreachable!("a writer only exists while its cell is live")
         };
         let (db, result) = mutation(db).await;
         *guard = State::Live(db);
@@ -143,15 +143,15 @@ mod tests {
     #[test]
     fn mutation_is_not_starved_by_read_storm() {
         deterministic::Runner::default().start(|context| async move {
-            let (mutator, handle) = gate(0u64);
+            let (writer, reader) = split(0u64);
 
-            let mut readers = Vec::new();
+            let mut workers = Vec::new();
             for worker in ["r0", "r1", "r2", "r3"] {
-                let handle = handle.clone();
-                readers.push(context.child(worker).spawn(move |ctx| async move {
+                let reader = reader.clone();
+                workers.push(context.child(worker).spawn(move |ctx| async move {
                     loop {
                         {
-                            let lease = handle.read().await;
+                            let lease = reader.read().await;
                             // Every observation is a full, live value.
                             assert!(*lease == 0 || *lease == 1);
                             if *lease == 1 {
@@ -164,15 +164,15 @@ mod tests {
             }
 
             context.sleep(Duration::from_millis(5)).await;
-            mutator
+            writer
                 .mutate(|db| async move {
                     assert_eq!(db, 0);
                     (db + 1, ())
                 })
                 .await;
 
-            for reader in readers {
-                reader.await.expect("reader should observe the mutation");
+            for worker in workers {
+                worker.await.expect("worker should observe the mutation");
             }
         });
     }
@@ -182,12 +182,12 @@ mod tests {
     #[test]
     fn leases_wait_out_a_parked_mutation() {
         deterministic::Runner::default().start(|context| async move {
-            let (mutator, handle) = gate(0u64);
+            let (writer, reader) = split(0u64);
             let (release_tx, release) = oneshot::channel::<()>();
             let (acquired_tx, acquired) = oneshot::channel::<()>();
 
-            let writer = context.child("writer").spawn(move |_| async move {
-                mutator
+            let mutation_task = context.child("mutation").spawn(move |_| async move {
+                writer
                     .mutate(|db| async move {
                         let _ = acquired_tx.send(());
                         let _ = release.await;
@@ -197,29 +197,29 @@ mod tests {
             });
 
             acquired.await.expect("mutation must start");
-            let read = handle.read();
+            let read = reader.read();
             futures::pin_mut!(read);
             assert!(
                 read.as_mut().now_or_never().is_none(),
-                "a lease must wait while a mutation holds the gate",
+                "a lease must wait while a mutation holds the cell",
             );
 
             release_tx.send(()).expect("mutation is waiting");
-            writer.await.expect("mutation completes");
+            mutation_task.await.expect("mutation completes");
             assert_eq!(*read.await, 1, "the lease sees the mutated state");
         });
     }
 
-    /// Dropping a mutation mid-flight poisons the gate, and takes the mutator
+    /// Dropping a mutation mid-flight poisons the cell, and takes the writer
     /// with it. Later leases park forever instead of observing missing state.
     /// A second mutation is unrepresentable, so there is nothing to assert.
     #[test]
     fn interrupted_mutation_poisons() {
         deterministic::Runner::default().start(|_context| async move {
-            let (mutator, handle) = gate(0u64);
+            let (writer, reader) = split(0u64);
             let (started_tx, started) = oneshot::channel::<()>();
 
-            let mut mutation = Box::pin(mutator.mutate(|db| async move {
+            let mut mutation = Box::pin(writer.mutate(|db| async move {
                 let _ = started_tx.send(());
                 future::pending::<()>().await;
                 (db, ())
@@ -231,7 +231,7 @@ mod tests {
             started.await.expect("mutation must reach its closure");
             drop(mutation);
 
-            let read = handle.read();
+            let read = reader.read();
             futures::pin_mut!(read);
             assert!(
                 read.as_mut().now_or_never().is_none(),

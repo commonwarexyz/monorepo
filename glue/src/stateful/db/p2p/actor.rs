@@ -1,7 +1,7 @@
 //! Resolver service actor for QMDB sync over P2P.
 
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
-use crate::stateful::db::Reader;
+use crate::stateful::db::Subscriber;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -92,7 +92,7 @@ where
     context: ContextCell<E>,
     config: Config<P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, M>>,
-    snapshot_reader: Reader<S, M>,
+    subscriber: Subscriber<S, M>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, M>,
 }
@@ -108,11 +108,11 @@ where
     M: Source<Family = F> + Clone + Send + Sync + 'static,
     Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
-    /// Create a new resolver actor and mailbox, serving from `reader`.
+    /// Create a new resolver actor and mailbox, serving from `subscriber`.
     pub fn new(
         context: E,
         cfg: Config<P, D, B>,
-        snapshot_reader: Reader<S, M>,
+        subscriber: Subscriber<S, M>,
     ) -> (Self, SyncMailbox<F, M>) {
         let metrics = ResolverMetrics::new(&context);
         let (mailbox_tx, mailbox_rx) =
@@ -122,7 +122,7 @@ where
             context: ContextCell::new(context),
             config: cfg,
             mailbox_rx,
-            snapshot_reader,
+            subscriber,
             metrics,
             pending: BTreeMap::new(),
         };
@@ -334,7 +334,7 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let Some(source) = self.snapshot_reader.latest() else {
+        let Some(source) = self.subscriber.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -419,8 +419,8 @@ mod tests {
         Arc<TestDb>,
     >;
 
-    /// A reader over a closed cell. Deliver-path tests never produce.
-    fn closed_reader(context: &deterministic::Context) -> Reader<Arc<TestDb>> {
+    /// A subscriber over a closed cell. Deliver-path tests never produce.
+    fn closed_reader(context: &deterministic::Context) -> Subscriber<Arc<TestDb>> {
         Publisher::<Arc<TestDb>>::new(context).1
     }
 
@@ -484,14 +484,14 @@ mod tests {
     async fn init_reader(
         context: deterministic::Context,
         suffix: &str,
-    ) -> (Publisher<Arc<TestDb>>, Reader<Arc<TestDb>>, Location) {
+    ) -> (Publisher<Arc<TestDb>>, Subscriber<Arc<TestDb>>, Location) {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");
         let size = db.bounds().end;
-        let (mut publisher, reader) = Publisher::new(&context);
+        let (mut publisher, subscriber) = Publisher::new(&context);
         publisher.publish_now(Height::new(0), Arc::new(db));
-        (publisher, reader, size)
+        (publisher, subscriber, size)
     }
 
     fn encoded_fetch_payload() -> Bytes {
@@ -509,9 +509,9 @@ mod tests {
     #[test]
     fn produce_denied_when_source_is_empty() {
         deterministic::Runner::default().start(|context| async move {
-            let (_publisher, reader) = Publisher::<Arc<TestDb>>::new(&context);
+            let (_publisher, subscriber) = Publisher::<Arc<TestDb>>::new(&context);
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(), reader);
+                TestActor::new(context.child("actor"), test_config(), subscriber);
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -524,10 +524,10 @@ mod tests {
     #[test]
     fn produce_serves_from_the_source() {
         deterministic::Runner::default().start(|context| async move {
-            let (_publisher, reader, size) =
+            let (_publisher, subscriber, size) =
                 init_reader(context.child("resolver_db"), "resolver-serves").await;
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(), reader);
+                TestActor::new(context.child("actor"), test_config(), subscriber);
 
             let (response_tx, response_rx) = oneshot::channel();
             actor
@@ -542,10 +542,10 @@ mod tests {
     #[test]
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
-            let (_publisher, reader, size) =
+            let (_publisher, subscriber, size) =
                 init_reader(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(), reader);
+                TestActor::new(context.child("actor"), test_config(), subscriber);
 
             let request = Request::Operations {
                 size,
@@ -562,8 +562,8 @@ mod tests {
     #[test]
     fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, subscriber_rx) = test_subscriber();
@@ -582,8 +582,8 @@ mod tests {
     #[test]
     fn deliver_with_rejected_subscriber_blocks_peer() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -616,8 +616,8 @@ mod tests {
     #[test]
     fn deliver_ignores_dropped_subscriber_approval() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
             let (sub1_tx, sub1_rx) = test_subscriber();
@@ -647,8 +647,8 @@ mod tests {
     #[test]
     fn failed_then_deliver_clears_pending_and_allows_retry() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
             let (subscriber_tx, _subscriber_rx) = test_subscriber();
@@ -667,8 +667,8 @@ mod tests {
     #[test]
     fn get_operations_refetches_when_pending_subscribers_are_closed() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
             let (stale_tx, stale_rx) = test_subscriber();
@@ -691,8 +691,8 @@ mod tests {
     #[test]
     fn deliver_rejects_answer_shaped_unlike_its_question() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = Request::Boundary {
                 size: Location::new(1),
                 start: Location::new(0),
@@ -715,8 +715,8 @@ mod tests {
     #[test]
     fn cancel_operations_cancels_pruned_request() {
         deterministic::Runner::default().start(|context| async move {
-            let reader = closed_reader(&context);
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(), reader);
+            let subscriber = closed_reader(&context);
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
             let action =

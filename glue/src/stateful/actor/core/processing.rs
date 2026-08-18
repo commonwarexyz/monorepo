@@ -1,7 +1,7 @@
 //! The post-sync processing loop of the stateful actor.
 //!
 //! The loop owns the database set and is the only thing that mutates it.
-//! Verification jobs hold read handles instead, so they are never cancelled: a
+//! Verification jobs hold readers instead, so they are never cancelled: a
 //! job that is mid-read when a finalized block arrives finishes that read, the
 //! apply runs, and the job continues against the state it installs.
 //!
@@ -410,7 +410,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{HandlesOf, Publisher, Reader, Single, SnapshotsOf},
+        db::{Publisher, ReadersOf, Single, SnapshotsOf, Subscriber},
         tests::{
             fixtures,
             mocks::{
@@ -595,7 +595,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _handles: HandlesOf<Self::Databases, deterministic::Context>,
+            _readers: ReadersOf<Self::Databases, deterministic::Context>,
         ) {
             let gate = self.finalized_gate.lock().take();
             if let Some(mut gate) = gate {
@@ -624,7 +624,7 @@ mod tests {
         app: GatedApp,
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
-        Reader<SnapshotsOf<TestDatabases, deterministic::Context>>,
+        Subscriber<SnapshotsOf<TestDatabases, deterministic::Context>>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -671,7 +671,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
-        Reader<u64>,
+        Subscriber<u64>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -686,7 +686,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
-        Reader<u64>,
+        Subscriber<u64>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {

@@ -3,11 +3,11 @@
 //!
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key. Positional batch reads lease the
-//! database through the batch's [`ReadHandle`].
+//! database through the batch's [`Reader`].
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -48,7 +48,7 @@ where
     batch: UnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
-    handle: ReadHandle<Keyless<F, E, V, C, H, S>>,
+    reader: Reader<Keyless<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
@@ -93,7 +93,7 @@ where
 
     /// Read a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
-        self.batch.get(location, &*self.handle.read().await).await
+        self.batch.get(location, &*self.reader.read().await).await
     }
 
     /// Read multiple values by location, falling back to applied state.
@@ -105,7 +105,7 @@ where
         locations: &[Location<F>],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.batch
-            .get_many(locations, &*self.handle.read().await)
+            .get_many(locations, &*self.reader.read().await)
             .await
     }
 
@@ -129,7 +129,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    handle: ReadHandle<Keyless<F, E, V, C, H, S>>,
+    reader: Reader<Keyless<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
@@ -145,7 +145,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -179,7 +179,7 @@ where
 {
     /// Read a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
-        self.inner.get(location, &*self.handle.read().await).await
+        self.inner.get(location, &*self.reader.read().await).await
     }
 
     /// Read multiple values by location, falling back to applied state.
@@ -191,7 +191,7 @@ where
         locations: &[Location<F>],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         self.inner
-            .get_many(locations, &*self.handle.read().await)
+            .get_many(locations, &*self.reader.read().await)
             .await
     }
 }
@@ -214,12 +214,12 @@ where
             batch,
             metadata,
             inactivity_floor,
-            handle,
+            reader,
         } = self;
         let inner = batch
-            .merkleize(&*handle.read().await, metadata, inactivity_floor)
+            .merkleize(&*reader.read().await, metadata, inactivity_floor)
             .await;
-        Ok(KeylessMerkleized { inner, handle })
+        Ok(KeylessMerkleized { inner, reader })
     }
 }
 
@@ -244,7 +244,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -277,16 +277,16 @@ where
         )
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         KeylessUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -301,9 +301,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), handle))
+        Ok((db, Arc::new(snapshot), sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -376,16 +376,16 @@ where
         )
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         KeylessUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -400,9 +400,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), handle))
+        Ok((db, Arc::new(snapshot), sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -508,7 +508,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::{db::gate, tests::mocks::finalize};
+    use crate::stateful::{db::split, tests::mocks::finalize};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -571,9 +571,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (mutator, handle) = gate(db);
+            let (writer, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -582,10 +582,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_mutator, snapshot, durability) = finalize(mutator, merkleized).await;
+            let (_mutator, snapshot, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
 
-            let db = handle.read().await;
+            let db = reader.read().await;
             assert_eq!(
                 db.get(mmr::Location::new(1)).await.unwrap(),
                 Some(U64::new(7))
@@ -609,9 +609,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (_mutator, handle) = gate(db);
+            let (_mutator, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -662,30 +662,30 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-floor-carry", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (mutator, handle) = gate(db);
+            let (writer, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            let (mutator, _, durability) = finalize(mutator, merkleized).await;
+            let (writer, _, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
 
             // A fresh batch without an explicit floor must commit at the raised
             // floor instead of regressing it to zero.
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(8));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
             let fork = MerkleizedTrait::new_batch(&merkleized);
-            let (mutator, _, durability) = finalize(mutator, merkleized).await;
+            let (writer, _, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*handle.read().await);
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
 
             // The same holds for a batch forked from a merkleized parent.
@@ -693,9 +693,9 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork)
                 .await
                 .unwrap();
-            let (_mutator, _, durability) = finalize(mutator, merkleized).await;
+            let (_mutator, _, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*handle.read().await);
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
         });
     }

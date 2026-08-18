@@ -23,7 +23,7 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            DatabaseSet, HandlesOf, Merkleized as _, MerkleizedOf, SyncEngineConfig,
+            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, SyncEngineConfig,
             Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
     },
@@ -432,7 +432,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        _handles: HandlesOf<Self::Databases, E>,
+        _readers: ReadersOf<Self::Databases, E>,
     ) {
         self.processed
             .lock()

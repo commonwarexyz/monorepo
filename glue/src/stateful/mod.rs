@@ -96,7 +96,7 @@
 use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use db::{DatabaseSet, HandlesOf, MerkleizedOf, UnmerkleizedOf};
+use db::{DatabaseSet, MerkleizedOf, ReadersOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::future::Future;
 
@@ -321,7 +321,7 @@ where
     /// reported or applied during handoff. Applications must derive synchronized state from the
     /// database set rather than rely on receiving every peer-state-sync finalization here.
     ///
-    /// This hook receives read handles over the set. It runs after the block is
+    /// This hook receives readers over the set. It runs after the block is
     /// applied, and the block's marshal acknowledgement waits for it, so a slow
     /// implementation stalls finalization. Result-affecting mutations must be
     /// made through normal block execution, not from this observer.
@@ -337,7 +337,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _handles: HandlesOf<Self::Databases, E>,
+        _readers: ReadersOf<Self::Databases, E>,
     ) -> impl Future<Output = ()> + Send {
         async {}
     }

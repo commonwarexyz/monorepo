@@ -248,7 +248,7 @@ mod tests {
         type Snapshots = ();
         type Config = u64;
         type SyncTargets = u64;
-        type Handles = ();
+        type Readers = ();
 
         async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
             Self(config)
@@ -258,9 +258,9 @@ mod tests {
             0
         }
 
-        fn handles(&self) -> Self::Handles {}
+        fn readers(&self) -> Self::Readers {}
 
-        async fn new_batches(_handles: &Self::Handles) -> Self::Unmerkleized {
+        async fn new_batches(_readers: &Self::Readers) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 

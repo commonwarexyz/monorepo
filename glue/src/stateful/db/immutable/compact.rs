@@ -5,7 +5,7 @@
 //! adapters expose set and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -45,7 +45,7 @@ where
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
-    handle: ReadHandle<CompactDb<F, E, K, V, H, C, S>>,
+    reader: Reader<CompactDb<F, E, K, V, H, C, S>>,
 }
 
 impl<F, E, K, V, H, C, S> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, C, S>
@@ -109,7 +109,7 @@ where
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    handle: ReadHandle<CompactDb<F, E, K, V, H, C, S>>,
+    reader: Reader<CompactDb<F, E, K, V, H, C, S>>,
 }
 
 impl<F, E, K, V, H, C, S> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, C, S>
@@ -126,7 +126,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -169,12 +169,12 @@ where
             batch,
             metadata,
             inactivity_floor,
-            handle,
+            reader,
         } = self;
         let inner = batch
-            .merkleize(&*handle.read().await, metadata, inactivity_floor)
+            .merkleize(&*reader.read().await, metadata, inactivity_floor)
             .await;
-        Ok(ImmutableUnjournaledMerkleized { inner, handle })
+        Ok(ImmutableUnjournaledMerkleized { inner, reader })
     }
 }
 
@@ -200,7 +200,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -233,16 +233,16 @@ where
         }
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         ImmutableUnjournaledUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -255,9 +255,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let snapshot = Self::snapshot(&db);
-        Ok((db, snapshot, handle))
+        Ok((db, snapshot, sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -314,16 +314,16 @@ where
         }
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         ImmutableUnjournaledUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -336,9 +336,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let snapshot = Self::snapshot(&db);
-        Ok((db, snapshot, handle))
+        Ok((db, snapshot, sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -584,7 +584,7 @@ mod tests {
             let metadata = Sha256::hash(&[&[3]]);
 
             let set = Single::from(db);
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(set.handle())
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(set.reader())
                 .await
                 .set(key, value)
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -597,7 +597,7 @@ mod tests {
             let (set, snapshot, barrier) = DatabaseSet::finalize(set, merkleized).await;
             assert!(barrier.durable().await, "finalize flush failed");
 
-            let db = set.handle();
+            let db = set.reader();
             let db = db.read().await;
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get_metadata(), Some(metadata));

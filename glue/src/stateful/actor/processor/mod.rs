@@ -25,7 +25,7 @@ use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::{core::Verification, metrics::Metrics as StatefulMetrics},
     db::{
-        Anchor, Barrier, DatabaseSet, HandlesOf, MerkleizedOf, Publisher, SnapshotsOf,
+        Anchor, Barrier, DatabaseSet, MerkleizedOf, Publisher, ReadersOf, SnapshotsOf,
         SyncTargetsOf, UnmerkleizedOf,
     },
 };
@@ -158,7 +158,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    handles: HandlesOf<A::Databases, E>,
+    readers: ReadersOf<A::Databases, E>,
     state: Arc<Mutex<ExecutionState<A, E>>>,
     metrics: StatefulMetrics,
 }
@@ -170,7 +170,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            handles: self.handles.clone(),
+            readers: self.readers.clone(),
             state: self.state.clone(),
             metrics: self.metrics.clone(),
         }
@@ -497,7 +497,7 @@ where
         Self {
             app,
             execution: Execution {
-                handles: databases.handles(),
+                readers: databases.readers(),
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
                     last_processed,
@@ -547,8 +547,8 @@ where
     }
 
     #[cfg(test)]
-    fn handles(&self) -> HandlesOf<A::Databases, E> {
-        self.execution.handles.clone()
+    fn readers(&self) -> ReadersOf<A::Databases, E> {
+        self.execution.readers.clone()
     }
 
     #[cfg(test)]
@@ -657,7 +657,7 @@ where
         let batch = match self.execution.pending_batch(&digest) {
             Some(merkleized) => merkleized,
             None => {
-                let batches = A::Databases::new_batches(&self.execution.handles).await;
+                let batches = A::Databases::new_batches(&self.execution.readers).await;
                 let batch = self
                     .app
                     .apply(
@@ -706,12 +706,12 @@ where
         block: &A::Block,
     ) -> impl Future<Output = ()> + Send {
         let mut app = self.app.clone();
-        let handles = self.execution.handles.clone();
+        let readers = self.execution.readers.clone();
         async move {
             app.finalized(
                 (context.child("finalized"), block.context()),
                 block,
-                handles,
+                readers,
             )
             .await;
         }
@@ -820,7 +820,7 @@ where
             }
         }
 
-        Ok(A::Databases::new_batches(&self.handles).await)
+        Ok(A::Databases::new_batches(&self.readers).await)
     }
 
     /// Replays one certified block and caches its commitment-matching state.
@@ -1286,7 +1286,7 @@ mod tests {
         Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{
-            Anchor, DatabaseSet, HandlesOf, Merkleized as _, MerkleizedOf, SyncTargetsOf,
+            Anchor, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, SyncTargetsOf,
             UnmerkleizedOf,
         },
     };
@@ -1622,7 +1622,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            handles: HandlesOf<Self::Databases, deterministic::Context>,
+            readers: ReadersOf<Self::Databases, deterministic::Context>,
         ) {
             if let Some(probe) = &self.finalized_probe {
                 probe.call(block.digest()).await;
@@ -1630,7 +1630,7 @@ mod tests {
             let Some(observer) = &self.finalized_observer else {
                 return;
             };
-            let value = handles
+            let value = readers
                 .read()
                 .await
                 .get(&height_key(block.height()))
@@ -1857,7 +1857,7 @@ mod tests {
 
         async fn height_value(&self, height: Height) -> Option<u64> {
             self.processor
-                .handles()
+                .readers()
                 .read()
                 .await
                 .get(&height_key(height))
@@ -1868,7 +1868,7 @@ mod tests {
 
         async fn counter_value(&self) -> Option<u64> {
             self.processor
-                .handles()
+                .readers()
                 .read()
                 .await
                 .get(&counter_key())

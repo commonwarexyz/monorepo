@@ -1,8 +1,8 @@
 use crate::stateful::{
     Application, Input, Proposed,
     db::{
-        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Mutator, ReadHandle, Unmerkleized,
-        UnmerkleizedOf,
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Unmerkleized, UnmerkleizedOf,
+        Writer,
     },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -116,7 +116,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    async fn new_batch(_handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -319,15 +319,15 @@ pub(crate) fn test_databases() -> TestDatabases {
     TestDb::default().into()
 }
 
-/// Finalize `batch` through the gate, returning the snapshot and flush handle.
+/// Finalize `batch` through the cell, returning the snapshot and flush handle.
 ///
-/// Tests that drive [`ManagedDb`] directly gate their database and use this
+/// Tests that drive [`ManagedDb`] directly split their database and use this
 /// instead of the set layer.
 pub(crate) async fn finalize<D: ManagedDb<deterministic::Context>>(
-    mutator: Mutator<D>,
+    writer: Writer<D>,
     batch: D::Merkleized,
-) -> (Mutator<D>, D::Snapshot, Handle<()>) {
-    let (mutator, (snapshot, sync)) = mutator
+) -> (Writer<D>, D::Snapshot, Handle<()>) {
+    let (writer, (snapshot, sync)) = writer
         .mutate(|db| async move {
             let (db, snapshot, sync) = D::finalize(db, batch)
                 .await
@@ -335,7 +335,7 @@ pub(crate) async fn finalize<D: ManagedDb<deterministic::Context>>(
             (db, (snapshot, sync))
         })
         .await;
-    (mutator, snapshot, sync)
+    (writer, snapshot, sync)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

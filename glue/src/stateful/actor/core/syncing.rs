@@ -421,7 +421,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, StateSyncMetadata, SyncResult},
         },
-        db::{Anchor, Publisher, Reader, Single},
+        db::{Anchor, Publisher, Single, Subscriber},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -460,7 +460,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
-        reader: Reader<u64>,
+        subscriber: Subscriber<u64>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -509,7 +509,7 @@ mod tests {
             }
 
             let (acknowledgement, mut newest_waiter) = Exact::handle();
-            let reader = self.reader.clone();
+            let subscriber = self.subscriber.clone();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
                     .process_finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
@@ -540,7 +540,10 @@ mod tests {
             }
             assert!(newest_waiter.await.is_ok());
             assert!(syncing.pending_finalizations.is_empty());
-            Self { syncing, reader }
+            Self {
+                syncing,
+                subscriber,
+            }
         }
     }
 
@@ -563,7 +566,7 @@ mod tests {
             let (syncer_sender, syncer_receiver) =
                 actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
-            let (snapshot_publisher, snapshot_reader) = Publisher::new(&syncing_context);
+            let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&syncing_context);
 
             let harness = Self {
                 syncing: Syncing {
@@ -582,7 +585,7 @@ mod tests {
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
-                reader: snapshot_reader,
+                subscriber: snapshot_subscriber,
             };
             (
                 harness,
@@ -618,7 +621,7 @@ mod tests {
             let (syncer_sender, _syncer_receiver) =
                 actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
             let (_sync_complete, sync_completed) = oneshot::channel();
-            let (snapshot_publisher, snapshot_reader) = Publisher::new(&syncing_context);
+            let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&syncing_context);
 
             Self {
                 syncing: Syncing {
@@ -640,7 +643,7 @@ mod tests {
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
                 },
-                reader: snapshot_reader,
+                subscriber: snapshot_subscriber,
             }
         }
     }
@@ -752,7 +755,7 @@ mod tests {
             let (reflected_acknowledgement, mut reflected_waiter) = Exact::handle();
             let (first_acknowledgement, mut first_waiter) = Exact::handle();
             let (second_acknowledgement, mut second_waiter) = Exact::handle();
-            let reader = harness.reader.clone();
+            let subscriber = harness.subscriber.clone();
             let transition = context.child("transition").spawn(move |_| {
                 harness.syncing.transition([
                     FinalizedHandoff::Reflected(
@@ -779,7 +782,7 @@ mod tests {
                 "completion metadata must not be written before the handoff is durable",
             );
             assert_eq!(
-                reader.latest(),
+                subscriber.latest(),
                 Some(0),
                 "the synced state must serve as the first capture before any handoff flush",
             );
@@ -793,7 +796,7 @@ mod tests {
             assert!(poll!(&mut first_waiter).is_ready());
             assert!(poll!(&mut second_waiter).is_pending());
             assert_eq!(
-                reader.latest(),
+                subscriber.latest(),
                 Some(1),
                 "each handoff capture must serve once its flush is durable",
             );
@@ -851,8 +854,8 @@ mod tests {
                 "an aborted handoff must cancel marshal's acknowledgement",
             );
             assert!(
-                harness.reader.latest().is_none(),
-                "the aborted capture must never serve, and the reader must decline \
+                harness.subscriber.latest().is_none(),
+                "the aborted capture must never serve, and the subscriber must decline \
                  once the writer is gone",
             );
             let reopened =

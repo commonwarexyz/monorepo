@@ -5,7 +5,7 @@
 //! adapters expose append and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -43,7 +43,7 @@ where
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
-    handle: ReadHandle<CompactDb<F, E, V, H, C, S>>,
+    reader: Reader<CompactDb<F, E, V, H, C, S>>,
 }
 
 impl<F, E, V, H, C, S> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, C, S>
@@ -104,7 +104,7 @@ where
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, V, S>>,
-    handle: ReadHandle<CompactDb<F, E, V, H, C, S>>,
+    reader: Reader<CompactDb<F, E, V, H, C, S>>,
 }
 
 impl<F, E, V, H, C, S> Clone for KeylessUnjournaledMerkleized<F, E, V, H, C, S>
@@ -120,7 +120,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -160,12 +160,12 @@ where
             batch,
             metadata,
             inactivity_floor,
-            handle,
+            reader,
         } = self;
         let inner = batch
-            .merkleize(&*handle.read().await, metadata, inactivity_floor)
+            .merkleize(&*reader.read().await, metadata, inactivity_floor)
             .await;
-        Ok(KeylessUnjournaledMerkleized { inner, handle })
+        Ok(KeylessUnjournaledMerkleized { inner, reader })
     }
 }
 
@@ -190,7 +190,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -222,16 +222,16 @@ where
         }
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         KeylessUnjournaledUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -244,9 +244,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let snapshot = Self::snapshot(&db);
-        Ok((db, snapshot, handle))
+        Ok((db, snapshot, sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -302,16 +302,16 @@ where
         }
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         KeylessUnjournaledUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -324,9 +324,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let snapshot = Self::snapshot(&db);
-        Ok((db, snapshot, handle))
+        Ok((db, snapshot, sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -431,7 +431,7 @@ where
 mod tests {
     use super::*;
     use crate::stateful::{
-        db::{SyncEngineConfig, gate},
+        db::{SyncEngineConfig, split},
         tests::mocks::finalize,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -576,9 +576,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (mutator, handle) = gate(db);
+            let (writer, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle.clone())
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -588,10 +588,10 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (_mutator, snapshot, durability) = finalize(mutator, merkleized).await;
+            let (_mutator, snapshot, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
 
-            let db = handle.read().await;
+            let db = reader.read().await;
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get_metadata(), Some(U64::new(9)));
 
@@ -612,9 +612,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (_mutator, handle) = gate(db);
+            let (_mutator, reader) = split(db);
 
-            let batch = <FixedDb as ManagedDb<_>>::new_batch(handle)
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))

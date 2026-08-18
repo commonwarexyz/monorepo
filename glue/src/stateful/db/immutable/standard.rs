@@ -3,12 +3,12 @@
 //!
 //! Immutable databases support adding new keyed values but not updates or
 //! deletions. Keyed batch reads lease the database through the batch's
-//! [`ReadHandle`] because the immutable proof snapshot carries no keyed
+//! [`Reader`] because the immutable proof snapshot carries no keyed
 //! index.
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, ReadHandle, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -36,8 +36,8 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Read handle over the immutable database a wrapper batch reads through.
-type DbHandle<F, E, K, V, C, H, T, S> = ReadHandle<Immutable<F, E, K, V, C, H, T, S>>;
+/// Reader over the immutable database a wrapper batch reads through.
+type DbHandle<F, E, K, V, C, H, T, S> = Reader<Immutable<F, E, K, V, C, H, T, S>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] to implement
 /// [`Unmerkleized`](crate::stateful::db::Unmerkleized).
@@ -56,7 +56,7 @@ where
     batch: UnmerkleizedBatch<F, H, K, V, S>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
-    handle: DbHandle<F, E, K, V, C, H, T, S>,
+    reader: DbHandle<F, E, K, V, C, H, T, S>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
@@ -105,14 +105,14 @@ where
 
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.batch.get(key, &*self.handle.read().await).await
+        self.batch.get(key, &*self.reader.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        self.batch.get_many(keys, &*self.handle.read().await).await
+        self.batch.get_many(keys, &*self.reader.read().await).await
     }
 
     /// Set `key` to `value` in the speculative batch.
@@ -137,7 +137,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    handle: DbHandle<F, E, K, V, C, H, T, S>,
+    reader: DbHandle<F, E, K, V, C, H, T, S>,
 }
 
 impl<F, E, K, V, C, H, T, S> Clone for ImmutableMerkleized<F, E, K, V, C, H, T, S>
@@ -155,7 +155,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -193,14 +193,14 @@ where
 {
     /// Read a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.inner.get(key, &*self.handle.read().await).await
+        self.inner.get(key, &*self.reader.read().await).await
     }
 
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        self.inner.get_many(keys, &*self.handle.read().await).await
+        self.inner.get_many(keys, &*self.reader.read().await).await
     }
 }
 
@@ -224,12 +224,12 @@ where
             batch,
             metadata,
             inactivity_floor,
-            handle,
+            reader,
         } = self;
         let inner = batch
-            .merkleize(&*handle.read().await, metadata, inactivity_floor)
+            .merkleize(&*reader.read().await, metadata, inactivity_floor)
             .await;
-        Ok(ImmutableMerkleized { inner, handle })
+        Ok(ImmutableMerkleized { inner, reader })
     }
 }
 
@@ -256,7 +256,7 @@ where
             batch: self.inner.new_batch::<H>(),
             metadata: None,
             inactivity_floor: self.inner.bounds().inactivity_floor,
-            handle: self.handle.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -307,16 +307,16 @@ where
         )
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         ImmutableUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -331,9 +331,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), handle))
+        Ok((db, Arc::new(snapshot), sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -413,16 +413,16 @@ where
         )
     }
 
-    async fn new_batch(handle: ReadHandle<Self>) -> Self::Unmerkleized {
+    async fn new_batch(reader: Reader<Self>) -> Self::Unmerkleized {
         let (batch, inactivity_floor) = {
-            let db = handle.read().await;
+            let db = reader.read().await;
             (db.new_batch(), db.inactivity_floor_loc())
         };
         ImmutableUnmerkleized {
             batch,
             metadata: None,
             inactivity_floor,
-            handle,
+            reader,
         }
     }
 
@@ -437,9 +437,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, handle) = db.start_sync().await?;
+        let (db, sync) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), handle))
+        Ok((db, Arc::new(snapshot), sync))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {

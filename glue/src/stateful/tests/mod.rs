@@ -20,7 +20,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
-        db::{DatabaseSet, HandlesOf, Merkleized as _, Publisher, SyncEngineConfig},
+        db::{DatabaseSet, Merkleized as _, Publisher, ReadersOf, SyncEngineConfig},
     },
 };
 use commonware_actor::Feedback;
@@ -1003,13 +1003,13 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
-        handles: HandlesOf<Self::Databases, deterministic::Context>,
+        readers: ReadersOf<Self::Databases, deterministic::Context>,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
-            handles,
+            readers,
         )
         .await;
         let gate = self.finalize_gate.lock().take();
@@ -1038,7 +1038,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases.handles())
+    >>::new_batches(&databases.readers())
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
@@ -1093,7 +1093,7 @@ async fn build_multi_chain(
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases.handles())
+    >>::new_batches(&databases.readers())
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
