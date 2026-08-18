@@ -44,23 +44,6 @@ impl<const N: usize> Shared<N> {
         self.read().ones_iter_from(from).next()
     }
 
-    /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)`, holding a single
-    /// read guard for the whole batch. Returns the next `scan_from`.
-    ///
-    /// The candidate sequence is identical to repeatedly calling `any::batch::next_candidate`
-    /// (the test oracle): set bits in the committed prefix are returned in order via one
-    /// `ones_iter_from`, then locations at or beyond the committed boundary are returned
-    /// sequentially.
-    pub(crate) fn fill_candidates<T: From<u64>>(
-        &self,
-        scan_from: u64,
-        tip: u64,
-        limit: usize,
-        out: &mut Vec<T>,
-    ) -> u64 {
-        fill_from(&*self.read(), scan_from, tip, limit, out)
-    }
-
     /// Return the number of pruned bits. Acquires the read lock briefly.
     #[cfg(any(test, feature = "test-traits"))]
     pub(crate) fn pruned_bits(&self) -> u64 {

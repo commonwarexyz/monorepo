@@ -528,7 +528,7 @@ where
         // raise scans below), clamped to the committed prefix inside the helper.
         let (inner, staged_updates, prefetched) = inner
             .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+                Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
             })
             .await?;
         let inner = inner
@@ -537,7 +537,9 @@ where
                 metadata,
                 staged_updates,
                 Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+                |floor, tip, limit, out| {
+                    Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
+                },
             )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
@@ -594,7 +596,9 @@ where
                 &db.any,
                 metadata,
                 staged_updates,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+                |floor, tip, limit, out| {
+                    Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
+                },
             )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
@@ -639,7 +643,9 @@ where
                 metadata,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
                 None,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+                |floor, tip, limit, out| {
+                    Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
+                },
             )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
@@ -683,7 +689,9 @@ where
                 &db.any,
                 metadata,
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+                |floor, tip, limit, out| {
+                    Ok(fill_candidates(&bitmap_parent, floor, tip, limit, out))
+                },
             )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await

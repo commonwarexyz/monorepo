@@ -16,9 +16,8 @@ use crate::{
             ordered::{find_next_key, find_next_key_ascending, find_prev_key},
             view::View,
         },
-        applied::ApplyGuard,
+        applied::{Applied, ApplyGuard, Resolution, Stale},
         batch_chain::{self, Bounds, Commitment},
-        bitmap::Shared,
         operation::{Key, Operation as OperationTrait},
     },
 };
@@ -26,7 +25,6 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap;
 use core::{cmp::Ordering, ops::Range};
 use std::{
     collections::{BTreeMap, hash_map},
@@ -409,6 +407,32 @@ where
     view: View<F, H::Digest>,
 }
 
+impl<F: Family, H, U, S: Strategy> Merkleizer<F, H, U, S>
+where
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Pin the read view. A chain whose committed prefix was dropped after applying
+    /// reads state that exists only live, so it gets a fresh view of the effective
+    /// boundary instead of the chain-base capture; that pattern requires the owner to
+    /// have applied the prefix, so the fresh reads are safe there.
+    fn pin_read_view<E, C, I, const N: usize>(&mut self, db: &Db<F, E, C, I, H, U, N, S>)
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        if self.db_state.size > self.view.size {
+            self.view = View {
+                generation: db.applied.generation(),
+                size: self.db_state.size,
+                mem: db.log.mem(),
+            };
+        }
+    }
+}
+
 /// Look up a key in the ancestor chain (immediate parent first).
 fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
     ancestors: &'a [Arc<MerkleizedBatch<F, D, U, S>>],
@@ -688,16 +712,19 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
-/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
-/// read guard, returning the next `floor`.
-fn fill_candidates<F: Family, const N: usize>(
-    bitmap: &Shared<N>,
+/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` as of `view`,
+/// under a single read guard, returning the next `floor`.
+fn fill_candidates_at<F: Family, D: Digest, I, const N: usize>(
+    applied: &Applied<F, I, N>,
+    view: &View<F, D>,
     floor: Location<F>,
     tip: u64,
     limit: usize,
     out: &mut Vec<Location<F>>,
-) -> Location<F> {
-    Location::new(bitmap.fill_candidates(*floor, tip, limit, out))
+) -> Result<Location<F>, Stale> {
+    applied
+        .fill_candidates_at(view.generation, *view.size, *floor, tip, limit, out)
+        .map(Location::new)
 }
 
 /// Resolve `loc` to an op within the in-memory ancestor region
@@ -888,7 +915,7 @@ where
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
         db: &Db<F, E, C, I, H, U, N, S>,
         include_active_collision_siblings: bool,
-    ) -> Vec<Location<F>>
+    ) -> Result<Vec<Location<F>>, Stale>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -897,42 +924,54 @@ where
         // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
-        db.applied.with_index(|index| {
-            if self.ancestors.is_empty() {
-                for key in mutations.keys() {
-                    locations.extend(index.get(key).copied());
-                }
-            } else {
-                let mut ancestors =
-                    DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
-                for key in mutations.keys() {
-                    match ancestors.resolve(key) {
-                        Some(DiffEntry::Deleted { .. }) => {
-                            // Stale; handled via extract_parent_deleted_creates.
-                        }
-                        Some(DiffEntry::Active {
-                            loc, base_old_loc, ..
-                        }) => {
-                            locations.push(*loc);
-                            if include_active_collision_siblings {
+        let resolve = |key: &U::Key, locations: &mut Vec<Location<F>>| -> Result<(), Stale> {
+            match db
+                .applied
+                .resolve(self.view.generation, *self.view.size, key)?
+            {
+                Resolution::Exact(Some(loc)) => locations.push(loc),
+                Resolution::Exact(None) => {}
+                Resolution::Candidates(locs) => locations.extend(locs),
+            }
+            Ok(())
+        };
+        if self.ancestors.is_empty() {
+            for key in mutations.keys() {
+                resolve(key, &mut locations)?;
+            }
+        } else {
+            let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
+            for key in mutations.keys() {
+                match ancestors.resolve(key) {
+                    Some(DiffEntry::Deleted { .. }) => {
+                        // Stale; handled via extract_parent_deleted_creates.
+                    }
+                    Some(DiffEntry::Active {
+                        loc, base_old_loc, ..
+                    }) => {
+                        locations.push(*loc);
+                        if include_active_collision_siblings {
+                            // The ordered path's sibling pointers are rewritten against
+                            // fresh state; the live bucket is the source of truth here.
+                            db.applied.with_index(|index| {
                                 locations.extend(
                                     index
                                         .get(key)
                                         .copied()
-                                        .filter(move |loc| Some(*loc) != *base_old_loc),
-                                );
-                            }
+                                        .filter(|loc| Some(*loc) != *base_old_loc),
+                                )
+                            });
                         }
-                        None => {
-                            locations.extend(index.get(key).copied());
-                        }
+                    }
+                    None => {
+                        resolve(key, &mut locations)?;
                     }
                 }
             }
-        });
+        }
         db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
         locations.dedup();
-        locations
+        Ok(locations)
     }
 
     /// Extract keys that were deleted by a parent batch but are being
@@ -978,7 +1017,12 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        mut fill_candidates: impl FnMut(
+            Location<F>,
+            u64,
+            usize,
+            &mut Vec<Location<F>>,
+        ) -> Result<Location<F>, Stale>,
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
@@ -1059,7 +1103,7 @@ where
                         fixed_tip,
                         limit - candidates.len(),
                         &mut candidates,
-                    );
+                    )?;
                 }
                 if candidates.is_empty() {
                     break;
@@ -1085,98 +1129,110 @@ where
                         read_candidates.push(*candidate);
                     }
                 }
-                let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
-                    if read_candidates.is_empty() {
-                        (Vec::new(), Vec::new())
-                    } else {
-                        // Batch-read candidates: page-cache hits are served by one batched read,
-                        // disk misses are fetched concurrently. Prefetched shards enter as the
-                        // reader probed them, ahead of the live suffix's read.
-                        let live = &read_candidates[pf_count..];
-                        let mut resolved = pf_shards;
-                        if !live.is_empty() {
-                            resolved.extend(self.read_ops_sharded(live, &ops, &db.log).await?);
-                        }
+                let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) = if read_candidates
+                    .is_empty()
+                {
+                    (Vec::new(), Vec::new())
+                } else {
+                    // Batch-read candidates: page-cache hits are served by one batched read,
+                    // disk misses are fetched concurrently. Prefetched shards enter as the
+                    // reader probed them, ahead of the live suffix's read.
+                    let live = &read_candidates[pf_count..];
+                    let mut resolved = pf_shards;
+                    if !live.is_empty() {
+                        resolved.extend(self.read_ops_sharded(live, &ops, &db.log).await?);
+                    }
 
-                        // Classification is the first consumer of the sorted diff. By now the
-                        // sort has overlapped the fill and read above.
-                        if let Some(job) = diff_sort.take() {
-                            diff = job.await;
-                        }
+                    // Classification is the first consumer of the sorted diff. By now the
+                    // sort has overlapped the fill and read above.
+                    if let Some(job) = diff_sort.take() {
+                        diff = job.await;
+                    }
 
-                        // Classify read candidates against the pre-raise state (see
-                        // [`FloorOutcome`]). Revalidation is required even for candidates whose
-                        // committed bitmap bit is set: an uncommitted ancestor diff may supersede
-                        // the committed location, and that is not reflected in the bitmap.
-                        let classify = |candidate: Location<F>, op: &Operation<F, U>| {
-                            let Some(key) = op.key() else {
-                                return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
-                            };
-                            match diff.binary_search_by(|(k, _)| k.cmp(key)) {
-                                Ok(idx) => {
-                                    let entry = &diff[idx].1;
+                    // Classify read candidates against the pre-raise state (see
+                    // [`FloorOutcome`]). Revalidation is required even for candidates whose
+                    // committed bitmap bit is set: an uncommitted ancestor diff may supersede
+                    // the committed location, and that is not reflected in the bitmap.
+                    let classify = |candidate: Location<F>,
+                                    op: &Operation<F, U>|
+                     -> Result<FloorOutcome<F>, Stale> {
+                        let Some(key) = op.key() else {
+                            // CommitFloor and other non-keyed ops.
+                            return Ok(FloorOutcome::Inactive);
+                        };
+                        Ok(match diff.binary_search_by(|(k, _)| k.cmp(key)) {
+                            Ok(idx) => {
+                                let entry = &diff[idx].1;
+                                if entry.loc() == Some(candidate) {
+                                    FloorOutcome::MoveExisting {
+                                        idx,
+                                        base_old_loc: entry.base_old_loc(),
+                                    }
+                                } else {
+                                    FloorOutcome::Inactive
+                                }
+                            }
+                            Err(_) => match resolve_in_ancestors(&self.ancestors, key) {
+                                Some(entry) => {
                                     if entry.loc() == Some(candidate) {
-                                        FloorOutcome::MoveExisting {
-                                            idx,
+                                        FloorOutcome::MoveNew {
                                             base_old_loc: entry.base_old_loc(),
                                         }
                                     } else {
                                         FloorOutcome::Inactive
                                     }
                                 }
-                                Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
-                                    || {
-                                        let active = db.applied.with_index(|index| {
-                                            index.get(key).any(|&l| l == candidate)
-                                        });
-                                        if active {
-                                            FloorOutcome::MoveNew {
-                                                base_old_loc: Some(candidate),
-                                            }
-                                        } else {
-                                            FloorOutcome::Inactive
+                                None => {
+                                    let active = match db.applied.resolve(
+                                        self.view.generation,
+                                        *self.view.size,
+                                        key,
+                                    )? {
+                                        Resolution::Exact(active) => active == Some(candidate),
+                                        Resolution::Candidates(locs) => locs.contains(&candidate),
+                                    };
+                                    if active {
+                                        FloorOutcome::MoveNew {
+                                            base_old_loc: Some(candidate),
                                         }
-                                    },
-                                    |entry| {
-                                        if entry.loc() == Some(candidate) {
-                                            FloorOutcome::MoveNew {
-                                                base_old_loc: entry.base_old_loc(),
-                                            }
-                                        } else {
-                                            FloorOutcome::Inactive
-                                        }
-                                    },
-                                ),
-                            }
-                        };
+                                    } else {
+                                        FloorOutcome::Inactive
+                                    }
+                                }
+                            },
+                        })
+                    };
 
-                        // Classification is already partitioned by candidate chunk, so use
-                        // manual strategy execution and keep each location aligned with the
-                        // operation resolved for the same filtered candidate. Chunks are
-                        // subdivided past the pool parallelism because the snapshot probes
-                        // that dominate classification have variable latency, so finer
-                        // chunks balance the tail.
-                        let manual = strategy.manual();
-                        let target = read_candidates
-                            .len()
-                            .div_ceil(manual.parallelism() * 4)
-                            .max(1);
-                        let mut chunks: Vec<CandidateChunk<'_, F, U>> = Vec::new();
-                        let mut offset = 0;
-                        for chunk in &resolved {
-                            let locs = &read_candidates[offset..offset + chunk.len()];
-                            offset += chunk.len();
-                            chunks.extend(locs.chunks(target).zip(chunk.chunks(target)));
-                        }
-                        let outcomes = manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                    // Classification is already partitioned by candidate chunk, so use
+                    // manual strategy execution and keep each location aligned with the
+                    // operation resolved for the same filtered candidate. Chunks are
+                    // subdivided past the pool parallelism because the snapshot probes
+                    // that dominate classification have variable latency, so finer
+                    // chunks balance the tail.
+                    let manual = strategy.manual();
+                    let target = read_candidates
+                        .len()
+                        .div_ceil(manual.parallelism() * 4)
+                        .max(1);
+                    let mut chunks: Vec<CandidateChunk<'_, F, U>> = Vec::new();
+                    let mut offset = 0;
+                    for chunk in &resolved {
+                        let locs = &read_candidates[offset..offset + chunk.len()];
+                        offset += chunk.len();
+                        chunks.extend(locs.chunks(target).zip(chunk.chunks(target)));
+                    }
+                    let outcomes: Vec<Vec<FloorOutcome<F>>> = manual
+                        .map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
                             chunk_locs
                                 .iter()
                                 .zip(chunk_ops)
                                 .map(|(loc, op)| classify(*loc, op))
-                                .collect()
-                        });
-                        (resolved, outcomes)
-                    };
+                                .collect::<Result<Vec<_>, Stale>>()
+                        })
+                        .into_iter()
+                        .collect::<Result<_, Stale>>()?;
+                    (resolved, outcomes)
+                };
 
                 // Apply in candidate order, moving active ops to the tip. `read_candidates`
                 // preserves candidate order, so a candidate that does not match the next
@@ -1268,18 +1324,16 @@ where
 
         // Leaf and node hashing dominate merkleization, so run them as one job on the
         // strategy instead of occupying the calling task (see `Journal::merkleize`).
-        // Hash against the chain-base mem capture: exact under concurrent applies and
-        // prunes. A chain whose committed prefix was dropped after applying needs the
-        // prefix's nodes, which exist only in the live tree; that pattern requires the
-        // owner to have applied the prefix, so the live read is safe there.
-        let mem = if self.db_state.size > self.view.size {
-            db.log.mem()
-        } else {
-            Arc::clone(&self.view.mem)
-        };
+        // Hash against the read view's mem capture: the chain base normally, so the
+        // job is exact under concurrent applies and prunes.
         let (journal, root) = db
             .log
-            .merkleize(self.journal_batch, ops, inactive_peaks, mem)
+            .merkleize(
+                self.journal_batch,
+                ops,
+                inactive_peaks,
+                Arc::clone(&self.view.mem),
+            )
             .await?;
         if let Some(job) = diff_merge.take() {
             diff = job.await;
@@ -1582,9 +1636,10 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let view = self.batch.committed_read_view(db);
         let (batch, staged_updates, prefetched) = self
             .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
+                fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
             })
             .await?;
         batch
@@ -1593,7 +1648,9 @@ where
                 metadata,
                 staged_updates,
                 Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+                |floor, tip, limit, out| {
+                    fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
+                },
             )
             .await
     }
@@ -1620,7 +1677,12 @@ where
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        mut fill_candidates: impl FnMut(
+            Location<F>,
+            u64,
+            usize,
+            &mut Vec<Location<F>>,
+        ) -> Result<Location<F>, Stale>,
     ) -> Result<
         (
             UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>,
@@ -1663,15 +1725,16 @@ where
         // source, and the step bound, none of which depend on the resolution. The batch
         // moves into the job, so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
+        let view = self.batch.committed_read_view(db);
         let resolve = db
             .strategy()
             .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
-        let committed_tip = bitmap::Readable::<N>::len(&*db.bitmap);
+        let committed_tip = *view.size;
         let mut locs: Vec<Location<F>> = Vec::with_capacity(steps_bound);
-        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs);
+        let next_scan = fill_candidates(scan_from, committed_tip, steps_bound, &mut locs)?;
         let raw: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let read = db.log.read_many_sharded(&raw).await;
 
@@ -1724,10 +1787,11 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
+        let view = self.batch.committed_read_view(db);
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
             .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
+                fill_candidates_at(&db.applied, &view, floor, tip, limit, out)
             })
             .await
     }
@@ -1779,9 +1843,11 @@ where
         )
     }
 
-    /// Read unresolved slots from the committed DB and merge them back into `results`.
+    /// Read unresolved slots from the committed DB as of `view` and merge them back
+    /// into `results`.
     async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
+        view: &View<F, H::Digest>,
         db: &Db<F, E, C, I, H, U, N, S>,
         results: &mut [Option<U::Value>],
         map: impl Fn(&U, Location<F>) -> T + Send + Sync,
@@ -1797,11 +1863,42 @@ where
         }
 
         let db_keys: Vec<_> = unresolved.iter().map(|(_, key)| *key).collect();
-        let db_results = db.get_many_map(&db_keys, map).await?;
+        let db_results = db.get_many_map_at(view, &db_keys, map).await?;
         for ((slot, _), result) in unresolved.into_iter().zip(db_results) {
             results[slot] = result.map(|value| apply(slot, value));
         }
         Ok(())
+    }
+
+    /// The view committed reads resolve against: the chain base normally, or a fresh
+    /// view of the effective boundary when a committed prefix was dropped after
+    /// applying (see [`Merkleizer::pin_read_view`]).
+    fn committed_read_view<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> View<F, H::Digest>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let view = self.base.view();
+        let oldest_base = self.base.parent().map(|parent| {
+            parent
+                .ancestors()
+                .last()
+                .map_or(parent.bounds.base, |oldest| oldest.bounds.base)
+        });
+        let boundary = batch_chain::effective_boundary(self.base.db(), oldest_base);
+        if boundary.size > view.size {
+            View {
+                generation: db.applied.generation(),
+                size: boundary.size,
+                mem: db.log.mem(),
+            }
+        } else {
+            view
+        }
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -1840,14 +1937,18 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
+        let view = self.committed_read_view(db);
         if self.reads_committed_only() {
-            return db.get_many(keys).await;
+            return db
+                .get_many_map_at(&view, keys, |data, _| data.value().clone())
+                .await;
         }
 
         let (mut results, unresolved) =
             self.resolve_uncommitted_reads(keys, db.strategy(), |_, _| {});
         Self::fill_committed_reads(
             unresolved,
+            &view,
             db,
             &mut results,
             |data, _| data.value().clone(),
@@ -1941,6 +2042,7 @@ where
             });
         Self::fill_committed_reads(
             unresolved,
+            &self.committed_read_view(db),
             db,
             &mut results,
             |data, loc| (data.value().clone(), loc, data.cached()),
@@ -1984,12 +2086,13 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let view = self.committed_read_view(db);
         self.merkleize_with_floor_scan(
             db,
             metadata,
             StagedUpdates::<F, update::Unordered<K, V>>::new(),
             None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            |floor, tip, limit, out| fill_candidates_at(&db.applied, &view, floor, tip, limit, out),
         )
         .await
     }
@@ -2012,17 +2115,24 @@ where
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        fill_candidates: impl FnMut(
+            Location<F>,
+            u64,
+            usize,
+            &mut Vec<Location<F>>,
+        ) -> Result<Location<F>, Stale>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (mut mutations, m) = self.into_parts();
+        let (mut mutations, mut m) = self.into_parts();
+        m.pin_read_view(db);
+        let m = m;
 
         // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, false);
+        let locations = m.gather_existing_locations(&mutations, db, false)?;
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
         // Generate user mutation operations.
@@ -2202,11 +2312,12 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
+        let view = self.committed_read_view(db);
         self.merkleize_with_floor_scan(
             db,
             metadata,
             StagedUpdates::<F, update::Ordered<K, V>>::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            |floor, tip, limit, out| fill_candidates_at(&db.applied, &view, floor, tip, limit, out),
         )
         .await
     }
@@ -2227,17 +2338,24 @@ where
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
-        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        fill_candidates: impl FnMut(
+            Location<F>,
+            u64,
+            usize,
+            &mut Vec<Location<F>>,
+        ) -> Result<Location<F>, Stale>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (mut mutations, m) = self.into_parts();
+        let (mut mutations, mut m) = self.into_parts();
+        m.pin_read_view(db);
+        let m = m;
 
         // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, true);
+        let locations = m.gather_existing_locations(&mutations, db, true)?;
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
@@ -3119,19 +3237,22 @@ mod tests {
     use super::*;
     use crate::{
         mmr,
-        qmdb::any::{
-            BITMAP_CHUNK_BYTES,
-            ordered::fixed::Db as OrderedFixedDb,
-            test::{colliding_digest, fixed_db_config},
-            unordered::fixed::Db as UnorderedFixedDb,
-            value::FixedEncoding,
+        qmdb::{
+            any::{
+                BITMAP_CHUNK_BYTES,
+                ordered::fixed::Db as OrderedFixedDb,
+                test::{colliding_digest, fixed_db_config},
+                unordered::fixed::Db as UnorderedFixedDb,
+                value::FixedEncoding,
+            },
+            bitmap::Shared,
         },
         translator::OneCap,
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::test_rng;
+    use commonware_utils::{bitmap, test_rng};
     use rand::RngExt as _;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -3550,11 +3671,17 @@ mod tests {
                 }
 
                 for limit in 1..=expected.len().max(1) + 1 {
-                    let mut actual = Vec::new();
+                    let mut actual: Vec<Location<mmr::Family>> = Vec::new();
                     let mut scan = loc(start);
                     loop {
-                        let mut batch = Vec::new();
-                        scan = fill_candidates(&bitmap, scan, tip, limit, &mut batch);
+                        let mut batch: Vec<Location<mmr::Family>> = Vec::new();
+                        scan = Location::new(crate::qmdb::bitmap::fill_from(
+                            &*bitmap.read(),
+                            *scan,
+                            tip,
+                            limit,
+                            &mut batch,
+                        ));
                         if batch.is_empty() {
                             break;
                         }

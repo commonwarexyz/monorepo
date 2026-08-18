@@ -2047,15 +2047,19 @@ pub(crate) mod test {
                 }
             }
 
-            // Prune begins a new incarnation: every old view is stale, a fresh one answers.
+            // Prune is physical GC: views survive it. A read whose as-of location was
+            // pruned errors cleanly; everything else keeps answering exactly.
             let db = db.commit().await.unwrap();
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
-            for (view, _) in &checkpoints {
-                assert!(matches!(
-                    db.get_at(view, &keys[0]).await,
-                    Err(crate::qmdb::Error::Stale(_))
-                ));
+            for (round, (view, model)) in checkpoints.iter().enumerate() {
+                for k in keys.iter().chain([&absent]) {
+                    match db.get_at(view, k).await {
+                        Ok(v) => assert_eq!(v, model.get(k).cloned(), "round {round} key {k:?}"),
+                        Err(crate::qmdb::Error::Journal(JournalError::ItemPruned(_))) => {}
+                        Err(e) => panic!("round {round} key {k:?}: {e}"),
+                    }
+                }
             }
             let fresh = db.view();
             let model = &checkpoints.last().unwrap().1;
@@ -2077,6 +2081,67 @@ pub(crate) mod test {
             assert_eq!(db.get_at(&tip, &keys[0]).await.unwrap(), Some(value(99, 0)));
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// The crash-class pin: a batch forked before a sibling apply reads and merkleizes
+    /// exactly as if the apply never happened. On the old live-read design this
+    /// scenario panicked (index out of bounds, missing Merkle nodes) or tore reads.
+    #[test_traced]
+    fn batch_reads_and_merkleizes_across_a_sibling_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let val = |i: u64| Sha256::hash(&[&(i + 500_000).to_be_bytes()]);
+
+            let mut roots = Vec::new();
+            let mut values = Vec::new();
+            for straddle in [false, true] {
+                let label = if straddle { "straddle" } else { "control" };
+                let mut db = create_test_db(context.child(label)).await;
+
+                // Identical seed.
+                let mut seed = db.new_batch();
+                for i in 0u64..50 {
+                    seed = seed.write(key(i), Some(val(i)));
+                }
+                let seed = seed.merkleize(&db, None).await.unwrap();
+                (db, _) = db.apply_batch(seed).await.unwrap();
+                let db = db.commit().await.unwrap();
+
+                // Fork the observed batch: writes over some keys, reads over others.
+                let batch = db
+                    .new_batch()
+                    .write(key(0), Some(val(1_000)))
+                    .write(key(60), Some(val(1_060)));
+
+                // In the straddle run, a sibling rewrites overlapping keys, deletes one,
+                // and is applied and committed while `batch` is in flight.
+                let db = if straddle {
+                    let mut sibling = db.new_batch();
+                    for i in 0u64..50 {
+                        sibling = sibling.write(key(i), Some(val(i + 2_000)));
+                    }
+                    sibling = sibling.write(key(5), None);
+                    let sibling = sibling.merkleize(&db, None).await.unwrap();
+                    let (db, _) = db.apply_batch(sibling).await.unwrap();
+                    db.commit().await.unwrap()
+                } else {
+                    db
+                };
+
+                // Reads through the batch see only its chain-base state.
+                let read_keys = [key(0), key(1), key(5), key(60), key(99)];
+                let read_refs: Vec<_> = read_keys.iter().collect();
+                values.push(batch.get_many(&read_refs, &db).await.unwrap());
+
+                // Merkleization is exact for the chain base.
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                roots.push(merkleized.root());
+                db.destroy().await.unwrap();
+            }
+            assert_eq!(values[0], values[1]);
+            assert_eq!(roots[0], roots[1]);
         });
     }
 }

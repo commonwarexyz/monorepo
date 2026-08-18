@@ -69,7 +69,6 @@ struct ApplyUndo<F: Family, const N: usize> {
     before: Generation,
     keys: UndoKeys<F>,
     /// Pre-images of the below-boundary bitmap chunks this apply dirtied.
-    #[allow(dead_code)] // consumed once merkleize reads chunks as-of
     chunks: Vec<(usize, [u8; N])>,
 }
 
@@ -81,7 +80,6 @@ impl<F: Family, const N: usize> ApplyUndo<F, N> {
             .map(|i| self.keys[i].1)
     }
 
-    #[allow(dead_code)] // consumed once merkleize reads chunks as-of
     fn chunk(&self, idx: usize) -> Option<&[u8; N]> {
         self.chunks
             .binary_search_by_key(&idx, |(i, _)| *i)
@@ -240,9 +238,18 @@ impl<F: Family, I, const N: usize> Applied<F, I, N> {
         (out, state.generation)
     }
 
-    /// Begin a new incarnation (rewind, prune, sync handoff): clear the undo window,
-    /// bump the epoch, and hand the closure raw access to rebuild the index and bitmap.
-    /// Views minted under the old epoch become permanently stale.
+    /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Physical GC,
+    /// not a logical state transition: the generation does not move and views survive.
+    /// Sound because pruning never passes the inactivity floor and as-of reads of a
+    /// pruned chunk answer from undo pre-images or (provably all-zero) default chunks.
+    pub(crate) fn prune(&self, prune_loc: u64) {
+        let state = self.inner.write();
+        state.bitmap.write().prune_to_bit(prune_loc);
+    }
+
+    /// Begin a new incarnation (rewind, sync handoff): clear the undo window, bump the
+    /// epoch, and hand the closure raw access to rebuild the index and bitmap. Views
+    /// minted under the old epoch become permanently stale.
     pub(crate) fn commit_epoch<R>(
         &self,
         f: impl FnOnce(&mut I, &mut bitmap::Prunable<N>) -> R,
@@ -343,24 +350,167 @@ impl<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize> Applied<
         ))
     }
 
+    /// Resolve many keys as of `view` under one read hold, visiting each key's
+    /// candidate locations as `(key index, location)`. Undo-record answers and live
+    /// candidates both report through `visit`; absent keys report nothing.
+    pub(crate) fn resolve_many<K: Key>(
+        &self,
+        view: Generation,
+        size: u64,
+        keys: &[&K],
+        mut visit: impl FnMut(usize, Location<F>),
+    ) -> Result<(), Stale> {
+        let state = self.read();
+        if !Self::covers(&state, view) {
+            return Err(Stale);
+        }
+        'keys: for (key_idx, key) in keys.iter().enumerate() {
+            for undo in &state.window {
+                if undo.before.sequence < view.sequence {
+                    continue;
+                }
+                if let Some(loc) = undo.resolve(key.as_ref()) {
+                    if let Some(loc) = loc {
+                        visit(key_idx, loc);
+                    }
+                    continue 'keys;
+                }
+            }
+            for loc in state.index.get(key.as_ref()) {
+                if **loc < size {
+                    visit(key_idx, *loc);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The content of bitmap chunk `idx` as of `view`. Bits at or beyond the view's
     /// size may reflect later appends; consumers must bound iteration by the view's
     /// size, never by chunk content.
-    #[allow(dead_code)] // consumed once merkleize reads chunks as-of
+    #[allow(dead_code)] // consumed once the current family reads chunks as-of
     pub(crate) fn chunk(&self, view: Generation, idx: usize) -> Result<[u8; N], Stale> {
         let state = self.read();
         if !Self::covers(&state, view) {
             return Err(Stale);
         }
-        for undo in &state.window {
-            if undo.before.sequence < view.sequence {
-                continue;
-            }
-            if let Some(chunk) = undo.chunk(idx) {
-                return Ok(*chunk);
-            }
+        Ok(live_or_zero_chunk(&state, view, idx))
+    }
+}
+
+impl<F: Family, I, const N: usize> Applied<F, I, N> {
+    /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)` as of
+    /// `view`, holding one read guard for the whole batch. Returns the next `scan_from`.
+    ///
+    /// The candidate sequence is what [`crate::qmdb::bitmap::fill_from`] would produce
+    /// over the bitmap at the view's generation, truncated to the view's size.
+    pub(crate) fn fill_candidates_at<T: From<u64>>(
+        &self,
+        view: Generation,
+        size: u64,
+        scan_from: u64,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> Result<u64, Stale> {
+        let state = self.read();
+        if !Self::covers(&state, view) {
+            return Err(Stale);
         }
-        Ok(bitmap::Readable::<N>::get_chunk(&*state.bitmap, idx))
+        let bitmap = state.bitmap.read();
+        let chunks = AsOfChunks {
+            state: &state,
+            bitmap: &bitmap,
+            view,
+            size,
+        };
+        Ok(crate::qmdb::bitmap::fill_from(
+            &chunks, scan_from, tip, limit, out,
+        ))
+    }
+}
+
+/// The oldest undo record at or after `view` that captured chunk `idx`, if any.
+fn window_chunk<F: Family, I, const N: usize>(
+    state: &State<F, I, N>,
+    view: Generation,
+    idx: usize,
+) -> Option<[u8; N]> {
+    state
+        .window
+        .iter()
+        .filter(|undo| undo.before.sequence >= view.sequence)
+        .find_map(|undo| undo.chunk(idx).copied())
+}
+
+/// Chunk `idx` as of `view`: undo pre-image, live chunk, or all-zero for a pruned chunk
+/// with no pre-image. The zero answer is exact: pruning never passes the inactivity
+/// floor, so a bit set at the view's generation in a since-pruned chunk was cleared by a
+/// later apply, and that apply captured the chunk's pre-image.
+fn live_or_zero_chunk<F: Family, I, const N: usize>(
+    state: &State<F, I, N>,
+    view: Generation,
+    idx: usize,
+) -> [u8; N] {
+    if let Some(chunk) = window_chunk(state, view, idx) {
+        return chunk;
+    }
+    if idx < bitmap::Readable::<N>::pruned_chunks(&*state.bitmap) {
+        return [0; N];
+    }
+    bitmap::Readable::<N>::get_chunk(&*state.bitmap, idx)
+}
+
+/// Bitmap chunks as of a view: undo pre-images first, live chunks otherwise, with the
+/// length frozen at the view's size. Bits at or beyond that size carry no contract;
+/// consumers bound iteration by `len()`. Constructed under the applied read hold, so the
+/// bitmap cannot move for its lifetime.
+struct AsOfChunks<'a, F: Family, I, const N: usize> {
+    state: &'a State<F, I, N>,
+    bitmap: &'a bitmap::Prunable<N>,
+    view: Generation,
+    size: u64,
+}
+
+impl<F: Family, I, const N: usize> bitmap::Readable<N> for AsOfChunks<'_, F, I, N> {
+    fn complete_chunks(&self) -> usize {
+        (self.size / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize
+    }
+
+    fn get_chunk(&self, idx: usize) -> [u8; N] {
+        if let Some(chunk) = window_chunk(self.state, self.view, idx) {
+            return chunk;
+        }
+        if idx < self.bitmap.pruned_chunks() {
+            return [0; N];
+        }
+        *self.bitmap.get_chunk(idx)
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        let bits = self.size % bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+        let idx = if bits == 0 && self.size > 0 {
+            self.complete_chunks() - 1
+        } else {
+            self.complete_chunks()
+        };
+        let bits = if bits == 0 && self.size > 0 {
+            bitmap::Prunable::<N>::CHUNK_SIZE_BITS
+        } else {
+            bits
+        };
+        (bitmap::Readable::<N>::get_chunk(self, idx), bits)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        // Never clamp scans to the live pruned boundary: a view may scan from a floor
+        // that has since been pruned past, and those chunks answer exactly (pre-image
+        // or zero).
+        0
+    }
+
+    fn len(&self) -> u64 {
+        self.size
     }
 }
 

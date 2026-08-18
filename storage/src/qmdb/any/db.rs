@@ -300,6 +300,61 @@ where
         Ok(results)
     }
 
+    /// Like [`Self::get_many_map`] but as of `view`: candidate locations come from the
+    /// undo-window resolution instead of the live index, so the results are exact under
+    /// concurrent applies.
+    pub(crate) async fn get_many_map_at<T: Send>(
+        &self,
+        view: &super::view::View<F, H::Digest>,
+        keys: &[&U::Key],
+        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
+    ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.metrics.lookups_requested.inc_by(keys.len() as u64);
+
+        // Collect candidates under one hold, then serve page-cache hits and fall back to
+        // one batched read, mirroring `get_many_map`.
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        self.applied
+            .resolve_many(view.generation, *view.size, keys, |key_idx, loc| {
+                candidates.push((key_idx, *loc))
+            })?;
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&candidates);
+
+        let served = self.log.try_read_many_sync(&positions);
+        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
+        let mut misses: Vec<(usize, u64)> = Vec::new();
+        Self::match_read_ops(
+            keys,
+            &candidates,
+            &positions,
+            |i| served[i].as_ref(),
+            &map,
+            &mut results,
+            |key_idx, pos| misses.push((key_idx, pos)),
+        );
+        if misses.is_empty() {
+            return Ok(results);
+        }
+
+        misses.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&misses);
+        let ops = self.log.read_many(&positions).await?;
+        Self::match_read_ops(
+            keys,
+            &misses,
+            &positions,
+            |i| Some(&ops[i]),
+            &map,
+            &mut results,
+            |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
+        );
+        Ok(results)
+    }
+
     /// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
     /// keys. Returns per-key results plus `(base + key index, position)` pairs for positions
     /// the cache could not serve. A miss is recorded even when its key already resolved so the
@@ -421,11 +476,10 @@ where
     Operation<F, U>: Codec,
 {
     /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
-    /// inactivity-floor check. Begins a new incarnation: views minted before the prune
-    /// become stale.
+    /// inactivity-floor check. Views survive: pruning is physical GC, not a logical
+    /// state transition.
     pub(crate) fn prune_bitmap(&mut self, prune_loc: Location<F>) {
-        self.applied
-            .commit_epoch(|_, bitmap| bitmap.prune_to_bit(*prune_loc));
+        self.applied.prune(*prune_loc);
     }
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
