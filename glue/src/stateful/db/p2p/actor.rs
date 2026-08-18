@@ -92,7 +92,7 @@ where
     context: ContextCell<E>,
     config: Config<P, D, B>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, M>>,
-    subscriber: Subscriber<S, M>,
+    captures: Subscriber<S, M>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, M>,
 }
@@ -108,11 +108,11 @@ where
     M: Source<Family = F> + Clone + Send + Sync + 'static,
     Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
-    /// Create a new resolver actor and mailbox, serving from `subscriber`.
+    /// Create a new resolver actor and mailbox, serving from `captures`.
     pub fn new(
         context: E,
         cfg: Config<P, D, B>,
-        subscriber: Subscriber<S, M>,
+        captures: Subscriber<S, M>,
     ) -> (Self, SyncMailbox<F, M>) {
         let metrics = ResolverMetrics::new(&context);
         let (mailbox_tx, mailbox_rx) =
@@ -122,7 +122,7 @@ where
             context: ContextCell::new(context),
             config: cfg,
             mailbox_rx,
-            subscriber,
+            captures,
             metrics,
             pending: BTreeMap::new(),
         };
@@ -334,7 +334,7 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let Some(source) = self.subscriber.latest() else {
+        let Some(source) = self.captures.latest() else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -420,7 +420,7 @@ mod tests {
     >;
 
     /// A subscriber over a closed cell. Deliver-path tests never produce.
-    fn closed_reader(context: &deterministic::Context) -> Subscriber<Arc<TestDb>> {
+    fn closed_subscriber(context: &deterministic::Context) -> Subscriber<Arc<TestDb>> {
         Publisher::<Arc<TestDb>>::new(context).1
     }
 
@@ -481,7 +481,7 @@ mod tests {
         }
     }
 
-    async fn init_reader(
+    async fn init_subscriber(
         context: deterministic::Context,
         suffix: &str,
     ) -> (Publisher<Arc<TestDb>>, Subscriber<Arc<TestDb>>, Location) {
@@ -525,7 +525,7 @@ mod tests {
     fn produce_serves_from_the_source() {
         deterministic::Runner::default().start(|context| async move {
             let (_publisher, subscriber, size) =
-                init_reader(context.child("resolver_db"), "resolver-serves").await;
+                init_subscriber(context.child("resolver_db"), "resolver-serves").await;
             let (mut actor, _mailbox) =
                 TestActor::new(context.child("actor"), test_config(), subscriber);
 
@@ -543,7 +543,7 @@ mod tests {
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
             let (_publisher, subscriber, size) =
-                init_reader(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
+                init_subscriber(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let (mut actor, _mailbox) =
                 TestActor::new(context.child("actor"), test_config(), subscriber);
 
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn deliver_with_dropped_response_receiver_is_treated_as_valid() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn deliver_with_rejected_subscriber_blocks_peer() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn deliver_ignores_dropped_subscriber_approval() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn failed_then_deliver_clears_pending_and_allows_retry() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn get_operations_refetches_when_pending_subscribers_are_closed() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn deliver_rejects_answer_shaped_unlike_its_question() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = Request::Boundary {
                 size: Location::new(1),
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn cancel_operations_cancels_pruned_request() {
         deterministic::Runner::default().start(|context| async move {
-            let subscriber = closed_reader(&context);
+            let subscriber = closed_subscriber(&context);
             let (mut actor, _mailbox) = TestActor::new(context, test_config(), subscriber);
             let request = test_request_at(Location::new(1));
 

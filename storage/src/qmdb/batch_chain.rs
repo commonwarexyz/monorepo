@@ -145,7 +145,9 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// it would mix two forks, so the read is refused with [`Error::StaleRead`].
     ///
     /// Every member state is reachable only by applying this chain's own batches, whose
-    /// diffs shadow every key they touched, so a read that passes this check is exact.
+    /// diffs shadow every key they touched, so a read that passes this check is exact
+    /// (assuming the standing contract that unapplied ancestors are kept alive until
+    /// their descendants are merkleized).
     /// Membership compares full commitments (size and root), never sizes alone: a sibling
     /// fork can commit the same operation count with different contents.
     pub(crate) fn on_chain<'a, T>(

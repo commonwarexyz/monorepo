@@ -18,7 +18,7 @@ use crate::{
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
-        batch_chain::Bounds,
+        batch_chain::{Bounds, OnChain},
         bitmap::{Shared, fill_from},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
@@ -312,20 +312,14 @@ where
 /// other words, every successful [`apply_batch`](super::db::Db::apply_batch) since this batch was
 /// merkleized must have applied an ancestor of this batch.
 ///
-/// Once a non-ancestor batch is applied, this batch and all of its descendants become invalid
-/// objects. The library does not guard against continued use after that point.
+/// Once a non-ancestor batch is applied, this batch and all of its descendants are stale:
+/// reading through or merkleizing them refuses with [`Error::StaleRead`], and applying them
+/// is rejected with [`Error::StaleBatch`] without mutating committed state (see
+/// [`crate::qmdb::batch_chain`]).
 ///
-/// Applying an invalid batch is caught by the any-layer authenticated lineage check and returns
-/// [`Error::StaleBatch`] without mutating committed state, so `apply_batch` itself cannot corrupt
-/// the DB.
-///
-/// Rules of thumb:
-/// - Drop any `Arc<MerkleizedBatch>` you no longer intend to apply.
-/// - Extending a batch after `apply_batch` has consumed it (building a child off the just-applied
-///   parent) is safe. The committed bitmap now equals the parent's post-apply state, so child reads
-///   are consistent.
-/// - Extending a batch after a different branch has been applied is not safe. Do not call `get`,
-///   `new_batch`, or `apply_batch` on that branch again.
+/// Extending a batch after `apply_batch` has consumed it (building a child off the
+/// just-applied parent) is valid. The committed bitmap now equals the parent's post-apply
+/// state, so child reads are consistent.
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
@@ -542,7 +536,8 @@ where
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
+        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -600,7 +595,8 @@ where
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
+        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -646,7 +642,8 @@ where
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
+        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -691,7 +688,8 @@ where
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let current_db = inner.bounds().on_chain(db, db.any.commitment())?;
+        compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -804,9 +802,10 @@ where
 ///
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
+#[allow(clippy::type_complexity)]
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    current_db: OnChain<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
@@ -946,9 +945,10 @@ where
 
 /// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
 ///
-/// The chain terminates in a `Base` that references the shared committed bitmap. No validity
-/// check is performed. Callers must ensure they only read through batches whose chains are
-/// still valid prefixes of committed state (see [`Shared`]'s docs).
+/// The chain terminates in a `Base` that references the shared committed bitmap. This enum
+/// performs no validity check of its own; its committed-read consumers run behind the
+/// batch-chain gate (see [`crate::qmdb::batch_chain`]), which refuses stale chains before
+/// they read through it.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the committed bitmap.
@@ -1114,8 +1114,8 @@ where
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
     ///
-    /// This is only valid while `self` remains on the committed prefix. If a non-ancestor batch
-    /// has been applied since `self` was merkleized, do not read through it.
+    /// Refuses with [`Error::StaleRead`] if a non-ancestor batch was applied since `self`
+    /// was merkleized.
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
@@ -1162,8 +1162,9 @@ where
     /// Create an initial [`MerkleizedBatch`] from the current committed DB state.
     ///
     /// The returned batch is rooted at the current committed prefix, but it is not a persistent
-    /// snapshot across later divergent commits. If some other branch is applied afterward, this
-    /// batch is no longer valid and must not be read through, extended, or applied.
+    /// snapshot across later divergent commits. If some other branch is applied afterward,
+    /// reading through or extending this batch refuses with [`Error::StaleRead`] and applying
+    /// it is rejected with [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {

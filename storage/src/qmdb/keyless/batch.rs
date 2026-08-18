@@ -22,7 +22,9 @@ type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
-/// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`. Every method that reads the committed
+/// DB first checks that the database is on this chain's own states and refuses with
+/// [`crate::qmdb::Error::StaleRead`] otherwise (see [`crate::qmdb::batch_chain`]).
 pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
 where
     F: Family,
@@ -45,7 +47,9 @@ where
 }
 
 /// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [`UnmerkleizedBatch`].
+/// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
+/// [`crate::qmdb::Error::StaleRead`] once a batch from a different fork is applied
+/// (see [`crate::qmdb::batch_chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -218,6 +222,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.on_chain(db)?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -225,7 +230,6 @@ where
             locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
-        let db = self.on_chain(db)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -389,6 +393,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -396,7 +401,6 @@ where
             locs.is_sorted_by(|a, b| a < b),
             "locations must be strictly increasing"
         );
-        let db = self.bounds.on_chain(db, db.commitment())?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();

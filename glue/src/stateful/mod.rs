@@ -100,6 +100,7 @@ use commonware_storage::{merkle::Family, qmdb};
 use db::{DatabaseSet, MerkleizedOf, ReadersOf, UnmerkleizedOf};
 use rand_core::Rng;
 use std::{convert::Infallible, future::Future};
+use thiserror::Error;
 
 mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
@@ -115,16 +116,20 @@ mod tests;
 /// Implementations of [`Application`] propagate storage errors from batch operations
 /// with `?` and never interpret them. The wrapper is the only layer that knows what
 /// each case means for the block being executed.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ExecutionError {
     /// Applied state left the executing block's branch: a competing block was
     /// finalized mid-execution and the batches refused their next read. The wrapper
     /// re-checks the block against the new canonical state.
+    #[error("stale execution: a competing block was finalized")]
     Stale,
-    /// The runtime is shutting down; the work is discarded.
+    /// The runtime is shutting down; the work is discarded. (A closed channel inside
+    /// a storage backend is indistinguishable from shutdown and lands here too.)
+    #[error("runtime shutting down")]
     Shutdown,
-    /// Any other storage failure. Storage errors are unrecoverable, so the wrapper
-    /// treats this as fatal.
+    /// Any other storage failure. Storage errors are unrecoverable: verification and
+    /// finalization panic on this, and proposals decline.
+    #[error("storage failure: {0}")]
     Fatal(String),
 }
 
@@ -263,7 +268,7 @@ where
     /// and retrying must not violate invariants or lose durable progress.
     ///
     /// Storage errors from batch operations are propagated as [`ExecutionError`],
-    /// never interpreted (see [`verify`](Self::verify)).
+    /// never interpreted. The wrapper declines the proposal on any error.
     fn propose(
         &mut self,
         context: (E, Self::Context),

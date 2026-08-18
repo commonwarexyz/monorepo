@@ -1519,7 +1519,7 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let (_mutator, reader) = split(db);
+            let (_writer, reader) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
@@ -1613,7 +1613,7 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let (_mutator, reader) = split(db);
+            let (_writer, reader) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);

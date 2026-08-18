@@ -589,7 +589,7 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            let (_mutator, snapshot, durability) = finalize(writer, merkleized).await;
+            let (_writer, snapshot, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
 
             let db = reader.read().await;
@@ -613,7 +613,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (_mutator, reader) = split(db);
+            let (_writer, reader) = split(db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
                 .await

@@ -1637,6 +1637,59 @@ mod tests {
         });
     }
 
+    /// A surviving child chain merkleizes across a prune whose floor passed the chain
+    /// base, including the grafted and bitmap layers.
+    #[test_traced]
+    fn test_current_merkleize_across_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("across-prune", &ctx),
+            )
+            .await
+            .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 140).await;
+            let base = db.any.last_commit_loc + 1;
+
+            // The parent rewrites every live key, so its floor raise moves past the
+            // whole committed prefix and far enough that the chunk-quantized sync
+            // boundary lands beyond the chain base.
+            let mut parent = db.new_batch();
+            for idx in 0..140u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                parent = parent.write(key, Some(Sha256::hash(&[b"rewrite"])));
+            }
+            let parent = parent.merkleize(&db, None).await.unwrap();
+
+            // Two identical children forked before the apply.
+            let build =
+                |parent: &Arc<crate::qmdb::current::batch::MerkleizedBatch<_, _, _, 32, _>>| {
+                    let mut child = parent.new_batch::<Sha256>();
+                    for idx in 100..140u64 {
+                        let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                        child = child.write(key, Some(Sha256::fill(1)));
+                    }
+                    child
+                };
+            let child = build(&parent);
+            let expected = build(&parent).merkleize(&db, None).await.unwrap().root();
+
+            // Apply the parent and prune past the old chain base.
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let boundary = db.sync_boundary();
+            assert!(boundary > base);
+            let db = db.prune(boundary).await.unwrap();
+
+            // The surviving child still merkleizes to the same root.
+            let merkleized = child.merkleize(&db, None).await.unwrap();
+            assert_eq!(merkleized.root(), expected);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A snapshot's ops proofs stay byte-stable and verifiable against the captured ops root
     /// while the live database updates keys (flipping activity bits and raising the floor),
     /// commits, and prunes past it.

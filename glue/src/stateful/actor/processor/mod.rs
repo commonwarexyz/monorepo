@@ -108,6 +108,12 @@ where
     pending: PendingMap<A, E>,
     /// Latest canonical anchor whose finalization hook has completed.
     last_processed: Anchor<PendingDigest<A, E>>,
+    /// Set while a finalization sits between its first database mutation and
+    /// the anchor move. Forks from the anchor during that window would take
+    /// post-apply state under the pre-apply anchor, so they refuse.
+    finalizing: bool,
+    /// Woken when the anchor moves and the finalizing window closes.
+    anchor_waiters: Vec<oneshot::Sender<()>>,
 }
 
 /// Returns the winner and pending descendants whose state survives finalization.
@@ -504,6 +510,8 @@ where
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
                     last_processed,
+                    finalizing: false,
+                    anchor_waiters: Vec::new(),
                 })),
                 metrics,
             },
@@ -657,14 +665,12 @@ where
         //
         // Safety contract: replayed `Application::apply` output must match the
         // block commitments previously enforced by `Application::verify`.
+        self.execution.state.lock().finalizing = true;
         let batch = match self.execution.pending_batch(&digest) {
             Some(merkleized) => merkleized,
             None => {
                 let batches = A::Databases::new_batches(&self.execution.readers).await;
-                // Failure here is impossible on a correct node: the batches were
-                // just forked from applied state, mutation authority is unique,
-                // and there is no caller to answer with a refusal.
-                let batch = self
+                let batch = match self
                     .app
                     .apply(
                         (context.child("finalize_replay"), block_context),
@@ -672,7 +678,16 @@ where
                         batches,
                     )
                     .await
-                    .unwrap_or_else(|err| panic!("finalize replay failed: {err:?}"));
+                {
+                    Ok(batch) => batch,
+                    // The runtime is tearing the actor down; park until this
+                    // task is dropped with it.
+                    Err(ExecutionError::Shutdown) => std::future::pending().await,
+                    // Impossible on a correct node: the batches were just forked
+                    // from applied state, mutation authority is unique, and
+                    // there is no caller to answer with a refusal.
+                    Err(err) => panic!("finalize replay failed: {err}"),
+                };
                 assert!(
                     A::Databases::matches_sync_targets(&batch, &sync_targets),
                     "finalize replay state root must match block commitments",
@@ -829,13 +844,38 @@ where
 
         let batches = A::Databases::new_batches(&self.readers).await;
 
-        // A finalization can land between the anchor check above and the
-        // per-database forks, leaving a batch set that straddles it. Refuse it
-        // like any other stale read; the caller re-checks canonical state.
-        if self.state.lock().last_processed.digest != *parent {
+        // A finalization mutates the databases before the anchor moves, so a
+        // fork taken meanwhile can hold post-apply state under the pre-apply
+        // anchor. Refuse whenever one overlapped this fork: either its window
+        // is still open, or its anchor move already landed. The caller waits
+        // out the window and re-checks canonical state.
+        let state = self.state.lock();
+        if state.finalizing || state.last_processed.digest != *parent {
             return Err(PrepareBatchesError::Stale);
         }
+        drop(state);
         Ok(batches)
+    }
+
+    /// Wait until no finalization is mid-flight and the anchor differs from `seen`.
+    ///
+    /// Returns immediately when that already holds. Used by stale verification
+    /// attempts, whose staleness proves a finalization at least reached its
+    /// database mutation; parking here (instead of retrying immediately) lets
+    /// that finalization finish moving the anchor.
+    async fn anchor_past(&self, seen: &Anchor<PendingDigest<A, E>>) {
+        loop {
+            let waiter = {
+                let mut state = self.state.lock();
+                if !state.finalizing && state.last_processed.digest != seen.digest {
+                    return;
+                }
+                let (sender, receiver) = oneshot::channel();
+                state.anchor_waiters.push(sender);
+                receiver
+            };
+            let _ = waiter.await;
+        }
     }
 
     /// Replays one certified block and caches its commitment-matching state.
@@ -877,7 +917,7 @@ where
             // re-checks canonical state; this replay never panics on it.
             Err(ExecutionError::Stale) => return Err(PrepareBatchesError::Stale),
             Err(ExecutionError::Shutdown) => return Err(PrepareBatchesError::Cancelled),
-            Err(ExecutionError::Fatal(err)) => panic!("application replay failed: {err}"),
+            Err(err @ ExecutionError::Fatal(_)) => panic!("application replay failed: {err}"),
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
@@ -1104,6 +1144,10 @@ where
         let pruned = before - state.pending.len();
         let remaining = state.pending.len();
         state.last_processed = anchor;
+        state.finalizing = false;
+        for waiter in state.anchor_waiters.drain(..) {
+            waiter.send_lossy(());
+        }
         drop(state);
         self.metrics.pruned_forks.inc_by(pruned as u64);
         let _ = self.metrics.pending_blocks.try_set(remaining);
@@ -2146,6 +2190,43 @@ mod tests {
                 prune, None,
                 "pruning should wait for the full retention window",
             );
+        });
+    }
+
+    /// A fork taken from the anchor while a finalization is mid-flight (databases
+    /// applied, anchor not yet advanced) refuses instead of handing out the winner's
+    /// state under the loser's anchor.
+    #[test]
+    fn fork_refuses_inside_the_finalize_window() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            // Park the finalize between its database apply and its anchor move.
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(winner.digest(), [gate]));
+            let verifier = harness.processor.verifier();
+            let processor = harness.processor;
+            let finalize = processor.finalize(harness.context_cell.as_present(), &winner);
+            futures::pin_mut!(finalize);
+            select! {
+                _ = &mut finalize => panic!("finalize must park on the probe"),
+                result = started => result.expect("finalize must reach the probe"),
+            }
+
+            // Inside the window, a fork from the anchor must refuse: the databases
+            // are already at the winner, but the anchor still names genesis.
+            assert!(matches!(
+                verifier.execution.fork_batches(&genesis.digest()).await,
+                Err(PrepareBatchesError::Stale)
+            ));
+
+            release.send(()).expect("finalize is parked");
+            let (processor, applied) = finalize.await;
+            assert!(applied.is_some());
+            drop(processor);
         });
     }
 

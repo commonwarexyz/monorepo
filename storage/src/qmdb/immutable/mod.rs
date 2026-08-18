@@ -874,8 +874,7 @@ pub(super) mod test {
     >;
 
     /// A surviving child chain merkleizes across a prune whose floor passed the chain
-    /// base: the chain hashes against its chain-base mem capture, so the prune cannot
-    /// starve it of boundary nodes.
+    /// base without losing the nodes its graft needs.
     #[boxed]
     pub(crate) async fn test_immutable_merkleize_across_prune<F: Family, V, C>(db: TestDb<F, V, C>)
     where

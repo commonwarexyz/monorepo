@@ -73,7 +73,7 @@ struct Staged<S> {
 
 /// Publishes the latest durable capture of snapshots to its [`Subscriber`]s.
 pub struct Publisher<S> {
-    /// The cell readers take the served capture from.
+    /// The cell subscribers take the served capture from.
     cell: Arc<Cell<S>>,
     /// Captures awaiting publication, keyed by height.
     staged: BTreeMap<Height, Staged<S>>,
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn viewed_reader_serves_its_part_of_the_snapshot() {
+    fn viewed_subscriber_serves_its_part_of_the_snapshot() {
         deterministic::Runner::default().start(|context| async move {
             let (mut publisher, subscriber) = Publisher::<(u32, u32)>::new(&context);
             let first_db = subscriber.view(|set| &set.0);

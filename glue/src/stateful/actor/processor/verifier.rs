@@ -42,7 +42,7 @@ enum PrepareFailure {
     Stale,
 }
 
-/// Outcome of one execution attempt against a snapshot of applied state.
+/// Outcome of one execution attempt of the candidate against applied state.
 enum Attempt {
     /// The attempt finished with a result.
     Done(VerificationResult),
@@ -138,13 +138,17 @@ where
         }
 
         // Each iteration classifies the candidate against the canonical chain,
-        // then executes it. A stale attempt means a block was finalized while
-        // this one executed; re-classifying answers correctly whether that
-        // block was the candidate itself, an ancestor, or a competitor. The
-        // loop is bounded: every stale attempt consumed one finalization. Each
-        // attempt consumes its own ancestry clone, so a retry starts from the
-        // same position after the candidate.
+        // then executes it. A stale attempt means a finalization landed while
+        // this one executed; re-classifying answers correctly whether the
+        // finalized block was the candidate itself, an ancestor, or a
+        // competitor. The loop is bounded: attempts go stale only while
+        // finalizations land, and classification decides outright once the
+        // anchor reaches the candidate's height. Each attempt consumes its own
+        // ancestry clone, so a retry starts from the same position after the
+        // candidate.
         loop {
+            let seen = self.execution.last_processed();
+
             // A finalized candidate cannot be re-executed against newer database
             // state. Prove it belongs to the canonical chain before accepting it.
             match self
@@ -176,7 +180,15 @@ where
                 Ok(parent) => parent,
                 Err(PrepareFailure::Invalid) => return VerificationResult::Decided(false),
                 Err(PrepareFailure::Cancelled) => return VerificationResult::Cancelled,
-                Err(PrepareFailure::Stale) => continue,
+                Err(PrepareFailure::Stale) => {
+                    if await_or_cancel(verification, self.execution.anchor_past(&seen))
+                        .await
+                        .is_none()
+                    {
+                        return VerificationResult::Cancelled;
+                    }
+                    continue;
+                }
             };
 
             match self
@@ -196,7 +208,15 @@ where
                     }
                     return result;
                 }
-                Attempt::Stale => continue,
+                Attempt::Stale => {
+                    if await_or_cancel(verification, self.execution.anchor_past(&seen))
+                        .await
+                        .is_none()
+                    {
+                        return VerificationResult::Cancelled;
+                    }
+                    continue;
+                }
             }
         }
     }
@@ -378,7 +398,7 @@ where
             Some(Err(ExecutionError::Shutdown)) => {
                 return Attempt::Done(VerificationResult::Cancelled);
             }
-            Some(Err(ExecutionError::Fatal(err))) => {
+            Some(Err(err @ ExecutionError::Fatal(_))) => {
                 panic!("application verification failed: {err}")
             }
             None => {

@@ -912,6 +912,71 @@ mod tests {
         });
     }
 
+    /// A stale attempt whose candidate is still above the new anchor re-executes
+    /// against the post-finalization state and completes with a verdict.
+    #[test]
+    fn stale_verification_reexecutes_and_answers_true() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (parent_gate, parent_started, parent_release) = application_gate();
+            let (first, first_started, first_release) = application_gate();
+            let (second, second_started, second_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, first, second]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                stale_verifies: Arc::default(),
+                observed_contexts: Arc::default(),
+            };
+            let staleness = app.stale_verifies.clone();
+            let (mut mailbox, _reader, marshal, actor) =
+                spawn_gated_application(&context, "stale-reexecute", app).await;
+
+            // Verify the parent first so the candidate forks from pending state.
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let block = TestBlock::child(&parent, 2);
+            let mut parent_verifier = mailbox.clone();
+            let mut parent_verify = Box::pin(parent_verifier.verify(
+                (context.child("verify_parent"), parent.context()),
+                ancestry::from_iter([Arc::new(parent.clone()), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut parent_verify).is_pending());
+            parent_started
+                .await
+                .expect("parent verification should start");
+            parent_release
+                .send(())
+                .expect("parent verification should remain active");
+            assert!(parent_verify.await);
+
+            let block_context = block.context();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block_context),
+                ancestry::from_iter([Arc::new(block), Arc::new(parent.clone())]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            first_started.await.expect("verification should start");
+            *staleness.lock() = 1;
+
+            // The candidate's parent finalizes while the candidate executes.
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(parent), acknowledgement));
+            waiter.await.expect("finalization should be acknowledged");
+
+            // The stale attempt re-classifies (still above the anchor) and
+            // re-executes against the new state.
+            first_release
+                .send(())
+                .expect("verification should remain active");
+            second_started.await.expect("retry should re-execute");
+            second_release.send(()).expect("retry should remain active");
+            assert!(verify.await);
+            actor.abort();
+            drop(marshal);
+        });
+    }
+
     #[test]
     fn verification_preserves_request_attributes() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {

@@ -582,7 +582,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_mutator, snapshot, durability) = finalize(writer, merkleized).await;
+            let (_writer, snapshot, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
 
             let db = reader.read().await;
@@ -609,7 +609,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let (_mutator, reader) = split(db);
+            let (_writer, reader) = split(db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
                 .await
@@ -693,7 +693,7 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(fork)
                 .await
                 .unwrap();
-            let (_mutator, _, durability) = finalize(writer, merkleized).await;
+            let (_writer, _, durability) = finalize(writer, merkleized).await;
             durability.await.expect("finalize flush failed");
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));

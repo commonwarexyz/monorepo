@@ -91,7 +91,9 @@ where
     }
 }
 
-/// A speculative batch for a compact immutable db.
+/// A speculative batch for a compact immutable db. Merkleization checks that the
+/// database is on this chain's own states and refuses with
+/// [`crate::qmdb::Error::StaleRead`] otherwise (see [`crate::qmdb::batch_chain`]).
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
 where

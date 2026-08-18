@@ -194,7 +194,7 @@ pub trait Merkleized: Clone + Sized + Send + Sync {
 /// Mutating methods take the database by value and return it on success. If a mutating
 /// method returns an error, or its future is dropped before it finishes, the database is
 /// gone: state that was not yet durable is discarded, but everything already on disk stays
-/// recoverable. Behind a gate that leaves the database poisoned, so later reads park
+/// recoverable. The cell is left poisoned, so later reads park
 /// rather than observe a database that is missing.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
@@ -474,7 +474,7 @@ pub type ReadersOf<D, E> = <D as DatabaseSet<E>>::Readers;
 
 /// A one-database set.
 ///
-/// The database lives behind a gate. The set holds the sole [`Writer`] and a
+/// The database lives in a cell. The set holds the sole [`Writer`] and a
 /// [`Reader`] it clones into batches.
 pub struct Single<T> {
     writer: Writer<T>,
@@ -860,7 +860,7 @@ where
     target_tx.send_lossy(new_target).await
 }
 
-/// Implement [`DatabaseSet`] for a tuple of gated one-database sets.
+/// Implement [`DatabaseSet`] for a tuple of single-database sets.
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
         impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
@@ -2361,7 +2361,7 @@ mod tests {
             Ok(Self)
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2398,7 +2398,7 @@ mod tests {
             unreachable!("CountingRewindDb is constructed directly in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2437,7 +2437,7 @@ mod tests {
             Ok(Self { prune_count })
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2547,7 +2547,7 @@ mod tests {
             Ok(Self)
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2589,7 +2589,7 @@ mod tests {
             Ok(Self)
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2673,7 +2673,7 @@ mod tests {
             unreachable!("BlockingFinalizeDb is constructed directly in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2721,7 +2721,7 @@ mod tests {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2764,7 +2764,7 @@ mod tests {
             )
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2803,7 +2803,7 @@ mod tests {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2842,7 +2842,7 @@ mod tests {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2881,7 +2881,7 @@ mod tests {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2920,7 +2920,7 @@ mod tests {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2959,7 +2959,7 @@ mod tests {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2998,7 +2998,7 @@ mod tests {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3037,7 +3037,7 @@ mod tests {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3080,7 +3080,7 @@ mod tests {
             )
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -3228,7 +3228,7 @@ mod tests {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_handle: Reader<Self>) -> Self::Unmerkleized {
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 

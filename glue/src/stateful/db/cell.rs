@@ -52,7 +52,7 @@ pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
     (Writer(cell.clone()), Reader(cell))
 }
 
-/// The unique capability to mutate the gated database.
+/// The unique capability to mutate the database behind a cell.
 ///
 /// This is the only value with [`mutate`](Self::mutate), and it is deliberately
 /// not [`Clone`], so at most one exists per cell. It does not own the database:
@@ -60,7 +60,7 @@ pub fn split<T>(db: T) -> (Writer<T>, Reader<T>) {
 /// why it must outlive the readers taken from the same cell.
 pub struct Writer<T>(Arc<Cell<T>>);
 
-/// A cloneable read capability over the gated database.
+/// A cloneable read capability over the database behind a cell.
 pub struct Reader<T>(Arc<Cell<T>>);
 
 impl<T> Clone for Reader<T> {

@@ -416,14 +416,16 @@ where
     ///
     /// The job hashes against an immutable snapshot of the committed Merkle state, so a
     /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
-    /// occupying the calling task. The snapshot is sufficient for any batch chain that
-    /// passed the on-chain check (see [`crate::qmdb::batch_chain`]): every committed node
-    /// the graft can need is a peak at the chain's effective boundary, and each such peak
-    /// is either still a peak of the committed tree (peaks stay pinned across prunes,
-    /// since roots need every peak) or was merged past by a later batch on the same
-    /// chain, which is still alive and serves its own nodes. If the caller is cancelled mid-job, the job still runs to
-    /// completion against its snapshot and the result is discarded (a panic inside the job is
-    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs
+    /// to completion against its snapshot and the result is discarded (a panic inside the
+    /// job is caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    ///
+    /// The snapshot is sufficient for any batch chain that passed the on-chain check (see
+    /// [`crate::qmdb::batch_chain`]) and kept its unapplied ancestors alive: every
+    /// committed node the graft can need is a peak at the chain's effective boundary, and
+    /// each such peak is either still a peak of the committed tree (peaks stay pinned
+    /// across prunes, since roots need every peak) or was merged past by a later batch on
+    /// the same chain, which is still alive and serves its own nodes.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,

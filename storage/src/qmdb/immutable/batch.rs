@@ -35,7 +35,10 @@ pub(crate) struct DiffEntry<F: Family, V> {
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
-/// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
+/// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a
+/// parameter. Every method that reads the committed
+/// DB first checks that the database is on this chain's own states and refuses with
+/// [`crate::qmdb::Error::StaleRead`] otherwise (see [`crate::qmdb::batch_chain`]).
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
 where
@@ -62,7 +65,9 @@ where
 type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>, S>>;
 
 /// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [`UnmerkleizedBatch`].
+/// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
+/// [`crate::qmdb::Error::StaleRead`] once a batch from a different fork is applied
+/// (see [`crate::qmdb::batch_chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
@@ -195,10 +200,10 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
+        let db = self.on_chain(db)?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let db = self.on_chain(db)?;
 
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();
@@ -394,10 +399,10 @@ where
         H: Hasher<Digest = D>,
         T: Translator,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let db = self.bounds.on_chain(db, db.commitment())?;
 
         let mut results: Vec<Option<V::Value>> = Vec::with_capacity(keys.len());
         let mut db_indices = Vec::new();

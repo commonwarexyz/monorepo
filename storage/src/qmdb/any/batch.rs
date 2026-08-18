@@ -1840,10 +1840,10 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
+        let db = self.on_chain(db)?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let db = self.on_chain(db)?;
         if self.reads_committed_only() {
             return db.get_many(keys).await;
         }
@@ -2701,10 +2701,10 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let db = self.bounds.on_chain(db, db.commitment())?;
 
         let ancestors: Vec<_> = self.ancestors().collect();
         let diffs: Vec<_> = ancestors
