@@ -2,7 +2,9 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    ReadOptions, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::journal::{
     Error,
     contiguous::{
@@ -255,7 +257,10 @@ fn fuzz(input: FuzzInput) {
                 JournalOperation::Replay { buffer, start_pos } => {
                     let bounds = journal.bounds();
                     let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                    match journal.replay(start_pos, NZUsize!(*buffer)).await {
+                    match journal
+                        .replay(start_pos, NZUsize!(*buffer), ReadOptions::default())
+                        .await
+                    {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    Blob, BufferPoolConfig, BufferPooler, Runner, Storage, WriteOptions,
+    Blob, BufferPoolConfig, BufferPooler, ReadOptions, Runner, Storage, WriteOptions,
     buffer::{
         Read, Write,
         paged::{CacheRef, Writer},
@@ -377,7 +377,7 @@ fn fuzz(input: FuzzInput) {
                         // This fuzzer never corrupts data, so CRC validation in replay
                         // should always succeed. A failure here indicates a bug.
                         let _ = append
-                            .replay(buffer_size)
+                            .replay(buffer_size, ReadOptions::default())
                             .await
                             .expect("Failed to create replay");
                     }

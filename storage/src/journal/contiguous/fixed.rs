@@ -146,7 +146,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf,
+    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
@@ -191,6 +191,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     items_per_blob: NonZeroU64,
     start_pos: u64,
     buffer: NonZeroUsize,
+    read_options: ReadOptions,
 ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
     if start_pos > bounds.end {
         return Err(Error::ItemOutOfRange(start_pos));
@@ -224,7 +225,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
                 .expect("positions in bounds map to a retained blob");
 
             states.push(FixedReplayState::<B, A> {
-                replay: blob.replay_from(offset, buffer)?,
+                replay: blob.replay_from(offset, buffer, read_options)?,
                 pos: first_pos,
                 end_pos: blob_end,
                 items_per_batch,
@@ -1612,6 +1613,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
         replay_stream(
             &self.blobs,
@@ -1619,6 +1621,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
             self.items_per_blob,
             start_pos,
             buffer,
+            read_options,
         )
     }
 }
@@ -1650,6 +1653,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
         let blobs = self.blobs.reader();
         replay_stream(
@@ -1658,6 +1662,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
             self.items_per_blob,
             start_pos,
             buffer,
+            read_options,
         )
     }
 }
@@ -1689,8 +1694,9 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        super::Contiguous::replay(&*self.0, start_pos, buffer).await
+        super::Contiguous::replay(&*self.0, start_pos, buffer, read_options).await
     }
 }
 
@@ -1759,11 +1765,11 @@ mod tests {
         buffer::paged::Writer,
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
-            fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
+            drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability};
     use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
@@ -2113,7 +2119,11 @@ mod tests {
             // handle unobserved.
             journal.append(&0).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(1.0),
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: Probability!(1.0),
+                    retention_rate: Probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
                 ..Default::default()
             };
             let (mut journal, handle) = journal.start_sync().await.unwrap();
@@ -2237,7 +2247,7 @@ mod tests {
             // Regression: commit() must force a data sync before callers can rely on recovered
             // bytes beyond the persisted recovery watermark.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(1.0),
+                sync_rate: Some(Probability!(1.0)),
                 ..Default::default()
             };
             assert!(
@@ -2458,7 +2468,9 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let result = reader.replay(0, NZUsize!(1024)).await;
+                let result = reader
+                    .replay(0, NZUsize!(1024), ReadOptions::default())
+                    .await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
             }
 
@@ -2466,13 +2478,19 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let res = reader.replay(0, NZUsize!(1024)).await;
+                let res = reader
+                    .replay(0, NZUsize!(1024), ReadOptions::default())
+                    .await;
                 assert!(matches!(res, Err(Error::ItemPruned(_))));
 
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(journal.bounds().start, NZUsize!(1024))
+                    .replay(
+                        journal.bounds().start,
+                        NZUsize!(1024),
+                        ReadOptions::default(),
+                    )
                     .await
                     .expect("failed to replay journal from pruning boundary");
                 pin_mut!(stream);
@@ -2559,7 +2577,7 @@ mod tests {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -2616,7 +2634,7 @@ mod tests {
                 let mut error_found = false;
                 let (_journal, reader) = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -2637,6 +2655,83 @@ mod tests {
                 }
                 assert!(error_found); // error should abort replay
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_replay_and_writable_tip_request_dont_cache() {
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(3);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let page_cache = cfg.page_cache.clone();
+            let mut journal = Journal::init(context.child("journal"), cfg)
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..5 {
+                (journal, _) = journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            journal = journal.sync().await.expect("failed to sync journal");
+
+            // Sealed history receives the replay operation's read policy directly.
+            page_cache.clear();
+            recordings.clear();
+            {
+                let stream = journal
+                    .replay(0, NZUsize!(56), ReadOptions::DONT_CACHE)
+                    .await
+                    .expect("failed to replay sealed history");
+                pin_mut!(stream);
+                let (position, item) = stream
+                    .next()
+                    .await
+                    .expect("missing sealed replay item")
+                    .expect("failed to replay sealed item");
+                assert_eq!(position, 0);
+                assert_eq!(item, test_digest(0));
+
+                let reads = recordings.snapshot().reads;
+                assert!(!reads.is_empty());
+                assert!(
+                    reads
+                        .iter()
+                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                );
+            }
+
+            // Writable-tip misses request DONT_CACHE through CacheRef ownership.
+            page_cache.clear();
+            recordings.clear();
+            {
+                let stream = journal
+                    .replay(3, NZUsize!(56), ReadOptions::DONT_CACHE)
+                    .await
+                    .expect("failed to replay writable tip");
+                pin_mut!(stream);
+                let (position, item) = stream
+                    .next()
+                    .await
+                    .expect("missing writable replay item")
+                    .expect("failed to replay writable item");
+                assert_eq!(position, 3);
+                assert_eq!(item, test_digest(3));
+
+                let reads = recordings.snapshot().reads;
+                assert!(!reads.is_empty());
+                assert!(
+                    reads
+                        .iter()
+                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                );
+            }
+
+            journal.destroy().await.expect("failed to destroy journal");
         });
     }
 
@@ -2668,7 +2763,10 @@ mod tests {
                 .unwrap();
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
-            let stream = reader.replay(0, NZUsize!(1024)).await.unwrap();
+            let stream = reader
+                .replay(0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
             pin_mut!(stream);
 
             for i in 0u64..10 {
@@ -2744,7 +2842,7 @@ mod tests {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(START_POS, NZUsize!(1024))
+                    .replay(START_POS, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
@@ -3306,7 +3404,7 @@ mod tests {
             // Inject sync faults. If commit skipped the recovered tail sync, it would succeed
             // despite the fault.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(1.0),
+                sync_rate: Some(Probability!(1.0)),
                 ..Default::default()
             };
             assert!(
@@ -4528,7 +4626,10 @@ mod tests {
             {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
-                let stream = reader.replay(u64::MAX - 1, NZUsize!(1024)).await.unwrap();
+                let stream = reader
+                    .replay(u64::MAX - 1, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 pin_mut!(stream);
                 let (pos, item) = stream.next().await.unwrap().unwrap();
                 assert_eq!(pos, u64::MAX - 1);
@@ -5068,7 +5169,7 @@ mod tests {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(7, NZUsize!(1024))
+                    .replay(7, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -5090,7 +5191,7 @@ mod tests {
                 let reader;
                 (journal, reader) = journal.snapshot().await.unwrap();
                 let stream = reader
-                    .replay(12, NZUsize!(1024))
+                    .replay(12, NZUsize!(1024), ReadOptions::default())
                     .await
                     .expect("failed to replay from mid-stream");
                 pin_mut!(stream);
@@ -5917,7 +6018,10 @@ mod tests {
             assert!(pruned);
 
             {
-                let stream = snapshot.replay(0, NZUsize!(1024)).await.unwrap();
+                let stream = snapshot
+                    .replay(0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
                 pin_mut!(stream);
                 let mut expected = 0u64;
                 while let Some(result) = stream.next().await {
