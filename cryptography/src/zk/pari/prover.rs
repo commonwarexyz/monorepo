@@ -2,7 +2,7 @@ use super::{
     Claim, Error, Proof, ProvingKey, Relation, Witness,
     circuit::dot,
     poly::{Domain, Polynomial},
-    sample_scalar, transcript_challenge,
+    sample_scalar, transcript_challenge, transcript_challenge_prebound,
 };
 use crate::{
     bls12381::primitives::group::{G1, Scalar},
@@ -21,6 +21,62 @@ pub fn prove(
     claim: &Claim,
     witness: &Witness,
     strategy: &impl Strategy,
+) -> Result<Proof, Error> {
+    prove_inner(
+        rng,
+        transcript,
+        proving_key,
+        relation,
+        claim,
+        witness,
+        strategy,
+        true,
+    )
+}
+
+/// Create a proof whose statement the caller has already bound to the
+/// transcript.
+///
+/// # Security
+///
+/// The Fiat-Shamir challenge only covers what the transcript contains. Before
+/// calling, the caller MUST have committed the claim's public inputs and every
+/// block commitment (or data that uniquely determines them) to `transcript`,
+/// and the verifier must replay exactly the same binding. Use [`prove`] unless
+/// the statement needs a custom transcript encoding (e.g. binding commitment
+/// preimages so batch verification can fold derived commitments).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_prebound(
+    rng: &mut impl CryptoRng,
+    transcript: &mut Transcript,
+    proving_key: &ProvingKey,
+    relation: &Relation,
+    claim: &Claim,
+    witness: &Witness,
+    strategy: &impl Strategy,
+) -> Result<Proof, Error> {
+    prove_inner(
+        rng,
+        transcript,
+        proving_key,
+        relation,
+        claim,
+        witness,
+        strategy,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_inner(
+    rng: &mut impl CryptoRng,
+    transcript: &mut Transcript,
+    proving_key: &ProvingKey,
+    relation: &Relation,
+    claim: &Claim,
+    witness: &Witness,
+    strategy: &impl Strategy,
+    bind_claim: bool,
 ) -> Result<Proof, Error> {
     validate_inputs(proving_key, relation, claim, witness, strategy)?;
 
@@ -83,8 +139,11 @@ pub fn prove(
         return Err(Error::IdentityPoint { kind: "proof T" });
     }
 
-    let challenge =
-        transcript_challenge(transcript, &domain, &proving_key.verifying_key, claim, &t);
+    let challenge = if bind_claim {
+        transcript_challenge(transcript, &domain, &proving_key.verifying_key, claim, &t)
+    } else {
+        transcript_challenge_prebound(transcript, &domain, &proving_key.verifying_key, &t)
+    };
     let mut z_a_at_challenge = z_a_masked.evaluate_at(&challenge);
     let v_a = z_a_at_challenge.clone() - &x_a.evaluate_at(&challenge);
     z_a_at_challenge.square();

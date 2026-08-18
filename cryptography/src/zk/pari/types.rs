@@ -476,6 +476,22 @@ impl Read for VerifyingKey {
     }
 }
 
+/// Toxic waste retained from a Pari setup.
+///
+/// Possession permits forging accepting proofs for arbitrary claims via
+/// [`super::simulate`], defeating soundness entirely. It exists for
+/// zero-knowledge testing and for load generation with simulated proofs;
+/// production setups must use [`super::setup`], which never exposes it.
+/// The scalars zeroize on drop.
+#[derive(Clone)]
+pub struct Trapdoor {
+    pub(crate) alpha: Scalar,
+    pub(crate) beta: Scalar,
+    pub(crate) deltas: Vec<Scalar>,
+    pub(crate) delta_witness: Scalar,
+    pub(crate) tau: Scalar,
+}
+
 /// The relation-specific key used to create proofs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvingKey {

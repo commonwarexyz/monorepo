@@ -2,7 +2,9 @@ use super::{
     Error, Relation,
     circuit::SparseRow,
     poly::Domain,
-    types::{CommitmentKey, ProvingKey, PublicColumn, VerifyingKey, commitment_keys_digest},
+    types::{
+        CommitmentKey, ProvingKey, PublicColumn, Trapdoor, VerifyingKey, commitment_keys_digest,
+    },
 };
 use crate::bls12381::primitives::group::{G1, G2, Scalar};
 use commonware_codec::Encode;
@@ -21,6 +23,23 @@ pub fn setup(
     rng: &mut impl CryptoRng,
     strategy: &impl Strategy,
 ) -> Result<(ProvingKey, VerifyingKey), Error> {
+    let (proving_key, verifying_key, _) = setup_with_trapdoor(relation, rng, strategy)?;
+    Ok((proving_key, verifying_key))
+}
+
+/// Generate keys and additionally return the setup trapdoor.
+///
+/// # Security
+///
+/// The returned [`Trapdoor`] is toxic waste: anyone holding it can forge
+/// accepting proofs for arbitrary claims via [`super::simulate`]. Use it only
+/// for zero-knowledge testing and load generation; production deployments
+/// must use [`setup`].
+pub fn setup_with_trapdoor(
+    relation: &Relation,
+    rng: &mut impl CryptoRng,
+    strategy: &impl Strategy,
+) -> Result<(ProvingKey, VerifyingKey, Trapdoor), Error> {
     let domain_size = relation.size();
     let domain = Domain::new(domain_size)?;
     let num_vars = relation.size();
@@ -152,7 +171,14 @@ pub fn setup(
             sigma_r,
             verifying_key: verifying_key.clone(),
         };
-        return Ok((proving_key, verifying_key));
+        let trapdoor = Trapdoor {
+            alpha,
+            beta,
+            deltas,
+            delta_witness,
+            tau,
+        };
+        return Ok((proving_key, verifying_key, trapdoor));
     }
 }
 

@@ -5,7 +5,7 @@ use crate::{
     zk::circuit::{CircuitIdx, Context, Var, build, build_with_values},
 };
 use commonware_codec::{Decode, Encode, RangeCfg};
-use commonware_math::algebra::{CryptoGroup, Ring};
+use commonware_math::algebra::{CryptoGroup, Field, Ring};
 use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
 use std::sync::OnceLock;
@@ -360,6 +360,185 @@ fn deterministic_batch_verification_accepts_valid_and_rejects_invalid_entries() 
         &parameters().verifying_key,
         &entries,
         &Sequential,
+    ));
+}
+
+#[test]
+fn batch_prebound_folds_commitment_terms() {
+    let parameters = parameters();
+    // Split each block commitment into two weighted terms that sum to it, so
+    // the fold must reconstruct the materialized commitment. Choose weights
+    // (1, w) and points (P, (C - P)/w) so that P + w*((C - P)/w) = C.
+    let weight = Scalar::from(3u64);
+    let weight_inv = weight.inv();
+
+    // Bind a point-independent prehistory so the challenge is reproducible
+    // across the valid and corrupted runs, isolating the commitment fold.
+    let bind = |transcript: &mut Transcript, public_inputs: &[Scalar]| {
+        for value in public_inputs {
+            transcript.commit(value.encode());
+        }
+    };
+
+    let mut entries = Vec::new();
+    for (x, y, public, opening) in [(2u64, 5, 10, 3), (6, 6, 36, 5)] {
+        let witness = witness(
+            &parameters.relation,
+            &parameters.layout,
+            x,
+            y,
+            public,
+            0,
+            opening,
+        );
+        let claim = witness
+            .claim(parameters.proving_key.commitment_keys(), &Sequential)
+            .expect("claim should be constructed");
+
+        let mut prover_transcript = Transcript::new(BATCH_NAMESPACE, Version::V1);
+        bind(&mut prover_transcript, &claim.public_inputs);
+        let proof = prove_prebound(
+            &mut test_rng(),
+            &mut prover_transcript,
+            &parameters.proving_key,
+            &parameters.relation,
+            &claim,
+            &witness,
+            &Sequential,
+        )
+        .expect("prebound proof should succeed");
+
+        let split = G1::generator() * &Scalar::from(11u64);
+        let remainder = (claim.commitments[0] - &split) * &weight_inv;
+        entries.push(BatchEntry {
+            public_inputs: claim.public_inputs.clone(),
+            commitments: vec![vec![
+                CommitmentTerm::Point(split),
+                CommitmentTerm::Weighted(remainder, weight.clone()),
+            ]],
+            proof,
+        });
+    }
+
+    let transcripts = |entries: &[BatchEntry]| {
+        entries
+            .iter()
+            .map(|entry| {
+                let mut transcript = Transcript::new(BATCH_NAMESPACE, Version::V1);
+                bind(&mut transcript, &entry.public_inputs);
+                transcript
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // The folded terms reconstruct each block commitment, so verification
+    // accepts exactly as if the materialized commitments had been supplied.
+    assert!(batch_verify_prebound(
+        &mut test_rng(),
+        &mut transcripts(&entries),
+        &parameters.verifying_key,
+        &entries,
+        &Sequential,
+    ));
+
+    // Corrupting one term's point makes the reconstructed commitment wrong,
+    // so the pairing fails while the challenge is unchanged.
+    let mut broken = entries.clone();
+    let CommitmentTerm::Point(point) = &mut broken[0].commitments[0][0] else {
+        unreachable!("first term is a plain point");
+    };
+    *point += &G1::generator();
+    assert!(!batch_verify_prebound(
+        &mut test_rng(),
+        &mut transcripts(&broken),
+        &parameters.verifying_key,
+        &broken,
+        &Sequential,
+    ));
+}
+
+#[test]
+fn prebound_prove_and_verify_roundtrip() {
+    let parameters = parameters();
+    let witness = witness(&parameters.relation, &parameters.layout, 3, 4, 12, 0, 9);
+    let claim = witness
+        .claim(parameters.proving_key.commitment_keys(), &Sequential)
+        .expect("claim should be constructed");
+
+    // The caller binds the statement into the transcript prehistory itself.
+    let bind = |transcript: &mut Transcript| {
+        transcript.commit(b"caller-statement".as_slice());
+        for commitment in &claim.commitments {
+            transcript.commit(commitment.encode());
+        }
+    };
+    let mut prover_transcript = Transcript::new(PROOF_NAMESPACE, Version::V1);
+    bind(&mut prover_transcript);
+    let proof = prove_prebound(
+        &mut test_rng(),
+        &mut prover_transcript,
+        &parameters.proving_key,
+        &parameters.relation,
+        &claim,
+        &witness,
+        &Sequential,
+    )
+    .expect("prebound proof should succeed");
+
+    let mut verifier_transcript = Transcript::new(PROOF_NAMESPACE, Version::V1);
+    bind(&mut verifier_transcript);
+    assert!(verify_prebound(
+        &mut verifier_transcript,
+        &parameters.verifying_key,
+        &claim,
+        &proof,
+    ));
+
+    // A verifier that binds a different prehistory rejects.
+    let mut mismatched = Transcript::new(PROOF_NAMESPACE, Version::V1);
+    mismatched.commit(b"other-statement".as_slice());
+    assert!(!verify_prebound(
+        &mut mismatched,
+        &parameters.verifying_key,
+        &claim,
+        &proof,
+    ));
+}
+
+#[test]
+fn simulated_proof_verifies_without_witness() {
+    let (relation, _) = compile_relation(0);
+    let (_, verifying_key, trapdoor) = setup_with_trapdoor(&relation, &mut test_rng(), &Sequential)
+        .expect("setup with trapdoor should succeed");
+
+    // Any commitment vector of the right shape accepts, with no witness.
+    let mut claim = Claim::new(
+        vec![Scalar::from(12u64)],
+        vec![G1::generator() * &Scalar::from(5u64)],
+    );
+    let proof = simulate(
+        &mut test_rng(),
+        &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
+        &trapdoor,
+        &verifying_key,
+        &claim,
+    )
+    .expect("simulation should succeed");
+    assert!(verify(
+        &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
+        &verifying_key,
+        &claim,
+        &proof,
+    ));
+
+    // The simulated proof is bound to its commitments: changing them rejects.
+    claim.commitments[0] += &G1::generator();
+    let tampered = claim;
+    assert!(!verify(
+        &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
+        &verifying_key,
+        &tampered,
+        &proof,
     ));
 }
 

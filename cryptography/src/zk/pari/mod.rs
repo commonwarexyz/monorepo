@@ -11,6 +11,7 @@ commonware_macros::stability_mod!(ALPHA, pub mod fuzz);
 mod poly;
 mod prover;
 mod setup;
+mod simulator;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -20,12 +21,17 @@ use crate::bls12381::primitives::group::{Scalar, ScalarReadCfg};
 pub use circuit::{InputLayout, Relation};
 use commonware_codec::{Encode, Read};
 use commonware_math::algebra::Additive;
-pub use prover::prove;
+pub use prover::{prove, prove_prebound};
 use rand_core::CryptoRng;
-pub use setup::setup;
+pub use setup::{setup, setup_with_trapdoor};
+pub use simulator::{simulate, simulate_prebound};
 use thiserror::Error;
-pub use types::{Claim, CommitmentKey, Opening, Proof, ProvingKey, VerifyingKey, Witness};
-pub use verifier::{batch_verify, verify};
+pub use types::{
+    Claim, CommitmentKey, Opening, Proof, ProvingKey, Trapdoor, VerifyingKey, Witness,
+};
+pub use verifier::{
+    BatchEntry, CommitmentTerm, batch_verify, batch_verify_prebound, verify, verify_prebound,
+};
 use zeroize::Zeroizing;
 
 const TRANSCRIPT_MARKER: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_PARI_PROOF_V1";
@@ -91,18 +97,19 @@ fn sample_scalar(rng: &mut impl CryptoRng) -> Scalar {
     }
 }
 
-fn transcript_challenge(
+/// Derive the evaluation challenge for a transcript that already binds the
+/// statement (public inputs and block commitments, or their preimages).
+///
+/// The key digest covers the relation and commitment-key digests, so this
+/// binds the challenge to the full verification context.
+fn transcript_challenge_prebound(
     transcript: &mut crate::transcript::Transcript,
     domain: &poly::Domain,
     verifying_key: &VerifyingKey,
-    claim: &Claim,
     t: &crate::bls12381::primitives::group::G1,
 ) -> Scalar {
-    // The key digest covers the relation and commitment-key digests, so this
-    // binds the challenge to the full verification context.
     transcript.commit(TRANSCRIPT_MARKER);
     transcript.commit(verifying_key.digest().as_slice());
-    transcript.commit(claim.encode());
     transcript.commit(t.encode());
 
     let mut rng = transcript.noise(b"evaluation-point");
@@ -112,4 +119,15 @@ fn transcript_challenge(
             return value;
         }
     }
+}
+
+fn transcript_challenge(
+    transcript: &mut crate::transcript::Transcript,
+    domain: &poly::Domain,
+    verifying_key: &VerifyingKey,
+    claim: &Claim,
+    t: &crate::bls12381::primitives::group::G1,
+) -> Scalar {
+    transcript.commit(claim.encode());
+    transcript_challenge_prebound(transcript, domain, verifying_key, t)
 }

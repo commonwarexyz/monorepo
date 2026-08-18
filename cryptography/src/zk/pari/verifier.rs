@@ -1,19 +1,77 @@
-use super::{Claim, Proof, VerifyingKey, poly::Domain, transcript_challenge};
+use super::{
+    Claim, Proof, VerifyingKey, poly::Domain, transcript_challenge, transcript_challenge_prebound,
+};
 use crate::{
     bls12381::primitives::group::{G1, G2, Scalar, SmallScalar},
     transcript::Transcript,
 };
+use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, CryptoGroup, Multiplicative, Ring, Space};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRng;
 
-/// Verify one Pari proof against its public inputs and expected commitment.
+/// One additive term of a block commitment in a batch entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitmentTerm {
+    /// The point contributes with weight one.
+    Point(G1),
+    /// The point contributes scaled by the weight.
+    Weighted(G1, Scalar),
+}
+
+/// One claim of a prebound batch, with each block commitment expressed as a
+/// weighted sum of caller points.
+///
+/// Expressing a derived commitment through its terms (instead of
+/// materializing the sum) lets batch verification fold the derivation into
+/// its multi-scalar multiplications.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchEntry {
+    /// Public inputs in the relation's declared order.
+    pub public_inputs: Vec<Scalar>,
+    /// Per-block commitment terms, in declared block order.
+    pub commitments: Vec<Vec<CommitmentTerm>>,
+    /// The proof for this claim.
+    pub proof: Proof,
+}
+
+/// Verify one Pari proof against its public inputs and expected commitments.
 #[must_use]
 pub fn verify(
     transcript: &mut Transcript,
     verifying_key: &VerifyingKey,
     claim: &Claim,
     proof: &Proof,
+) -> bool {
+    verify_inner(transcript, verifying_key, claim, proof, true)
+}
+
+/// Verify a proof whose statement the caller has already bound to the
+/// transcript.
+///
+/// # Security
+///
+/// The Fiat-Shamir challenge only covers what the transcript contains. Before
+/// calling, the caller MUST have committed the claim's public inputs and every
+/// block commitment (or data that uniquely determines them) to `transcript`,
+/// exactly as the prover did via [`super::prove_prebound`]. Use [`verify`]
+/// unless the statement needs a custom transcript encoding.
+#[must_use]
+pub fn verify_prebound(
+    transcript: &mut Transcript,
+    verifying_key: &VerifyingKey,
+    claim: &Claim,
+    proof: &Proof,
+) -> bool {
+    verify_inner(transcript, verifying_key, claim, proof, false)
+}
+
+fn verify_inner(
+    transcript: &mut Transcript,
+    verifying_key: &VerifyingKey,
+    claim: &Claim,
+    proof: &Proof,
+    bind_claim: bool,
 ) -> bool {
     // Block commitments may legitimately be the identity (e.g. commitments to
     // zero maintained homomorphically), so only the proof points are gated.
@@ -28,8 +86,18 @@ pub fn verify(
     {
         return false;
     }
-    let challenge = transcript_challenge(transcript, &domain, verifying_key, claim, &proof.t);
-    let Some(v_r) = public_evaluation(verifying_key, claim, &domain, &challenge, &proof.v_a) else {
+    let challenge = if bind_claim {
+        transcript_challenge(transcript, &domain, verifying_key, claim, &proof.t)
+    } else {
+        transcript_challenge_prebound(transcript, &domain, verifying_key, &proof.t)
+    };
+    let Some(v_r) = public_evaluation(
+        verifying_key,
+        &claim.public_inputs,
+        &domain,
+        &challenge,
+        &proof.v_a,
+    ) else {
         return false;
     };
     pairing_check(verifying_key, &claim.commitments, proof, &challenge, &v_r)
@@ -50,27 +118,75 @@ pub fn batch_verify(
     if transcripts.len() != claims_and_proofs.len() {
         return false;
     }
-    if claims_and_proofs.is_empty() {
+    let entries = claims_and_proofs
+        .iter()
+        .zip(transcripts.iter_mut())
+        .map(|((claim, proof), transcript)| {
+            transcript.commit(claim.encode());
+            BatchEntry {
+                public_inputs: claim.public_inputs.clone(),
+                commitments: claim
+                    .commitments
+                    .iter()
+                    .map(|commitment| vec![CommitmentTerm::Point(*commitment)])
+                    .collect(),
+                proof: proof.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    batch_verify_prebound(rng, transcripts, verifying_key, &entries, strategy)
+}
+
+/// Batch verify proofs whose statements the callers have already bound to the
+/// transcripts, with block commitments given as weighted point terms.
+///
+/// # Security
+///
+/// The Fiat-Shamir challenges only cover what each transcript contains. Before
+/// calling, every transcript MUST bind its entry's public inputs and block
+/// commitments (or data that uniquely determines them, e.g. the points and
+/// weights of its terms), exactly as the prover did via
+/// [`super::prove_prebound`]. Use [`batch_verify`] unless the statements need
+/// a custom transcript encoding.
+#[must_use]
+pub fn batch_verify_prebound(
+    rng: &mut impl CryptoRng,
+    transcripts: &mut [Transcript],
+    verifying_key: &VerifyingKey,
+    entries: &[BatchEntry],
+    strategy: &impl Strategy,
+) -> bool {
+    if transcripts.len() != entries.len() {
+        return false;
+    }
+    if entries.is_empty() {
         return true;
     }
     let Ok(domain) = verification_domain(verifying_key) else {
         return false;
     };
 
-    let mut challenges = Vec::with_capacity(claims_and_proofs.len());
-    let mut v_rs = Vec::with_capacity(claims_and_proofs.len());
-    for (transcript, (claim, proof)) in transcripts.iter_mut().zip(claims_and_proofs) {
-        if proof.t == G1::zero() || proof.u == G1::zero() {
+    let blocks = verifying_key.blocks.len();
+    let mut challenges = Vec::with_capacity(entries.len());
+    let mut v_rs = Vec::with_capacity(entries.len());
+    for (transcript, entry) in transcripts.iter_mut().zip(entries) {
+        if entry.proof.t == G1::zero() || entry.proof.u == G1::zero() {
             return false;
         }
-        if claim.public_inputs.len() != verifying_key.public_inputs as usize
-            || claim.commitments.len() != verifying_key.blocks.len()
+        if entry.public_inputs.len() != verifying_key.public_inputs as usize
+            || entry.commitments.len() != blocks
         {
             return false;
         }
-        let challenge = transcript_challenge(transcript, &domain, verifying_key, claim, &proof.t);
-        let Some(v_r) = public_evaluation(verifying_key, claim, &domain, &challenge, &proof.v_a)
-        else {
+        let challenge =
+            transcript_challenge_prebound(transcript, &domain, verifying_key, &entry.proof.t);
+        let Some(v_r) = public_evaluation(
+            verifying_key,
+            &entry.public_inputs,
+            &domain,
+            &challenge,
+            &entry.proof.v_a,
+        ) else {
             return false;
         };
         challenges.push(challenge);
@@ -80,32 +196,49 @@ pub fn batch_verify(
     // 128-bit coefficients keep the random linear combination sound at 2^-128
     // while halving the cost of the point aggregations below. Terms that
     // multiply a full-width value stay in the full scalar field.
-    let coefficients = (0..claims_and_proofs.len())
+    let coefficients = (0..entries.len())
         .map(|_| SmallScalar::random(&mut *rng))
         .collect::<Vec<_>>();
     let full_coefficients = coefficients
         .iter()
         .map(|coefficient| Scalar::from(coefficient.clone()))
         .collect::<Vec<_>>();
-    let blocks = verifying_key.blocks.len();
-    let mut block_commitments = vec![Vec::with_capacity(claims_and_proofs.len()); blocks];
-    for (claim, _) in claims_and_proofs {
-        for (folded, commitment) in block_commitments.iter_mut().zip(&claim.commitments) {
-            folded.push(*commitment);
-        }
-    }
-    let ts = claims_and_proofs
-        .iter()
-        .map(|(_, proof)| proof.t)
-        .collect::<Vec<_>>();
-    let us = claims_and_proofs
-        .iter()
-        .map(|(_, proof)| proof.u)
-        .collect::<Vec<_>>();
 
-    let folded_commitments = block_commitments
+    // Fold every block commitment, partitioning weight-one terms (which keep
+    // the 128-bit coefficient path) from weighted terms.
+    let mut folded_commitments = Vec::with_capacity(blocks);
+    for block in 0..blocks {
+        let mut unit_points = Vec::new();
+        let mut unit_scalars = Vec::new();
+        let mut weighted_points = Vec::new();
+        let mut weighted_scalars = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            for term in &entry.commitments[block] {
+                match term {
+                    CommitmentTerm::Point(point) => {
+                        unit_points.push(*point);
+                        unit_scalars.push(coefficients[index].clone());
+                    }
+                    CommitmentTerm::Weighted(point, weight) => {
+                        weighted_points.push(*point);
+                        weighted_scalars.push(full_coefficients[index].clone() * weight);
+                    }
+                }
+            }
+        }
+        folded_commitments.push(
+            G1::msm(&unit_points, &unit_scalars, strategy)
+                + &G1::msm(&weighted_points, &weighted_scalars, strategy),
+        );
+    }
+
+    let ts = entries
         .iter()
-        .map(|commitments| G1::msm(commitments, &coefficients, strategy))
+        .map(|entry| entry.proof.t)
+        .collect::<Vec<_>>();
+    let us = entries
+        .iter()
+        .map(|entry| entry.proof.u)
         .collect::<Vec<_>>();
     let t = G1::msm(&ts, &coefficients, strategy);
     let u = G1::msm(&us, &coefficients, strategy);
@@ -117,9 +250,9 @@ pub fn batch_verify(
     let evaluated_u = G1::msm(&us, &weighted_challenges, strategy);
     let v_a = full_coefficients
         .iter()
-        .zip(claims_and_proofs)
-        .fold(Scalar::zero(), |sum, (coefficient, (_, proof))| {
-            sum + &(coefficient.clone() * &proof.v_a)
+        .zip(entries)
+        .fold(Scalar::zero(), |sum, (coefficient, entry)| {
+            sum + &(coefficient.clone() * &entry.proof.v_a)
         });
     let v_r = full_coefficients
         .iter()
@@ -149,20 +282,17 @@ fn verification_domain(verifying_key: &VerifyingKey) -> Result<Domain, ()> {
     Domain::new(verifying_key.domain_size as usize).map_err(|_| ())
 }
 
-/// Evaluate the public parts of the verification equation at the challenge.
-///
-/// Computes `x_a` and `x_b`, the interpolations of the public columns dotted
-/// with `(1, public inputs)`, directly from one set of Lagrange coefficients.
-fn public_evaluation(
+/// Evaluate the interpolated public columns dotted with `(1, public inputs)`
+/// at an arbitrary point, using one set of targeted Lagrange coefficients.
+pub(super) fn evaluate_public_columns(
     verifying_key: &VerifyingKey,
-    claim: &Claim,
+    public_inputs: &[Scalar],
     domain: &Domain,
-    challenge: &Scalar,
-    v_a: &Scalar,
-) -> Option<Scalar> {
-    let mut values = Vec::with_capacity(1 + claim.public_inputs.len());
+    point: &Scalar,
+) -> Option<(Scalar, Scalar)> {
+    let mut values = Vec::with_capacity(1 + public_inputs.len());
     values.push(Scalar::one());
-    values.extend_from_slice(&claim.public_inputs);
+    values.extend_from_slice(public_inputs);
     if verifying_key.public_columns.len() != values.len() {
         return None;
     }
@@ -176,7 +306,7 @@ fn public_evaluation(
         .collect::<Vec<_>>();
     rows.sort_unstable();
     rows.dedup();
-    let lagrange = domain.lagrange_coefficients_at(challenge, &rows).ok()?;
+    let lagrange = domain.lagrange_coefficients_at(point, &rows).ok()?;
     let coefficient_at = |row: u32| rows.binary_search(&row).ok().map(|slot| &lagrange[slot]);
 
     let mut x_a = Scalar::zero();
@@ -189,7 +319,18 @@ fn public_evaluation(
             x_b += &((coefficient.clone() * value) * coefficient_at(row)?);
         }
     }
+    Some((x_a, x_b))
+}
 
+/// Evaluate the public side of the verification equation at the challenge.
+fn public_evaluation(
+    verifying_key: &VerifyingKey,
+    public_inputs: &[Scalar],
+    domain: &Domain,
+    challenge: &Scalar,
+    v_a: &Scalar,
+) -> Option<Scalar> {
+    let (x_a, x_b) = evaluate_public_columns(verifying_key, public_inputs, domain, challenge)?;
     let mut z = v_a.clone() + &x_a;
     z.square();
     Some(z - &x_b)
