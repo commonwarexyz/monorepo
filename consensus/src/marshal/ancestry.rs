@@ -17,6 +17,12 @@ use std::{
 };
 
 /// A stream of blocks used by application propose and verify calls.
+///
+/// A clone starts at the source's logical position at the time of cloning and
+/// can be consumed independently. Advancing or dropping one clone must not
+/// advance, exhaust, or invalidate another. Each clone's [`peek`](Self::peek)
+/// reports its own remaining view; clones need not become ready at the same
+/// time.
 pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'static {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
