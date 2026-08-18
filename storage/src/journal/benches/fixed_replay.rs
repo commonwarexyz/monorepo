@@ -46,11 +46,14 @@ fn bench_fixed_replay(c: &mut Criterion) {
         let cfg = Config::default();
         let mut initialized = false;
         let runner = tokio::Runner::new(cfg.clone());
-        for buffer in [16_384, 65_536, 1_048_576] {
-            for (read_options, label) in [
-                (ReadOptions::default(), "cache"),
-                (ReadOptions::DONT_CACHE, "dont_cache"),
-            ] {
+
+        // Run DONT_CACHE first because it may not prune pages left resident by
+        // cached replays.
+        for (read_options, label) in [
+            (ReadOptions::DONT_CACHE, "dont_cache"),
+            (ReadOptions::default(), "cache"),
+        ] {
+            for buffer in [16_384, 65_536, 1_048_576] {
                 c.bench_function(
                     &format!(
                         "{}/items={} buffer={} size={} read_options={}",
