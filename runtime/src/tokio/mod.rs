@@ -24,5 +24,7 @@
 
 mod runtime;
 pub use runtime::*;
+#[cfg(feature = "dial9")]
+pub mod dial9;
 pub mod telemetry;
 pub mod tracing;
