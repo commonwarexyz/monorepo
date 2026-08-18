@@ -1,4 +1,8 @@
 //! Dense polynomial operations used by the PARI proof system.
+//!
+//! The radix-2 transform is local rather than shared with `commonware_math::ntt`
+//! because this module also needs polynomial multiplication and division, which
+//! the math crate does not provide; unifying them is a possible follow-up.
 
 use crate::bls12381::primitives::group::Scalar;
 use commonware_math::algebra::{Additive, Field, FieldNTT, Ring};
@@ -211,6 +215,24 @@ impl Polynomial {
         Ok((Self::from_nonempty(quotient)?, remainder))
     }
 
+    /// Multiply by the domain vanishing polynomial `X^m - 1`.
+    pub(super) fn mul_vanishing(&self, domain: &Domain) -> Result<Self> {
+        if self.is_zero() {
+            return Ok(Self::zero());
+        }
+        let output_len = self
+            .coefficients
+            .len()
+            .checked_add(domain.size)
+            .ok_or(Error::PolynomialSizeOverflow)?;
+        let mut coefficients = zeroes(output_len)?;
+        for (index, coefficient) in self.coefficients.iter().enumerate() {
+            coefficients[index] -= coefficient;
+            coefficients[index + domain.size] += coefficient;
+        }
+        Self::from_nonempty(coefficients)
+    }
+
     /// Add a multiple of the domain vanishing polynomial.
     ///
     /// For `m = domain.size()`, this returns `self + mask * (X^m - 1)`. The result
@@ -345,12 +367,6 @@ impl Domain {
     #[cfg(test)]
     pub(super) fn contains(&self, point: &Scalar) -> bool {
         self.evaluate_vanishing(point) == Scalar::zero()
-    }
-
-    /// Evaluate the domain vanishing polynomial `X^m - 1` at `point`.
-    #[cfg(test)]
-    pub(super) fn vanishing(&self, point: &Scalar) -> Scalar {
-        self.evaluate_vanishing(point)
     }
 
     /// Evaluate a polynomial at every point in the domain using a radix-2 NTT.
@@ -606,7 +622,7 @@ mod tests {
         for (index, evaluation) in evaluations.iter().enumerate() {
             let point = domain.element(index).unwrap();
             assert!(domain.contains(&point));
-            assert_eq!(domain.vanishing(&point), Scalar::zero());
+            assert_eq!(domain.evaluate_vanishing(&point), Scalar::zero());
             assert_eq!(*evaluation, naive_evaluate(input.coefficients(), &point));
         }
         assert!(!domain.contains(&Scalar::zero()));

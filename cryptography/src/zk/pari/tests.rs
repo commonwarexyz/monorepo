@@ -364,6 +364,44 @@ fn deterministic_batch_verification_accepts_valid_and_rejects_invalid_entries() 
 }
 
 #[test]
+fn decoded_proving_key_proves_and_verifies() {
+    let parameters = parameters();
+
+    let opening = Opening::new(Scalar::from(42u64));
+    let decoded_opening = Opening::decode_cfg(opening.encode(), &()).expect("opening decodes");
+    assert_eq!(opening, decoded_opening);
+    assert_eq!(decoded_opening.scalar(), &Scalar::from(42u64));
+
+    let decoded = ProvingKey::decode_cfg(
+        parameters.proving_key.encode(),
+        &RangeCfg::exact(parameters.verifying_key.public_input_count()),
+    )
+    .expect("proving key decodes");
+    assert_eq!(parameters.proving_key, decoded);
+
+    let witness = witness(&parameters.relation, &parameters.layout, 3, 4, 12, 0, 9);
+    let claim = witness
+        .claim(decoded.commitment_key(), &Sequential)
+        .expect("decoded commitment key should produce the claim");
+    let proof = prove(
+        &mut test_rng(),
+        &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
+        &decoded,
+        &parameters.relation,
+        &claim,
+        &witness,
+        &Sequential,
+    )
+    .expect("decoded proving key should prove");
+    assert!(verify(
+        &mut Transcript::new(PROOF_NAMESPACE, Version::V1),
+        decoded.verifying_key(),
+        &claim,
+        &proof,
+    ));
+}
+
+#[test]
 fn malformed_input_layouts_are_rejected() {
     let (circuit, indices) = build(|ctx| product_circuit(ctx, 0, 0, 0, 0));
     let public = indices[0];

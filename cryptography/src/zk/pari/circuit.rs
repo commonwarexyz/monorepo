@@ -206,7 +206,8 @@ pub(super) struct Assignment {
 }
 
 impl Assignment {
-    pub(super) fn assignment(&self) -> &[Scalar] {
+    /// Return the full assignment vector, including all padding.
+    pub(super) fn values(&self) -> &[Scalar] {
         &self.values
     }
 
@@ -226,18 +227,6 @@ impl Assignment {
 
     pub(super) const fn relation_digest(&self) -> &[u8; 32] {
         &self.relation_digest
-    }
-
-    pub(super) fn values(&self) -> &[Scalar] {
-        self.assignment()
-    }
-
-    pub(super) fn public_values(&self) -> &[Scalar] {
-        self.public_inputs()
-    }
-
-    pub(super) fn committed_values(&self) -> &[Scalar] {
-        self.committed_inputs()
     }
 }
 
@@ -898,7 +887,7 @@ mod tests {
 
         assert_eq!(assignment.public_inputs(), &[scalar(5), scalar(3)]);
         assert_eq!(assignment.committed_inputs(), &[scalar(15), scalar(8)]);
-        assert_eq!(assignment.assignment()[0], scalar(1));
+        assert_eq!(assignment.values()[0], scalar(1));
         assert_eq!(assignment.relation_digest(), relation.digest());
     }
 

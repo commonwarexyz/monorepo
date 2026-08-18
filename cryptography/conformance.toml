@@ -218,9 +218,17 @@ hash = "0f7d8243d4bb54862c103ed7cf714ad81bdb81f65766e891e1b23f36cab53c19"
 n_cases = 1024
 hash = "3f53f24825df548408591f0841c4fe4c392b3ffabda233c55d9da13d29da79cf"
 
+["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<Opening>"]
+n_cases = 1024
+hash = "0c883651ad4a9ab9d3b060cd37e5fa5183e328f434d9f7f6a81f6aa7ba7adaf1"
+
 ["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<Proof>"]
 n_cases = 1024
 hash = "62bb37502e3fc41f74833bd61258cf81822fdc6c462b94618d9fe40eee4bf922"
+
+["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<ProvingKey>"]
+n_cases = 1024
+hash = "4c21ea32150a021acfa1d6fb0a040ad2e84df4b2508e3f88519ba71ffa285acf"
 
 ["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<VerifyingKey>"]
 n_cases = 1024

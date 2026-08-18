@@ -216,13 +216,15 @@ mod tests {
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance {
-    use crate::zk::pari::{Claim, CommitmentKey, Proof, VerifyingKey};
+    use crate::zk::pari::{Claim, CommitmentKey, Opening, Proof, ProvingKey, VerifyingKey};
     use commonware_codec::conformance::CodecConformance;
 
     commonware_conformance::conformance_tests! {
         CodecConformance<CommitmentKey> => 1024,
         CodecConformance<Claim> => 1024,
+        CodecConformance<Opening> => 1024,
         CodecConformance<Proof> => 1024,
+        CodecConformance<ProvingKey> => 1024,
         CodecConformance<VerifyingKey> => 1024,
     }
 }

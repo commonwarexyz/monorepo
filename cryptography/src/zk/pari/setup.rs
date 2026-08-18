@@ -2,12 +2,11 @@ use super::{
     Error, Relation,
     circuit::SparseRow,
     poly::Domain,
-    sample_nonzero_scalar,
     types::{CommitmentKey, ProvingKey, PublicColumn, VerifyingKey},
 };
 use crate::bls12381::primitives::group::{G1, G2, Scalar};
 use commonware_codec::Encode;
-use commonware_math::algebra::{Additive, CryptoGroup, Field, Ring};
+use commonware_math::algebra::{Additive, CryptoGroup, Field, Random, Ring};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRng;
 use std::collections::BTreeSet;
@@ -37,12 +36,12 @@ pub fn setup(
     let h = G2::generator();
 
     loop {
-        let alpha = sample_nonzero_scalar(rng);
-        let beta = sample_nonzero_scalar(rng);
-        let delta_committed = sample_nonzero_scalar(rng);
-        let delta_witness = sample_nonzero_scalar(rng);
+        let alpha = Scalar::random(&mut *rng);
+        let beta = Scalar::random(&mut *rng);
+        let delta_committed = Scalar::random(&mut *rng);
+        let delta_witness = Scalar::random(&mut *rng);
         let tau = loop {
-            let candidate = sample_nonzero_scalar(rng);
+            let candidate = Scalar::random(&mut *rng);
             if domain.evaluate_vanishing(&candidate) != Scalar::zero() {
                 break candidate;
             }

@@ -92,7 +92,7 @@ pub fn prove(
         return Err(Error::InconsistentOpening);
     }
 
-    let vanishing_quotient = Polynomial::zero().mask_vanishing(&quotient, &domain)?;
+    let vanishing_quotient = quotient.mul_vanishing(&domain)?;
     let r_polynomial = z_b_masked.sub(&x_b)?.add(&vanishing_quotient)?;
     let r_opening_numerator = r_polynomial.sub(&Polynomial::from_coefficients(vec![v_r])?)?;
     let (r_opening, r_remainder) = r_opening_numerator.divide_by_linear(&challenge)?;

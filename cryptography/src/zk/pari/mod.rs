@@ -88,15 +88,6 @@ fn sample_scalar(rng: &mut impl CryptoRng) -> Scalar {
     }
 }
 
-fn sample_nonzero_scalar(rng: &mut impl CryptoRng) -> Scalar {
-    loop {
-        let value = sample_scalar(rng);
-        if value != Scalar::zero() {
-            return value;
-        }
-    }
-}
-
 fn transcript_challenge(
     transcript: &mut crate::transcript::Transcript,
     domain: &poly::Domain,
