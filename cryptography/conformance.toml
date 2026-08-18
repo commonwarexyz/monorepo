@@ -210,6 +210,22 @@ hash = "de132e1ab2576fd8227c5ca2e04ca93e5f8e6f8c46369457af0d0383b3559034"
 n_cases = 65536
 hash = "baa7fede6bfe35a0b2bfe1195b6df3a31fb6be8f9d2f4877c65444602ef13797"
 
+["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<Claim>"]
+n_cases = 1024
+hash = "0f7d8243d4bb54862c103ed7cf714ad81bdb81f65766e891e1b23f36cab53c19"
+
+["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<CommitmentKey>"]
+n_cases = 1024
+hash = "3f53f24825df548408591f0841c4fe4c392b3ffabda233c55d9da13d29da79cf"
+
+["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<Proof>"]
+n_cases = 1024
+hash = "62bb37502e3fc41f74833bd61258cf81822fdc6c462b94618d9fe40eee4bf922"
+
+["commonware_cryptography::zk::pari::fuzz::conformance::CodecConformance<VerifyingKey>"]
+n_cases = 1024
+hash = "3c66d3a53f54f2b3ac288da37db370e8e85178a84d08617d1a8617336a6e8d5c"
+
 ["commonware_cryptography::zk::pedersen_to_plain::conformance::CodecConformance<Claim<TestG>>"]
 n_cases = 65536
 hash = "d646b76dd2d950039f2512bb5a30560836b3f29a5510f49a5796c142c3ecab21"

@@ -1,0 +1,394 @@
+use super::{Error, circuit::Assignment, sample_scalar};
+use crate::bls12381::primitives::group::{G1, G2, Scalar, ScalarReadCfg};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_math::algebra::{Additive, Space};
+use commonware_parallel::Strategy;
+use rand_core::CryptoRng;
+
+const COMMITMENT_KEY_DIGEST_NAMESPACE: &[u8] =
+    b"_COMMONWARE_CRYPTOGRAPHY_ZK_PARI_COMMITMENT_KEY_DIGEST";
+const VERIFYING_KEY_DIGEST_NAMESPACE: &[u8] =
+    b"_COMMONWARE_CRYPTOGRAPHY_ZK_PARI_VERIFYING_KEY_DIGEST";
+
+/// Randomness opening a native Pari committed-input commitment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opening(Scalar);
+
+impl Opening {
+    /// Sample fresh commitment randomness.
+    pub fn random(rng: &mut impl CryptoRng) -> Self {
+        Self(sample_scalar(rng))
+    }
+
+    /// Construct an opening from a scalar.
+    pub const fn new(value: Scalar) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn scalar(&self) -> &Scalar {
+        &self.0
+    }
+}
+
+/// The circuit-specific key for committing to the relation's committed inputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentKey {
+    pub(crate) relation_digest: [u8; 32],
+    pub(crate) basis: Vec<G1>,
+    pub(crate) blinding: G1,
+}
+
+impl CommitmentKey {
+    /// The relation this commitment key was generated for.
+    pub const fn relation_digest(&self) -> &[u8; 32] {
+        &self.relation_digest
+    }
+
+    /// Number of committed field elements expected by this key.
+    pub const fn len(&self) -> usize {
+        self.basis.len()
+    }
+
+    /// Returns whether the key commits to an empty vector.
+    pub const fn is_empty(&self) -> bool {
+        self.basis.is_empty()
+    }
+
+    /// Commit to an ordered vector of field elements.
+    pub fn commit(
+        &self,
+        values: &[Scalar],
+        opening: &Opening,
+        strategy: &impl Strategy,
+    ) -> Result<G1, Error> {
+        if values.len() != self.basis.len() {
+            return Err(Error::CommittedInputCount {
+                expected: self.basis.len(),
+                actual: values.len(),
+            });
+        }
+        let commitment =
+            G1::msm(&self.basis, values, strategy) + &(self.blinding * opening.scalar());
+        if commitment == G1::zero() {
+            return Err(Error::IdentityPoint { kind: "commitment" });
+        }
+        Ok(commitment)
+    }
+
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(COMMITMENT_KEY_DIGEST_NAMESPACE);
+        hasher.update(&self.encode());
+        *hasher.finalize().as_bytes()
+    }
+}
+
+impl Write for CommitmentKey {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.relation_digest.write(buf);
+        self.basis.write(buf);
+        self.blinding.write(buf);
+    }
+}
+
+impl EncodeSize for CommitmentKey {
+    fn encode_size(&self) -> usize {
+        self.relation_digest.encode_size() + self.basis.encode_size() + self.blinding.encode_size()
+    }
+}
+
+impl Read for CommitmentKey {
+    type Cfg = RangeCfg<usize>;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            relation_digest: <[u8; 32]>::read(buf)?,
+            basis: Vec::<G1>::read_cfg(buf, &(*cfg, ()))?,
+            blinding: G1::read(buf)?,
+        })
+    }
+}
+
+/// Public inputs and the expected native committed-input commitment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Claim {
+    /// Public inputs in the relation's declared order.
+    pub public_inputs: Vec<Scalar>,
+    /// Commitment to the relation's ordered committed inputs.
+    pub commitment: G1,
+}
+
+/// Prover-only assignment and commitment opening for a compiled relation.
+#[derive(Clone)]
+pub struct Witness {
+    pub(super) assignment: Assignment,
+    pub(super) opening: Opening,
+}
+
+impl Witness {
+    /// Construct the public claim corresponding to this witness.
+    pub fn claim(
+        &self,
+        commitment_key: &CommitmentKey,
+        strategy: &impl Strategy,
+    ) -> Result<Claim, Error> {
+        if self.assignment.relation_digest() != commitment_key.relation_digest() {
+            return Err(Error::RelationMismatch);
+        }
+        Ok(Claim {
+            public_inputs: self.assignment.public_values().to_vec(),
+            commitment: commitment_key.commit(
+                self.assignment.committed_values(),
+                &self.opening,
+                strategy,
+            )?,
+        })
+    }
+
+    pub(super) const fn assignment(&self) -> &Assignment {
+        &self.assignment
+    }
+
+    pub(crate) const fn opening(&self) -> &Opening {
+        &self.opening
+    }
+}
+
+impl Claim {
+    /// Construct a public Pari claim.
+    pub const fn new(public_inputs: Vec<Scalar>, commitment: G1) -> Self {
+        Self {
+            public_inputs,
+            commitment,
+        }
+    }
+}
+
+impl Write for Claim {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.public_inputs.write(buf);
+        self.commitment.write(buf);
+    }
+}
+
+impl EncodeSize for Claim {
+    fn encode_size(&self) -> usize {
+        self.public_inputs.encode_size() + self.commitment.encode_size()
+    }
+}
+
+impl Read for Claim {
+    type Cfg = RangeCfg<usize>;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            public_inputs: Vec::<Scalar>::read_cfg(buf, &(*cfg, ScalarReadCfg::AllowZero))?,
+            commitment: G1::read(buf)?,
+        })
+    }
+}
+
+/// A Pari proof consisting of two G1 elements and one scalar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proof {
+    pub(crate) t: G1,
+    pub(crate) u: G1,
+    pub(crate) v_a: Scalar,
+}
+
+impl Write for Proof {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.t.write(buf);
+        self.u.write(buf);
+        self.v_a.write(buf);
+    }
+}
+
+impl EncodeSize for Proof {
+    fn encode_size(&self) -> usize {
+        self.t.encode_size() + self.u.encode_size() + self.v_a.encode_size()
+    }
+}
+
+impl Read for Proof {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            t: G1::read(buf)?,
+            u: G1::read(buf)?,
+            v_a: Scalar::read_cfg(buf, &ScalarReadCfg::AllowZero)?,
+        })
+    }
+}
+
+/// The succinct key used to verify proofs for one relation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifyingKey {
+    pub(crate) relation_digest: [u8; 32],
+    pub(crate) commitment_key_digest: [u8; 32],
+    pub(crate) domain_size: u32,
+    pub(crate) num_vars: u32,
+    pub(crate) public_inputs: u32,
+    pub(crate) committed_inputs: u32,
+    pub(crate) alpha_g: G1,
+    pub(crate) beta_g: G1,
+    pub(crate) delta_committed_h: G2,
+    pub(crate) delta_witness_h: G2,
+    pub(crate) tau_h: G2,
+    pub(crate) h: G2,
+}
+
+impl VerifyingKey {
+    /// The relation this key verifies.
+    pub const fn relation_digest(&self) -> &[u8; 32] {
+        &self.relation_digest
+    }
+
+    /// Number of ordinary public inputs, excluding the implicit constant one.
+    pub const fn public_input_count(&self) -> usize {
+        self.public_inputs as usize
+    }
+
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(VERIFYING_KEY_DIGEST_NAMESPACE);
+        hasher.update(&self.encode());
+        *hasher.finalize().as_bytes()
+    }
+}
+
+impl Write for VerifyingKey {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.relation_digest.write(buf);
+        self.commitment_key_digest.write(buf);
+        self.domain_size.write(buf);
+        self.num_vars.write(buf);
+        self.public_inputs.write(buf);
+        self.committed_inputs.write(buf);
+        self.alpha_g.write(buf);
+        self.beta_g.write(buf);
+        self.delta_committed_h.write(buf);
+        self.delta_witness_h.write(buf);
+        self.tau_h.write(buf);
+        self.h.write(buf);
+    }
+}
+
+impl EncodeSize for VerifyingKey {
+    fn encode_size(&self) -> usize {
+        self.relation_digest.encode_size()
+            + self.commitment_key_digest.encode_size()
+            + self.domain_size.encode_size()
+            + self.num_vars.encode_size()
+            + self.public_inputs.encode_size()
+            + self.committed_inputs.encode_size()
+            + self.alpha_g.encode_size()
+            + self.beta_g.encode_size()
+            + self.delta_committed_h.encode_size()
+            + self.delta_witness_h.encode_size()
+            + self.tau_h.encode_size()
+            + self.h.encode_size()
+    }
+}
+
+impl Read for VerifyingKey {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            relation_digest: <[u8; 32]>::read(buf)?,
+            commitment_key_digest: <[u8; 32]>::read(buf)?,
+            domain_size: u32::read(buf)?,
+            num_vars: u32::read(buf)?,
+            public_inputs: u32::read(buf)?,
+            committed_inputs: u32::read(buf)?,
+            alpha_g: G1::read(buf)?,
+            beta_g: G1::read(buf)?,
+            delta_committed_h: G2::read(buf)?,
+            delta_witness_h: G2::read(buf)?,
+            tau_h: G2::read(buf)?,
+            h: G2::read(buf)?,
+        })
+    }
+}
+
+/// The relation-specific key used to create proofs.
+#[derive(Clone, Debug)]
+pub struct ProvingKey {
+    pub(crate) commitment_key: CommitmentKey,
+    pub(crate) sigma_witness: Vec<G1>,
+    pub(crate) sigma_mask_constant: G1,
+    pub(crate) sigma_mask_linear: G1,
+    pub(crate) sigma_quotient: Vec<G1>,
+    pub(crate) sigma_a: Vec<G1>,
+    pub(crate) sigma_r: Vec<G1>,
+    pub(crate) verifying_key: VerifyingKey,
+}
+
+impl ProvingKey {
+    /// Return the key for creating claims that this proving key can prove.
+    pub const fn commitment_key(&self) -> &CommitmentKey {
+        &self.commitment_key
+    }
+
+    /// Return the corresponding verification key.
+    pub const fn verifying_key(&self) -> &VerifyingKey {
+        &self.verifying_key
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+mod arbitrary_impls {
+    use super::*;
+    use arbitrary::{Arbitrary, Unstructured};
+
+    impl<'a> Arbitrary<'a> for CommitmentKey {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self {
+                relation_digest: u.arbitrary()?,
+                basis: u.arbitrary()?,
+                blinding: u.arbitrary()?,
+            })
+        }
+    }
+
+    impl<'a> Arbitrary<'a> for Claim {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self {
+                public_inputs: u.arbitrary()?,
+                commitment: u.arbitrary()?,
+            })
+        }
+    }
+
+    impl<'a> Arbitrary<'a> for Proof {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self {
+                t: u.arbitrary()?,
+                u: u.arbitrary()?,
+                v_a: u.arbitrary()?,
+            })
+        }
+    }
+
+    impl<'a> Arbitrary<'a> for VerifyingKey {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self {
+                relation_digest: u.arbitrary()?,
+                commitment_key_digest: u.arbitrary()?,
+                domain_size: u.arbitrary()?,
+                num_vars: u.arbitrary()?,
+                public_inputs: u.arbitrary()?,
+                committed_inputs: u.arbitrary()?,
+                alpha_g: u.arbitrary()?,
+                beta_g: u.arbitrary()?,
+                delta_committed_h: u.arbitrary()?,
+                delta_witness_h: u.arbitrary()?,
+                tau_h: u.arbitrary()?,
+                h: u.arbitrary()?,
+            })
+        }
+    }
+}
