@@ -958,7 +958,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .is_ok_and(|parent| parent == context.parent)
             && !self.captured_parent_valid(context)
         {
-            // Rejection leaves the proposal slot empty, so allow the round to retry.
+            // The rejected build recorded nothing, so release the latch for a retry.
             if let Some(round) = self.views.get_mut(&context.view()) {
                 round.clear_proposal_request();
             }
@@ -1715,9 +1715,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// proposals normally arrive through explicit ancestry and need no extra
     /// gate, but a locally endorsed pipelined handoff links directly to the
     /// outgoing term's tip before it certifies and must retain that barrier.
-    /// The endorsement is detected from round state (an own notarize vote on
-    /// a tip-linked proposal), not the elector opt-in, so replay preserves
-    /// the barrier across a restart that removes the opt-in.
+    /// The barrier keys on round state (an own notarize vote on a tip-linked
+    /// proposal), not the elector opt-in, so replay preserves it across a
+    /// restart that removes the opt-in. It also matches non-endorsement
+    /// term-start votes: those are cast only on explicitly certified
+    /// ancestry, and append-ordered journal replay restores the parent's
+    /// certification before the vote, so the barrier is already satisfied
+    /// for them.
     fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
         let view = proposal.view();
         self.previous_in_term(view).or_else(|| {
@@ -6883,10 +6887,6 @@ mod tests {
             let (ready, fetches) = state.certify_candidates();
             assert!(fetches.is_empty());
             assert_eq!(ready, vec![tip]);
-
-            let mut pool = AbortablePool::<()>::default();
-            let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(View::new(5), handle);
             assert!(state.certified(View::new(5), true).is_some());
 
             // Completing the cross-term parent wakes the blocked child.

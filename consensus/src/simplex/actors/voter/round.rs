@@ -134,7 +134,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    /// Clears an unrecorded local proposal request so it can be issued again.
+    /// Clears the local proposal request. A new build may follow only while
+    /// the slot has no proposal.
     pub const fn clear_proposal_request(&mut self) {
         self.proposal.clear_request();
     }

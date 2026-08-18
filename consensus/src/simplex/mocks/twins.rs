@@ -337,6 +337,11 @@ where
         // later views (if a twin is elected).
         self.fallback.elect(round, certificate)
     }
+
+    // `elect_early` deliberately keeps the opt-out default. Scripted
+    // `round_leaders` answer `elect` during the attack prefix, so an early
+    // election delegated to the fallback could contradict the script and
+    // violate the `elect_early == elect` contract.
 }
 
 /// Controls how multi-round scenarios are constructed.
