@@ -12,14 +12,17 @@ use commonware_cryptography::{Digest, certificate::Verification};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::ordered::Set;
+use futures::{FutureExt as _, future::BoxFuture};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
 use tracing::{Instrument as _, Span, info_span};
 
 /// Runs a CPU-bound job through [Strategy::spawn], entering `span` on the worker thread and
-/// instrumenting the awaited future so the offloaded work stays attributed to the caller's trace.
-async fn offload<P, F, T>(span: Span, strategy: &P, job: F) -> T
+/// instrumenting the returned future so the offloaded work stays attributed to the caller's trace.
+///
+/// The job is submitted eagerly: it starts without the returned future being polled.
+fn offload<P, F, T>(span: Span, strategy: &P, job: F) -> impl Future<Output = T> + Send + 'static
 where
     P: Strategy,
     F: FnOnce(P) -> T + Send + 'static,
@@ -29,7 +32,6 @@ where
     strategy
         .spawn(move |strategy| worker_span.in_scope(|| job(strategy)))
         .instrument(span)
-        .await
 }
 
 /// Certification progress for one kind of vote.
@@ -41,6 +43,9 @@ struct Certification<V> {
     quorum: usize,
     /// Whether the scheme benefits from batching signature verification.
     batchable: bool,
+    /// Whether a verification batch is currently in flight. At most one batch
+    /// per kind runs at a time; votes arriving meanwhile buffer as pending.
+    in_flight: bool,
     /// Progress toward a certificate.
     state: State<V>,
 }
@@ -64,6 +69,7 @@ impl<V> Certification<V> {
         Self {
             quorum,
             batchable,
+            in_flight: false,
             state: State::Incomplete {
                 pending: Vec::new(),
                 verified: Vec::new(),
@@ -95,10 +101,13 @@ impl<V> Certification<V> {
         votes.push(vote);
     }
 
-    /// Returns true if a batch verification should run: pending votes exist,
-    /// the quorum is unmet, and (for batchable schemes) the buffers together
-    /// could reach it.
+    /// Returns true if a batch verification should run: no batch is already in
+    /// flight, pending votes exist, the quorum is unmet, and (for batchable
+    /// schemes) the buffers together could reach it.
     const fn should_verify(&self) -> bool {
+        if self.in_flight {
+            return false;
+        }
         match &self.state {
             State::Incomplete { pending, verified } => {
                 !pending.is_empty()
@@ -109,18 +118,30 @@ impl<V> Certification<V> {
         }
     }
 
-    /// Runs `f` over the buffered votes and stores the verified set it
+    /// Runs `f` over the buffered votes and reintegrates the verified set it
     /// returns, or `None` if a batch is not worth verifying (see
-    /// [Self::should_verify]).
-    ///
-    /// `f` receives the pending and previously verified votes and returns the
-    /// new verified set plus the signers that failed verification. Returns
-    /// the number of votes processed alongside those signers.
+    /// [Self::should_verify]). Test-only shim over [Self::begin_verify] and
+    /// [Self::finish_verify].
+    #[cfg(test)]
     async fn try_verify<F, Fut>(&mut self, f: F) -> Option<(usize, Vec<Participant>)>
     where
         F: FnOnce(Vec<V>, Vec<V>) -> Fut,
         Fut: Future<Output = (Vec<V>, Vec<Participant>)>,
     {
+        let (batch, pending, prior) = self.begin_verify()?;
+        let (votes, invalid) = f(pending, prior).await;
+        self.finish_verify(votes);
+        Some((batch, invalid))
+    }
+
+    /// Surrenders the buffered votes for a verification batch, or `None` if a
+    /// batch is not worth verifying (see [Self::should_verify]).
+    ///
+    /// Returns the number of pending votes alongside the pending and
+    /// previously verified votes. Marks the certification in flight until
+    /// [Self::finish_verify] reintegrates the batch's result; votes arriving
+    /// meanwhile buffer as pending for a later batch.
+    fn begin_verify(&mut self) -> Option<(usize, Vec<V>, Vec<V>)> {
         if !self.should_verify() {
             return None;
         }
@@ -129,12 +150,27 @@ impl<V> Certification<V> {
         };
         let batch = pending.len();
         let (pending, prior) = (mem::take(pending), mem::take(verified));
-        let (votes, invalid) = f(pending, prior).await;
+        self.in_flight = true;
+        Some((batch, pending, prior))
+    }
+
+    /// Reintegrates the verified votes of a completed batch, merging them with
+    /// any votes verified while the batch was in flight. Signer uniqueness is
+    /// owned by the caller ([Verifier::add]), so the merge cannot double-count
+    /// a signer.
+    ///
+    /// Dropped without effect if a certificate completed while the batch was
+    /// in flight.
+    fn finish_verify(&mut self, votes: Vec<V>) {
+        self.in_flight = false;
         let State::Incomplete { verified, .. } = &mut self.state else {
-            unreachable!("certification completed mid-verification");
+            return;
         };
-        *verified = votes;
-        Some((batch, invalid))
+        if verified.is_empty() {
+            *verified = votes;
+        } else {
+            verified.extend(votes);
+        }
     }
 
     /// Completes with a verified quorum, surrendering it for certificate
@@ -169,6 +205,19 @@ impl<V> Certification<V> {
         }
     }
 }
+
+/// The verified votes of one completed batch, tagged by kind so a pooled
+/// verification's result can be routed back to the right [Certification].
+pub enum VerifiedVotes<S: Scheme<D>, D: Digest> {
+    Notarizes(Vec<Notarize<S, D>>),
+    Nullifies(Vec<Nullify<S>>),
+    Finalizes(Vec<Finalize<S, D>>),
+}
+
+/// An owned, in-flight verification batch: resolves to the verified votes and
+/// the signers that failed verification. Feed the votes back through
+/// [Verifier::finish_verify].
+pub type VerifyJob<S, D> = BoxFuture<'static, (VerifiedVotes<S, D>, Vec<Participant>)>;
 
 /// How the selected proposal changed after an update.
 pub(super) struct ProposalUpdate {
@@ -303,62 +352,58 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         self.proposal.proposal()
     }
 
-    /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
-    ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless
-    /// the verifier will also be discarded.
+    /// Test-only shim over [Self::begin_construct_certificate].
+    #[cfg(test)]
     pub async fn try_construct_certificate(
         &mut self,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
-        if let Some(notarizes) = self.notarize.try_complete() {
-            let span = info_span!(
-                "simplex.batcher.try_construct_notarization",
-                epoch = self.round.epoch().traced(),
-                view = self.round.view().traced()
-            );
-            let scheme = Arc::clone(&self.scheme);
-            let notarization = offload(span, strategy, move |strategy| {
+        Some(self.begin_construct_certificate(strategy)?.await)
+    }
+
+    /// Begins recovery of a certificate from verified votes: the first kind
+    /// (notarization, then nullification, then finalization) with an
+    /// unconsumed verified quorum. Call repeatedly to drain every
+    /// constructible kind.
+    ///
+    /// Returns an owned future that resolves to the certificate. Recovery
+    /// consumes the verified votes when it begins; do not drop the future
+    /// unless the verifier will also be discarded.
+    pub fn begin_construct_certificate(
+        &mut self,
+        strategy: &impl Strategy,
+    ) -> Option<impl Future<Output = Certificate<S, D>> + Send + 'static> {
+        let (quorum, name) = if let Some(notarizes) = self.notarize.try_complete() {
+            (VerifiedVotes::Notarizes(notarizes), "notarization")
+        } else if let Some(nullifies) = self.nullify.try_complete() {
+            (VerifiedVotes::Nullifies(nullifies), "nullification")
+        } else {
+            (
+                VerifiedVotes::Finalizes(self.finalize.try_complete()?),
+                "finalization",
+            )
+        };
+        let span = info_span!(
+            "simplex.batcher.construct_certificate",
+            kind = name,
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        );
+        let scheme = Arc::clone(&self.scheme);
+        Some(offload(span, strategy, move |strategy| match quorum {
+            VerifiedVotes::Notarizes(notarizes) => Certificate::Notarization(
                 Notarization::from_owned_notarizes(scheme.as_ref(), notarizes, &strategy)
-                    .expect("verified notarize quorum must assemble")
-            })
-            .await;
-            return Some(Certificate::Notarization(notarization));
-        }
-
-        if let Some(nullifies) = self.nullify.try_complete() {
-            let span = info_span!(
-                "simplex.batcher.try_construct_nullification",
-                epoch = self.round.epoch().traced(),
-                view = self.round.view().traced()
-            );
-            let scheme = Arc::clone(&self.scheme);
-            let nullification = offload(span, strategy, move |strategy| {
+                    .expect("verified notarize quorum must assemble"),
+            ),
+            VerifiedVotes::Nullifies(nullifies) => Certificate::Nullification(
                 Nullification::from_owned_nullifies(scheme.as_ref(), nullifies, &strategy)
-                    .expect("verified nullify quorum must assemble")
-            })
-            .await;
-            return Some(Certificate::Nullification(nullification));
-        }
-
-        if let Some(finalizes) = self.finalize.try_complete() {
-            let span = info_span!(
-                "simplex.batcher.try_construct_finalization",
-                epoch = self.round.epoch().traced(),
-                view = self.round.view().traced()
-            );
-            let scheme = Arc::clone(&self.scheme);
-            let finalization = offload(span, strategy, move |strategy| {
+                    .expect("verified nullify quorum must assemble"),
+            ),
+            VerifiedVotes::Finalizes(finalizes) => Certificate::Finalization(
                 Finalization::from_owned_finalizes(scheme.as_ref(), finalizes, &strategy)
-                    .expect("verified finalize quorum must assemble")
-            })
-            .await;
-            return Some(Certificate::Finalization(finalization));
-        }
-
-        None
+                    .expect("verified finalize quorum must assemble"),
+            ),
+        }))
     }
 
     /// Returns true if a certificate of `kind` exists.
@@ -484,139 +529,159 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Batch verifies pending [Vote::Notarize] messages, if worthwhile: the
-    /// proposal is known (notarizes reference one proposal) and the buffers
-    /// warrant a batch (see [Certification::should_verify]).
-    ///
-    /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
-    /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
-    /// instead of occupying the calling task.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The number of votes processed and the signer indices for whom verification
-    /// failed, or `None` if verification was not worthwhile.
+    /// Awaits a begun verification batch and reintegrates its result through
+    /// [Self::finish_verify]. Shared body of the test-only `try_verify_*`
+    /// shims.
+    #[cfg(test)]
+    async fn drive(
+        &mut self,
+        begun: Option<(usize, VerifyJob<S, D>)>,
+    ) -> Option<(usize, Vec<Participant>)> {
+        let (batch, job) = begun?;
+        let (votes, invalid) = job.await;
+        self.finish_verify(votes);
+        Some((batch, invalid))
+    }
+
+    /// Test-only shim over [Self::begin_verify_notarizes] and
+    /// [Self::finish_verify].
+    #[cfg(test)]
     pub async fn try_verify_notarizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
+        let begun = self.begin_verify_notarizes(rng, strategy);
+        self.drive(begun).await
+    }
+
+    /// Begins a batch verification of pending [Vote::Notarize] messages, if
+    /// worthwhile (see [Certification::should_verify]), returning the batch
+    /// size and an owned future that resolves to the verified votes and the
+    /// signers that failed verification.
+    ///
+    /// The caller must feed the future's votes back through
+    /// [Self::finish_verify]; until then, no further notarize batch begins.
+    pub fn begin_verify_notarizes<R: CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        strategy: &impl Strategy,
+    ) -> Option<(usize, VerifyJob<S, D>)> {
         // Until the proposal is known, notarizes may reference many different
         // proposals.
         if matches!(self.proposal, ProposalState::Unknown) {
             return None;
         }
-        self.notarize
-            .try_verify(|notarizes, mut verified_notarizes| {
-                let span = info_span!(
-                    "simplex.batcher.verify_notarizes",
-                    epoch = self.round.epoch().traced(),
-                    view = self.round.view().traced()
-                );
-                let scheme = Arc::clone(&self.scheme);
-                let mut rng = StdRng::from_rng(rng);
-                offload(span, strategy, move |strategy| {
-                    let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
-                        .into_iter()
-                        .map(|n| (n.proposal, n.attestation))
-                        .unzip();
-                    // All proposals here are equal: pending votes are filtered to the
-                    // selected proposal before verification becomes ready.
-                    let proposal = &proposals[0];
+        let (batch, notarizes, mut verified_notarizes) = self.notarize.begin_verify()?;
+        let span = info_span!(
+            "simplex.batcher.verify_notarizes",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        );
+        let scheme = Arc::clone(&self.scheme);
+        let mut rng = StdRng::from_rng(rng);
+        let job = offload(span, strategy, move |strategy| {
+            let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
+                .into_iter()
+                .map(|n| (n.proposal, n.attestation))
+                .unzip();
+            // All proposals here are equal: pending votes are filtered to the
+            // selected proposal before verification becomes ready.
+            let proposal = &proposals[0];
 
-                    let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
-                        &mut rng,
-                        Subject::Notarize { proposal },
-                        attestations,
-                        &strategy,
-                    );
+            let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
+                &mut rng,
+                Subject::Notarize { proposal },
+                attestations,
+                &strategy,
+            );
 
-                    verified_notarizes.extend(verified.into_iter().zip(proposals).map(
-                        |(attestation, proposal)| Notarize {
-                            proposal,
-                            attestation,
-                        },
-                    ));
-                    (verified_notarizes, invalid)
-                })
-            })
-            .await
+            verified_notarizes.extend(verified.into_iter().zip(proposals).map(
+                |(attestation, proposal)| Notarize {
+                    proposal,
+                    attestation,
+                },
+            ));
+            (VerifiedVotes::Notarizes(verified_notarizes), invalid)
+        });
+        Some((batch, job.boxed()))
     }
 
-    /// Batch verifies pending [Vote::Nullify] messages, if worthwhile (see
-    /// [Certification::should_verify]).
-    ///
-    /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
-    /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
-    /// instead of occupying the calling task.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The number of votes processed and the signer indices for whom verification
-    /// failed, or `None` if verification was not worthwhile.
+    /// Test-only shim over [Self::begin_verify_nullifies] and
+    /// [Self::finish_verify].
+    #[cfg(test)]
     pub async fn try_verify_nullifies<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        self.nullify
-            .try_verify(|nullifies, mut verified_nullifies| {
-                let span = info_span!(
-                    "simplex.batcher.verify_nullifies",
-                    epoch = self.round.epoch().traced(),
-                    view = self.round.view().traced()
-                );
-                let round = nullifies[0].round;
-                let scheme = Arc::clone(&self.scheme);
-                let mut rng = StdRng::from_rng(rng);
-                offload(span, strategy, move |strategy| {
-                    let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
-                        &mut rng,
-                        Subject::Nullify { round },
-                        nullifies.into_iter().map(|nullify| nullify.attestation),
-                        &strategy,
-                    );
-
-                    verified_nullifies.extend(
-                        verified
-                            .into_iter()
-                            .map(|attestation| Nullify { round, attestation }),
-                    );
-                    (verified_nullifies, invalid)
-                })
-            })
-            .await
+        let begun = self.begin_verify_nullifies(rng, strategy);
+        self.drive(begun).await
     }
 
-    /// Batch verifies pending [Vote::Finalize] messages, if worthwhile: the
-    /// proposal is known (finalizes reference one proposal) and the buffers
-    /// warrant a batch (see [Certification::should_verify]).
+    /// Begins a batch verification of pending [Vote::Nullify] messages, if
+    /// worthwhile (see [Certification::should_verify]), returning the batch
+    /// size and an owned future that resolves to the verified votes and the
+    /// signers that failed verification.
     ///
-    /// It uses `S::verify_attestations` for efficient batch verification, run as one CPU-bound job
-    /// submitted through [Strategy::spawn] so a parallel strategy hosts it on its own pool
-    /// instead of occupying the calling task.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The number of votes processed and the signer indices for whom verification
-    /// failed, or `None` if verification was not worthwhile.
+    /// The caller must feed the future's votes back through
+    /// [Self::finish_verify]; until then, no further nullify batch begins.
+    pub fn begin_verify_nullifies<R: CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        strategy: &impl Strategy,
+    ) -> Option<(usize, VerifyJob<S, D>)> {
+        let (batch, nullifies, mut verified_nullifies) = self.nullify.begin_verify()?;
+        let span = info_span!(
+            "simplex.batcher.verify_nullifies",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        );
+        let round = nullifies[0].round;
+        let scheme = Arc::clone(&self.scheme);
+        let mut rng = StdRng::from_rng(rng);
+        let job = offload(span, strategy, move |strategy| {
+            let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
+                &mut rng,
+                Subject::Nullify { round },
+                nullifies.into_iter().map(|nullify| nullify.attestation),
+                &strategy,
+            );
+
+            verified_nullifies.extend(
+                verified
+                    .into_iter()
+                    .map(|attestation| Nullify { round, attestation }),
+            );
+            (VerifiedVotes::Nullifies(verified_nullifies), invalid)
+        });
+        Some((batch, job.boxed()))
+    }
+
+    /// Test-only shim over [Self::begin_verify_finalizes] and
+    /// [Self::finish_verify].
+    #[cfg(test)]
     pub async fn try_verify_finalizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
+        let begun = self.begin_verify_finalizes(rng, strategy);
+        self.drive(begun).await
+    }
+
+    /// Begins a batch verification of pending [Vote::Finalize] messages, if
+    /// worthwhile (see [Certification::should_verify]), returning the batch
+    /// size and an owned future that resolves to the verified votes and the
+    /// signers that failed verification.
+    ///
+    /// The caller must feed the future's votes back through
+    /// [Self::finish_verify]; until then, no further finalize batch begins.
+    pub fn begin_verify_finalizes<R: CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        strategy: &impl Strategy,
+    ) -> Option<(usize, VerifyJob<S, D>)> {
         // Until the proposal is known (from the leader's vote or a verified
         // certificate, which suffices even when the leader is unknown, e.g. a
         // round only learned about through certificates), finalizes may
@@ -624,39 +689,57 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         if matches!(self.proposal, ProposalState::Unknown) {
             return None;
         }
-        self.finalize
-            .try_verify(|finalizes, mut verified_finalizes| {
-                let span = info_span!(
-                    "simplex.batcher.verify_finalizes",
-                    epoch = self.round.epoch().traced(),
-                    view = self.round.view().traced()
-                );
-                let scheme = Arc::clone(&self.scheme);
-                let mut rng = StdRng::from_rng(rng);
-                offload(span, strategy, move |strategy| {
-                    let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
-                        .into_iter()
-                        .map(|n| (n.proposal, n.attestation))
-                        .unzip();
-                    let proposal = &proposals[0];
+        let (batch, finalizes, mut verified_finalizes) = self.finalize.begin_verify()?;
+        let span = info_span!(
+            "simplex.batcher.verify_finalizes",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        );
+        let scheme = Arc::clone(&self.scheme);
+        let mut rng = StdRng::from_rng(rng);
+        let job = offload(span, strategy, move |strategy| {
+            let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
+                .into_iter()
+                .map(|n| (n.proposal, n.attestation))
+                .unzip();
+            let proposal = &proposals[0];
 
-                    let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
-                        &mut rng,
-                        Subject::Finalize { proposal },
-                        attestations,
-                        &strategy,
-                    );
+            let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
+                &mut rng,
+                Subject::Finalize { proposal },
+                attestations,
+                &strategy,
+            );
 
-                    verified_finalizes.extend(verified.into_iter().zip(proposals).map(
-                        |(attestation, proposal)| Finalize {
-                            proposal,
-                            attestation,
-                        },
-                    ));
-                    (verified_finalizes, invalid)
-                })
-            })
-            .await
+            verified_finalizes.extend(verified.into_iter().zip(proposals).map(
+                |(attestation, proposal)| Finalize {
+                    proposal,
+                    attestation,
+                },
+            ));
+            (VerifiedVotes::Finalizes(verified_finalizes), invalid)
+        });
+        Some((batch, job.boxed()))
+    }
+
+    /// Reintegrates the result of a completed verification batch into the
+    /// [Certification] of its kind (see [Certification::finish_verify]).
+    /// Proposal-bearing votes are filtered against the current proposal,
+    /// which may have changed while the batch was in flight.
+    pub fn finish_verify(&mut self, votes: VerifiedVotes<S, D>) {
+        match votes {
+            VerifiedVotes::Notarizes(mut notarizes) => {
+                let proposal = self.proposal();
+                notarizes.retain(|notarize| Some(&notarize.proposal) == proposal);
+                self.notarize.finish_verify(notarizes);
+            }
+            VerifiedVotes::Nullifies(nullifies) => self.nullify.finish_verify(nullifies),
+            VerifiedVotes::Finalizes(mut finalizes) => {
+                let proposal = self.proposal();
+                finalizes.retain(|finalize| Some(&finalize.proposal) == proposal);
+                self.finalize.finish_verify(finalizes);
+            }
+        }
     }
 }
 
@@ -1076,6 +1159,148 @@ mod tests {
         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>).await;
         ready_and_verify_notarizes(ed25519::fixture).await;
         ready_and_verify_notarizes(secp256r1::fixture).await;
+    }
+
+    async fn buffer_votes_while_batch_in_flight<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let mut verifier = Verifier::<S, Sha256>::new(
+            Round::new(Epoch::new(0), View::new(1)),
+            schemes[0].clone(),
+            quorum,
+        );
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| create_notarize(scheme, round, View::new(0), 1))
+            .collect();
+
+        verifier.set_leader(notarizes[0].signer(), None);
+        for notarize in &notarizes[..4] {
+            verifier.add(Vote::Notarize(notarize.clone()), false);
+        }
+
+        // The batch takes every pending vote and marks the kind in flight:
+        // no second batch may begin until the first reintegrates.
+        let (batch, job) = verifier
+            .begin_verify_notarizes(&mut rng, &Sequential)
+            .expect("batch must begin");
+        assert_eq!(batch, 4);
+        assert!(verifier.notarize.pending().is_empty());
+        assert!(
+            verifier
+                .begin_verify_notarizes(&mut rng, &Sequential)
+                .is_none()
+        );
+
+        // A vote arriving while the batch is in flight buffers as pending
+        // without opening a second batch.
+        verifier.add(Vote::Notarize(notarizes[4].clone()), false);
+        assert_eq!(verifier.notarize.pending().len(), 1);
+        assert!(
+            verifier
+                .begin_verify_notarizes(&mut rng, &Sequential)
+                .is_none()
+        );
+
+        // Reintegrate the batch one vote short of a quorum, as if one vote
+        // had failed verification.
+        let (votes, invalid) = job.await;
+        assert!(invalid.is_empty());
+        let VerifiedVotes::Notarizes(mut verified) = votes else {
+            panic!("expected notarizes");
+        };
+        assert_eq!(verified.len(), 4);
+        verified.truncate(3);
+        verifier.finish_verify(VerifiedVotes::Notarizes(verified));
+        assert_eq!(verifier.notarize.verified().len(), 3);
+        assert_eq!(verifier.notarize.pending().len(), 1);
+
+        // Reintegration clears the in-flight mark, so the buffered vote forms
+        // the next batch and completes the quorum.
+        let (batch, job) = verifier
+            .begin_verify_notarizes(&mut rng, &Sequential)
+            .expect("buffered vote must batch");
+        assert_eq!(batch, 1);
+        let (votes, invalid) = job.await;
+        assert!(invalid.is_empty());
+        verifier.finish_verify(votes);
+        assert_eq!(verifier.notarize.verified().len(), quorum as usize);
+
+        let certificate = verifier
+            .try_construct_certificate(&Sequential)
+            .await
+            .expect("quorum must recover a certificate");
+        assert!(matches!(certificate, Certificate::Notarization(_)));
+    }
+
+    #[test_async]
+    async fn test_buffer_votes_while_batch_in_flight() {
+        buffer_votes_while_batch_in_flight(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_multisig::fixture::<MinSig, _>).await;
+        buffer_votes_while_batch_in_flight(bls12381_multisig::fixture::<MinPk, _>).await;
+        buffer_votes_while_batch_in_flight(ed25519::fixture).await;
+        buffer_votes_while_batch_in_flight(secp256r1::fixture).await;
+    }
+
+    #[test_async]
+    async fn test_proposal_displacement_filters_in_flight_batches() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier =
+            Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone(), quorum);
+        let proposal_a = Proposal::new(round, View::zero(), sample_digest(1));
+        let proposal_b = Proposal::new(round, View::zero(), sample_digest(2));
+
+        verifier.set_leader(Participant::new(0), None);
+        for scheme in schemes.iter().take(quorum as usize) {
+            verifier.add(
+                Vote::Notarize(Notarize::sign(scheme, proposal_a.clone()).unwrap()),
+                false,
+            );
+            verifier.add(
+                Vote::Finalize(Finalize::sign(scheme, proposal_a.clone()).unwrap()),
+                false,
+            );
+        }
+
+        let (_, notarizes) = verifier
+            .begin_verify_notarizes(&mut rng, &Sequential)
+            .expect("notarize batch must begin");
+        let (_, finalizes) = verifier
+            .begin_verify_finalizes(&mut rng, &Sequential)
+            .expect("finalize batch must begin");
+        assert!(
+            verifier
+                .set_proposal(ProposalState::Certificate(proposal_b))
+                .changed
+        );
+
+        let (notarizes, invalid) = notarizes.await;
+        assert!(invalid.is_empty());
+        verifier.finish_verify(notarizes);
+        let (finalizes, invalid) = finalizes.await;
+        assert!(invalid.is_empty());
+        verifier.finish_verify(finalizes);
+
+        assert!(verifier.notarize.verified().is_empty());
+        assert!(verifier.finalize.verified().is_empty());
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_none()
+        );
     }
 
     fn add_nullify<S, F>(mut fixture: F)

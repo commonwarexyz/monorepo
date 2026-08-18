@@ -1,4 +1,7 @@
-use super::{Verifier, verifier::ProposalState};
+use super::{
+    Verifier,
+    verifier::{ProposalState, VerifiedVotes, VerifyJob},
+};
 use crate::{
     Reporter,
     simplex::{
@@ -16,7 +19,7 @@ use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 use tracing::Span;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -363,21 +366,49 @@ impl<
 
     /// Batch verifies the first kind of vote worth verifying (notarizes, then
     /// nullifies, then finalizes), or `None` if no kind is worthwhile.
+    /// Test-only shim over [Self::begin_verify] and [Self::finish_verify].
     ///
     /// Returns the number of votes processed and the signers that failed
     /// verification.
+    #[cfg(test)]
     pub async fn try_verify<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> Option<(usize, Vec<Participant>)> {
-        if let Some(result) = self.verifier.try_verify_notarizes(rng, strategy).await {
-            return Some(result);
+        let (batch, job) = self.begin_verify(rng, strategy)?;
+        let (votes, invalid) = job.await;
+        self.finish_verify(votes);
+        Some((batch, invalid))
+    }
+
+    /// Begins a batch verification of the first kind of vote worth verifying
+    /// (notarizes, then nullifies, then finalizes), or `None` if no kind is
+    /// worthwhile. Each kind independently tracks an in-flight batch, so call
+    /// repeatedly to start every worthwhile kind.
+    ///
+    /// Returns the batch size and an owned future that resolves to the
+    /// verified votes and the signers that failed verification. The caller
+    /// must feed the future's votes back through [Self::finish_verify]; until
+    /// then, no further batch of that kind begins.
+    pub fn begin_verify<E: CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        strategy: &impl Strategy,
+    ) -> Option<(usize, VerifyJob<S, D>)> {
+        if let Some(begun) = self.verifier.begin_verify_notarizes(rng, strategy) {
+            return Some(begun);
         }
-        if let Some(result) = self.verifier.try_verify_nullifies(rng, strategy).await {
-            return Some(result);
+        if let Some(begun) = self.verifier.begin_verify_nullifies(rng, strategy) {
+            return Some(begun);
         }
-        self.verifier.try_verify_finalizes(rng, strategy).await
+        self.verifier.begin_verify_finalizes(rng, strategy)
+    }
+
+    /// Reintegrates the result of a completed verification batch. See
+    /// [Verifier::finish_verify].
+    pub fn finish_verify(&mut self, votes: VerifiedVotes<S, D>) {
+        self.verifier.finish_verify(votes);
     }
 
     /// Returns whether `signer` has a nullify vote.
@@ -410,18 +441,28 @@ impl<
             .collect()
     }
 
-    /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
-    ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless the round will
-    /// also be discarded.
+    /// Test-only shim over [Self::begin_construct_certificate] and
+    /// [Self::record_certificate].
+    #[cfg(test)]
     pub async fn try_construct_certificate(
         &mut self,
         strategy: &impl Strategy,
     ) -> Option<Certificate<S, D>> {
-        let certificate = self.verifier.try_construct_certificate(strategy).await?;
+        let certificate = self.begin_construct_certificate(strategy)?.await;
         self.record_certificate(&certificate);
         Some(certificate)
+    }
+
+    /// Begins recovery of a certificate from verified votes (see
+    /// [Verifier::begin_construct_certificate]).
+    ///
+    /// The caller must pass the resolved certificate to
+    /// [Self::record_certificate] so the round completes the certified phase
+    /// and applies its retention policy.
+    pub fn begin_construct_certificate(
+        &mut self,
+        strategy: &impl Strategy,
+    ) -> Option<impl Future<Output = Certificate<S, D>> + Send + 'static> {
+        self.verifier.begin_construct_certificate(strategy)
     }
 }

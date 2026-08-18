@@ -15,7 +15,7 @@ use commonware_parallel::Strategy;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
 use std::{num::NonZeroUsize, time::Duration};
-pub use verifier::Verifier;
+pub use verifier::{VerifiedVotes, Verifier};
 
 pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub scheme: S,
@@ -44,7 +44,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{actor::Done, *};
     use crate::{
         Viewable,
         simplex::{
@@ -85,11 +85,16 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Strategizer as _, Supervisor as _, deterministic,
-        telemetry::traces::{TracedExt as _, collector::TraceStorage},
+        telemetry::{
+            metrics::histogram::Timed,
+            traces::{TracedExt as _, collector::TraceStorage},
+        },
         tokio,
     };
-    use commonware_utils::{NZUsize, TestRng, ordered::Set, sync::Mutex, test_rng};
-    use std::{marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
+    use commonware_utils::{NZUsize, TestRng, futures::Pool, ordered::Set, sync::Mutex, test_rng};
+    use std::{
+        collections::BTreeMap, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration,
+    };
     use tracing::{Level, Span};
 
     type Broadcasts = Arc<Mutex<Vec<(Sha256Digest, Round, Vec<PublicKey>)>>>;
@@ -507,6 +512,243 @@ mod tests {
             round.try_construct_certificate(&Sequential).await,
             Some(Certificate::Notarization(_))
         ));
+    }
+
+    /// [Actor::handle_done] routes batch results to the view that dispatched
+    /// them, in any completion order across views.
+    #[test_traced]
+    fn test_handle_done_routes_by_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, b"batcher_test", 5);
+            let quorum = quorum(5) as usize;
+            let epoch = Epoch::new(0);
+            let cfg = test_config(
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (mut actor, _mailbox) = Actor::new(context.child("actor"), cfg);
+            let (voter_sender, _voter_receiver) = mailbox::new::<voter::Message<_, Sha256Digest>>(
+                context.child("voter_mailbox"),
+                NZUsize!(8),
+            );
+            let mut voter = voter::Mailbox::new(voter_sender);
+            let timed = Timed::register(&context, "test_latency", "test latency");
+
+            // Track two rounds with distinct proposals.
+            let mut work = BTreeMap::new();
+            let mut proposals = Vec::new();
+            for view in [1u64, 2] {
+                let round_id = Round::new(epoch, View::new(view));
+                let proposal = Proposal::new(
+                    round_id,
+                    View::new(view - 1),
+                    Sha256::hash(&[(view as u8).to_be_bytes().as_slice()]),
+                );
+                let mut round = super::Round::new(
+                    round_id,
+                    Arc::new(schemes[0].clone()),
+                    NoopBlocker,
+                    NoopReporter(PhantomData),
+                    false,
+                );
+                round.set_leader(Participant::new(0));
+                round.accept_vote(
+                    Vote::Notarize(Notarize::sign(&schemes[0], proposal.clone()).unwrap()),
+                    false,
+                );
+                work.insert(View::new(view), round);
+                proposals.push(proposal);
+            }
+
+            // Reintegrate the higher view's batch first.
+            for (view, proposal) in [(2u64, &proposals[1]), (1u64, &proposals[0])] {
+                let votes = schemes
+                    .iter()
+                    .skip(1)
+                    .take(quorum)
+                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                let dirty = actor.handle_done(
+                    &mut voter,
+                    &mut work,
+                    Done::Verified {
+                        view: View::new(view),
+                        batch: quorum,
+                        timer: timed.timer(&context),
+                        votes: VerifiedVotes::Notarizes(votes),
+                        invalid: vec![],
+                    },
+                );
+                assert_eq!(dirty, Some(View::new(view)));
+            }
+
+            // Each round holds exactly its own quorum: recovery yields the
+            // matching proposal.
+            for (view, proposal) in [(1u64, &proposals[0]), (2u64, &proposals[1])] {
+                let round = work.get_mut(&View::new(view)).unwrap();
+                let Some(Certificate::Notarization(notarization)) =
+                    round.try_construct_certificate(&Sequential).await
+                else {
+                    panic!("view {view} must recover a notarization");
+                };
+                assert_eq!(&notarization.proposal, proposal);
+            }
+        });
+    }
+
+    /// Crypto dispatch never submits more jobs than the strategy can execute
+    /// concurrently. A view skipped at capacity remains ready for a later pass.
+    #[test_traced]
+    fn test_dispatch_view_respects_strategy_parallelism() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"batcher_test", 5);
+            let epoch = Epoch::new(0);
+            let cfg = test_config(
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (mut actor, _mailbox) = Actor::new(context.child("actor"), cfg);
+            let mut rounds = BTreeMap::new();
+
+            for view in [View::new(1), View::new(2)] {
+                let round_id = Round::new(epoch, view);
+                let proposal = Proposal::new(
+                    round_id,
+                    view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(&[&view.get().to_be_bytes()]),
+                );
+                let mut round = super::Round::new(
+                    round_id,
+                    Arc::new(schemes[0].clone()),
+                    NoopBlocker,
+                    NoopReporter(PhantomData),
+                    false,
+                );
+                round.set_leader(Participant::new(0));
+                for (participant, scheme) in participants.iter().zip(&schemes) {
+                    let vote = Notarize::sign(scheme, proposal.clone()).unwrap();
+                    assert!(round.add_network(participant.clone(), Vote::Notarize(vote)));
+                }
+                rounds.insert(view, round);
+            }
+
+            let mut pool = Pool::default();
+            actor.dispatch_view(
+                &mut pool,
+                View::new(1),
+                rounds.get_mut(&View::new(1)).unwrap(),
+            );
+            assert_eq!(pool.len(), 1);
+
+            actor.dispatch_view(
+                &mut pool,
+                View::new(2),
+                rounds.get_mut(&View::new(2)).unwrap(),
+            );
+            assert_eq!(pool.len(), 1);
+
+            let Done::Verified { view, .. } = pool.next_completed().await else {
+                panic!("expected a verification completion");
+            };
+            assert_eq!(view, View::new(1));
+
+            actor.dispatch_view(
+                &mut pool,
+                View::new(2),
+                rounds.get_mut(&View::new(2)).unwrap(),
+            );
+            let Done::Verified { view, .. } = pool.next_completed().await else {
+                panic!("expected a verification completion");
+            };
+            assert_eq!(view, View::new(2));
+        });
+    }
+
+    /// A completion for a view pruned mid-flight drops the votes but still
+    /// forwards a recovered certificate: the voter prunes independently.
+    #[test_traced]
+    fn test_handle_done_tolerates_pruned_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, b"batcher_test", 5);
+            let quorum = quorum(5) as usize;
+            let epoch = Epoch::new(0);
+            let cfg = test_config(
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            );
+            let (mut actor, _mailbox) = Actor::new(context.child("actor"), cfg);
+            let (voter_sender, mut voter_receiver) =
+                mailbox::new::<voter::Message<_, Sha256Digest>>(
+                    context.child("voter_mailbox"),
+                    NZUsize!(8),
+                );
+            let mut voter = voter::Mailbox::new(voter_sender);
+            let timed = Timed::register(&context, "test_latency", "test latency");
+
+            let view = View::new(9);
+            let proposal =
+                Proposal::new(Round::new(epoch, view), View::new(8), Sha256::hash(&[b"pruned"]));
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization = build_notarization(&schemes, &proposal, quorum);
+
+            // No round tracks the view.
+            let mut work = BTreeMap::new();
+            let dirty = actor.handle_done(
+                &mut voter,
+                &mut work,
+                Done::Verified {
+                    view,
+                    batch: quorum,
+                    timer: timed.timer(&context),
+                    votes: VerifiedVotes::Notarizes(votes),
+                    invalid: vec![],
+                },
+            );
+            assert!(dirty.is_none());
+
+            // A recovered certificate still reaches the voter.
+            let dirty = actor.handle_done(
+                &mut voter,
+                &mut work,
+                Done::Recovered {
+                    view,
+                    timer: timed.timer(&context),
+                    certificate: Certificate::Notarization(notarization.clone()),
+                },
+            );
+            assert!(dirty.is_none());
+            let voter::Message::Verified {
+                certificate: Certificate::Notarization(received),
+                ..
+            } = voter_receiver.recv().await.unwrap()
+            else {
+                panic!("voter must receive the recovered notarization");
+            };
+            assert_eq!(received.proposal, notarization.proposal);
+        });
     }
 
     /// Deterministic-runtime tests drive `Strategy::spawn` inline: the deterministic runtime's
