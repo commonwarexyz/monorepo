@@ -1,5 +1,6 @@
 //! A platform-independent probability value and sampler.
 
+use core::fmt;
 use rand::Rng;
 
 // Number of possible `u64` samples and denominator of the threshold grid.
@@ -20,7 +21,8 @@ pub struct InvalidProbability;
 /// Ratios are rounded down to the nearest multiple of 2^-64. Sampling consumes one `u64` for
 /// probabilities strictly between zero and one, and consumes no randomness for either endpoint.
 /// Given the same sequence of `u64` samples, decisions are identical on every platform.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Probability(u64);
 
 impl Probability {
@@ -125,6 +127,12 @@ impl TryFrom<f64> for Probability {
 
     fn try_from(value: f64) -> Result<Self, Self::Error> {
         Self::from_f64(value).ok_or(InvalidProbability)
+    }
+}
+
+impl fmt::Debug for Probability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.as_f64(), f)
     }
 }
 

@@ -17,6 +17,48 @@ use std::{
     },
 };
 
+/// A bounded RNG for tests that require explicit probability outcomes.
+#[cfg(test)]
+pub(crate) struct ScriptedRng {
+    samples: std::vec::IntoIter<u64>,
+}
+
+#[cfg(test)]
+impl ScriptedRng {
+    pub(crate) const EVENT_OCCURS: u64 = 0;
+    pub(crate) const EVENT_DOES_NOT_OCCUR: u64 = u64::MAX;
+
+    pub(crate) fn new(samples: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            samples: samples.into_iter().collect::<Vec<_>>().into_iter(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl rand::TryRng for ScriptedRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        panic!("fault script should only sample u64 probabilities");
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self
+            .samples
+            .next()
+            .expect("fault script consumed more samples than expected"))
+    }
+
+    fn try_fill_bytes(&mut self, _dst: &mut [u8]) -> Result<(), Self::Error> {
+        panic!("fault script should only sample u64 probabilities");
+    }
+}
+
+// ScriptedRng is test-only; this marker satisfies the deterministic runtime's RNG bound.
+#[cfg(test)]
+impl rand::TryCryptoRng for ScriptedRng {}
+
 /// Operation types for fault injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -945,10 +987,12 @@ mod tests {
         }
 
         fn with_seed(seed: u64, config: Config) -> Self {
+            Self::with_rng(Box::new(StdRng::seed_from_u64(seed)), config)
+        }
+
+        fn with_rng(rng: BoxDynRng, config: Config) -> Self {
             let inner = MemStorage::new(test_pool());
-            let rng = Arc::new(Mutex::new(
-                Box::new(StdRng::seed_from_u64(seed)) as BoxDynRng
-            ));
+            let rng = Arc::new(Mutex::new(rng));
             let config = Arc::new(RwLock::new(config));
             let storage = Storage::new(inner.clone(), rng, config.clone());
             Self {
@@ -1383,8 +1427,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_crash_replays_writes_and_resizes_in_issue_order() {
-        let h = Harness::with_seed(
-            83,
+        let retained_resizes =
+            [ScriptedRng::EVENT_DOES_NOT_OCCUR, ScriptedRng::EVENT_OCCURS].repeat(3);
+        let h = Harness::with_rng(
+            Box::new(ScriptedRng::new(retained_resizes)),
             Config::default()
                 .write(WriteConfig {
                     failure_rate: Probability!(0.0),
@@ -1427,8 +1473,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_sync_write_replays_after_retained_resize() {
-        let h = Harness::with_seed(
-            83,
+        let retained_resize = [ScriptedRng::EVENT_DOES_NOT_OCCUR, ScriptedRng::EVENT_OCCURS];
+        let retained_write_bytes = [
+            ScriptedRng::EVENT_OCCURS,
+            ScriptedRng::EVENT_DOES_NOT_OCCUR,
+            ScriptedRng::EVENT_OCCURS,
+            ScriptedRng::EVENT_DOES_NOT_OCCUR,
+        ];
+        let h = Harness::with_rng(
+            Box::new(ScriptedRng::new(
+                retained_resize.into_iter().chain(retained_write_bytes),
+            )),
             Config::default().resize(ResizeConfig {
                 failure_rate: Probability!(0.5),
                 partial_rate: Probability!(0.0),

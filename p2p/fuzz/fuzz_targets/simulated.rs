@@ -58,8 +58,8 @@ enum Operation {
         latency_ms: u16,
         /// Latency jitter in milliseconds.
         jitter: u16,
-        /// Success rate as a numerator over 255.
-        success_rate: u8,
+        /// Probability that a message is delivered successfully.
+        success_rate: Probability,
     },
     /// Remove a network link between two peers.
     RemoveLink {
@@ -283,7 +283,7 @@ fn fuzz(input: FuzzInput) {
                     let link = simulated::Link {
                         latency: Duration::from_millis(latency_ms as u64),
                         jitter: Duration::from_millis(jitter as u64),
-                        success_rate: Probability!(u64::from(success_rate), u64::from(u8::MAX)),
+                        success_rate,
                     };
                     let _ = oracle
                         .add_link(peer_pks[from_idx].clone(), peer_pks[to_idx].clone(), link)
