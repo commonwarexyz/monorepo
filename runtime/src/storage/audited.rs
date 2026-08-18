@@ -92,6 +92,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update(len.to_be_bytes());
+            hasher.update([options.0]);
         });
         self.inner.read_at(offset, len, options).await
     }
@@ -109,6 +110,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update(len.to_be_bytes());
+            hasher.update([options.0]);
         });
         self.inner.read_at_buf(offset, len, bufs, options).await
     }
@@ -125,6 +127,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&bufs);
+            hasher.update([options.0]);
         });
         self.inner.write_at(offset, bufs, options).await
     }
@@ -199,50 +202,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_options_do_not_change_audit_event() {
-        let auditor1 = Arc::new(Auditor::default());
-        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
-        let auditor2 = Arc::new(Auditor::default());
-        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+    async fn test_write_options_change_audit_event() {
+        let mut states = Vec::new();
+        for options in [
+            WriteOptions::default(),
+            WriteOptions::SYNC,
+            WriteOptions::DONT_CACHE,
+            WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+        ] {
+            let auditor = Arc::new(Auditor::default());
+            let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"data", options).await.unwrap();
+            states.push(auditor.state());
+        }
 
-        let (blob1, _) = storage1.open("partition", b"blob").await.unwrap();
-        let (blob2, _) = storage2.open("partition", b"blob").await.unwrap();
-        blob1
-            .write_at(0, b"data", WriteOptions::default())
-            .await
-            .unwrap();
-        blob2
-            .write_at(0, b"data", WriteOptions::SYNC | WriteOptions::DONT_CACHE)
-            .await
-            .unwrap();
-
-        assert_eq!(auditor1.state(), auditor2.state());
+        states.sort_unstable();
+        states.dedup();
+        assert_eq!(states.len(), 4);
     }
 
     #[tokio::test]
-    async fn test_read_options_do_not_change_audit_event() {
-        let auditor1 = Arc::new(Auditor::default());
-        let auditor2 = Arc::new(Auditor::default());
-        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
-        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+    async fn test_read_options_change_audit_event() {
+        for use_provided_buffer in [false, true] {
+            let mut states = Vec::new();
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                let auditor = Arc::new(Auditor::default());
+                let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+                let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+                blob.write_at(0, b"data", WriteOptions::default())
+                    .await
+                    .unwrap();
 
-        let (blob1, _) = storage1.open("partition", b"blob").await.unwrap();
-        let (blob2, _) = storage2.open("partition", b"blob").await.unwrap();
-        blob1
-            .write_at(0, b"data", WriteOptions::default())
-            .await
-            .unwrap();
-        blob2
-            .write_at(0, b"data", WriteOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(auditor1.state(), auditor2.state());
-
-        // Cache policy is a backend hint and must not enter the deterministic audit event.
-        blob1.read_at(0, 4, ReadOptions::default()).await.unwrap();
-        blob2.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
-
-        assert_eq!(auditor1.state(), auditor2.state());
+                if use_provided_buffer {
+                    blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), options)
+                        .await
+                        .unwrap();
+                } else {
+                    blob.read_at(0, 4, options).await.unwrap();
+                }
+                states.push(auditor.state());
+            }
+            assert_ne!(states[0], states[1]);
+        }
     }
 
     #[tokio::test]
