@@ -95,7 +95,7 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{NZU16, NZU32, NZUsize, channel::oneshot, sync::Mutex};
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
@@ -109,6 +109,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
+    type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
@@ -455,6 +456,30 @@ mod tests {
             if context.current() >= deadline {
                 panic!("application did not receive request for {view}");
             }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn take_certification_request(
+        context: &deterministic::Context,
+        requests: &CertificationRequests,
+        view: View,
+    ) -> oneshot::Sender<bool> {
+        let deadline = context.current() + Duration::from_secs(1);
+        loop {
+            if let Some(response) = {
+                let mut requests = requests.lock();
+                requests
+                    .iter()
+                    .position(|(request_view, _)| *request_view == view)
+                    .map(|index| requests.swap_remove(index).1)
+            } {
+                return response;
+            }
+            assert!(
+                context.current() < deadline,
+                "application did not receive certification request for {view}"
+            );
             context.sleep(Duration::from_millis(1)).await;
         }
     }
@@ -3563,6 +3588,126 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    /// A locally pipelined term-start vote may notarize before its parent
+    /// certifies, but application certification requests remain parent-first.
+    #[test_traced]
+    fn test_pipelined_handoff_certifies_parent_before_child() {
+        let n = 1;
+        let namespace = b"pipelined_handoff_certifies_parent_before_child".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let requests_for_app = requests.clone();
+            let certifier =
+                mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
+                    requests_for_app.lock().push((round.view(), response));
+                }));
+            let elector = RoundRobin::<Sha256>::default().with_pipelined_handoff();
+            let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    certifier,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // A singleton's local votes notarize both views while the parent
+            // application request remains under test control.
+            let mut parent = None;
+            let mut child = None;
+            while parent.is_none() || child.is_none() {
+                select! {
+                    message = batcher_receiver.recv() => {
+                        match message.unwrap() {
+                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                                match notarize.view() {
+                                    view if view == View::new(1) => {
+                                        parent = Some(notarize.proposal);
+                                    }
+                                    view if view == View::new(2) => {
+                                        child = Some(notarize.proposal);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            batcher::Message::Update { .. } => {}
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected local parent and handoff-child notarize votes");
+                    }
+                }
+            }
+            let parent = parent.expect("parent proposal");
+            let child = child.expect("child proposal");
+            assert_eq!(child.parent, parent.view());
+
+            // Deliver the child certificate first. Once the later parent
+            // request appears, FIFO mailbox processing proves the child was
+            // already considered for certification.
+            let (_, child_notarization) = build_notarization(&schemes, &child, 1);
+            mailbox.recovered(Certificate::Notarization(child_notarization));
+            let (_, parent_notarization) = build_notarization(&schemes, &parent, 1);
+            mailbox.recovered(Certificate::Notarization(parent_notarization));
+            let parent_response =
+                take_certification_request(&context, &requests, View::new(1)).await;
+
+            assert!(
+                !requests
+                    .lock()
+                    .iter()
+                    .any(|(view, _)| *view == View::new(2)),
+                "child certification ran ahead of its parent"
+            );
+
+            parent_response
+                .send(true)
+                .expect("parent certification receiver must remain open");
+            let child_response =
+                take_certification_request(&context, &requests, View::new(2)).await;
+            child_response
+                .send(true)
+                .expect("child certification receiver must remain open");
+
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => {
+                        if matches!(
+                            message.unwrap(),
+                            batcher::Message::Constructed(Vote::Finalize(finalize))
+                                if finalize.view() == View::new(2)
+                        ) {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("child did not finalize after parent certification completed");
+                    }
+                }
+            }
+            assert!(reporter.certifications.lock().contains_key(&View::new(1)));
+            assert!(reporter.certifications.lock().contains_key(&View::new(2)));
         });
     }
 

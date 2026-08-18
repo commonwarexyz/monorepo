@@ -1278,11 +1278,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Certification exempts term starts, so the candidate and its parent
-        // sit mid-term and share the term's stable leader (see
-        // [`Self::term_leader`]). Without a tracked leader the fetch asks any
-        // peer. A leader that is the local signer is also excluded: a fresh
-        // fetch targeted only at ourselves has no peer to serve it.
+        // The proposal leader is the best targeted source for its missing
+        // ancestry. Within a term this is also the parent's stable leader; at
+        // a pipelined handoff it is the incoming leader that built on the
+        // parent. Without a tracked leader the fetch asks any peer. A leader
+        // that is the local signer is also excluded: a fresh fetch targeted
+        // only at ourselves has no peer to serve it.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
