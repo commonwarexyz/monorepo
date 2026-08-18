@@ -4107,6 +4107,7 @@ mod tests {
             assert!(reads.len() > 2);
             let (metadata_reads, recovery_reads) = reads.split_at(2);
             assert_eq!(metadata_reads, [ReadOptions::DONT_CACHE; 2]);
+
             // Data-page validation uses the default options so alignment can reuse those pages
             // during recovery.
             assert!(

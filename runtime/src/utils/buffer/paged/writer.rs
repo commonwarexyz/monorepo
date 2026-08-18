@@ -1187,6 +1187,7 @@ mod tests {
                 .open("test_partition", b"prefix_clean")
                 .await
                 .unwrap();
+
             // Reopening also validates the disk-authoritative tail with the default options.
             recordings.clear();
             let _recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
@@ -2827,6 +2828,7 @@ mod tests {
                 .replay(NZUsize!(physical_page_size), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
+
             // Every refill uses the replay's read options, including the refill after crossing a
             // page boundary.
             assert!(replay.ensure(1).await.unwrap());
@@ -4284,6 +4286,7 @@ mod tests {
             let data = vec![7; PAGE_SIZE.get() as usize];
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
+
             // The shrink retains the prefix in the in-memory tip, so its backing read requests
             // DONT_CACHE.
             writer.resize(50).await.unwrap();

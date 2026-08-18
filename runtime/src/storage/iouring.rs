@@ -828,6 +828,7 @@ mod tests {
         blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
             .await
             .unwrap();
+
         // A zero-length read beyond EOF retains io_uring's existing success behavior and must
         // still short-circuit before touching the disconnected backend or probing hint support.
         let empty = blob.read_at(1, 0, ReadOptions::DONT_CACHE).await.unwrap();

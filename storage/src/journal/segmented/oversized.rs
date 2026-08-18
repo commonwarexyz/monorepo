@@ -1716,6 +1716,7 @@ mod tests {
                 .await
                 .expect("Failed to replay");
             recordings.clear();
+
             // The adapter must preserve the caller's policy on the lazy refill.
             let (section, position, entry) = replay
                 .next()

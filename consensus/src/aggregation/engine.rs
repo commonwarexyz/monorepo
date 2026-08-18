@@ -832,6 +832,7 @@ impl<
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
+
         // Replay rebuilds the engine's in-memory state, so journal pages need
         // not remain in the OS page cache.
         let mut replay = journal

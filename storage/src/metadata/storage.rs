@@ -502,6 +502,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Shrinking rewrites must also persist the resize, so they need a full sync.
         let next_data = next_data.freeze();
         let shrinking = next_data.len() < target_data_len;
+
         // The encoded blob becomes the authoritative in-memory mirror below, so every write
         // requests cache bypass.
         let sync = if pipelined {
