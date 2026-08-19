@@ -98,7 +98,7 @@ Compression comes from cumulative totals. The close carries each payer's final d
 
 ## One Exact Close
 
-A single incoming counter would serialize every payment to a popular recipient. Instead, the operator gives each recipient epoch-local receive components, identified by $(\mathcal A_e,b,\kappa)$. A payment of $x$ assigned to component $\kappa$ advances only that component's running credit and receipt count:
+A single incoming counter would serialize every payment to a popular recipient. Instead, the operator shards each recipient's incoming payments across epoch-local receive components, identified by $(\mathcal A_e,b,\kappa)$. A payment of $x$ assigned to component $\kappa$ advances only that component's running credit and receipt count:
 
 $$
 (G_\kappa,J_\kappa)\longrightarrow(G_\kappa+x,J_\kappa+1),
@@ -106,7 +106,7 @@ $$
 (G_{\kappa'},J_{\kappa'})\text{ unchanged for every }\kappa'\ne\kappa.
 $$
 
-Payments assigned to different components never contend on the same counter.
+Payments assigned to different components never contend on the same counter, so a hot account scales across parallel workers instead of serializing on one.
 
 A recipient still has one account balance. Components are only concurrency domains feeding that balance. At close, one terminal signed pair represents each component, no matter how many payments advanced it.
 

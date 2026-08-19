@@ -268,10 +268,11 @@ O’Grady</a></div>
         omitted.</p>
         <h2 id="one-exact-close">One Exact Close</h2>
         <p>A single incoming counter would serialize every payment to a
-        popular recipient. Instead, the operator gives each recipient
-        epoch-local receive components, identified by <span
-        class="math inline">(\mathcal A_e,b,\kappa)</span>. A payment of
-        <span class="math inline">x</span> assigned to component <span
+        popular recipient. Instead, the operator shards each recipient’s
+        incoming payments across epoch-local receive components,
+        identified by <span class="math inline">(\mathcal
+        A_e,b,\kappa)</span>. A payment of <span
+        class="math inline">x</span> assigned to component <span
         class="math inline">\kappa</span> advances only that component’s
         running credit and receipt count:</p>
         <p><span class="math display">
@@ -281,7 +282,8 @@ O’Grady</a></div>
         }\kappa&#39;\ne\kappa.
         </span></p>
         <p>Payments assigned to different components never contend on
-        the same counter.</p>
+        the same counter, so a hot account scales across parallel
+        workers instead of serializing on one.</p>
         <p>A recipient still has one account balance. Components are
         only concurrency domains feeding that balance. At close, one
         terminal signed pair represents each component, no matter how
