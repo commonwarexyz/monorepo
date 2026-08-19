@@ -765,57 +765,38 @@ O’Grady</a></div>
         byte.</p>
         <h2 id="a-bajillion-payments-one-close">A Bajillion Payments,
         One Close</h2>
-        <p>Write <span class="math inline">T</span> for accepted
-        payments, <span class="math inline">A</span> for changed-account
-        rows, <span class="math inline">H=H_e=\sum_a h_a</span> for
-        terminal receive components, <span
-        class="math inline">\Phi=|\Phi_e|</span> for sparse-frontier
-        hashes, and <span class="math inline">N</span> for registered
-        account positions.</p>
-        <p>The operator still performs <span
-        class="math inline">O(T)</span> payment work. It verifies <span
-        class="math inline">T</span> requests, commits <span
-        class="math inline">T</span> durable updates, and signs <span
-        class="math inline">T</span> receipts. Public settlement counts
-        something else:</p>
+        <p>The operator’s work scales with payments: it verifies,
+        durably commits, and signs every one of the <span
+        class="math inline">T</span> payments it accepts. The public
+        close never grows with <span class="math inline">T</span>. It
+        carries one row per changed account (<span
+        class="math inline">A</span>), one terminal pair per receive
+        component (<span class="math inline">H</span>), and one frontier
+        digest per untouched subtree (<span
+        class="math inline">\Phi</span>):</p>
         <p><span class="math display">
         \text{payments }T
         \quad\longrightarrow\quad
         \text{rows }A+\text{components }H+\text{frontier }\Phi.
         </span></p>
-        <p>A close must pass complete public validation. An included
-        call that observes an overdue queued withdrawal fences new work.
-        The admitted prefix must still resolve, and terminal unwind
-        requires the complete survivor state.</p>
-        <p>For repeated activity over a fixed changed-account and
-        component footprint, <span class="math inline">(A+H+\Phi)/T\to
-        0</span>. Unchanged subtrees cost one frontier digest apiece no
-        matter how many accounts they hold. Every changed account and
-        represented component still contributes to the close.
-        Account-level clearing compresses repetition, not change.</p>
-        <p><span class="math inline">H</span> is the price of receive
-        concurrency. More components remove online contention but
-        enlarge the close. The protocol therefore caps both the number
-        of terminal components and the close size independently of <span
-        class="math inline">T</span>. A payment is accepted only when
-        the operator can reuse a component or reserve room for a new one
-        without exceeding either cap.</p>
-        <p>Within one operator-backed service and chain custody, and for
-        users recovering from public data alone, these are the trust
-        model’s floors. A preconfirmation cannot arrive in less than one
-        round trip to the operator that serializes spending. A close
-        cannot quietly drop a payment: it must agree with every receipt
-        a holder retains, or a single retained pair proves the
-        fault.</p>
-        <p>Cheap settlement bottoms out at the changed state itself,
-        since no design whose users recover from public data alone can
-        make less available. This close adds only each account’s
-        terminal pairs: the outgoing pair when it sent and one per
-        receive component. It also adds the frontier that splices the
-        change into the registry.</p>
-        <p>Sign every payment. Settle each changed account once.</p>
-        <p>Bajillion has not yet been peer-reviewed or uploaded to
-        arXiv.</p>
+        <p>For repeated activity over a fixed set of accounts and
+        components, <span class="math inline">(A+H+\Phi)/T\to 0</span>.
+        Account-level clearing compresses repetition, not change: every
+        changed account still pays for its row and every component for
+        its terminal pair, but additional payments between them add
+        nothing. No traffic pattern grows the close either, because
+        acceptance reserves room per account and per component, never
+        per payment.</p>
+        <p>And this is as good as the trust model allows. A
+        preconfirmation cannot arrive in less than one round trip to the
+        operator that serializes spending. A close cannot quietly drop a
+        payment: it must agree with every receipt a holder retains, or a
+        single retained pair proves the fault. Settlement cannot make
+        less than the changed state available to users who recover from
+        public data alone, and this close adds only the terminal pairs
+        and the frontier that splices the change into the registry.</p>
+        <p>Stay tuned for the formal specification and reference
+        implementation.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

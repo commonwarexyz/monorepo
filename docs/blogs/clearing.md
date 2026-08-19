@@ -397,9 +397,7 @@ The timers ran under a ten-million-payment build of each fixture. The sizes hold
 
 ## A Bajillion Payments, One Close
 
-Write $T$ for accepted payments, $A$ for changed-account rows, $H=H_e=\sum_a h_a$ for terminal receive components, $\Phi=|\Phi_e|$ for sparse-frontier hashes, and $N$ for registered account positions.
-
-The operator still performs $O(T)$ payment work. It verifies $T$ requests, commits $T$ durable updates, and signs $T$ receipts. Public settlement counts something else:
+The operator's work scales with payments: it verifies, durably commits, and signs every one of the $T$ payments it accepts. The public close never grows with $T$. It carries one row per changed account ($A$), one terminal pair per receive component ($H$), and one frontier digest per untouched subtree ($\Phi$):
 
 $$
 \text{payments }T
@@ -407,16 +405,8 @@ $$
 \text{rows }A+\text{components }H+\text{frontier }\Phi.
 $$
 
-A close must pass complete public validation. An included call that observes an overdue queued withdrawal fences new work. The admitted prefix must still resolve, and terminal unwind requires the complete survivor state.
+For repeated activity over a fixed set of accounts and components, $(A+H+\Phi)/T\to 0$. Account-level clearing compresses repetition, not change: every changed account still pays for its row and every component for its terminal pair, but additional payments between them add nothing. No traffic pattern grows the close either, because acceptance reserves room per account and per component, never per payment.
 
-For repeated activity over a fixed changed-account and component footprint, $(A+H+\Phi)/T\to 0$. Unchanged subtrees cost one frontier digest apiece no matter how many accounts they hold. Every changed account and represented component still contributes to the close. Account-level clearing compresses repetition, not change.
+And this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault. Settlement cannot make less than the changed state available to users who recover from public data alone, and this close adds only the terminal pairs and the frontier that splices the change into the registry.
 
-$H$ is the price of receive concurrency. More components remove online contention but enlarge the close. The protocol therefore caps both the number of terminal components and the close size independently of $T$. A payment is accepted only when the operator can reuse a component or reserve room for a new one without exceeding either cap.
-
-Within one operator-backed service and chain custody, and for users recovering from public data alone, these are the trust model's floors. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault.
-
-Cheap settlement bottoms out at the changed state itself, since no design whose users recover from public data alone can make less available. This close adds only each account's terminal pairs: the outgoing pair when it sent and one per receive component. It also adds the frontier that splices the change into the registry.
-
-Sign every payment. Settle each changed account once.
-
-Bajillion has not yet been peer-reviewed or uploaded to arXiv.
+Stay tuned for the formal specification and reference implementation.
