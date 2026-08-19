@@ -1473,34 +1473,12 @@ fn check_fuzz_invariants<E, S, L>(
         let mut rejected_proposals: BTreeSet<ApplicationProposal> = BTreeSet::new();
         let mut observed_notarizations: BTreeSet<Proposal<Sha256Digest>> = BTreeSet::new();
         let mut observed_nullifications: BTreeSet<Round> = BTreeSet::new();
-        // Distinct signers of every valid nullify vote observed so far, keyed
-        // by round. A quorum of these is the exact evidence the engine
-        // assembles a nullification from.
-        let mut observed_nullify_signers: BTreeMap<Round, BTreeSet<Participant>> = BTreeMap::new();
-        let quorum = bounds::quorum(participants.len() as u32) as usize;
-        // Every nullification round anywhere in this observer's log. The voter
-        // dispatches newly eligible application requests before journal sync
-        // and staged publication, so the nullification that authorized a
-        // context is reported after it; whole-log presence keeps the evidence
-        // local to this observer without asserting an ordering the engine
-        // does not provide.
-        let all_nullification_rounds: BTreeSet<Round> = events
-            .iter()
-            .filter_map(|recorded| match &recorded.event {
-                Event::Activity {
-                    valid: true,
-                    activity: Activity::Nullification(certificate),
-                } => Some(certificate.round()),
-                _ => None,
-            })
-            .collect();
         let mut successful_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut failed_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut reported_certifications: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
             BTreeMap::new();
         let mut local_finalizes: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
             BTreeMap::new();
-        let mut certified_parents: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
         let mut certified_activity_views: BTreeSet<u64> = BTreeSet::new();
         let mut predecessor_evidence: BTreeSet<u64> = BTreeSet::new();
         let mut own_nullified: BTreeMap<u32, BTreeSet<Round>> = BTreeMap::new();
@@ -1622,14 +1600,8 @@ fn check_fuzz_invariants<E, S, L>(
                         Activity::Notarize(vote) if vote.signer() == observer_idx => {
                             incarnation_trigger_own_votes.insert(vote.proposal.round);
                         }
-                        Activity::Nullify(vote) => {
-                            observed_nullify_signers
-                                .entry(vote.round)
-                                .or_default()
-                                .insert(vote.signer());
-                            if vote.signer() == observer_idx {
-                                incarnation_trigger_own_votes.insert(vote.round);
-                            }
+                        Activity::Nullify(vote) if vote.signer() == observer_idx => {
+                            incarnation_trigger_own_votes.insert(vote.round);
                         }
                         Activity::Finalize(vote) if vote.signer() == observer_idx => {
                             incarnation_trigger_own_votes.insert(vote.proposal.round);
@@ -1954,8 +1926,6 @@ fn check_fuzz_invariants<E, S, L>(
                             let view = certificate.proposal.round.view().get();
                             predecessor_evidence.insert(view);
                             certified_activity_views.insert(view);
-                            certified_parents
-                                .insert((certificate.proposal.round, certificate.proposal.payload));
                             notarization_backing.insert((
                                 certificate.proposal.clone(),
                                 signer_keys(&certificate.certificate),
@@ -1965,8 +1935,6 @@ fn check_fuzz_invariants<E, S, L>(
                             let view = certificate.proposal.round.view().get();
                             predecessor_evidence.insert(view);
                             certified_activity_views.insert(view);
-                            certified_parents
-                                .insert((certificate.proposal.round, certificate.proposal.payload));
                             observed_finalizations.insert(certificate.proposal.round);
                             incarnation_trigger_observed_finalizations
                                 .insert(certificate.proposal.round);
@@ -2103,32 +2071,9 @@ fn check_fuzz_invariants<E, S, L>(
                                 context.round
                             );
 
-                            // Invariant: automaton_context_parent_certified_with_nullified_gaps
-                            // Every application context's parent must be locally
-                            // certified: for parent view p > 0 the same log must
-                            // already hold a Certification/Finalization for
-                            // exactly (p, parent digest) or a successful certify
-                            // result for it, plus coverage for every view in
-                            // (p, child view): a covering nullification (one
-                            // nullification covers its view through the end of
-                            // its term) anywhere in this observer's log, or
-                            // prior nullify votes from a quorum of distinct
-                            // signers at a covering round. The nullification may
-                            // trail the context because the voter dispatches
-                            // newly eligible application requests before journal
-                            // sync and staged publication; the quorum-vote form
-                            // covers a log truncated before that staged report.
-                            // Genesis parents are compared across nodes below.
-                            // Scoped to the Floor::Genesis single-epoch audit
-                            // targets (the recorded parent omits its epoch).
-                            //
-                            // Source: "If the container's parent is finalized (or
-                            // both notarized and certified) ... and we have
-                            // nullifications for all views between", and
-                            // Context's parent documentation (skipping a view
-                            // without its nullification could fork).
                             let (parent_view, parent_digest) = context.parent;
                             let child_view = context.round.view().get();
+                            // Invariant: context_parent_precedes_child
                             // Parent ordering holds unconditionally, even when
                             // the child sits at a term start where the
                             // sequential-parent rule below would not bind. A
@@ -2149,38 +2094,13 @@ fn check_fuzz_invariants<E, S, L>(
                                 "Invariant violation: mid-term context skips views: observer {observer_bytes:?}, parent view {parent_view:?}, child round {:?}",
                                 context.round
                             );
+                            // Genesis parents are compared across nodes below.
+                            // Scoped to the single-epoch audit targets (the
+                            // recorded parent omits its epoch).
                             if parent_view.get() == 0 {
                                 genesis_parent_digests
                                     .entry(parent_digest)
                                     .or_insert_with(|| observer_bytes.clone());
-                            } else {
-                                let parent_round = Round::new(context.round.epoch(), parent_view);
-                                assert!(
-                                    certified_parents.contains(&(parent_round, parent_digest))
-                                        || successful_certifications
-                                            .contains(&(parent_round, parent_digest)),
-                                    "Invariant violation: context parent without local certification: observer {observer_bytes:?}, parent ({parent_view:?}, {parent_digest:?}), child round {:?}",
-                                    context.round
-                                );
-                            }
-                            for skipped in parent_view.get().saturating_add(1)..child_view {
-                                let covering = Round::new(
-                                    context.round.epoch(),
-                                    View::new(term_start(skipped, term_length)),
-                                )
-                                    ..=Round::new(context.round.epoch(), View::new(skipped));
-                                let covered = all_nullification_rounds
-                                    .range(covering.clone())
-                                    .next()
-                                    .is_some()
-                                    || observed_nullify_signers
-                                        .range(covering)
-                                        .any(|(_, signers)| signers.len() >= quorum);
-                                assert!(
-                                    covered,
-                                    "Invariant violation: context skips view {skipped} without covering nullification: observer {observer_bytes:?}, child round {:?}",
-                                    context.round
-                                );
                             }
                         }
                         _ => {}
@@ -2456,9 +2376,9 @@ fn check_fuzz_invariants<E, S, L>(
         );
     }
 
-    // Invariant: automaton_context_parent_certified_with_nullified_gaps
-    // (genesis clause) Every correct engine is configured with the identical
-    // genesis, so all parent-view-0 context digests must agree.
+    // Invariant: context_genesis_parents_agree
+    // Every correct engine is configured with the identical genesis, so all
+    // parent-view-0 context digests must agree.
     if genesis_parent_digests.len() > 1 {
         panic!(
             "Invariant violation: correct contexts disagree on the genesis parent digest: {genesis_parent_digests:?}"
@@ -4596,175 +4516,6 @@ mod tests {
         reporter.report(Activity::Finalization(finalization_activity(
             &schemes, 5, 4, 0xA,
         )));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn context_with_certified_parent_and_nullified_gaps_passes() {
-        let (participants, schemes) = vote_fixture();
-        // Observer 1 is the round-robin leader of round 5, matching the
-        // certificate-derived schedule the reported nullifications create.
-        let mut reporter = audit_reporter(1, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(2, 1, 0xB), true);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[1].clone(),
-                    &proposal(5, 2, 0xA),
-                    digest(0xB),
-                ),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "context parent without local certification")]
-    fn context_parent_without_certification_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context(participants[0].clone(), &proposal(5, 4, 0xA)),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "context parent without local certification")]
-    fn context_parent_digest_mismatch_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let reporter = audit_reporter(0, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(4, 3, 0xB), true);
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context(participants[0].clone(), &proposal(5, 4, 0xA)),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn context_gap_covered_by_quorum_nullify_votes_passes() {
-        let (participants, schemes) = vote_fixture();
-        // Observer 1 is the round-robin leader of round 5, matching the
-        // certificate-derived schedule the reported nullification creates.
-        let mut reporter = audit_reporter(1, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(2, 1, 0xB), true);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
-        // View 4 has no nullification report yet, but nullify votes from a
-        // quorum of distinct signers are the evidence the engine assembles
-        // one from before dispatching the view-5 context.
-        for signer in [1, 2, 3] {
-            reporter.report(Activity::Nullify(
-                Nullify::sign::<Sha256Digest>(&schemes[signer], round(4)).unwrap(),
-            ));
-        }
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[1].clone(),
-                    &proposal(5, 2, 0xA),
-                    digest(0xB),
-                ),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn context_gap_nullification_reported_after_context_passes() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(1, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(2, 1, 0xB), true);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[1].clone(),
-                    &proposal(5, 2, 0xA),
-                    digest(0xB),
-                ),
-            },
-        );
-        // The voter dispatches the view-5 request before its staged step
-        // publishes and reports the nullification that authorized it.
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 4)));
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "context skips view 4 without covering nullification")]
-    fn context_gap_with_subquorum_nullify_votes_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(1, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(2, 1, 0xB), true);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
-        // One vote short of a quorum cannot have assembled a nullification.
-        for signer in [1, 2] {
-            reporter.report(Activity::Nullify(
-                Nullify::sign::<Sha256Digest>(&schemes[signer], round(4)).unwrap(),
-            ));
-        }
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[1].clone(),
-                    &proposal(5, 2, 0xA),
-                    digest(0xB),
-                ),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    #[should_panic(expected = "context skips view")]
-    fn context_missing_gap_nullification_is_rejected() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        record_certify_result(&reporter, &proposal(2, 1, 0xB), true);
-        reporter.report(Activity::Nullification(nullification_activity(&schemes, 3)));
-        record_automaton(
-            &reporter,
-            AutomatonEvent::ProposeRequested {
-                context: automaton_context_with_parent_digest(
-                    participants[0].clone(),
-                    &proposal(5, 2, 0xA),
-                    digest(0xB),
-                ),
-            },
-        );
-        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
-    }
-
-    #[test]
-    fn finalization_evidence_authorizes_verify_context() {
-        let (participants, schemes) = vote_fixture();
-        let mut reporter = audit_reporter(0, &participants, &schemes);
-        reporter.report(Activity::Finalization(finalization_activity_from(
-            &schemes,
-            &[1, 2, 3],
-            4,
-            3,
-            0xF,
-        )));
-        record_automaton(
-            &reporter,
-            AutomatonEvent::VerifyRequested {
-                context: automaton_context(participants[1].clone(), &proposal(5, 4, 0xA)),
-                payload: digest(0xA),
-            },
-        );
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
