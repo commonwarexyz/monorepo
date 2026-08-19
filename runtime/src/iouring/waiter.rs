@@ -388,7 +388,7 @@ mod tests {
     use super::*;
     use crate::{
         IoBuf, IoBufMut, IoBufs,
-        iouring::request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
+        iouring::request::{Cache, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
     };
     use commonware_utils::channel::oneshot;
     use std::{
@@ -696,6 +696,7 @@ mod tests {
                     len: 8,
                     read: 0,
                     buf: IoBufMut::with_capacity(8),
+                    cache: Cache::Enabled,
                     result: None,
                     sender: tx,
                 }),
@@ -845,6 +846,7 @@ mod tests {
                     len: 8,
                     read: 0,
                     buf: IoBufMut::with_capacity(8),
+                    cache: Cache::Enabled,
                     result: None,
                     sender: tx,
                 }),

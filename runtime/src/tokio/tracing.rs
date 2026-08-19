@@ -1,5 +1,6 @@
 //! Utilities to export traces to an OTLP endpoint.
 
+use commonware_utils::Probability;
 use opentelemetry::{global, trace::TracerProvider};
 use opentelemetry_otlp::{ExporterBuildError, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
@@ -18,7 +19,7 @@ pub struct Config {
     /// The service name to use for the traces.
     pub name: String,
     /// The sampling rate to use for the traces.
-    pub rate: f64,
+    pub rate: Probability,
 }
 
 /// Export traces to an OTLP endpoint.
@@ -39,7 +40,7 @@ pub fn export(cfg: Config) -> Result<Tracer, ExporterBuildError> {
         .build();
 
     // Build the tracer provider
-    let sampler = Sampler::TraceIdRatioBased(cfg.rate);
+    let sampler = Sampler::TraceIdRatioBased(cfg.rate.as_f64());
     let tracer_provider = SdkTracerProvider::builder()
         .with_span_processor(batch_processor)
         .with_resource(resource)

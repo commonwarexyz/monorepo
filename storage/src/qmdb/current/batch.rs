@@ -200,6 +200,31 @@ impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStor
         }
         self.base.get_node(pos).await
     }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, merkle::Error<F>> {
+        let mut nodes = vec![None; positions.len()];
+        let mut base_positions = Vec::with_capacity(positions.len());
+
+        // Look up nodes already in the batch chain.
+        for (slot, &pos) in nodes.iter_mut().zip(positions) {
+            match self.batch.get_node(pos) {
+                Some(node) => *slot = Some(node),
+                None => base_positions.push(pos),
+            }
+        }
+
+        // Look up remaining nodes from the base.
+        let base_nodes = if base_positions.is_empty() {
+            Vec::new()
+        } else {
+            self.base.get_nodes(&base_positions).await?
+        };
+        let mut base_nodes = base_nodes.into_iter();
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.unwrap_or_else(|| base_nodes.next().expect("one node per base read")))
+            .collect())
+    }
 }
 
 /// Layers a [`GenericMerkleizedBatch`] over a [`Mem`] for node resolution.
