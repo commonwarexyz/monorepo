@@ -31,13 +31,11 @@ S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
 R=\mathsf{Sign}_{\mathsf{op}}\bigl(\mathcal A_e,\;\kappa,\;x,\;\mathsf{TxId}(S),\;(G+x,\,J+1)\bigr).
 $$
 
-$\mathsf{TxId}$ hashes only the canonical request body, so signature bytes never affect it, and a payer-signed $S$ is still only a request until the operator acknowledges it.
+After authenticating $S$ and checking spendability, the operator atomically commits the debit, component advance, close reservation, replay record, and receipt body. It then signs and returns $R$.
 
-Acceptance is transactional. After authenticating $S$ and checking spendability, freshness, and room in the close, the operator atomically commits the debit, component advance, close reservation, replay record, and receipt body. Only then does it sign and return $R$.
+The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and retains it, then forwards it to the recipient (if not forwarded by the operator already). A rejection before the commit changes nothing. If the response is lost, retrying the same request returns the same pair without a second debit, until the payer sends again.
 
-The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and retains it, then forwards it to the recipient. A rejection before the commit changes nothing. If the response is lost, retrying the same request returns the same pair without a second debit, until the payer sends again.
-
-The examples below use one registry with $N=8$ positions. Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
+Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
 
 ```{=html}
 <style>

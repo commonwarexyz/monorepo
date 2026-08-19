@@ -116,40 +116,51 @@ O’Grady</a></div>
         least don’t want to cover the tab of doing so), what else could
         we do? Payment channels are cheap and instant between two funded
         parties, but reaching an arbitrary counterparty means opening a
-        new channel or negotiating with existing channels to let you
-        route through them (without risking to grief via forced closure
-        or taking too much of their liquidity). A payment rollup can
-        compress what settles, but proof cost scales per payment and its
-        preconfirmations are not binding and contestable.</p>
-        <p><strong>Bajillion</strong> is a simple, optimistic clearing
-        protocol that does just enough to be useful. Payments are
-        many-to-many and settle efficiently to any chain that can verify
-        and store a few kilobyte commitment. Payment preconfirmations
-        are as fast as browsing the web and serve as succinct proof for
-        holding the system honest. If all breaks down or an account is
-        censored, both senders and recipients can force recovery of
-        their funds with one onchain challenge. No fancy cryptography or
-        SNARK/STARK required.</p>
-        <h2 id="one-signed-payment">One Signed Payment</h2>
-        <p>An epoch starts from an authenticated account vector and a
-        chain-sealed anchor <span class="math inline">\mathcal
+        new channel or asking existing ones to route for you (locking
+        their liquidity and risking forced closure along the way). A
+        rollup either pays a prover per payment or publishes every
+        payment so faults can be disputed.</p>
+        <p><a
+        href="https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md">Bajillion</a>
+        is a simple, optimistic clearing protocol that does just enough
+        to be useful. It provides many-to-many payments and efficiently
+        settles them on any chain that can process a few-kilobyte
+        commitment. Its preconfirmations arrive as fast as browsing the
+        web and double as the evidence that holds the system honest.
+        Payments flow through a non-custodial operator selected by the
+        sender: if the operator disappears or censors an account,
+        senders and recipients alike can force recovery through the
+        settlement chain alone. No SNARKs and no fancy cryptography:
+        just signatures, Merkle openings, and one-shot challenges.</p>
+        <p>Settlement cost is a function of the accounts that change,
+        not the payments that move them. Make one payment or a
+        bajillion: the close remains the same size. Without expensive
+        incremental processing or complex challenges to police what
+        happened.</p>
+        <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
+        as Browsing the Web</h2>
+        <p>A Bajillion epoch starts from an authenticated account vector
+        and an onchain anchor <span class="math inline">\mathcal
         A_e</span>. Deposits and user-signed withdrawals are fixed
-        before online payments begin. Suppose account <span
+        before online payments begin. Let’s suppose account <span
         class="math inline">a</span> opens with 100 and wants to pay
         account <span class="math inline">b</span> 20.</p>
-        <p>Its persistent state <span class="math inline">X_a</span> is
-        a balance <span class="math inline">B_a</span>, cumulative debit
-        <span class="math inline">D_a</span>, operator-promised credit
-        <span class="math inline">C_a</span>, a receipt count, and an
-        activity flag (<a
+        <p><span class="math inline">a</span>’s persistent state <span
+        class="math inline">X_a</span> is a balance <span
+        class="math inline">B_a</span>, cumulative debit <span
+        class="math inline">D_a</span>, operator-promised credit <span
+        class="math inline">C_a</span>, a receipt count, and an activity
+        flag (<a
         href="https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#b-deployment-and-chain-state">§B
-        of the formal spec</a>).</p>
-        <p>To send <span class="math inline">x&gt;0</span> from <span
+        of the formal spec</a>). To send <span
+        class="math inline">x&gt;0</span> from <span
         class="math inline">a</span> to <span
         class="math inline">b</span>, the payer signs the exact next
-        debit, and the operator accepts by advancing one epoch-local
+        debit, and the operator accepts by advancing the recipient’s
         receive component <span class="math inline">\kappa</span> from
-        its current tip <span class="math inline">(G,J)</span>:</p>
+        its current tip <span class="math inline">(G,J)</span> (which
+        may or may not have been registered with the operator at the
+        start of the epoch):</p>
         <p><span class="math display">
         S=\mathsf{Sign}_a\bigl(\mathcal
         A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
@@ -157,27 +168,21 @@ O’Grady</a></div>
         R=\mathsf{Sign}_{\mathsf{op}}\bigl(\mathcal
         A_e,\;\kappa,\;x,\;\mathsf{TxId}(S),\;(G+x,\,J+1)\bigr).
         </span></p>
-        <p><span class="math inline">\mathsf{TxId}</span> hashes only
-        the canonical request body, so signature bytes never affect it,
-        and a payer-signed <span class="math inline">S</span> is still
-        only a request until the operator acknowledges it.</p>
-        <p>Acceptance is transactional. After authenticating <span
-        class="math inline">S</span> and checking spendability,
-        freshness, and room in the close, the operator atomically
-        commits the debit, component advance, close reservation, replay
-        record, and receipt body. Only then does it sign and return
-        <span class="math inline">R</span>.</p>
+        <p>After authenticating <span class="math inline">S</span> and
+        checking spendability, the operator atomically commits the
+        debit, component advance, close reservation, replay record, and
+        receipt body. It then signs and returns <span
+        class="math inline">R</span>.</p>
         <p>The matching pair <span class="math inline">(S,R)</span> is
         the accepted payment and the preconfirmation. The payer verifies
-        and retains it, then forwards it to the recipient. A rejection
-        before the commit changes nothing. If the response is lost,
-        retrying the same request returns the same pair without a second
-        debit, until the payer sends again.</p>
-        <p>The examples below use one registry with <span
-        class="math inline">N=8</span> positions. Figure 1 begins with
-        <span class="math inline">a</span> at 100, <span
-        class="math inline">b</span> at 40, and the payment <span
-        class="math inline">a\xrightarrow{20}b</span>.</p>
+        and retains it, then forwards it to the recipient (if not
+        forwarded by the operator already). A rejection before the
+        commit changes nothing. If the response is lost, retrying the
+        same request returns the same pair without a second debit, until
+        the payer sends again.</p>
+        <p>Figure 1 begins with <span class="math inline">a</span> at
+        100, <span class="math inline">b</span> at 40, and the payment
+        <span class="math inline">a\xrightarrow{20}b</span>.</p>
         <style>
           .clearing-loop {
             aspect-ratio: 1024 / 576;
@@ -959,18 +964,25 @@ O’Grady</a></div>
         carry the same flow on three funded links whose liquidity the
         cycle merely shuffles.</p>
         <h3 id="rollups">Rollups</h3>
-        <p>A payment-specific validity rollup narrows execution to a
-        minimal operation set and commits state diffs, bringing its
-        settlement data close to this design’s rows. The trade is in how
-        it gets there. Proving is priced per payment executed, which is
-        expensive at this scale even with recent advances. Bajillion’s
-        close is built and checked with plain signatures and hashes.</p>
-        <p>More importantly, a validity proof certifies whatever its
-        operator chose to execute. An undisclosed promise is exactly the
-        one fact validation cannot see, so its preconfirmations remain
-        the operator’s word. Bajillion turns that word into enforceable
-        evidence with a one-shot receipt challenge and no prover or
-        interactive dispute game in the loop.</p>
+        <p>A rollup picks between two costs. A validity rollup can
+        commit only state diffs, bringing its settlement data close to
+        this design’s rows, but it proves every payment it executes,
+        expensive at this scale even with recent advances. An optimistic
+        rollup drops the prover, but its faults are proven against
+        published inputs, so every payment must land in data
+        availability, and a one-shot ZK fault proof shrinks the dispute,
+        not the log. Bajillion also touches every payment, but with a
+        signature instead of a proof, and it publishes neither a log nor
+        a trace: the dispute object is a signed receipt already in its
+        holder’s hands.</p>
+        <p>Under either flavor, the chain settles whatever the operator
+        chose to execute, and an undisclosed promise is exactly the one
+        fact validation cannot see. A sequencer could sign its
+        preconfirmations and answer a challenge for dropping one, but
+        that concedes the point: binding a preconfirmation takes a
+        challenge protocol under any proof system. Bajillion starts
+        there. Its signed receipt is the preconfirmation, and a one-shot
+        challenge with no prover in the loop binds it.</p>
         <h3 id="plasma">Plasma</h3>
         <p>Plasma makes a different choice about what users can
         reconstruct. The <a href="https://plasma.io/plasma.pdf">original
