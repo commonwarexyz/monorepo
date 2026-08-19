@@ -193,8 +193,8 @@ where
             };
         }
 
-        // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
-        // and we fall through to the DB.
+        // Check the parent's retained items. Below the retained range the
+        // committed DB answers.
         if let Some(parent) = self.parent.as_ref()
             && loc_val >= parent.bounds.db.size
             && let Some(op) = read_chain_op(parent, loc_val)
@@ -364,8 +364,8 @@ where
         let db = self.bounds.on_chain(db, db.commitment())?;
         let loc_val = *loc;
 
-        // Check this batch's local items first, then walk parent chain. If an ancestor was
-        // freed, fall through to the committed DB.
+        // Check this batch's local items, then the retained chain items. Below
+        // the retained range the committed DB answers.
         if loc_val >= self.bounds.db.size
             && let Some(op) = read_chain_op(self, loc_val)
         {

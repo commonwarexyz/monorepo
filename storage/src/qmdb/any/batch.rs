@@ -4011,6 +4011,87 @@ mod tests {
         });
     }
 
+    /// A staged handle crossing a foreign apply refuses at expand and merkleize,
+    /// and the gate runs before empty-input early returns.
+    #[test]
+    fn staged_and_empty_reads_refuse_on_stale_fork() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("staged-stale-fork", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let hot = Sha256::hash(&[b"hot"]);
+            let seed = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"seed"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            // Two competing batches off the same committed prefix, with staged
+            // handles and an idle child taken through the loser beforehand.
+            let winner = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"winner"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let loser = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"loser"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (_, staged_expand) = loser
+                .new_batch::<Sha256>()
+                .stage(&[&hot], &db)
+                .await
+                .unwrap();
+            let (_, staged_merkleize) = loser
+                .new_batch::<Sha256>()
+                .stage(&[&hot], &db)
+                .await
+                .unwrap();
+            let idle = loser.new_batch::<Sha256>();
+
+            let (db, _) = db.apply_batch(winner).await.unwrap();
+
+            // The staged handles refuse at expand and at merkleize.
+            assert!(matches!(
+                staged_expand.expand(&[&hot], &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                staged_merkleize.merkleize(vec![], vec![], None, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+
+            // Empty inputs still surface the staleness.
+            let no_keys: [&sha256::Digest; 0] = [];
+            assert!(matches!(
+                idle.get_many(&no_keys, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+            assert!(matches!(
+                idle.stage(&no_keys, &db).await,
+                Err(crate::qmdb::Error::StaleRead)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Sibling forks with the same operation count still refuse because the check compares
     /// full commitments, never sizes alone.
     #[test]

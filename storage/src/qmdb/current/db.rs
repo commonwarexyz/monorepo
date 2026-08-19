@@ -1572,7 +1572,7 @@ mod tests {
     /// refuse with [`Error::StaleRead`], covering the current layer's delegation to the
     /// inner batch and its bitmap work.
     #[test_traced]
-    fn test_stale_fork_reads_and_merkleize_refuse() {
+    fn test_stale_fork_reads_and_merkleizes_refuse() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let db = MmrDb::init(

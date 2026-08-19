@@ -988,6 +988,7 @@ pub(super) mod test {
         // The surviving child still merkleizes to the same root.
         let merkleized = child.merkleize(&db, None, parent_floor).await.unwrap();
         assert_eq!(merkleized.root(), expected);
+        db.destroy().await.unwrap();
     }
 
     /// Once a sibling batch is applied, reads and merkleization through the losing fork
@@ -1031,6 +1032,7 @@ pub(super) mod test {
             Err(Error::StaleRead)
         ));
         assert!(matches!(db.validate_batch(&loser), Err(Error::StaleBatch)));
+        db.destroy().await.unwrap();
     }
 
     #[boxed]

@@ -35,9 +35,11 @@ use std::{
 ///
 /// Committed-read helpers take this instead of a bare database reference, so a read path
 /// that skips the check fails to compile. It is only created by [`Bounds::on_chain`]
-/// and [`Commitment::on_chain`]. Holding the wrapped reference also freezes the database
-/// for the duration of the call. Every state mutation takes the database by value, so no
-/// apply, prune, or rewind can interleave with a checked read.
+/// and [`Commitment::on_chain`], which check whatever commitment the caller supplies, so
+/// callers must pair the database with its own commitment (every current caller does).
+/// Holding the wrapped reference also freezes the database for the duration of the call.
+/// Every state mutation takes the database by value, so no apply, prune, or rewind can
+/// interleave with a checked read.
 pub(crate) struct OnChain<'a, T>(&'a T);
 
 impl<T> Clone for OnChain<'_, T> {
