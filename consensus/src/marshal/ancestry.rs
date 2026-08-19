@@ -18,6 +18,9 @@ use std::{
 
 /// A stream of blocks used by application propose and verify calls.
 ///
+/// Implementations must yield blocks from newest to oldest, with each block
+/// after the first being the direct parent of the block yielded before it.
+///
 /// A clone starts at the source's logical position at the time of cloning and
 /// can be consumed independently. Advancing or dropping one clone must not
 /// advance, exhaust, or invalidate another. Each clone's [`peek`](Self::peek)
@@ -29,27 +32,79 @@ pub trait Ancestry<B: Block>: Stream<Item = Arc<B>> + Clone + Send + Unpin + 'st
     fn peek(&self) -> Option<&B>;
 }
 
+/// Returns true when `child_height` is exactly the successor of `parent_height`.
+#[inline]
+pub(crate) fn has_contiguous_height(parent_height: Height, child_height: Height) -> bool {
+    child_height.previous() == Some(parent_height)
+}
+
+// Adjacent heights do not establish ancestry, so the parent digest must also match the digest
+// committed to by the child.
+fn assert_contiguous_parent<B: Block>(child: &B, parent: &B) {
+    assert!(
+        has_contiguous_height(parent.height(), child.height()),
+        "blocks must be contiguous in height"
+    );
+    assert_eq!(
+        parent.digest(),
+        child.parent(),
+        "blocks must be contiguous in ancestry"
+    );
+}
+
+// Checks blocks in the same newest-to-oldest order in which they will be yielded.
+fn validate_ancestry<B: Block>(blocks: &VecDeque<Arc<B>>) {
+    let mut blocks = blocks.iter();
+    let Some(mut child) = blocks.next() else {
+        return;
+    };
+
+    for parent in blocks {
+        assert_contiguous_parent(child.as_ref(), parent.as_ref());
+        child = parent;
+    }
+}
+
 /// Creates an ancestry stream from a fixed sequence of blocks.
 ///
-/// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
-/// the caller wants to bound the ancestry available to the application.
+/// Blocks are yielded in iterator order and no parent fetching is performed. Blocks must be
+/// ordered from newest to oldest and are validated before this function returns. This is useful
+/// when the caller wants to bound the ancestry available to the application.
+///
+/// # Panics
+///
+/// Panics during construction if the blocks do not form a contiguous chain in iterator order.
 pub fn from_iter<B: Block>(blocks: impl IntoIterator<Item = Arc<B>>) -> impl Ancestry<B> {
-    BoundedAncestry {
-        blocks: blocks.into_iter().collect(),
-    }
+    let blocks: VecDeque<_> = blocks.into_iter().collect();
+    validate_ancestry(&blocks);
+
+    BoundedAncestry { blocks }
 }
 
 /// Prepends a fixed sequence of blocks to an existing ancestry stream.
 ///
-/// Blocks are yielded in iterator order before the tail is polled.
+/// Blocks are yielded in iterator order before the tail is polled. The prefix must be ordered from
+/// newest to oldest. The tail remains responsible for satisfying [`Ancestry`]. This function
+/// validates the prefix and its connection to the first block yielded by the tail.
+///
+/// # Panics
+///
+/// Panics during construction if the prefixed blocks do not form a contiguous chain. The returned
+/// stream panics when the first tail block is peeked or polled if it is not the parent of the
+/// oldest prefixed block.
 pub fn with_prefix<B, S>(blocks: impl IntoIterator<Item = Arc<B>>, tail: S) -> impl Ancestry<B>
 where
     B: Block,
     S: Ancestry<B>,
 {
+    let blocks: VecDeque<_> = blocks.into_iter().collect();
+    validate_ancestry(&blocks);
+    let boundary_child = blocks.back().cloned();
+
     PrefixedAncestry {
-        blocks: blocks.into_iter().collect(),
+        blocks,
         tail,
+        boundary_child,
     }
 }
 
@@ -130,6 +185,7 @@ impl<B: Block> Stream for BoundedAncestry<B> {
 struct PrefixedAncestry<B: Block, S> {
     blocks: VecDeque<Arc<B>>,
     tail: S,
+    boundary_child: Option<Arc<B>>,
 }
 
 impl<B: Block, S> Unpin for PrefixedAncestry<B, S> {}
@@ -140,10 +196,19 @@ where
     S: Ancestry<B>,
 {
     fn peek(&self) -> Option<&B> {
-        self.blocks
-            .front()
-            .map(Arc::as_ref)
-            .or_else(|| self.tail.peek())
+        // Prefix contiguity is established at construction, so these blocks can be exposed
+        // directly.
+        if let Some(block) = self.blocks.front() {
+            return Some(block);
+        }
+
+        // The tail may be unavailable during construction, so validate its first visible block
+        // before exposing it.
+        let parent = self.tail.peek()?;
+        if let Some(child) = &self.boundary_child {
+            assert_contiguous_parent(child.as_ref(), parent);
+        }
+        Some(parent)
     }
 }
 
@@ -155,10 +220,22 @@ where
     type Item = Arc<B>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Keep the boundary child until a tail block is yielded and can be validated against it.
         if let Some(block) = self.blocks.pop_front() {
             return Poll::Ready(Some(block));
         }
-        Pin::new(&mut self.tail).poll_next(cx)
+
+        // Polling can reach the tail without a preceding peek, so validate the same boundary
+        // before yielding it.
+        match Pin::new(&mut self.tail).poll_next(cx) {
+            Poll::Ready(Some(parent)) => {
+                if let Some(child) = self.boundary_child.take() {
+                    assert_contiguous_parent(child.as_ref(), parent.as_ref());
+                }
+                Poll::Ready(Some(parent))
+            }
+            outcome => outcome,
+        }
     }
 }
 
@@ -445,6 +522,7 @@ mod test {
     };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::StreamExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     type TestBlock = EmptyBlock<Sha256>;
 
@@ -627,6 +705,45 @@ mod test {
     }
 
     #[test]
+    fn test_has_contiguous_height() {
+        assert!(has_contiguous_height(Height::new(6), Height::new(7)));
+        assert!(!has_contiguous_height(Height::new(6), Height::new(8)));
+        assert!(!has_contiguous_height(
+            Height::new(u64::MAX),
+            Height::zero()
+        ));
+    }
+
+    #[test]
+    #[should_panic = "blocks must be contiguous in height"]
+    fn test_from_iter_panics_on_non_contiguous_height() {
+        let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
+        let child = TestBlock::new(parent.digest(), Height::new(3), 3);
+
+        let _ = from_iter([Arc::new(child), Arc::new(parent)]);
+    }
+
+    #[test]
+    #[should_panic = "blocks must be contiguous in ancestry"]
+    fn test_from_iter_panics_on_non_contiguous_ancestry() {
+        let expected_parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
+        let wrong_parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 2);
+        let child = TestBlock::new(expected_parent.digest(), Height::new(2), 3);
+
+        let _ = from_iter([Arc::new(child), Arc::new(wrong_parent)]);
+    }
+
+    #[test]
+    #[should_panic = "blocks must be contiguous in height"]
+    fn test_from_iter_panics_on_reordered_chain() {
+        let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
+        let child = TestBlock::new(parent.digest(), Height::new(2), 2);
+        let grandchild = TestBlock::new(child.digest(), Height::new(3), 3);
+
+        let _ = from_iter([Arc::new(grandchild), Arc::new(parent), Arc::new(child)]);
+    }
+
+    #[test]
     fn test_from_iter_yields_blocks_in_order_and_peeks_next() {
         deterministic::Runner::default().start(|_| async move {
             let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
@@ -669,6 +786,73 @@ mod test {
             assert_eq!(ancestry.peek(), Some(&parent));
             assert_eq!(ancestry.next().await.as_deref(), Some(&parent));
             assert_eq!(ancestry.peek(), None);
+        });
+    }
+
+    #[test]
+    fn test_with_prefix_clones_validate_boundary_independently() {
+        deterministic::Runner::default().start(|_| async move {
+            let expected_parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
+            let wrong_parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 2);
+            let child = TestBlock::new(expected_parent.digest(), Height::new(2), 3);
+            let mut ancestry = with_prefix(
+                [Arc::new(child.clone())],
+                from_iter([Arc::new(wrong_parent)]),
+            );
+            let mut cloned = ancestry.clone();
+
+            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
+            assert_eq!(cloned.next().await.as_deref(), Some(&child));
+
+            // Each clone owns its unresolved seam check.
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _ = ancestry.peek();
+                }))
+                .is_err()
+            );
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _ = cloned.peek();
+                }))
+                .is_err()
+            );
+        });
+    }
+
+    #[test]
+    #[should_panic = "blocks must be contiguous in height"]
+    fn test_with_prefix_panics_on_non_contiguous_prefix() {
+        let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
+        let child = TestBlock::new(parent.digest(), Height::new(3), 3);
+
+        let _ = with_prefix(
+            [Arc::new(child), Arc::new(parent)],
+            from_iter(Vec::<Arc<TestBlock>>::new()),
+        );
+    }
+
+    #[test]
+    #[should_panic = "blocks must be contiguous in height"]
+    fn test_with_prefix_panics_when_pending_tail_breaks_height() {
+        deterministic::Runner::default().start(|context| async move {
+            let parent = TestBlock::new(Sha256Digest::EMPTY, Height::new(1), 1);
+            let consumed = TestBlock::new(parent.digest(), Height::new(2), 2);
+            let provider = PendingProvider::default();
+            let mut tail = stream(&context, provider.clone(), [consumed.clone()]);
+            assert_eq!(tail.next().await.as_deref(), Some(&consumed));
+            assert_eq!(tail.peek(), None);
+            assert_eq!(provider.subscription_count(), 1);
+
+            let child = TestBlock::new(consumed.digest(), Height::new(3), 3);
+            let mut ancestry = with_prefix([Arc::new(child.clone())], tail);
+            assert_eq!(ancestry.next().await.as_deref(), Some(&child));
+
+            // A pending tail poll must not discard the unresolved seam check.
+            assert!(ancestry.next().now_or_never().is_none());
+
+            provider.complete_all(Arc::new(parent));
+            let _ = ancestry.next().await;
         });
     }
 
