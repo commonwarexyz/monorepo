@@ -923,8 +923,8 @@ macro_rules! impl_database_set {
             }
 
             async fn finalize(self, batches: Self::Merkleized) -> (Self, Self::Snapshots, Barrier) {
-                // Every database captures at its own apply boundary inside this call, so the
-                // captured snapshots form one capture.
+                // Every database captures at its own apply boundary inside this call, so
+                // the snapshots together describe the set's one post-apply state.
                 let results = join!($(
                     finalize_or_panic(self.$idx, batches.$idx, Some($idx)),
                 )+);
