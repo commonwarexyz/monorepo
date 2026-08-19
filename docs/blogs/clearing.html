@@ -268,8 +268,10 @@ O’Grady</a></div>
         class="math inline">(20,1)</span>, <span
         class="math inline">(4,1)</span>, and <span
         class="math inline">(6,1)</span>.</p>
-        <p>Sort the terminal records by component identifier and commit
-        them under <span
+        <p>A hot recipient can end an epoch with many components, and
+        proving one tip (we’ll get to this later) should not require
+        shipping the rest. Let’s sort the terminal records by component
+        identifier and commit them as a Merkle tree under <span
         class="math inline">\mathsf{HeadRoot}_e(b)</span>. The root
         binds the exact component count, ordered records, total credit,
         and total receipt count: here <span

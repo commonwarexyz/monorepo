@@ -98,7 +98,7 @@ $$
 
 Suppose the operator assigns each of $b$'s three incoming payments to its own component. Their tips end at $(20,1)$, $(4,1)$, and $(6,1)$.
 
-Sort the terminal records by component identifier and commit them under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
+A hot recipient can end an epoch with many components, and proving one tip (we'll get to this later) should not require shipping the rest. Let's sort the terminal records by component identifier and commit them as a Merkle tree under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
 
 ## One Row per Changed Account
 
