@@ -124,7 +124,7 @@ pub enum ExecutionError {
     #[error("stale execution: a competing block was finalized")]
     Stale,
     /// Any other storage failure. Storage errors are unrecoverable, so the
-    /// wrapper panics on this everywhere. Only `Ok(None)` declines a proposal.
+    /// wrapper panics on this everywhere.
     #[error("storage failure: {0}")]
     Fatal(String),
 }
@@ -256,7 +256,9 @@ where
     /// and retrying must not violate invariants or lose durable progress.
     ///
     /// Storage errors from batch operations are propagated as [`ExecutionError`],
-    /// never interpreted. The wrapper declines the proposal on any error.
+    /// never interpreted. The wrapper declines the proposal on `Ok(None)` and
+    /// [`Stale`](ExecutionError::Stale), and panics on
+    /// [`Fatal`](ExecutionError::Fatal).
     fn propose(
         &mut self,
         context: (E, Self::Context),
@@ -278,10 +280,12 @@ where
     /// voting, do not resolve this future yet. Abstaining is not represented by
     /// a special return value.
     ///
-    /// Validity is relative to the supplied inputs. Finalizing a competing
-    /// branch later does not retroactively change a completed verdict. A
-    /// verdict reached after that finalization is reported as invalid instead,
-    /// because its branch is no longer reachable.
+    /// Validity is relative to the supplied inputs, and the boundary is the
+    /// applied anchor move. A verdict completed before the anchor moves stays
+    /// valid even when a competing branch finalizes afterward. A verdict that
+    /// completes after the anchor moved is answered from the new canonical
+    /// chain instead. True when the block itself became canonical, and false
+    /// when its branch is no longer reachable.
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).
