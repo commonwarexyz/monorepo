@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 470">
+  <rect width="1320" height="470" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 26px; font-weight: 700; fill: #111; }
+    .subtitle { font-size: 17px; fill: #666; }
+    .panel-title { font-size: 20px; font-weight: 700; fill: #111; text-anchor: middle; }
+    .axis { font-size: 15px; fill: #666; }
+    .axis-strong { font-size: 16px; font-weight: 700; fill: #111; }
+    .value { font-size: 15px; font-weight: 700; paint-order: stroke; stroke: #fff; stroke-width: 4px; stroke-linejoin: round; }
+    .grid { stroke: #dedede; stroke-width: 1; }
+    .frame { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .blue { stroke: #2424d4; fill: none; }
+    .green { stroke: #2f7d3d; fill: none; }
+    .blue-text { fill: #2424d4; }
+    .green-text { fill: #2f7d3d; }
+    .series { stroke-width: 3; }
+    .whisker { stroke-width: 1.5; }
+  </style>
+
+  <text class="title" x="34" y="39">What moves the close?</text>
+  <text class="subtitle" x="34" y="67">N = T = 1,000,000 • 512 credited accounts • 256 pieces • 8 worker threads • busiest of 100 validator assignments</text>
+
+  <line class="blue series" x1="916" y1="38" x2="956" y2="38"/>
+  <circle cx="936" cy="38" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <text class="axis-strong blue-text" x="966" y="43">A = 1,024</text>
+  <line class="green series" x1="1100" y1="38" x2="1140" y2="38"/>
+  <rect x="1115" y="33" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="axis-strong green-text" x="1150" y="43">A = 1,000,000</text>
+
+  <!-- Commitment-root construction. -->
+  <rect class="frame" x="30" y="90" width="400" height="360" rx="3"/>
+  <text class="panel-title" x="230" y="122">Operator: build roots</text>
+  <text class="axis" x="55" y="143">ms</text>
+  <line class="grid" x1="105" y1="150" x2="395" y2="150"/>
+  <line class="grid" x1="105" y1="205" x2="395" y2="205"/>
+  <line class="grid" x1="105" y1="260" x2="395" y2="260"/>
+  <line class="grid" x1="105" y1="315" x2="395" y2="315"/>
+  <line class="grid" x1="105" y1="370" x2="395" y2="370"/>
+  <text class="axis" x="95" y="155" text-anchor="end">500</text>
+  <text class="axis" x="95" y="210" text-anchor="end">375</text>
+  <text class="axis" x="95" y="265" text-anchor="end">250</text>
+  <text class="axis" x="95" y="320" text-anchor="end">125</text>
+  <text class="axis" x="95" y="375" text-anchor="end">0</text>
+  <text class="axis-strong" x="160" y="402" text-anchor="middle">h = 1</text>
+  <text class="axis-strong" x="340" y="402" text-anchor="middle">h = 512</text>
+  <path class="blue series" d="M160 369.40 L340 344.69"/>
+  <path class="green series" d="M160 227.97 L340 173.88"/>
+  <g class="blue whisker">
+    <path d="M160 369.39 V369.41 M154 369.39 H166 M154 369.41 H166"/>
+    <path d="M340 344.47 V344.91 M334 344.47 H346 M334 344.91 H346"/>
+  </g>
+  <g class="green whisker">
+    <path d="M160 227.17 V228.70 M154 227.17 H166 M154 228.70 H166"/>
+    <path d="M340 168.09 V179.14 M334 168.09 H346 M334 179.14 H346"/>
+  </g>
+  <circle cx="160" cy="369.40" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="340" cy="344.69" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="155" y="222.97" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="335" y="168.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="172" y="357">1.36</text>
+  <text class="value blue-text" x="350" y="333">57.5</text>
+  <text class="value green-text" x="172" y="216">323</text>
+  <text class="value green-text" x="350" y="162">446</text>
+
+  <!-- All-piece proof construction. -->
+  <rect class="frame" x="460" y="90" width="400" height="360" rx="3"/>
+  <text class="panel-title" x="660" y="122">Operator: build piece proofs</text>
+  <text class="axis" x="485" y="143">ms</text>
+  <line class="grid" x1="535" y1="150" x2="825" y2="150"/>
+  <line class="grid" x1="535" y1="205" x2="825" y2="205"/>
+  <line class="grid" x1="535" y1="260" x2="825" y2="260"/>
+  <line class="grid" x1="535" y1="315" x2="825" y2="315"/>
+  <line class="grid" x1="535" y1="370" x2="825" y2="370"/>
+  <text class="axis" x="525" y="155" text-anchor="end">500</text>
+  <text class="axis" x="525" y="210" text-anchor="end">375</text>
+  <text class="axis" x="525" y="265" text-anchor="end">250</text>
+  <text class="axis" x="525" y="320" text-anchor="end">125</text>
+  <text class="axis" x="525" y="375" text-anchor="end">0</text>
+  <text class="axis-strong" x="590" y="402" text-anchor="middle">h = 1</text>
+  <text class="axis-strong" x="770" y="402" text-anchor="middle">h = 512</text>
+  <path class="blue series" d="M590 369.50 L770 352.73"/>
+  <path class="green series" d="M590 208.84 L770 183.98"/>
+  <g class="blue whisker">
+    <path d="M590 369.50 V369.50 M584 369.50 H596 M584 369.50 H596"/>
+    <path d="M770 352.62 V352.84 M764 352.62 H776 M764 352.84 H776"/>
+  </g>
+  <g class="green whisker">
+    <path d="M590 207.10 V210.65 M584 207.10 H596 M584 210.65 H596"/>
+    <path d="M770 181.56 V186.58 M764 181.56 H776 M764 186.58 H776"/>
+  </g>
+  <circle cx="590" cy="369.50" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="770" cy="352.73" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="585" y="203.84" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="765" y="178.98" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="602" y="357">1.13</text>
+  <text class="value blue-text" x="780" y="341">39.3</text>
+  <text class="value green-text" x="602" y="197">366</text>
+  <text class="value green-text" x="780" y="172">423</text>
+
+  <!-- Maximum-load validator. -->
+  <rect class="frame" x="890" y="90" width="400" height="360" rx="3"/>
+  <text class="panel-title" x="1090" y="122">Validator: check and sign</text>
+  <text class="axis" x="915" y="143">ms</text>
+  <line class="grid" x1="965" y1="150" x2="1255" y2="150"/>
+  <line class="grid" x1="965" y1="205" x2="1255" y2="205"/>
+  <line class="grid" x1="965" y1="260" x2="1255" y2="260"/>
+  <line class="grid" x1="965" y1="315" x2="1255" y2="315"/>
+  <line class="grid" x1="965" y1="370" x2="1255" y2="370"/>
+  <text class="axis" x="955" y="155" text-anchor="end">1,400</text>
+  <text class="axis" x="955" y="210" text-anchor="end">1,050</text>
+  <text class="axis" x="955" y="265" text-anchor="end">700</text>
+  <text class="axis" x="955" y="320" text-anchor="end">350</text>
+  <text class="axis" x="955" y="375" text-anchor="end">0</text>
+  <text class="axis-strong" x="1020" y="402" text-anchor="middle">h = 1</text>
+  <text class="axis-strong" x="1200" y="402" text-anchor="middle">h = 512</text>
+  <path class="blue series" d="M1020 369.67 L1200 336.62"/>
+  <path class="green series" d="M1020 204.55 L1200 180.82"/>
+  <g class="blue whisker">
+    <path d="M1020 369.66 V369.67 M1014 369.66 H1026 M1014 369.67 H1026"/>
+    <path d="M1200 336.39 V336.88 M1194 336.39 H1206 M1194 336.88 H1206"/>
+  </g>
+  <g class="green whisker">
+    <path d="M1020 198.59 V208.42 M1014 198.59 H1026 M1014 208.42 H1026"/>
+    <path d="M1200 179.66 V181.98 M1194 179.66 H1206 M1194 181.98 H1206"/>
+  </g>
+  <circle cx="1020" cy="369.67" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="1200" cy="336.62" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="1015" y="199.55" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="1195" y="175.82" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="1032" y="357">2.12</text>
+  <text class="value blue-text" x="1210" y="325">212</text>
+  <text class="value green-text" x="1032" y="192">1,053</text>
+  <text class="value green-text" x="1210" y="169">1,204</text>
+</svg>

@@ -1,0 +1,3264 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Keep the Change</title>
+    <meta name="description" content="Account-level clearing makes
+millions of tiny payments economical by settling account changes instead
+of publishing every transaction. At internet scale, digital signatures
+and Merkle trees make its public settlement cost per payment effectively
+zero.">
+    <meta name="author" content="Patrick O’Grady">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/clearing" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/clearing.png" />
+    <meta property="og:title" content="Keep the Change" />
+    <meta property="og:description" content="Account-level clearing
+makes millions of tiny payments economical by settling account changes
+instead of publishing every transaction. At internet scale, digital
+signatures and Merkle trees make its public settlement cost per payment
+effectively zero." />
+    <meta property="article:author" content="Patrick O’Grady" />
+    <meta property="article:published_time" content="2026-08-14T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-08-14T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/clearing" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/clearing" />
+    <meta property="twitter:title" content="Keep the Change" />
+    <meta property="twitter:description" content="Account-level clearing
+makes millions of tiny payments economical by settling account changes
+instead of publishing every transaction. At internet scale, digital
+signatures and Merkle trees make its public settlement cost per payment
+effectively zero." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/clearing.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Keep the Change</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/_patrickogrady">Patrick
+O’Grady</a></div>
+                        <div class="date">August 14th, 2026</div>
+        </div>
+        <p>A $0.000001 payment costs more to settle onchain than it is
+        worth.</p>
+        <p>More blockspace, bandwidth, and storage let a network carry
+        more payment records. The economic question is whether every
+        payment needs one.</p>
+        <p>That depends on the guarantee. Direct onchain settlement
+        publishes each payment and gives it public finality. A payment
+        channel keeps enforceable state between two parties and settles
+        only its latest state. A routed channel links those states
+        across a path, with liquidity and claims at every hop. A
+        general-purpose rollup validates arbitrary execution. These
+        designs ask the chain to settle a payment, a channel state, or a
+        general state transition.</p>
+        <p>At this scale, the payer and recipient can accept an
+        operator’s signed preconfirmation now and wait for public
+        finality. The signature gives them evidence they can retain
+        immediately, while finality arrives later as part of a larger
+        close.</p>
+        <p>Account-level clearing applies that trade within one operator
+        and custody system. It makes the account the unit of settlement.
+        The operator accepts payments throughout an epoch. At close,
+        each changed account contributes one row that commits its exact
+        opening and closing state. Repeated payments over the same set
+        of accounts share those rows even when the pairings differ.</p>
+        <p>The operator still verifies and durably records every
+        payment. Users trust it for custody and online service. The
+        savings appear in public settlement when many payments reuse the
+        same accounts.</p>
+        <p>That choice defines the rest of the design. The close must
+        prove exact account changes without replaying a public payment
+        log. A privately delivered receipt must still constrain
+        settlement. Users need a recovery path if the operator stops,
+        and closing one epoch should not halt payments in the next.</p>
+        <p>The construction starts with the signed evidence for one
+        accepted payment.</p>
+        <h2 id="one-signed-payment">One Signed Payment</h2>
+        <p>An epoch begins from an authenticated account vector and a
+        chain-sealed anchor <span class="math inline">\mathcal
+        A_e</span>, with deposits and user-signed withdrawals fixed
+        before its online payments begin. Suppose account <span
+        class="math inline">a</span> opens with 100 and wants to pay
+        account <span class="math inline">b</span> 20. The persistent
+        state <span class="math inline">X_a</span> of an account is its
+        balance <span class="math inline">B_a</span>, its cumulative
+        debit <span class="math inline">D_a</span> and operator-promised
+        credit <span class="math inline">C_a</span>, a receipt count,
+        and an activity flag (Appendix B).</p>
+        <p>To send <span class="math inline">x&gt;0</span> from <span
+        class="math inline">a</span> to <span
+        class="math inline">b</span>, the payer signs the exact next
+        debit, and the operator accepts by advancing one epoch-local
+        receive component <span class="math inline">\kappa</span> from
+        its current tip <span class="math inline">(G,J)</span>:</p>
+        <p><span class="math display">
+        S=\mathsf{Sign}_a\bigl(\mathcal
+        A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
+        \qquad
+        R=\mathsf{Sign}_{\mathsf{op}}\bigl(\mathcal
+        A_e,\;\kappa,\;x,\;\mathsf{TxId}(S),\;(G+x,\,J+1)\bigr).
+        </span></p>
+        <p><span class="math inline">\mathsf{TxId}</span> hashes only
+        the canonical request body, so signature bytes never affect it,
+        and a payer-signed <span class="math inline">S</span> is still
+        only a request until the operator acknowledges it.</p>
+        <p>That acceptance is transactional. After authenticating <span
+        class="math inline">S</span> and checking spendability,
+        freshness, and room in the close, the operator atomically
+        commits the debit, the component advance, the close reservation,
+        the replay record, and the receipt body, and only then signs and
+        returns <span class="math inline">R</span>.</p>
+        <p>The matching pair <span class="math inline">(S,R)</span> is
+        the accepted payment. The payer verifies and retains it, then
+        forwards it to the recipient. Rejection before the commit
+        changes nothing, and until the payer sends again, an exact retry
+        of a lost response returns the same pair without a second
+        debit.</p>
+        <p>Figures 1–5 use one registry with <span
+        class="math inline">N=8</span> positions. Figure 1 begins with
+        <span class="math inline">a</span> at 100, <span
+        class="math inline">b</span> at 40, and the payment <span
+        class="math inline">a\xrightarrow{20}b</span>.</p>
+        <style>
+          .clearing-loop {
+            aspect-ratio: 1024 / 576;
+            margin: 28px 0 6px;
+          }
+          .clearing-benchmark-plot {
+            display: block;
+            height: auto;
+            width: 100%;
+          }
+          .clearing-benchmark-table {
+            overflow-x: auto;
+          }
+          .clearing-benchmark-table table {
+            min-width: 760px;
+          }
+        </style>
+        <noscript>
+          <style>
+            .clearing-loop {
+              aspect-ratio: auto;
+              border-left: 2px solid #d9251c;
+              color: gray;
+              margin: 28px 0 6px;
+              padding-left: 12px;
+            }
+          </style>
+        </noscript>
+        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and component kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop. A dashed line shows the operator could instead relay the same pair to b directly, one hop sooner.">
+          <noscript>Account a sends one request to one operator and receives one signed response. Verification, atomic storage, and receipt signing are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the same matching pair directly to b without another operator hop, and the operator could equally deliver the pair to b one hop sooner.</noscript>
+        </div>
+        <script type="module" src="clearing.loops.js"></script>
+        <div class="image-caption">
+        <p>Figure 1: The payer sends one request and receives one signed
+        response. The operator verifies, commits, and signs locally,
+        adding no network round trip. The commit moves <span
+        class="math inline">a</span> from 100 to 80 and advances <span
+        class="math inline">b</span>’s component <span
+        class="math inline">\kappa_0</span> from <span
+        class="math inline">(0,0)</span> to <span
+        class="math inline">(20,1)</span> before <span
+        class="math inline">R</span> exists. Once <span
+        class="math inline">R</span> returns, <span
+        class="math inline">a</span> sends the same matching <span
+        class="math inline">(S,R)</span> directly to <span
+        class="math inline">b</span> as transferable evidence, and the
+        operator, holding the same pair, could deliver it to <span
+        class="math inline">b</span> one hop sooner.</p>
+        </div>
+        <p>Because the operator commits state before signing, every
+        accepted debit is already counted in the payer’s live balance. A
+        recipient can spend incoming credit only after importing the
+        authenticated component tip that contains it. A delayed import
+        may understate spendable balance, but cannot overstate it.</p>
+        <p>Compression comes from cumulative totals. The close carries
+        each payer’s final debit and the final credit and receipt count
+        for each receive component. Intermediate payments can be
+        omitted.</p>
+        <h2 id="one-exact-account-close">One Exact Account Close</h2>
+        <p>A single incoming counter would serialize every payment to a
+        popular recipient. The operator instead scopes each receive
+        component by <span class="math inline">(\mathcal
+        A_e,b,\kappa)</span>. A payment of <span
+        class="math inline">x</span> assigned to component <span
+        class="math inline">\kappa</span> advances only that component’s
+        running credit and receipt count:</p>
+        <p><span class="math display">
+        (G_\kappa,J_\kappa)\longrightarrow(G_\kappa+x,J_\kappa+1),
+        \qquad
+        (G_{\kappa&#39;},J_{\kappa&#39;})\text{ unchanged for every
+        }\kappa&#39;\ne\kappa.
+        </span></p>
+        <p>Payments assigned to different components therefore do not
+        contend on the same counter.</p>
+        <p>A recipient still has one account balance. Components exist
+        only as epoch-local concurrency domains feeding that balance. At
+        close, one terminal signed pair represents each component, no
+        matter how many payments advanced it.</p>
+        <p>In the same ledger, accounts <span
+        class="math inline">(a,b,c,d)</span> open with balances <span
+        class="math inline">(100,40,25,35)</span> and the epoch
+        accepts</p>
+        <p><span class="math display">
+        a\xrightarrow{20}b,\quad b\xrightarrow{12}c,\quad
+        c\xrightarrow{7}d,\quad d\xrightarrow{5}a,\quad
+        c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
+        </span></p>
+        <p>Their exact closing balances are <span
+        class="math inline">(85,58,26,31)</span> and total payment debit
+        equals total payment credit at 54.</p>
+        <p>For recipient <span class="math inline">b</span>, sort the
+        terminal records by component identifier and commit them under
+        <span class="math inline">\mathsf{HeadRoot}_e(b)</span>. The
+        root binds the exact component count, ordered records, total
+        credit, and total receipt count. In the running example, <span
+        class="math inline">b</span>’s three heads end at <span
+        class="math inline">(20,1)</span>, <span
+        class="math inline">(4,1)</span>, and <span
+        class="math inline">(6,1)</span>, so the root summary is <span
+        class="math inline">(h_b,G_b,J_b)=(3,30,3)</span>.</p>
+        <p>The account row is the unit of public settlement. Write
+        opening and closing states as <span
+        class="math inline">X_a^0</span> and <span
+        class="math inline">X_a^1</span>, with checked debit and credit
+        deltas <span class="math inline">d_a=D_a^1-D_a^0</span> and
+        <span class="math inline">c_a=C_a^1-C_a^0</span>.</p>
+        <p>If the chain-sealed boundary assigns deposit <span
+        class="math inline">f_a</span> and withdrawal <span
+        class="math inline">w_a</span>, the exact balance relation
+        is</p>
+        <p><span class="math display">
+        \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
+        </span></p>
+        <p>Each row binds both account states, the terminal outgoing
+        pair <span class="math inline">\mathsf{Out}_a</span> when the
+        account sent, its <span
+        class="math inline">\mathsf{HeadRoot}</span>, and the aggregate
+        prefixes needed for conservation:</p>
+        <p><span class="math display">
+        \mathsf{Row}_a=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{HeadRoot}_e(a),\;\mathsf{prefix}_a\bigr).
+        </span></p>
+        <p>The rows are strictly sorted by account, with exactly one for
+        every account whose authenticated state changes.</p>
+        <p>The <span class="math inline">A</span> rows form a
+        length-bound <span
+        class="math inline">\mathsf{ChangeRoot}</span>, which
+        authenticates the compact change vector. The paired sparse
+        witness below uses that vector to derive the new account-state
+        root.</p>
+        <p>The paired sparse witness reconstructs the opening and
+        closing roots together over the row positions <span
+        class="math inline">\mathcal J_e</span>: each row supplies its
+        opening and closing leaf, and every omitted subtree contributes
+        one authenticated digest to both sides, collected as the sparse
+        frontier <span class="math inline">\Phi_e</span>. Successful
+        verification proves every omitted position unchanged and every
+        row position changed to exactly its committed close, so an
+        account changes if and only if it has a row.</p>
+        <p>The settlement chain retains a header <span
+        class="math inline">\mathsf{Header}_e</span> containing the
+        opening <span class="math inline">\mathsf{StateRoot}_e</span>,
+        <span class="math inline">\mathsf{ChangeRoot}_e</span>, and
+        closing <span
+        class="math inline">\mathsf{StateRoot}_{e+1}</span>, together
+        with the quorum certificate. Admission also receives the
+        terminal changed row and its Merkle opening, authenticates the
+        row against <span
+        class="math inline">\mathsf{ChangeRoot}_e</span>, checks its
+        aggregate prefixes, and retains none of it. A <span
+        class="math inline">\mathsf{StateRoot}</span> commits every
+        field in the complete account-state vector <span
+        class="math inline">X</span>. The component vectors, remaining
+        changed rows, and paired exact-update witness stay outside the
+        chain payload as an authenticated corpus <span
+        class="math inline">\mathcal D_e</span> that must remain
+        retrievable through the challenge deadline <span
+        class="math inline">\Delta_e</span>. Appendix D tabulates the
+        evidence lifetimes.</p>
+        <p><span class="math display">
+        \begin{aligned}
+        \mathbf Y_b
+        &amp;=\bigl((\kappa_0,20,1),(\kappa_1,4,1),(\kappa_2,6,1)\bigr),\\
+        \mathbf Y_b
+        &amp;\xrightarrow{\ \mathsf{Merkle}\ }
+        \mathsf{HeadRoot}_e(b)
+        \hookrightarrow \mathsf{Row}_b,\\
+        \mathbf A_e
+        &amp;=(\mathsf{Row}_a,\mathsf{Row}_b,\mathsf{Row}_c,\mathsf{Row}_d)
+        \xrightarrow{\ \mathsf{Merkle}\ }
+        \mathsf{ChangeRoot}_e.
+        \end{aligned}
+        </span></p>
+        <p>Here <span class="math inline">\hookrightarrow</span> places
+        the head root inside <span
+        class="math inline">\mathsf{Row}_b</span>. The row vector also
+        drives the full-state update:</p>
+        <p><span class="math display">
+        \underbrace{\mathsf{StateRoot}_e}_{\mathsf{Commit}(X^0)}
+        \xrightarrow[\displaystyle
+          k\notin\mathcal J_e\Rightarrow X_k^1=X_k^0]
+        {\displaystyle \mathbf A_e,\,\Phi_e}
+        \underbrace{\mathsf{StateRoot}_{e+1}}_{\mathsf{Commit}(X^1)}.
+        </span></p>
+        <div class="image-caption">
+        <p>Figure 2: The first derivation builds <span
+        class="math inline">\mathsf{ChangeRoot}_e</span> from terminal
+        component heads, each committed as its terminal signed pair and
+        shown here by that pair’s marker, and exact changed-account
+        rows. The second uses those rows and sparse frontier <span
+        class="math inline">\Phi_e</span> to transform the opening
+        full-state commitment into the closing one while proving every
+        omitted position unchanged.</p>
+        </div>
+        <p>Write <span class="math inline">T</span> for accepted
+        payments, <span class="math inline">A</span> for changed-account
+        rows, <span class="math inline">H=H_e=\sum_a h_a</span> for
+        terminal receive-component heads, <span
+        class="math inline">\Phi=|\Phi_e|</span> for sparse-frontier
+        hashes, and <span class="math inline">N</span> for registered
+        account positions.</p>
+        <p><span class="math inline">H</span> is the price of receive
+        concurrency. More components remove online contention but
+        enlarge the close. The protocol therefore caps both the number
+        of terminal components and the close size independently of <span
+        class="math inline">T</span>. A payment is accepted only when
+        the operator can reuse a component or reserve room for a new one
+        without exceeding either cap.</p>
+        <h2 id="validate-before-admission">Validate Before
+        Admission</h2>
+        <p>Admission fully validates the public close before it becomes
+        pending, rejecting anything malformed or inexact. Challenges
+        cover contradictions among operator-signed receipts, whether
+        retained privately or drawn from the disclosed corpus.</p>
+        <p>For sorted rows, the authenticated prefixes telescope to
+        total debit <span class="math inline">D_e</span>, credit <span
+        class="math inline">C_e</span>, deposits <span
+        class="math inline">F_e</span>, and withdrawals <span
+        class="math inline">W_e</span>. Those totals must reproduce the
+        chain-sealed boundary, respect the close caps, and conserve
+        payments:</p>
+        <p><span class="math display">
+        \boxed{D_e=C_e.}
+        </span></p>
+        <p>Writing <span class="math inline">L_e=\sum_a B_a^0</span> and
+        <span class="math inline">L_{e+1}=\sum_a B_a^1</span>, summing
+        the per-account balance equation cancels payments but not
+        boundary flows:</p>
+        <p><span class="math display">
+        \boxed{L_{e+1}=L_e+F_e-W_e.}
+        </span></p>
+        <p>This is typed conservation. Deposits and withdrawals come
+        from the chain-sealed boundary. Debits and credits come from
+        signed cumulative debit and credit markers. Equal totals do not
+        let one type impersonate another.</p>
+        <p>The reference deployment partitions the public corpus into
+        deterministic, exhaustive account intervals. Every certificate
+        signer signs the same header, and each evidence piece is
+        assigned to a quorum of validators who check and retain it.
+        Quorum intersection guarantees that an honest signer checked and
+        retains each piece: at the reference parameters of 100
+        validators, 33 tolerated faults, and quorum 67, every piece’s
+        holders share at least 34 validators with the certificate.</p>
+        <p>The honest signer may differ by piece. Together, the
+        identical header, exhaustive assignment, and quorum intersection
+        attest to the complete public relation, which byte availability
+        alone would not. Admission appends the close as a pending slot
+        without changing custody or the finalized root, while
+        registration has already sealed the epoch’s boundary and opened
+        the next. Only an unchallenged queue front can install its root
+        and release its withdrawals:</p>
+        <p><span class="math display">
+        \mathsf{Serving}_e
+        \xrightarrow[\text{finalized root and custody
+        unchanged}]{\mathsf{admit},\ t\le\alpha_e}
+        \underbrace{\mathsf{Pending}_e}_{\mathsf{challengeable}\
+        t\le\Delta_e}
+        \xrightarrow[\mathsf{front\ only}]{\mathsf{finalize},\
+        t&gt;\Delta_e}
+        \mathsf{Finalized}_e.
+        </span></p>
+        <div class="image-caption">
+        <p>Figure 3: Admission appends the fully validated close to the
+        pending queue, changing neither custody nor the finalized root.
+        An unchallenged slot finalizes only from the queue front, once
+        its window closes.</p>
+        </div>
+        <p>Here <span class="math inline">\alpha_e&lt;\Delta_e</span>.
+        The chain may pipeline a bounded number <span
+        class="math inline">K</span> of consecutive pending slots, but
+        only the front can finalize. This preserves one state lineage
+        even when a later slot’s challenge window closes first.</p>
+        <h2 id="the-one-fact-validation-cannot-see">The One Fact
+        Validation Cannot See</h2>
+        <p>Under the selected mode’s validity assumptions, validation
+        establishes that the exact bound corpus satisfies the public
+        relation. It cannot prove that the corpus contains every receipt
+        the operator signed and delivered privately.</p>
+        <p>Fix a public corpus <span class="math inline">\mathcal
+        D_e</span> and accepting certificate, proof, or attestation
+        <span class="math inline">\zeta</span>. Compare two executions:
+        in <span class="math inline">\Xi_0</span> the operator signs
+        exactly the receipts represented by <span
+        class="math inline">\mathcal D_e</span>, while in <span
+        class="math inline">\Xi_1</span> it produces the same <span
+        class="math inline">(\mathcal D_e,\zeta)</span> and privately
+        delivers one more valid receipt <span
+        class="math inline">R^+</span>. The admission verifier has the
+        same view in both:</p>
+        <p><span class="math display">
+        \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
+        </span></p>
+        <p>If it accepts <span class="math inline">\Xi_0</span>, it must
+        accept <span class="math inline">\Xi_1</span>. The argument is
+        independent of whether <span class="math inline">\zeta</span> is
+        a quorum certificate, a zero-knowledge proof, or a TEE
+        attestation. Each can certify the exact public-validity relation
+        over selected inputs. None proves the nonexistence of an
+        additional private signature.</p>
+        <p>Through the inclusive deadline <span
+        class="math inline">t\le\Delta_e</span>, any holder or
+        watchtower may submit one of four bounded contradictions:</p>
+        <ol type="1">
+        <li><p><strong>Payer debit contradiction.</strong> A matching
+        acknowledged pair carries a debit above the public debit marker,
+        or the same debit with a different send or receipt body. A bare
+        payer request is insufficient. The receipt proves operator
+        acknowledgement.</p></li>
+        <li><p><strong>Higher receive-component tip.</strong>
+        Authenticate the public tip <span
+        class="math inline">(G^\star,J^\star)</span> for one component,
+        using <span class="math inline">(0,0)</span> for authenticated
+        absence, and present a matching retained receipt at <span
+        class="math inline">(G^+,J^+)</span>. Either strict increase,
+        <span class="math inline">G^+&gt;G^\star</span> or <span
+        class="math inline">J^+&gt;J^\star</span>, is a
+        contradiction.</p></li>
+        <li><p><strong>Inconsistent receipt range.</strong> For linked
+        lower and upper pairs in one anchor, recipient, and component,
+        adjacent receipts must increase credit by exactly the upper
+        payment, and an index gap must leave at least one unit for each
+        omitted positive payment. A violation is a
+        contradiction.</p></li>
+        <li><p><strong>Receipt fork.</strong> Two distinct linked
+        receipt bodies either reuse one receipt index within a component
+        or acknowledge the same payer transaction differently. Different
+        signature bytes over one identical receipt body are not a
+        fork.</p></li>
+        </ol>
+        <p>Appendix E gives the exact checked-arithmetic and fork
+        predicates.</p>
+        <p>The higher-tip challenge below combines three sources. The
+        settlement chain already has the admitted header and its <span
+        class="math inline">\mathsf{ChangeRoot}</span>. The availability
+        service supplies the authenticated account and component lookups
+        needed to open <span class="math inline">b</span> and then <span
+        class="math inline">\kappa_0</span>. The recipient supplies the
+        signed pair it retained privately. Those lookups and that pair
+        become one bounded onchain challenge call.</p>
+        <p><span class="math display">
+        \begin{aligned}
+        \mathsf{Challenge}^{\mathsf{higher}}_e=\bigl(&amp;
+        \underbrace{\mathsf{slotId}_e}_{\text{chain
+        reference}},\\[-0.1em]
+        &amp;\underbrace{P^+_{a\to b,\kappa_0}}_{\text{retained by the
+        recipient}},\\[-0.1em]
+        &amp;\underbrace{
+          \mathsf{AccountLookup}(b),
+          \mathsf{ComponentLookup}(\kappa_0)
+        }_{\text{from the availability service}}
+        \bigr).
+        \end{aligned}
+        </span></p>
+        <p>The challenge call resolves the two authenticated lookups in
+        sequence:</p>
+        <p><span class="math display">
+        \begin{aligned}
+        \mathsf{slotId}_e
+        &amp;\longmapsto
+        \mathsf{Header}_e[\mathsf{ChangeRoot}_e],\\
+        \mathsf{ChangeRoot}_e
+        &amp;\xrightarrow{\ \mathsf{AccountLookup}(b)\ }
+        \mathsf{Row}_b[\mathsf{HeadRoot}_e(b)]
+        \xrightarrow{\ \mathsf{ComponentLookup}(\kappa_0)\ }
+        (G^\star,J^\star)=(20,1),\\
+        P^+_{a\to b,\kappa_0}
+        &amp;\xrightarrow{\ \mathsf{Verify}(\mathcal A_e,b,\kappa_0)\ }
+        (G^+,J^+)=(23,2).
+        \end{aligned}
+        </span></p>
+        <p><span class="math display">
+        \bigl(G^+&gt;G^\star\bigr)\lor\bigl(J^+&gt;J^\star\bigr)
+        \;\Longleftrightarrow\;
+        (23&gt;20)\lor(2&gt;1)
+        \;\Longrightarrow\;
+        \mathsf{HigherTip}.
+        </span></p>
+        <div class="image-caption">
+        <p>Figure 4: The first display identifies the challenge inputs
+        and the source of each one. The second authenticates the
+        committed component tip by following <span
+        class="math inline">\mathsf{ChangeRoot}_e\to
+        \mathsf{Row}_b\to\mathsf{HeadRoot}_e(b)\to\kappa_0</span>, then
+        verifies the retained pair in the same scope. Either strict
+        coordinate inequality proves the contradiction. If row <span
+        class="math inline">b</span> were absent, the account lookup
+        would instead carry the neighboring-row openings that prove its
+        ordered absence.</p>
+        </div>
+        <p>Boundary omissions do not need a fifth challenge. Deposits
+        and withdrawals were serialized by the settlement chain before
+        the epoch, so wrong roots, totals, signatures, or account
+        effects are public registration or admission failures.</p>
+        <p>A successful receipt challenge prevents the challenged slot
+        and every admitted descendant from finalizing. Earlier admitted
+        slots keep their ordinary challenge windows and may still
+        finalize in order. The challenge itself provides neither
+        reimbursement nor slashing. Collateral, insurance, and repair
+        allocation are deployment policy.</p>
+        <h2 id="a-deadline-to-exit">A Deadline to Exit</h2>
+        <p>Blocking a contradicted close matters only if users can still
+        recover custody. The exit path begins with chain-sealed deposits
+        and signed withdrawals.</p>
+        <p>A deposit has no deadline. A finalized deposit immediately
+        raises custody, its record enters the next boundary that admits
+        it, and if terminal unwind begins before that boundary’s slot
+        finalizes, the deposit returns in the terminal payout. A stalled
+        deposit alone can neither trigger deployment unwind nor claim a
+        bounded exit.</p>
+        <p>A withdrawal is signed against an existing finalized root
+        <span class="math inline">\mathsf{rt}_z</span> and names no
+        future epoch or anchor:</p>
+        <p><span class="math display">
+        Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr),
+        </span></p>
+        <p>with an eligible destination <span
+        class="math inline">v</span>, amount <span
+        class="math inline">x</span>, full-close flag <span
+        class="math inline">\gamma</span>, and absolute deadline <span
+        class="math inline">\tau</span>. Queueing is a direct,
+        permissionless chain call: the operator neither submits nor
+        approves it, and operator cooperation decides only whether the
+        withdrawal settles through a clean close or through terminal
+        unwind.</p>
+        <p>If the admitted pipeline extends <span
+        class="math inline">\mathsf{rt}_z</span> through <span
+        class="math inline">\mathsf{rt}_\ell</span>, where <span
+        class="math inline">\ell-z\le K</span>, queueing must prove the
+        withdrawal affordable at each of those roots, and every later
+        admission that does not carry it re-proves it at the new root,
+        so every possible survivor root is covered. A full close must
+        exhaust the balance at the pipeline tail, and the deadline must
+        leave the configured notice <span
+        class="math inline">\eta&gt;0</span> after queueing. Queueing
+        changes neither custody nor a state root. Clean front
+        finalization atomically releases withdrawals, consumes deposits,
+        advances the finalized root, and decrements custody.</p>
+        <p>Appendix F gives the complete queueing and terminal-payout
+        predicates.</p>
+        <p>Let <span class="math inline">E</span> be current custody.
+        For admitted slots <span
+        class="math inline">z+1,\ldots,\ell</span>, let <span
+        class="math inline">F_i</span> be the unfinalized deposits
+        carried by slot <span class="math inline">i</span>, and let
+        <span class="math inline">F_\star</span> contain the deposits
+        not yet carried by an admitted slot. Custody can be read either
+        from finalized liability or from the pipeline tail:</p>
+        <p><span class="math display">
+        \boxed{
+        E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
+        =L_\ell+\sum_{i=z+1}^{\ell}W_i+F_\star.
+        }
+        </span></p>
+        <p>Withdrawals remain inside custody until their own slot
+        reaches the front and finalizes. This is why admission can be
+        pipelined without letting a speculative descendant spend assets
+        out from under an ancestor.</p>
+        <p>The signed deadline <span class="math inline">\tau</span> is
+        a fence, not a payout promise. If an included valid call
+        observes an unreleased <span class="math inline">Q</span> at
+        <span class="math inline">t\ge\tau</span>, it permanently blocks
+        new work but does not erase already-admitted slots. Those slots
+        remain challengeable and resolve from the front in order. Only
+        an unadmitted registration is discarded.</p>
+        <p>A pure timeout unwinds only after every admitted slot
+        resolves, while a successful challenge cuts the pipeline at the
+        faulted slot and unwinds once every clean slot ahead of it
+        resolves in order. Terminal unwind then authenticates the
+        complete <span class="math inline">N</span>-account state vector
+        at the surviving finalized root, pays each signed withdrawal,
+        and returns each residual balance together with any deposit
+        never consumed by a surviving slot.</p>
+        <p>The canonical payout must sum to <span
+        class="math inline">E</span>. One atomic transition then pays
+        it, zeroes custody and liability, consumes every remaining
+        record, and makes the deployment permanently unwound.</p>
+        <p>Recovery is unilateral but deliberately coarse. One expired
+        withdrawal kills the affected deployment. Terminal unwind
+        requires an <span class="math inline">O(N)</span> scan of the
+        complete survivor state. In the reference path, aggregating a
+        dense invalid suffix can raise worst-case work to <span
+        class="math inline">O(KN\log(N+1))</span> and retained boundary
+        data to <span class="math inline">O(KN)</span>. The guarantee
+        also depends on inclusion of valid timeout, finalization, and
+        unwind calls and availability of that complete state
+        preimage.</p>
+        <h2 id="close-without-pausing-payments">Close Without Pausing
+        Payments</h2>
+        <p>Closing an epoch is asynchronous. Spending continues while
+        the final payer debit markers and receive-component tips are
+        authenticated and admitted. Otherwise, account-level compression
+        would create a throughput cliff at every epoch boundary.</p>
+        <p>Rollover happens independently for each payer. Before an
+        account can send in epoch <span class="math inline">e+1</span>,
+        its final epoch-<span class="math inline">e</span> debit marker
+        and preserved spendable balance are fixed. Accounts that do not
+        send are fixed when the predecessor epoch seals.</p>
+        <p>The key invariant applies immediately before any successor
+        deposit or withdrawal is applied. Let <span
+        class="math inline">\widetilde B_a</span> be the preserved
+        guarded balance after every accepted predecessor debit and every
+        predecessor credit already imported for spending. Let <span
+        class="math inline">B_a^1</span> be the exact predecessor
+        closing balance. Then</p>
+        <p><span class="math display">
+        \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0,}
+        </span></p>
+        <p>where <span class="math inline">\rho_a</span> is the total
+        unimported predecessor credit. The live head is the payer’s safe
+        spendable balance. The authenticated predecessor close is
+        computed separately.</p>
+        <p>Because successor debits continue on the same head,
+        reconciliation adds <span class="math inline">\rho_a</span> to
+        the live value. Assigning <span class="math inline">B_a^1</span>
+        over it would erase those debits. In the running example, <span
+        class="math inline">a\xrightarrow{20}b</span> leaves the
+        preserved head at 80 while the not-yet-imported <span
+        class="math inline">d\xrightarrow{5}a</span> credit makes the
+        exact predecessor close 85. If <span
+        class="math inline">a</span> spends 20 and then 15 in the
+        successor while the missing credit arrives between them,</p>
+        <p><span class="math display">
+        80-20+5-15=50=(85)-20-15.
+        </span></p>
+        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated owner-preserved rollover for account a. An accepted epoch-e pair leaves one preserved head of 80 and rotates that head into epoch e plus 1. Two connected rails branch from the same 80. The exact predecessor close reaches 85. The live successor rail spends 20 to reach 60, reconciles to 65, and spends 15 to reach 50. One vertical marker identifies the same missing predecessor credit of 5 in both calculations. The 85 close terminates on its own rail and never overwrites the live head.">
+          <noscript>An accepted epoch-e pair leaves one preserved head of 80. The exact-close rail computes 80 plus 5 as 85. The live rail computes 80 minus 20 plus the same 5 minus 15 as 50. Reconciliation adds the shared missing credit without installing 85 over the live head.</noscript>
+        </div>
+        <div class="image-caption">
+        <p>Figure 5: Both rails branch from the same preserved 80. The
+        upper rail computes the exact epoch-<span
+        class="math inline">e</span> close, <span
+        class="math inline">80+\rho_a=85</span>. The lower rail keeps
+        the epoch-<span class="math inline">e+1</span> head live, <span
+        class="math inline">80-20+\rho_a-15=50</span>. The single
+        vertical <span class="math inline">\rho_a=5</span> marker is the
+        same predecessor credit in both calculations. The two values
+        serve different roles: 85 is the canonical predecessor close,
+        while 50 is the current live head. Reconciliation adds <span
+        class="math inline">\rho_a</span> to the live value and
+        preserves every successor debit.</p>
+        </div>
+        <p>The live balance is not monotone: successor payments spend it
+        down. Only predecessor completion is one-sided, because it can
+        add missing credit but cannot discover another accepted
+        debit.</p>
+        <p>Successor boundary operations and shard moves must preserve
+        the same rule: the live head is only ever adjusted, never
+        overwritten. Appendix G gives the one-time application and
+        authenticated-snapshot conditions.</p>
+        <p>Rollover changes only live serving state. The ordinary close
+        still produces the canonical rows, state root, and public
+        corpus, which go through the same validity and admission checks.
+        A challenge against the predecessor invalidates its admitted
+        descendants.</p>
+        <h2 id="a-million-payments-in-the-close">A Million Payments in
+        the Close</h2>
+        <p>The asymptotics say what stops growing. A controlled
+        benchmark shows what still costs time.</p>
+        <p>Each profile below fixes <span
+        class="math inline">N=1{,}000{,}000</span> registered accounts,
+        <span class="math inline">T=1{,}000{,}000</span> accepted
+        payments, 512 credited accounts, 256 deterministic pieces, a
+        100-validator committee with quorum 67, and an eight-thread
+        worker pool. Every changed account sends. The same 512 accounts
+        receive in every profile, evenly spaced among the accounts that
+        change. The matrix independently varies <span
+        class="math inline">A</span>, the number of changed accounts,
+        and <span class="math inline">h</span>, the number of component
+        heads on each credited account.</p>
+        <div class="clearing-benchmark-table">
+        <table>
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Close stage</th>
+              <th colspan="2" style="text-align:center;"><em>A</em> = 1,024</th>
+              <th colspan="2" style="text-align:center;"><em>A</em> = 1,000,000</th>
+            </tr>
+            <tr>
+              <th style="text-align:right;"><em>h</em> = 1</th>
+              <th style="text-align:right;"><em>h</em> = 512</th>
+              <th style="text-align:right;"><em>h</em> = 1</th>
+              <th style="text-align:right;"><em>h</em> = 512</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th colspan="5" style="text-align:left;">Operator</th></tr>
+            <tr>
+              <td style="padding-left:20px;">public corpus</td>
+              <td style="text-align:right;">2.07 MB</td>
+              <td style="text-align:right;">117 MB</td>
+              <td style="text-align:right;">649 MB</td>
+              <td style="text-align:right;">764 MB</td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">build roots</td>
+              <td style="text-align:right;">1.36 ms</td>
+              <td style="text-align:right;">57.5 ms</td>
+              <td style="text-align:right;">323 ms</td>
+              <td style="text-align:right;">446 ms</td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">build piece proofs</td>
+              <td style="text-align:right;">1.13 ms</td>
+              <td style="text-align:right;">39.3 ms</td>
+              <td style="text-align:right;">366 ms</td>
+              <td style="text-align:right;">423 ms</td>
+            </tr>
+            <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
+            <tr>
+              <td style="padding-left:20px;">assignment</td>
+              <td style="text-align:right;">1.39 MB</td>
+              <td style="text-align:right;">79.4 MB</td>
+              <td style="text-align:right;">436 MB</td>
+              <td style="text-align:right;">514 MB</td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">check and sign</td>
+              <td style="text-align:right;">2.12 ms</td>
+              <td style="text-align:right;">212 ms</td>
+              <td style="text-align:right;">1.05 s</td>
+              <td style="text-align:right;">1.20 s</td>
+            </tr>
+            <tr><th colspan="5" style="text-align:left;">Chain</th></tr>
+            <tr>
+              <td style="padding-left:20px;">admission payload</td>
+              <td style="text-align:right;"><strong>5.62 KB</strong></td>
+              <td style="text-align:right;"><strong>5.62 KB</strong></td>
+              <td style="text-align:right;"><strong>5.94 KB</strong></td>
+              <td style="text-align:right;"><strong>5.94 KB</strong></td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">check admission</td>
+              <td style="text-align:right;"><strong>0.211 ms</strong></td>
+              <td style="text-align:right;"><strong>0.220 ms</strong></td>
+              <td style="text-align:right;"><strong>0.219 ms</strong></td>
+              <td style="text-align:right;"><strong>0.239 ms</strong></td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">challenge payload</td>
+              <td style="text-align:right;"><strong>1.84 KB</strong></td>
+              <td style="text-align:right;"><strong>2.34 KB</strong></td>
+              <td style="text-align:right;"><strong>2.16 KB</strong></td>
+              <td style="text-align:right;"><strong>2.66 KB</strong></td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">check challenge</td>
+              <td style="text-align:right;"><strong>0.124 ms</strong></td>
+              <td style="text-align:right;"><strong>0.130 ms</strong></td>
+              <td style="text-align:right;"><strong>0.133 ms</strong></td>
+              <td style="text-align:right;"><strong>0.126 ms</strong></td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency and 95 percent confidence intervals for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 heads per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+        <div class="image-caption">
+        <p>Benchmark chart: These are four measured profiles, not an
+        interpolation. Points are arithmetic means, whiskers are 95%
+        confidence intervals, and each panel has its own millisecond
+        scale. Blue holds <span class="math inline">A=1{,}024</span> and
+        green holds <span class="math inline">A=1{,}000{,}000</span>
+        while the horizontal axis changes the heads on each credited
+        account from <span class="math inline">h=1</span> to <span
+        class="math inline">h=512</span>.</p>
+        </div>
+        <p>Increasing <span class="math inline">A</span> makes the state
+        transition dense. Increasing <span class="math inline">h</span>
+        concentrates more authenticated component leaves and signatures
+        behind each credited row. Neither disappears behind the phrase
+        “one row per account.” All four profiles register the same
+        million accounts, yet at <span
+        class="math inline">A=1{,}024</span> the validator’s assignment
+        is 1.39 MB: distribution follows the changed rows and the shared
+        frontier, not the registry, so it is sublinear in registered
+        accounts as well as in payments. The chain payload remains
+        nearly flat because it carries the header, quorum certificate,
+        and terminal prefix opening—not the rows or component leaves.
+        This fixture queues no withdrawals and no full closes, whose
+        re-check and row openings would otherwise add to it. The
+        challenge rows submit one proven higher-tip challenge: its
+        payload grows only with the two lookup depths, and its check
+        verifies two signatures and two openings.</p>
+        <p>The timers cover warm, in-memory close construction and
+        validation on an 18-core Apple M5 Pro with 64 GiB, with the
+        shared worker pool capped at eight threads. They exclude payment
+        acceptance, networking, durable storage, key and registry
+        construction, and custody execution. Canonical encoding for
+        hashing and signature verification remains included. Corpus
+        bytes count each of the 256 pieces once, before replication to
+        its 67 holders, the validator rows report the busiest of the 100
+        assignments, and the challenge rows target a mid-registry
+        credited account’s mid-set component.</p>
+        <h2 id="the-account-level-trade">The Account-Level Trade</h2>
+        <p>Payment channels attack the same economic problem with a
+        different settlement boundary. A bilateral channel compresses
+        repeated transfers between two parties while preserving
+        bilateral self-custody. A routed network such as the one in the
+        <a
+        href="https://lightning.network/lightning-network-paper.pdf">original
+        Lightning paper</a> extends that guarantee across a path, which
+        means reserving directional liquidity and individually
+        enforceable timed state at every hop. This construction instead
+        trusts one operator and custody system during normal operation,
+        then nets every sender and recipient under one account-wide
+        close. It has no routed-hop state: the close carries only the
+        terminal head of each receive component used, and the deployment
+        chooses how payments map into those bounded concurrency
+        domains.</p>
+        <p>That broader netting boundary is why a cycle can be cheap. If
+        <span class="math inline">a\to b</span>, <span
+        class="math inline">b\to c</span>, and <span
+        class="math inline">c\to a</span> repeat 100,000 times, the
+        epoch contains <span class="math inline">T=300{,}000</span>
+        payments but only <span class="math inline">A=3</span> changed
+        accounts. With one component per recipient, it also has <span
+        class="math inline">H=3</span>. Gross debit still equals gross
+        credit, but the public close carries three rows, three heads,
+        and their sparse frontier rather than 300,000 payment
+        records.</p>
+        <p>Plasma makes a different choice about what users can
+        reconstruct. The <a href="https://plasma.io/plasma.pdf">original
+        Plasma construction</a> commits roots of an ordered child-chain
+        history to a parent while users retain the data needed to exit.
+        Validity-proven <a
+        href="https://vitalik.eth.limo/general/2024/10/17/futures2.html#generalized-plasma">generalized
+        Plasma</a> can prove general state transitions and let a user
+        act from an available proven branch. This design deliberately
+        discards the payment history as a settlement object. It orders
+        only real conflicts—successive sends from one payer and receipts
+        within one component—then authenticates their terminal effects
+        through a payment-specific relation.</p>
+        <p>That narrower relation buys compression by giving up
+        generality. The result is an account-wide netting protocol.
+        Arbitrary execution and reconstructible payment history are
+        outside its scope. Its privacy benefit is data minimization:
+        superseded pairs can stay out of ordinary public settlement.
+        Every payment remains known to its payer, recipient, and
+        operator, as well as any watchtower they involve. The persistent
+        chain state contains commitments, while the retrievable public
+        corpus reveals the exact changed-account states, each account’s
+        terminal outgoing pair when it sent, and each receive
+        component’s terminal pair. For an accepted pair in a conforming
+        close, ordinary disclosure is therefore exact: the pair appears
+        in the public corpus when and only when it is one of those
+        terminals. A holder challenge may reveal a superseded pair
+        later, and the public account deltas, receipt counts, and
+        terminal pairs still leak activity. The protocol provides no
+        anonymity, amount hiding, or privacy from the operator and
+        counterparties.</p>
+        <p>The reference deployment binds one asset. Supporting more
+        requires separate deployments or an asset-indexed extension.</p>
+        <p>No validity mode removes the availability assumptions: the
+        public corpus must stay retrievable and holders must retain
+        their own evidence through the challenge window.</p>
+        <p>A user retains a unilateral path: queue a signed withdrawal,
+        prove that it is affordable at the finalized root and every
+        admitted successor, and permanently fence new work if it remains
+        unreleased at its deadline. But failure containment is coarse. A
+        proven receipt contradiction or expired withdrawal kills the
+        affected deployment, and terminal unwind needs the complete
+        authenticated survivor state. Users receive no separate
+        enforceable exit object for every payment, route, or account
+        branch.</p>
+        <p>The normal path relies on operator custody, and exceptional
+        failures affect the entire deployment. In return, the close nets
+        across counterparties and follows changed account state.
+        General-purpose rollup execution and per-payment channel exits
+        are outside its scope.</p>
+        <h2 id="sublinear-payments">Sublinear Payments</h2>
+        <p>The operator still performs <span
+        class="math inline">O(T)</span> payment work: it verifies <span
+        class="math inline">T</span> requests, commits <span
+        class="math inline">T</span> durable updates, and signs <span
+        class="math inline">T</span> receipts. The public settlement
+        record follows a different quantity:</p>
+        <p><span class="math display">
+        \text{payments }T
+        \quad\longrightarrow\quad
+        \text{rows }A+\text{heads }H+\text{frontier }\Phi.
+        </span></p>
+        <p>Admission validates the complete public close. The challenge
+        window covers what no validity mode can establish: that the
+        operator’s signed receipts, disclosed or not, contain no
+        contradiction. Holders retain the signed evidence needed to
+        expose a concrete contradiction. An included call that observes
+        an overdue queued withdrawal fences new work. The admitted
+        prefix must still resolve, and terminal unwind requires the
+        complete survivor state.</p>
+        <p>For repeated activity over a fixed changed-account and
+        component footprint, <span class="math inline">(A+H+\Phi)/T\to
+        0</span>. Unchanged subtrees cost one frontier digest apiece no
+        matter how many accounts they hold, and receive components keep
+        a hot recipient from becoming a shared online counter. Every
+        changed account and represented component still contributes to
+        the close. Account-level clearing compresses repetition, not
+        change.</p>
+        <p>Sign every payment. Settle each changed account once.</p>
+        <p>The construction has not yet been peer-reviewed or uploaded
+        to arXiv.</p>
+        <h2 id="appendix-formal-specification">Appendix: Formal
+        Specification</h2>
+        <ul>
+        <li><strong>A.</strong> Model: participants, timing,
+        cryptographic primitives, and the adversary.</li>
+        <li><strong>B.</strong> Deployment, registry, boundaries, and
+        chain state.</li>
+        <li><strong>C.</strong> Payments: sends, receipts, acceptance,
+        and import.</li>
+        <li><strong>D.</strong> The epoch close, its certification, and
+        availability.</li>
+        <li><strong>E.</strong> Receipt challenges: the four predicates,
+        soundness, and completeness.</li>
+        <li><strong>F.</strong> Settlement-chain transitions, exit, and
+        terminal unwind.</li>
+        <li><strong>G.</strong> Overlapped epochs and rollover.</li>
+        <li><strong>H.</strong> Assumptions, security properties, and
+        the main theorems.</li>
+        </ul>
+        <p>Deployment creation opens the first boundary once. Every
+        epoch then runs the same lifecycle, and adjacent epochs overlap:
+        registration seals epoch <span class="math inline">e</span>’s
+        boundary, starts its service, and opens epoch <span
+        class="math inline">e+1</span>’s boundary, so each epoch
+        collects while its predecessor serves and serves while its
+        predecessor closes and settles.</p>
+        <p><span class="math display">
+        \begin{aligned}
+        &amp;\mathsf{Open}_e
+        \xrightarrow{\mathsf{seal+register}}
+        \mathsf{Serving}_e
+        \xrightarrow{\mathsf{close+certify+admit}}
+        \mathsf{Pending}_e,\\[0.3em]
+        &amp;\mathsf{Pending}_e
+        \begin{cases}
+        \xrightarrow[\ t&gt;\Delta_e]{\mathsf{unchallenged\ queue\
+        front}}
+        \mathsf{Finalized}_e,\\[0.5em]
+        \xrightarrow[\ t\le\Delta_e]{\mathsf{valid\ receipt\ challenge}}
+        \mathsf{Faulted}
+        \xrightarrow{\mathsf{resolve\ admitted\ prefix}}
+        \mathsf{Unwound}.
+        \end{cases}
+        \end{aligned}
+        </span></p>
+        <ul>
+        <li><strong>Open.</strong> The epoch’s boundary collects deposit
+        and withdrawal records on the settlement chain while its
+        predecessor serves (Section B.3).</li>
+        <li><strong>Serving.</strong> Registration seals that boundary
+        into the epoch’s anchor <span class="math inline">\mathcal
+        A_e</span> and opens its successor’s (Section B.4). While the
+        registration is outstanding, the operator accepts the epoch’s
+        payments (Section C), fixes the terminal markers at the hard
+        seal (Section G), and builds and certifies the close (Section
+        D). A registration never admitted expires at <span
+        class="math inline">t&gt;\Delta_e</span>, returning its records
+        to the open boundary (Section F.1).</li>
+        <li><strong>Pending.</strong> Admission verifies the close’s
+        validity and availability evidence at <span
+        class="math inline">t\le\alpha_e</span> and appends it as an
+        admitted, unfinalized slot (Section F.1). Through <span
+        class="math inline">t\le\Delta_e</span>, any holder may submit a
+        receipt challenge against it (Section E).</li>
+        <li><strong>Finalized.</strong> An unchallenged slot that
+        reaches the queue front finalizes once its window closes: the
+        closing root installs, withdrawals release, and deposits consume
+        (Section F.1).</li>
+        <li><strong>Faulted and Unwound.</strong> A valid challenge, or
+        an overdue withdrawal observed from any stage, permanently
+        faults the deployment. Earlier admitted slots keep their windows
+        and resolve from the front, and once the front reaches the fault
+        cut, terminal unwind pays the complete survivor state and zeroes
+        custody (Sections F.3 and F.4).</li>
+        </ul>
+        <h3 id="a.-model">A. Model</h3>
+        <h4 id="a.1-participants">A.1 Participants</h4>
+        <p>An <strong>account</strong> is a public-key identity
+        registered with one deployment. An account may act as payer,
+        recipient, or both.</p>
+        <p>The <strong>operator</strong> is a single logical server. It
+        serves online payments, maintains mutable execution state, signs
+        receipts, and constructs each epoch close. The protocol trusts
+        the operator for custody and service during normal operation and
+        for nothing at settlement.</p>
+        <p>The <strong>settlement chain</strong> is an append-only state
+        machine trusted for safety and liveness. It is authoritative for
+        the account registry, custody, epoch boundaries, committed
+        roots, deadlines, and transition order. It exposes a monotone
+        authenticated time <span class="math inline">t</span>, and it
+        executes each included call atomically: a call either performs
+        its complete effect or leaves state unchanged. Every transition
+        of Section F is permissionless: any party that supplies the
+        required inputs may invoke it. The chain’s own consensus is
+        outside this model.</p>
+        <p>A <strong>deployment</strong> is one settlement-chain
+        instance of the protocol. It binds an immutable profile <span
+        class="math inline">\Pi</span> (Section B.1), a registry, an
+        operator key, and an asset adapter, and it owns custody <span
+        class="math inline">E</span>, the slot pipeline, and a lifecycle
+        flag among live, faulted, and unwound.</p>
+        <p>A <strong>validity checker</strong> certifies the public
+        close relation of Section D. Depending on the deployment’s mode
+        it is a committee of <span
+        class="math inline">n_{\mathsf{val}}=3f_{\mathsf{val}}+1</span>
+        validators of which at most <span
+        class="math inline">f_{\mathsf{val}}</span> are faulty, a proof
+        system for the relation, or a trusted execution environment
+        (TEE).</p>
+        <p>The <strong>availability service</strong> stores the public
+        close data and answers authenticated lookups, under the
+        obligations of Definition D.5.</p>
+        <p>A <strong>holder</strong> is any party retaining signed
+        protocol evidence: payers, recipients, and any watchtower they
+        share evidence with. Holders submit the challenges of Section
+        E.</p>
+        <h4 id="a.2-time-and-inclusion">A.2 Time and inclusion</h4>
+        <p>All deadlines are values of chain time <span
+        class="math inline">t</span>. The model has one inclusion
+        parameter <span
+        class="math inline">\delta_{\mathsf{incl}}</span>: a valid call
+        submitted by an honest party at time <span
+        class="math inline">t</span> is included and executed by <span
+        class="math inline">t+\delta_{\mathsf{incl}}</span>. Operator
+        liveness is never assumed. Every guarantee for holders is stated
+        against an operator that may stop or misbehave at any point.</p>
+        <h4 id="a.3-cryptographic-primitives">A.3 Cryptographic
+        primitives</h4>
+        <p>The deployment profile fixes a signature scheme, a hash
+        family, and a commitment scheme, all used with strict canonical
+        encoding: every signed or hashed object has exactly one valid
+        byte encoding, decoding rejects any other bytes, and all
+        protocol arithmetic is checked in profile-fixed integer domains,
+        with overflow treated as failure. Security statements hold
+        except with probability negligible in the profile’s security
+        parameter.</p>
+        <p><strong>Assumption SIG.</strong> The signature scheme is
+        existentially unforgeable under chosen-message attack.
+        Verification is a deterministic predicate over canonical
+        encodings. Distinct signature bytes over one identical body
+        carry no protocol meaning: every rule below keys on canonical
+        bodies, never on signature bytes.</p>
+        <p><strong>Assumption CR.</strong> The hash family is
+        collision-resistant, and every use is domain-separated by
+        purpose.</p>
+        <p><strong>Definition A.1 (authenticated vector).</strong> An
+        authenticated vector scheme commits a context string and an
+        ordered vector <span
+        class="math inline">v=(v_0,\ldots,v_{m-1})</span> to a digest
+        <span
+        class="math inline">\mathsf{root}=\mathsf{Commit}(\mathsf{ctx},v)</span>
+        and supports four proof kinds:</p>
+        <ol type="1">
+        <li><strong>Membership.</strong> A proof that position <span
+        class="math inline">k</span> of the committed vector holds value
+        <span class="math inline">v_k</span>.</li>
+        <li><strong>Ordered absence.</strong> For a vector whose entries
+        are strictly ordered by a key, a proof that no entry has key
+        <span class="math inline">x</span>, given by the adjacent
+        committed entries or vector ends that bracket <span
+        class="math inline">x</span>.</li>
+        <li><strong>Aggregate.</strong> When entries carry an additive
+        summary, the root binds the exact vector total of that
+        summary.</li>
+        <li><strong>Length.</strong> The root binds the exact length
+        <span class="math inline">m</span>.</li>
+        </ol>
+        <p><strong>Assumption BIND.</strong> No feasible adversary
+        produces a root together with two accepting proofs of
+        contradictory statements: two memberships at one position with
+        different values, a membership and an absence for one key, two
+        aggregate totals, or two lengths. A domain-separated Merkle tree
+        over canonical leaf encodings, with leaf and internal nodes
+        separated by domain and with the length and additive summary
+        bound into every node, satisfies this under Assumption CR, and
+        its internal digests bind their subtree’s contents, positions,
+        and height.</p>
+        <p>The paired opening below is defined over that Merkle
+        instantiation, whose subtree digests carry the binding just
+        stated.</p>
+        <p><strong>Definition A.2 (paired sparse opening).</strong> Fix
+        two roots <span
+        class="math inline">\mathsf{root}^0,\mathsf{root}^1</span> over
+        one context and length <span class="math inline">m</span>, a
+        strictly ordered position set <span class="math inline">\mathcal
+        J\subseteq\{0,\ldots,m-1\}</span>, claimed value pairs <span
+        class="math inline">(u_k^0,u_k^1)</span> for <span
+        class="math inline">k\in\mathcal J</span>, and a frontier <span
+        class="math inline">\Phi</span>: the vector holding one digest
+        for each maximal subtree that contains no position of <span
+        class="math inline">\mathcal J</span>, in canonical order. The
+        opening verifies when recomputing both roots from the claimed
+        values and the <strong>same</strong> frontier digests on both
+        sides succeeds, and <span class="math inline">u_k^0\ne
+        u_k^1</span> for every <span class="math inline">k\in\mathcal
+        J</span>.</p>
+        <p><strong>Lemma A.1 (exact difference).</strong> Under
+        Assumption BIND, if a paired sparse opening verifies for <span
+        class="math inline">(\mathsf{root}^0,\mathsf{root}^1,\mathcal
+        J,\{u_k^0,u_k^1\},\Phi)</span> and <span
+        class="math inline">\mathsf{root}^0=\mathsf{Commit}(\mathsf{ctx},v^0)</span>,
+        then <span class="math inline">\mathsf{root}^1</span> commits
+        exactly one vector <span class="math inline">v^1</span>, and</p>
+        <p><span class="math display">
+        v^1_k=
+        \begin{cases}
+        u^1_k\ne v^0_k,&amp;k\in\mathcal J,\\
+        v^0_k,&amp;k\notin\mathcal J.
+        \end{cases}
+        </span></p>
+        <p><em>Proof.</em> The recomputation of <span
+        class="math inline">\mathsf{root}^0</span> is a membership proof
+        of <span class="math inline">u_k^0</span> at each <span
+        class="math inline">k\in\mathcal J</span>, so <span
+        class="math inline">u_k^0=v_k^0</span> by Assumption BIND. The
+        recomputation of <span
+        class="math inline">\mathsf{root}^1</span> authenticates a
+        vector that holds <span class="math inline">u_k^1</span> at each
+        <span class="math inline">k\in\mathcal J</span> and, over every
+        omitted subtree, the same digest that authenticates <span
+        class="math inline">v^0</span> there. Because subtree digests
+        bind contents, positions, and height, a vector committed by
+        <span class="math inline">\mathsf{root}^1</span> that differed
+        from <span class="math inline">v^0</span> at an omitted position
+        would open that shared digest to two different subvectors,
+        contradicting Assumption BIND. The inequality checks give <span
+        class="math inline">v^1_k\ne v^0_k</span> on <span
+        class="math inline">\mathcal J</span>. <span
+        class="math inline">\square</span></p>
+        <h4 id="a.4-adversary-and-scope">A.4 Adversary and scope</h4>
+        <p>The adversary controls the operator, any subset of accounts,
+        and at most <span class="math inline">f_{\mathsf{val}}</span>
+        validators in quorum mode, all statically corrupted, and it
+        schedules message delivery on the user-operator channels, which
+        are asynchronous and lossy. It cannot break Assumptions SIG, CR,
+        or BIND, corrupt the settlement chain, or delay an honest call
+        beyond <span class="math inline">\delta_{\mathsf{incl}}</span>.
+        Guarantees for a specific honest party additionally require that
+        party to follow its own discipline (Definition E.2) and the
+        availability obligations to hold (Definition D.5). Denial of
+        payment service by the operator is outside the guarantees: the
+        remedy for a censored account is exit (Section F), not service.
+        The protocol provides no anonymity or amount privacy, binds one
+        asset per deployment, and assigns blame without compensation: a
+        proven fault stops settlement and unwinds custody, and
+        reimbursement beyond the unwind payout is deployment policy.</p>
+        <h3 id="b.-deployment-and-chain-state">B. Deployment and chain
+        state</h3>
+        <h4 id="b.1-deployment-profile">B.1 Deployment profile</h4>
+        <p>Fix one deployment and one asset. Asset amounts are
+        nonnegative integers. The immutable profile <span
+        class="math inline">\Pi</span> fixes the canonical encodings,
+        signature and hash schemes, domain-separation tags, checked
+        arithmetic domains, a totally ordered component-identifier
+        domain, an asset adapter, a total order on account identities, a
+        canonical asset-layer destination for every registrable account
+        identity, and the resource limits <span
+        class="math inline">\Lambda</span>, including the
+        terminal-component cap <span
+        class="math inline">H_{\max}</span>, a payment-row cap <span
+        class="math inline">A_{\max}\le N</span>, a per-boundary deposit
+        quota <span class="math inline">F_{\mathsf{cap}}</span>, and
+        bounds on every decoded input and on per-call work. The asset
+        adapter authenticates finalized inbound transfers, validates
+        destinations, and executes outbound transfers, and every
+        destination it accepts, including each identity’s canonical
+        destination, is assumed payable. Different profiles are
+        different deployments. Inputs are strictly decoded and
+        length-checked before allocation, and a failed precondition
+        leaves state unchanged. We write <span
+        class="math inline">\bot</span> for absence.</p>
+        <h4 id="b.2-registry-and-account-state">B.2 Registry and account
+        state</h4>
+        <p>The registry is the ordered vector of <span
+        class="math inline">N</span> account identities <span
+        class="math inline">\mathcal R=(a_0,\ldots,a_{N-1})</span> with
+        <span class="math inline">a_0&lt;\cdots&lt;a_{N-1}</span>,
+        committed as an authenticated vector under <span
+        class="math inline">\mathsf{RegistryRoot}</span>. <span
+        class="math inline">\mathsf{pos}(a)</span> is the registry
+        position of <span class="math inline">a</span>.</p>
+        <p>Each account has persistent state</p>
+        <p><span class="math display">
+        X_a=(B_a,D_a,C_a,i_a,\mathit{active}_a),
+        </span></p>
+        <p>where <span class="math inline">B_a</span> is balance, <span
+        class="math inline">D_a</span> is cumulative debit, <span
+        class="math inline">C_a</span> is cumulative operator-promised
+        credit, <span class="math inline">i_a</span> counts
+        operator-promised receipts, and <span
+        class="math inline">\mathit{active}_a</span> gates
+        participation. An inactive account has zero balance and can
+        neither send nor receive payments. Boundary deposits may still
+        target it and reactivate it (Definition D.1). <span
+        class="math inline">\mathsf{StateRoot}</span> commits the
+        registry-aligned authenticated vector <span
+        class="math inline">\mathbf
+        S=((a_0,X_{a_0}),\ldots,(a_{N-1},X_{a_{N-1}}))</span> with the
+        balance sum as its bound aggregate. Superscripts <span
+        class="math inline">X_a^0,X_a^1</span> and <span
+        class="math inline">\mathbf S_k^0,\mathbf S_k^1</span> denote
+        opening and closing values for one epoch.</p>
+        <h4 id="b.3-chain-state-pipeline-and-boundaries">B.3 Chain
+        state, pipeline, and boundaries</h4>
+        <p>The settlement chain tracks custody <span
+        class="math inline">E</span>, the asset units the adapter holds
+        for the deployment, and an ordered pipeline of slots. Write
+        <span class="math inline">\mathsf{rt}_i</span> for the
+        account-state root installed by slot <span
+        class="math inline">i</span> and <span
+        class="math inline">L_i</span> for the balance sum bound by
+        <span class="math inline">\mathsf{rt}_i</span>. Let <span
+        class="math inline">z</span> index the latest finalized slot, so
+        <span class="math inline">(\mathsf{rt}_z,L_z)</span> is the
+        finalized root and liability. Slots <span
+        class="math inline">z+1,\ldots,\ell</span> may be admitted but
+        unfinalized, at most <span class="math inline">K</span> at once.
+        Slot <span class="math inline">i</span> carries the deposit and
+        withdrawal totals <span class="math inline">(F_i,W_i)</span> of
+        the boundary it consumed, and <span
+        class="math inline">L_i=L_{i-1}+F_i-W_i</span>. Only the front
+        slot <span class="math inline">z+1</span> may finalize. Slot
+        indices are assigned at admission, in registration order.</p>
+        <p>While the deployment is live, exactly one <strong>open
+        boundary</strong> collects deposit and withdrawal records.
+        Registration seals the open boundary for the registering epoch
+        and opens the next, so collection never pauses. A
+        <strong>deposit record</strong> binds a unique identifier, an
+        external source, a registered account, and a positive amount. It
+        is <strong>unconsumed</strong> from acceptance until the slot
+        that carries it finalizes, which consumes it, or until terminal
+        unwind, which returns it through the terminal payout (Section
+        F.4). <strong>Withdrawal records</strong> are defined in Section
+        F.</p>
+        <p>Within one boundary an account never carries both kinds of
+        record, and at most <span
+        class="math inline">F_{\mathsf{cap}}</span> deposit records
+        enter one boundary. Every record movement maintains this: a
+        deposit that would join a boundary holding the account’s
+        withdrawal record, or exceed the quota, is instead
+        <strong>held</strong> and assigned to the next boundary that
+        admits it, queueing a withdrawal re-holds the account’s deposit
+        records out of the open boundary, and the expiration merge of
+        Section F re-applies the same rules. Withdrawal records always
+        enter the open boundary and are never held or capped, so nothing
+        can crowd out an exit, and one unreleased withdrawal per account
+        bounds them by <span class="math inline">N</span>.</p>
+        <p>At creation the deployment commits the genesis vector, every
+        account inactive with all-zero state, so <span
+        class="math inline">\mathsf{rt}_0</span> binds <span
+        class="math inline">L_0=0</span>, custody is zero, the pipeline
+        is empty, one boundary is open, and epochs number from one. A
+        first deposit activates its account (Definition D.1). The
+        registry is fixed at creation, and changing it is outside this
+        specification.</p>
+        <p><span class="math inline">F_\star</span> denotes the total of
+        all accepted deposits not yet carried by an admitted slot,
+        whether held, in the open boundary, or in a sealed boundary
+        awaiting admission. For account <span
+        class="math inline">a</span> and one epoch, <span
+        class="math inline">f_a</span> and <span
+        class="math inline">w_a</span> are its per-account deposit and
+        withdrawal amounts, equal to the sealed records except a full
+        close’s exhausting <span class="math inline">w_a</span>
+        (Definition D.1), with totals <span
+        class="math inline">F_e=\sum_a f_a</span> and <span
+        class="math inline">W_e=\sum_a w_a</span>, and <span
+        class="math inline">M_e</span> counts the boundary’s withdrawal
+        records, including a zero-amount full close.</p>
+        <h4 id="b.4-registration">B.4 Registration</h4>
+        <p>Before epoch <span class="math inline">e</span> accepts
+        payments, the chain registers the anchor</p>
+        <p><span class="math display">
+        \mathcal A_e=\bigl(
+        \mathsf{deployment},e,\mathsf{RegistryRoot},\mathsf{operatorKey},
+        \mathsf{Boundary}_e,\mathsf{ValidityConfig}_e,
+        \alpha_e,\Delta_e,\Pi\bigr),
+        \qquad
+        \alpha_e&lt;\Delta_e,
+        </span></p>
+        <p>with identifier <span
+        class="math inline">\mathsf{AnchorId}_e=\mathcal
+        H_{\mathsf{anchor}}(\mathcal A_e)</span>. Registration seals the
+        open boundary into <span
+        class="math inline">\mathsf{Boundary}_e=(\mathsf{Deposits}_e,\mathsf{Withdrawals}_e)</span>
+        and opens a fresh boundary. <span
+        class="math inline">\mathsf{operatorKey}</span> verifies
+        receipts, and <span
+        class="math inline">\mathsf{ValidityConfig}_e</span> fixes the
+        validity mode, availability assignment, and resource limits for
+        the epoch. Registration binds no state root: the epoch’s opening
+        root is fixed at admission, where the chain checks lineage
+        against the pipeline tail. The operator serves epoch <span
+        class="math inline">e</span> against the newest state its close
+        can admit on top of: the closing state it proposed for epoch
+        <span class="math inline">e-1</span> in normal operation, or the
+        pipeline tail <span class="math inline">\mathsf{rt}_\ell</span>
+        at <span class="math inline">e=1</span> and after an expiration
+        cascade, re-initializing live serving state per Section B.5. The
+        expiration rule of Section F keeps a dropped predecessor’s
+        successor from admitting against anything else. Epochs register
+        in order, at most two registrations may be outstanding at once,
+        and registration requires <span
+        class="math inline">t\le\alpha_e</span>, a live deployment,
+        pipeline capacity, and no doomed registration outstanding.
+        Allowing a second outstanding registration is what lets a
+        successor epoch begin service while its predecessor is closed,
+        certified, and admitted (Section G). Every send, receipt, close,
+        lookup, and challenge for epoch <span
+        class="math inline">e</span> is scoped to <span
+        class="math inline">\mathcal A_e</span>. Because admission also
+        requires <span class="math inline">t\le\alpha_e</span>, the
+        epoch’s execution, close, and certification must all fit between
+        its registration and <span class="math inline">\alpha_e</span>.
+        The profile’s schedule must also keep admission feasible under a
+        full pipeline: <span class="math inline">\alpha_e</span> must
+        exceed the challenge deadline of the slot whose finalization
+        frees the epoch’s capacity, so at <span
+        class="math inline">K=1</span>, <span
+        class="math inline">\alpha_{e+1}&gt;\Delta_e</span> for every
+        <span class="math inline">e</span>.</p>
+        <h4 id="b.5-live-serving-state">B.5 Live serving state</h4>
+        <p>Between committed snapshots the operator maintains mutable
+        serving state per account: a live balance <span
+        class="math inline">B_a^{\mathsf{live}}</span> and live debit
+        <span class="math inline">D_a^{\mathsf{live}}</span> used to
+        accept payments, receive-component markers, and imported-credit
+        markers (Section C). Without an overlapped predecessor, the
+        sealed boundary initializes <span
+        class="math inline">B_a^{\mathsf{live}}=B_a^0+f_a-w_a</span> and
+        <span class="math inline">D_a^{\mathsf{live}}=D_a^0</span>
+        exactly once before the account’s first payment of the epoch,
+        and sets serving activity to <span
+        class="math inline">u_a</span> (Definition D.1 item 3). Here a
+        sealed full close contributes its signed amount and freezes the
+        account in both directions (Section G, rule 3), leaving the
+        exhausting sweep to the close. Section G gives the equivalent
+        rule when epochs overlap. Live state is serving state only:
+        settlement commits the snapshots of Section D, never the live
+        values.</p>
+        <h4 id="b.6-symbols">B.6 Symbols</h4>
+        <table>
+        <colgroup>
+        <col style="width: 50%" />
+        <col style="width: 50%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: left;">Symbol</th>
+        <th style="text-align: left;">Meaning</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">N</span>, <span
+        class="math inline">T</span></td>
+        <td style="text-align: left;">registered account positions,
+        payments accepted in the epoch</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">A</span>, <span
+        class="math inline">A_{\max}</span></td>
+        <td style="text-align: left;">changed-account rows in the close,
+        and the payment-row cap</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">F_{\mathsf{cap}}</span>, <span
+        class="math inline">\beta_e</span></td>
+        <td style="text-align: left;">per-boundary deposit quota,
+        accounts with sealed records in <span
+        class="math inline">\mathsf{Boundary}_e</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">h_a</span>, <span
+        class="math inline">H_e</span>, <span
+        class="math inline">H_{\max}</span></td>
+        <td style="text-align: left;">terminal receive components of
+        <span class="math inline">a</span>, their sum, and its cap</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">\kappa</span>, <span
+        class="math inline">(G,J)</span></td>
+        <td style="text-align: left;">receive-component identifier, and
+        its credit and receipt-count marker</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">D_e</span>, <span
+        class="math inline">C_e</span>, <span
+        class="math inline">F_e</span>, <span
+        class="math inline">W_e</span>, <span
+        class="math inline">M_e</span></td>
+        <td style="text-align: left;">epoch totals of debit, credit,
+        deposits, withdrawals, and withdrawal records</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        J_e</span>, <span class="math inline">\mathcal D_e</span></td>
+        <td style="text-align: left;">changed registry positions, and
+        the public corpus</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">\Phi_e</span></td>
+        <td style="text-align: left;">shared sparse frontier of the
+        paired opening</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">K</span></td>
+        <td style="text-align: left;">maximum admitted, unfinalized
+        slots</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">\mathsf{rt}_i</span>, <span
+        class="math inline">z</span>, <span
+        class="math inline">\ell</span></td>
+        <td style="text-align: left;">root installed by slot <span
+        class="math inline">i</span>, and the finalized and tail
+        pipeline indices</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">E</span>, <span
+        class="math inline">L_i</span></td>
+        <td style="text-align: left;">custody, and liability under <span
+        class="math inline">\mathsf{rt}_i</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">F_i</span>, <span
+        class="math inline">W_i</span>, <span
+        class="math inline">F_\star</span></td>
+        <td style="text-align: left;">slot deposit and withdrawal
+        totals, unadmitted deposits</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">c_\star</span>, <span
+        class="math inline">\ell_{\mathsf{fault}}</span></td>
+        <td style="text-align: left;">fault cut, and the tail frozen at
+        fault</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">\alpha_e</span>, <span
+        class="math inline">\Delta_e</span></td>
+        <td style="text-align: left;">inclusive
+        registration-and-admission cutoff, inclusive challenge
+        deadline</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">\tau</span>, <span
+        class="math inline">\eta</span></td>
+        <td style="text-align: left;">withdrawal deadline, minimum
+        notice</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span
+        class="math inline">\lambda_{\mathsf{DA}}</span>, <span
+        class="math inline">\delta_{\mathsf{incl}}</span></td>
+        <td style="text-align: left;">availability-recovery allowance,
+        inclusion bound</td>
+        </tr>
+        </tbody>
+        </table>
+        <h3 id="c.-payments">C. Payments</h3>
+        <h4 id="c.1-sends-and-receipts">C.1 Sends and receipts</h4>
+        <p><strong>Definition C.1 (send).</strong> To pay <span
+        class="math inline">x&gt;0</span> from <span
+        class="math inline">a</span> to <span
+        class="math inline">b</span>, the payer signs the exact next
+        cumulative debit:</p>
+        <p><span class="math display">
+        s=(\mathcal A_e,a,b,x,D&#39;,e),\qquad
+        S=(s,\sigma_a),\qquad
+        D&#39;=D_a^{\mathsf{live}}+x,\qquad
+        \mathsf{TxId}(s)=\mathcal H_{\mathsf{txid}}(s).
+        </span></p>
+        <p><span class="math inline">\mathsf{TxId}</span> hashes the
+        canonical send body only, so signature bytes never affect it,
+        and injective encoding makes it collision-free across distinct
+        bodies under Assumption CR.</p>
+        <p>The operator assigns each accepted payment to one epoch-local
+        <strong>receive component</strong> <span
+        class="math inline">\kappa</span> of the recipient, an
+        identifier from the profile’s ordered domain. Component choice
+        is operator policy within the reservation rule of Definition
+        D.3, and whether self-payments (<span
+        class="math inline">a=b</span>) are accepted is profile policy.
+        Each component starts at marker <span
+        class="math inline">(G,J)=(0,0)</span>, where <span
+        class="math inline">G</span> is cumulative operator-promised
+        credit and <span class="math inline">J</span> counts receipts in
+        the component. A component’s newest marker is its
+        <strong>tip</strong>. Markers are serving state, separate from
+        <span class="math inline">X_b</span>: their terminal sums
+        determine the epoch change in <span
+        class="math inline">C_b</span> and <span
+        class="math inline">i_b</span>.</p>
+        <p><strong>Definition C.2 (receipt).</strong> If component <span
+        class="math inline">(b,\kappa)</span> currently ends at <span
+        class="math inline">(G,J)</span>, the receipt for a payment of
+        <span class="math inline">x</span> with send body <span
+        class="math inline">s</span> is</p>
+        <p><span class="math display">
+        r=(\mathcal
+        A_e,b,\kappa,x,\mathsf{TxId}(s),G&#39;,J&#39;,e),\qquad
+        R=(r,\sigma_{\mathsf{op}}),\qquad
+        (G&#39;,J&#39;)=(G+x,J+1),
+        </span></p>
+        <p>signed under <span
+        class="math inline">\mathsf{operatorKey}</span>.</p>
+        <p><strong>Definition C.3 (linked and matching pairs).</strong>
+        A pair <span class="math inline">P=(S,R)</span> is
+        <strong>linked</strong> when both signatures are canonical and
+        valid, both bodies name the same anchor and epoch, the amount
+        and recipient agree, and the receipt names <span
+        class="math inline">\mathsf{TxId}(s)</span>. Write <span
+        class="math inline">x(P)</span> for its amount and <span
+        class="math inline">(G(P),J(P))</span> for its receipt marker. A
+        linked pair has an <strong>intrinsic range fault</strong> when
+        <span class="math inline">J(P)=0</span> or <span
+        class="math inline">G(P)&lt;x(P)</span>. It is
+        <strong>matching</strong> when it is linked, <span
+        class="math inline">x(P)&gt;0</span>, and it has no intrinsic
+        fault. A matching pair is transferable evidence of one
+        operator-acknowledged payment. A bare send <span
+        class="math inline">S</span> is not: acceptance requires the
+        operator to have committed the receipt body.</p>
+        <p><strong>Definition C.4 (range feasibility).</strong> For a
+        lower marker <span class="math inline">(G^-,J^-)</span> and an
+        upper linked pair <span class="math inline">P^+=(S^+,R^+)</span>
+        in one <span class="math inline">(\mathcal A_e,b,\kappa)</span>
+        scope,</p>
+        <p><span class="math display">
+        \mathsf{RangeOK}((G^-,J^-),P^+)
+        \Longleftrightarrow
+        \begin{cases}
+        G^+=G^-+x^+,&amp;J^+=J^-+1,\\
+        G^+\ge G^-+x^++(J^+-J^--1),&amp;J^+&gt;J^-+1,\\
+        \mathsf{false},&amp;J^+\le J^-,
+        \end{cases}
+        </span></p>
+        <p>with all sums checked in the profile’s credit domain and any
+        overflow yielding false. Adjacent receipts must advance exactly.
+        Across an index gap, each omitted receipt carries a positive
+        integer amount and therefore contributes at least one unit, so
+        the inequality is necessary. It is not sufficient to prove the
+        omitted receipts exist or are authentic: <span
+        class="math inline">\mathsf{RangeOK}</span> establishes numeric
+        feasibility, and Section E uses only its violations.</p>
+        <p>The protocol orders only real conflicts. Sends from one payer
+        form a chain through <span class="math inline">D</span>, and
+        receipts within one component form a chain through <span
+        class="math inline">(G,J)</span>. Payments with different payers
+        and different components are never ordered against each other.
+        The payer chain is itself a serialization: under Definition E.2
+        one send is outstanding at a time, so per-payer throughput is
+        one accepted payment per operator round trip, and the
+        concurrency domains exist only on the receive side.</p>
+        <h4 id="c.2-acceptance-and-import">C.2 Acceptance and
+        import</h4>
+        <p><strong>Algorithm C.1 (accept).</strong> On input <span
+        class="math inline">(S,\kappa)</span> the operator:</p>
+        <ol type="1">
+        <li><p>Strictly decodes <span class="math inline">S</span>,
+        verifies the payer signature, and checks that the body names the
+        registered anchor, the current epoch, and registered
+        accounts.</p></li>
+        <li><p>Replays and resyncs: if <span
+        class="math inline">s</span> is byte-identical to the latest
+        committed send of payer <span class="math inline">a</span>,
+        returns the stored receipt without mutation. If <span
+        class="math inline">s</span> is any other send whose <span
+        class="math inline">D&#39;</span> is not the exact live
+        successor <span
+        class="math inline">D_a^{\mathsf{live}}+x</span>, rejects it.
+        When the rejected send is novel, the rejection attaches the
+        stored latest committed pair <span
+        class="math inline">(S_{\mathsf{last}},R_{\mathsf{last}})</span>
+        so a payer that lost its in-flight request can trustlessly
+        resynchronize: the payer authenticates the response by
+        recognizing its own signature on <span
+        class="math inline">S_{\mathsf{last}}</span>. Replays of older
+        committed sends get a bare rejection, so a past counterparty
+        learns nothing new.</p></li>
+        <li><p>For a novel request, checks that payer and recipient are
+        active, <span class="math inline">x&gt;0</span>, <span
+        class="math inline">B_a^{\mathsf{live}}\ge x</span>, the
+        component and self-payment policies admit <span
+        class="math inline">(b,\kappa)</span>, and the close reservation
+        of Definition D.3 can account for row <span
+        class="math inline">a</span>, row <span
+        class="math inline">b</span>, and component <span
+        class="math inline">(b,\kappa)</span>. Then it atomically
+        commits</p>
+        <p><span class="math display">
+        B_a^{\mathsf{live}}\leftarrow B_a^{\mathsf{live}}-x,\qquad
+        D_a^{\mathsf{live}}\leftarrow D&#39;,\qquad
+        (G_{b,\kappa},J_{b,\kappa})\leftarrow(G_{b,\kappa}+x,\,J_{b,\kappa}+1),
+        </span></p>
+        <p>together with the replay record, the canonical receipt body
+        <span class="math inline">r</span>, and the close
+        reservation.</p></li>
+        <li><p>Only after that commit, signs and returns <span
+        class="math inline">R</span>.</p></li>
+        </ol>
+        <p>Rejection before the commit changes nothing. A crash after
+        the commit re-signs the committed body on retry without a second
+        debit: <span class="math inline">r</span> is a deterministic
+        function of the committed state, and fresh signature bytes over
+        the identical body are the same receipt under Definition
+        C.3.</p>
+        <p><strong>Algorithm C.2 (import).</strong> Recipients spend
+        incoming credit only after importing it, and only for components
+        scoped to their own registered identity. Let <span
+        class="math inline">(G_0,J_0)</span> be the last imported marker
+        for <span class="math inline">(b,\kappa)</span>, initially <span
+        class="math inline">(0,0)</span>. Given a matching pair <span
+        class="math inline">P^+</span> in that scope: if <span
+        class="math inline">(G^+,J^+)\le(G_0,J_0)</span> coordinatewise,
+        importing is a no-op. Otherwise import requires <span
+        class="math inline">\mathsf{RangeOK}((G_0,J_0),P^+)</span> and
+        atomically applies</p>
+        <p><span class="math display">
+        B_b^{\mathsf{live}}\leftarrow
+        B_b^{\mathsf{live}}+(G^+-G_0),\qquad
+        (G_0,J_0)\leftarrow(G^+,J^+).
+        </span></p>
+        <p>Import is idempotent, and delayed import can only understate
+        spendable balance. Every imported tip is signature-verified in
+        scope, so total imported credit in a component never exceeds the
+        highest cumulative credit the operator ever signed for it.</p>
+        <p><strong>Example (one accepted payment).</strong> Account
+        <span class="math inline">a</span> opens the epoch at <span
+        class="math inline">B_a^{\mathsf{live}}=100</span> and <span
+        class="math inline">D_a^{\mathsf{live}}=0</span> and pays <span
+        class="math inline">b</span> 20 (Figure 1). The payer signs
+        <span class="math inline">s=(\mathcal
+        A_e,a,b,20,D&#39;,e)</span> with <span
+        class="math inline">D&#39;=0+20</span>. The operator assigns
+        component <span class="math inline">(b,\kappa_0)</span>, resting
+        at <span class="math inline">(0,0)</span>, and Algorithm C.1
+        atomically commits <span
+        class="math inline">B_a^{\mathsf{live}}=80</span>, <span
+        class="math inline">D_a^{\mathsf{live}}=20</span>, and <span
+        class="math inline">(G_{b,\kappa_0},J_{b,\kappa_0})=(20,1)</span>
+        together with the replay record, the close reservation, and the
+        receipt body <span class="math inline">r=(\mathcal
+        A_e,b,\kappa_0,20,\mathsf{TxId}(s),20,1,e)</span>, then signs
+        and returns <span class="math inline">R</span>. The matching
+        pair <span class="math inline">(S,R)</span> is the payment’s
+        transferable evidence, an exact retry of <span
+        class="math inline">S</span> returns the same receipt without a
+        second debit, and the 20 becomes spendable for <span
+        class="math inline">b</span> once it imports the tip under
+        Algorithm C.2.</p>
+        <h4 id="c.3-honest-operator-invariants">C.3 Honest-operator
+        invariants</h4>
+        <p>The challenge-soundness proof needs exactly what an honest
+        operator’s signing history looks like.</p>
+        <p><strong>Lemma C.1 (serving invariants).</strong> In any
+        execution in which the operator follows Algorithm C.1, all of
+        the following hold at every point, per registered anchor, except
+        with negligible probability:</p>
+        <ol type="1">
+        <li><p><strong>Payer chains.</strong> For each payer <span
+        class="math inline">a</span>, the committed send bodies have
+        strictly increasing debits forming the exact chain <span
+        class="math inline">D_a^0+x_1,\ D_a^0+x_1+x_2,\ \ldots</span>,
+        ending at <span class="math inline">D_a^{\mathsf{live}}</span>,
+        and at most one committed send body exists per debit
+        value.</p></li>
+        <li><p><strong>Component chains.</strong> For each component
+        <span class="math inline">(b,\kappa)</span>, the committed
+        receipt bodies have markers <span
+        class="math inline">(x_1,1),(x_1+x_2,2),\ldots</span>, ending at
+        the live marker, at most one committed receipt body exists per
+        index <span class="math inline">J</span>, and at most one
+        committed receipt body exists per <span
+        class="math inline">\mathsf{TxId}</span> across all
+        components.</p></li>
+        <li><p><strong>Signing discipline.</strong> Every receipt body
+        the operator ever signs is committed: signatures exist only over
+        stored bodies (step 4 and the replay path of step 2).</p></li>
+        <li><p><strong>Range.</strong> Every committed receipt satisfies
+        <span class="math inline">J\ge1</span> and <span
+        class="math inline">G\ge x</span>, and in each component <span
+        class="math inline">\mathsf{RangeOK}</span> holds from <span
+        class="math inline">(0,0)</span> to every committed pair and
+        from every lower committed marker to every higher committed
+        pair.</p></li>
+        <li><p><strong>Balances.</strong> <span
+        class="math inline">B_a^{\mathsf{live}}\ge0</span>, and <span
+        class="math inline">B_a^{\mathsf{live}}=B_a^0+f_a-w_a-(D_a^{\mathsf{live}}-D_a^0)+\iota_a</span>,
+        where <span class="math inline">w_a</span> is the
+        boundary-applied amount, a full close contributing its signed
+        floor (Section B.5), and <span
+        class="math inline">\iota_a</span> is the total credit imported
+        by Algorithm C.2. Every accepted debit is therefore already
+        counted against the payer’s live balance before its receipt
+        exists.</p></li>
+        </ol>
+        <p><em>Proof.</em> Induction over committed operations. Step 3
+        of Algorithm C.1 admits a novel send only at the exact successor
+        debit and commits the debit, marker advance, and receipt body in
+        one transaction, which extends both chains by one and preserves
+        uniqueness per debit value, per component index, and per <span
+        class="math inline">\mathsf{TxId}</span>: a repeated <span
+        class="math inline">\mathsf{TxId}</span> is a byte-identical
+        body by injective canonical encoding under Assumption CR, hence
+        a replay, hence returns the stored receipt. Step 4 signs only
+        committed bodies. Exact chains give item 4 directly: adjacent
+        committed receipts advance by exactly the upper amount, the
+        first receipt in a component has <span
+        class="math inline">(G,J)=(x,1)</span>, and across a gap each
+        omitted committed amount is a positive integer. Item 5 holds
+        because step 3 checks <span
+        class="math inline">B^{\mathsf{live}}\ge x</span> before
+        subtracting, the boundary applies once (Section B.5), and
+        Algorithm C.2 adds exactly the marker difference it records as
+        imported. <span class="math inline">\square</span></p>
+        <h3 id="d.-closing-an-epoch">D. Closing an epoch</h3>
+        <h4 id="d.1-terminal-evidence-and-rows">D.1 Terminal evidence
+        and rows</h4>
+        <p>The close retains only terminal evidence. For recipient <span
+        class="math inline">b</span>, let <span
+        class="math inline">h_b</span> be the number of components used
+        during the epoch and collect their final accepted pairs in
+        strict component order:</p>
+        <p><span class="math display">
+        \mathbf Y_b=(Y_{b,0},\ldots,Y_{b,h_b-1}),\qquad
+        Y_{b,m}=(\kappa_m,S_m^\star,R_m^\star),\qquad
+        \kappa_0&lt;\cdots&lt;\kappa_{h_b-1}.
+        </span></p>
+        <p>Its aggregate commitment is <span
+        class="math inline">\mathsf{HeadRoot}_e(b)</span>: the
+        authenticated-vector root of <span class="math inline">\mathbf
+        Y_b</span>, binding the exact length <span
+        class="math inline">h_b</span> and the aggregate <span
+        class="math inline">(G_b,J_b)</span>, the coordinate sums of the
+        terminal markers.</p>
+        <p>For each account define the checked epoch deltas</p>
+        <p><span class="math display">
+        d_a=D_a^1-D_a^0,\qquad
+        c_a=C_a^1-C_a^0,\qquad
+        j_a=i_a^1-i_a^0,
+        </span></p>
+        <p>and let <span
+        class="math inline">\chi_a,\gamma_a\in\{0,1\}</span> record the
+        presence of a sealed withdrawal and its full-close flag.</p>
+        <p><strong>Definition D.1 (valid row).</strong> A
+        changed-account row</p>
+        <p><span class="math display">
+        \mathsf{Row}_a=\bigl(a,X_a^0,X_a^1,\mathsf{Out}_a,\mathsf{HeadRoot}_e(a),\mathsf{prefix}_a\bigr)
+        </span></p>
+        <p>is valid against <span class="math inline">(\mathcal
+        A_e,\mathsf{StateRoot}_e)</span>, with <span
+        class="math inline">\mathsf{prefix}_a</span> the running-total
+        field defined in Section D.2, when:</p>
+        <ol type="1">
+        <li><p><strong>Domains.</strong> The cumulative fields are
+        monotone, the deltas fit the configured domains, and <span
+        class="math inline">X_a^1\ne X_a^0</span>.</p></li>
+        <li><p><strong>Boundary binding.</strong> <span
+        class="math inline">(f_a,w_a,\chi_a,\gamma_a)</span> equal the
+        sealed per-account records of <span
+        class="math inline">\mathsf{Boundary}_e</span>, which the
+        verifier reads from the registered anchor, an account with no
+        sealed record contributing zeros. A full close is the one
+        exception: its <span class="math inline">w_a</span> is the
+        exhausting amount <span
+        class="math inline">B_a^0+c_a-d_a+f_a</span>, at least its
+        sealed signed amount.</p></li>
+        <li><p><strong>Eligibility.</strong> <span
+        class="math inline">u_a=\mathit{active}_a^0\lor(f_a&gt;0)</span>
+        holds, <span
+        class="math inline">\mathit{active}_a^1=u_a\land\neg\gamma_a</span>,
+        and an inactive closing account has <span
+        class="math inline">B_a^1=0</span>.</p></li>
+        <li><p><strong>Balance.</strong> The exact account equation
+        holds:</p>
+        <p><span class="math display">
+        \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
+        </span></p></li>
+        <li><p><strong>Outgoing terminal.</strong> <span
+        class="math inline">\mathsf{Out}_a=\bot</span> exactly when
+        <span class="math inline">d_a=0</span>. Otherwise <span
+        class="math inline">\mathsf{Out}_a</span> is a matching pair
+        from payer <span class="math inline">a</span> scoped to <span
+        class="math inline">\mathcal A_e</span> whose send debit is
+        exactly <span class="math inline">D_a^1</span>, whose amount
+        satisfies <span class="math inline">x(\mathsf{Out}_a)\le
+        d_a</span>, and whose receipt satisfies <span
+        class="math inline">\mathsf{RangeOK}((0,0),\mathsf{Out}_a)</span>.</p></li>
+        <li><p><strong>Incoming terminals.</strong> <span
+        class="math inline">\mathbf Y_a</span> is empty exactly when
+        <span class="math inline">(c_a,j_a)=(0,0)</span>. Otherwise its
+        component identifiers are strictly ordered, every entry is a
+        matching pair scoped to <span class="math inline">(\mathcal
+        A_e,a,\kappa)</span>, every entry satisfies <span
+        class="math inline">\mathsf{RangeOK}((0,0),\cdot)</span>, and
+        the bound aggregate satisfies <span
+        class="math inline">(G_a,J_a)=(c_a,j_a)</span>.</p></li>
+        </ol>
+        <h4 id="d.2-the-public-close">D.2 The public close</h4>
+        <p>Rows are strictly ordered by account, one row for every and
+        only changed account. <span
+        class="math inline">\mathsf{prefix}_a</span> is the inclusive
+        running total of <span
+        class="math inline">(d,c,f,w,\chi,h)</span> over rows up to
+        <span class="math inline">a</span>, checked row by row: each
+        prefix equals its predecessor’s plus the row’s own
+        contributions. The terminal prefix carries</p>
+        <p><span class="math display">
+        D_e=\sum_a d_a,\quad C_e=\sum_a c_a,\quad F_e=\sum_a f_a,\quad
+        W_e=\sum_a w_a,\quad M_e=\sum_a\chi_a,\quad H_e=\sum_a h_a,
+        </span></p>
+        <p>all within the checked domains. Let <span
+        class="math inline">\mathbf A_e</span> be the row vector, <span
+        class="math inline">A=|\mathbf A_e|</span>, and <span
+        class="math inline">\mathsf{ChangeRoot}_e</span> its
+        authenticated commitment, length-bound and ordered by account.
+        Let <span class="math inline">\mathcal
+        J_e=\{\mathsf{pos}(a):\mathsf{Row}_a\in\mathbf A_e\}</span>, and
+        let <span class="math inline">(\mathcal
+        J_e,\{(X_a^0,X_a^1)\},\Phi_e)</span> be a paired sparse opening
+        of <span
+        class="math inline">(\mathsf{StateRoot}_e,\mathsf{StateRoot}_{e+1})</span>
+        in the sense of Definition A.2.</p>
+        <p>The close’s header binds</p>
+        <p><span class="math display">
+        \mathsf{Header}_e=\bigl(
+        \mathsf{AnchorId}_e,\mathsf{StateRoot}_e,\mathsf{ChangeRoot}_e,\mathsf{StateRoot}_{e+1},
+        A,D_e,C_e,F_e,W_e,M_e,H_e,\Delta_e\bigr).
+        </span></p>
+        <p>The <strong>public corpus</strong> <span
+        class="math inline">\mathcal D_e</span> contains the rows, the
+        terminal component vectors behind each <span
+        class="math inline">\mathsf{HeadRoot}</span>, the paired sparse
+        opening, and the membership openings needed to check each piece
+        of it.</p>
+        <p><strong>Definition D.2 (public validity).</strong> <span
+        class="math inline">\mathsf{PublicValid}_e(\mathsf{Header}_e,\mathcal
+        D_e)</span> is the conjunction of:</p>
+        <ol type="1">
+        <li><p><strong>Context.</strong> Strict decoding, and the header
+        names the registered <span
+        class="math inline">\mathsf{AnchorId}_e</span> and its <span
+        class="math inline">\Delta_e</span>, with the resource limits
+        read from that anchor.</p></li>
+        <li><p><strong>Rows.</strong> Every row is valid (Definition
+        D.1), rows are strictly ordered by account with consistent
+        prefixes, and <span
+        class="math inline">\mathsf{ChangeRoot}_e</span> commits exactly
+        this vector.</p></li>
+        <li><p><strong>Boundary coverage.</strong> Every account with a
+        sealed record in <span
+        class="math inline">\mathsf{Boundary}_e</span> has a row, the
+        terminal prefix totals <span class="math inline">F_e</span> and
+        <span class="math inline">M_e</span> equal the sealed boundary
+        totals, and <span class="math inline">W_e</span> is the row sum,
+        each row’s <span class="math inline">w_a</span> bound by item 2
+        of Definition D.1.</p></li>
+        <li><p><strong>Exact update.</strong> The paired sparse opening
+        verifies from <span
+        class="math inline">\mathsf{StateRoot}_e</span> to <span
+        class="math inline">\mathsf{StateRoot}_{e+1}</span> over exactly
+        the row positions <span class="math inline">\mathcal J_e</span>,
+        using each row’s <span
+        class="math inline">(X_a^0,X_a^1)</span>.</p></li>
+        <li><p><strong>Limits and conservation.</strong> The configured
+        resource limits hold, <span class="math inline">A\le
+        A_{\max}+\beta_e</span> with <span
+        class="math inline">\beta_e</span> the number of accounts
+        carrying sealed records in <span
+        class="math inline">\mathsf{Boundary}_e</span>, <span
+        class="math inline">M_e\le A</span>, <span
+        class="math inline">H_e\le H_{\max}</span>, and <span
+        class="math inline">D_e=C_e</span>.</p></li>
+        </ol>
+        <p>Boundary coverage is both checkable and necessary. It is
+        checkable because <span
+        class="math inline">\mathsf{Boundary}_e</span> is bound inside
+        the registered anchor, so every verifier holds the sealed
+        per-account records. It is necessary because a sealed record
+        forces a state change: within one boundary an account carries
+        deposits or a withdrawal, never both (Section B.3), so its
+        balance equation cannot cancel, and a zero-amount full close
+        flips the active flag. Without item 3, a close could satisfy
+        every total while silently reassigning one account’s sealed
+        deposit to another row.</p>
+        <p><strong>Lemma D.1 (exact difference of the close).</strong>
+        Under Assumption BIND, if <span
+        class="math inline">\mathsf{PublicValid}_e</span> holds and
+        <span class="math inline">\mathsf{StateRoot}_e</span> commits
+        <span class="math inline">\mathbf S^0</span>, then <span
+        class="math inline">\mathsf{StateRoot}_{e+1}</span> commits the
+        unique <span class="math inline">\mathbf S^1</span> with</p>
+        <p><span class="math display">
+        k\in\mathcal J_e\Longleftrightarrow\mathbf S_k^1\ne\mathbf
+        S_k^0,
+        </span></p>
+        <p>and <span class="math inline">\mathbf S_k^1=X_a^1</span> for
+        each row account <span class="math inline">a</span> at position
+        <span class="math inline">k</span>.</p>
+        <p><em>Proof.</em> Lemma A.1 applied to item 4 of Definition
+        D.2, with the inequality direction on <span
+        class="math inline">\mathcal J_e</span> given by Definition D.1
+        item 1. <span class="math inline">\square</span></p>
+        <p>Lemma D.1 speaks only about committed state. An operator
+        whose live state changed can still commit an unchanged value by
+        omitting the row and the receipts behind it. That omission is
+        invisible to every public check and is exactly what the
+        challenge window of Section E covers.</p>
+        <p><strong>Lemma D.2 (typed conservation).</strong> Under the
+        conditions of Lemma D.1, with <span
+        class="math inline">L_e=\sum_kB^0_k</span> and <span
+        class="math inline">L_{e+1}=\sum_kB^1_k</span>,</p>
+        <p><span class="math display">
+        \boxed{L_{e+1}=L_e+F_e-W_e.}
+        </span></p>
+        <p><em>Proof.</em> Positions outside <span
+        class="math inline">\mathcal J_e</span> contribute equal
+        balances to both sums by Lemma D.1 and carry no sealed boundary
+        record by item 3 of Definition D.2. Summing the balance equation
+        of Definition D.1 over rows gives <span
+        class="math inline">L_{e+1}-L_e=(C_e-D_e)+(F_e-W_e)</span>, with
+        the prefix consistency of item 2 identifying the row sums with
+        the header totals, and item 5 cancels the payment terms. The
+        conservation is typed: <span class="math inline">F_e</span> and
+        <span class="math inline">W_e</span> come from the chain-sealed
+        boundary and <span class="math inline">D_e</span>, <span
+        class="math inline">C_e</span> from signed cumulative markers,
+        so equal totals cannot let one type impersonate the other. <span
+        class="math inline">\square</span></p>
+        <p>For <span class="math inline">A=0</span> the canonical close
+        has an empty <span
+        class="math inline">\mathsf{ChangeRoot}</span>, zero totals, and
+        <span
+        class="math inline">\mathsf{StateRoot}_{e+1}=\mathsf{StateRoot}_e</span>.</p>
+        <p><strong>Example (one changed row).</strong> Accounts <span
+        class="math inline">(a,b,c,d)</span> open at balances <span
+        class="math inline">(100,40,25,35)</span> with zero cumulative
+        fields, and the epoch accepts <span
+        class="math inline">a\xrightarrow{20}b</span>, <span
+        class="math inline">b\xrightarrow{12}c</span>, <span
+        class="math inline">c\xrightarrow{7}d</span>, <span
+        class="math inline">d\xrightarrow{5}a</span>, <span
+        class="math inline">c\xrightarrow{4}b</span>, and <span
+        class="math inline">d\xrightarrow{6}b</span> over an empty
+        boundary (Figure 2). Recipient <span
+        class="math inline">b</span>’s three components end at <span
+        class="math inline">(20,1)</span>, <span
+        class="math inline">(4,1)</span>, and <span
+        class="math inline">(6,1)</span>, so <span
+        class="math inline">\mathsf{HeadRoot}_e(b)</span> binds <span
+        class="math inline">h_b=3</span> and <span
+        class="math inline">(G_b,J_b)=(30,3)</span>, and <span
+        class="math inline">\mathsf{Row}_b</span> closes at <span
+        class="math inline">B_b^1=58</span>: the balance equation reads
+        <span class="math inline">58+12+0=40+30+0</span>. All four
+        accounts change, the terminal prefix carries <span
+        class="math inline">D_e=C_e=54</span>, and Lemma D.2 gives <span
+        class="math inline">L_{e+1}=L_e=200</span>.</p>
+        <p><strong>Definition D.3 (close reservation).</strong> The
+        operator accepts a payment only when the resulting close still
+        fits <span class="math inline">\Lambda</span>: rows for the
+        payer and recipient and a terminal slot for the chosen component
+        either already exist or can be reserved without exceeding <span
+        class="math inline">A_{\max}</span> or <span
+        class="math inline">H_{\max}</span>. Boundary-forced rows sit
+        above the cap through <span class="math inline">\beta_e</span>,
+        so a sealed boundary can never make the close unsatisfiable,
+        however large an expiration merge grows it. This makes <span
+        class="math inline">A</span> and <span
+        class="math inline">H_e</span> independent of <span
+        class="math inline">T</span> and guarantees that acceptance
+        never strands a payment the close cannot represent.</p>
+        <p><strong>Lemma D.3 (honest validity).</strong> A close built
+        by an operator following Algorithm C.1, the boundary rules of
+        Section B, and the seal discipline of Section G from its
+        committed terminal state satisfies <span
+        class="math inline">\mathsf{PublicValid}_e</span>.</p>
+        <p><em>Proof sketch.</em> Each accepted payment adds <span
+        class="math inline">x</span> to exactly one payer debit and the
+        same <span class="math inline">x</span> to exactly one component
+        credit, so the terminal sums satisfy <span
+        class="math inline">D_e=C_e</span>, with Definition D.1 item 6
+        equating component sums with credit deltas. Monotonicity and the
+        balance equation per row are Lemma C.1 items 1 and 5 read at the
+        hard seal, with reconciliation closing the imported-credit gap
+        (Lemma G.1). Boundary binding and coverage hold because the
+        operator applies its own sealed boundary exactly once per
+        account. The caps hold by Definition D.3’s reservation. The
+        paired opening recomputes both roots from the operator’s own
+        committed vectors. <span class="math inline">\square</span></p>
+        <p>The close separates its evidence lifetimes:</p>
+        <table>
+        <colgroup>
+        <col style="width: 33%" />
+        <col style="width: 33%" />
+        <col style="width: 33%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: left;">Artifact</th>
+        <th style="text-align: left;">Contents</th>
+        <th style="text-align: left;">Required lifetime</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;">Chain record</td>
+        <td style="text-align: left;">Header and validity evidence</td>
+        <td style="text-align: left;">Persistent</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Admission check</td>
+        <td style="text-align: left;">Terminal row and its <span
+        class="math inline">\mathsf{ChangeRoot}</span> opening, or the
+        canonical empty close, plus one row opening per full-close
+        record, withdrawal re-check openings, and any mode-required
+        availability evidence</td>
+        <td style="text-align: left;">Admission only</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Public corpus <span
+        class="math inline">\mathcal D_e</span></td>
+        <td style="text-align: left;">Rows, component vectors, paired
+        opening, lookup material</td>
+        <td style="text-align: left;">Retrievable through <span
+        class="math inline">t\le\Delta_e</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Survivor preimages</td>
+        <td style="text-align: left;">Complete state vector of each root
+        that may survive (Definition D.5)</td>
+        <td style="text-align: left;">Until its successor slot finalizes
+        or unwind completes</td>
+        </tr>
+        </tbody>
+        </table>
+        <h4 id="d.3-certification">D.3 Certification</h4>
+        <p>Validity concerns the complete relation <span
+        class="math inline">\mathsf{PublicValid}_e</span>, never
+        isolated pieces.</p>
+        <p><strong>Definition D.4 (quorum certification).</strong> <span
+        class="math inline">\mathsf{ValidityConfig}_e</span> fixes a
+        deterministic partition of <span
+        class="math inline">(\mathsf{Header}_e,\mathcal D_e)</span> into
+        pieces <span class="math inline">\mathcal
+        P_{e,0},\ldots,\mathcal P_{e,p-1}</span> by contiguous account
+        interval, together with each piece’s validator assignment, both
+        public functions of the header and the validator set, so the
+        prover cannot route data away from its checkers. How validators
+        obtain the corpus is transport, outside this specification. Each
+        piece carries its interval’s rows, component vectors, and
+        opening segments, together with seam context: the predecessor
+        interval’s terminal row and prefix, the ordering edge to the
+        successor, and the frontier digests bordering the interval’s
+        state subtrees. Piece predicates <span
+        class="math inline">\pi_j</span> check row validity, ordering,
+        prefix continuity, and the interval’s share of the paired
+        opening locally. Every validator additionally checks the
+        <strong>spine</strong>: the header totals against the terminal
+        prefix, the sealed boundary, the caps, <span
+        class="math inline">D_e=C_e</span>, and the top-level assembly
+        of interval subtree roots into the three header roots. The
+        assignment must be <strong>composition-sound</strong>:</p>
+        <p><span class="math display">
+        \Bigl(\bigwedge_{j}\pi_j(\mathcal
+        P_{e,j})\Bigr)\land\mathsf{spine}
+        \Longleftrightarrow\mathsf{PublicValid}_e,
+        </span></p>
+        <p>with the pieces jointly covering all <span
+        class="math inline">A</span> rows and all <span
+        class="math inline">N</span> registry positions. Each piece is
+        assigned to a set <span class="math inline">\mathcal
+        V_{e,j}</span> of <span
+        class="math inline">q=2f_{\mathsf{val}}+1</span> validators. An
+        honest validator signs <span
+        class="math inline">\mathsf{Header}_e</span> only after the
+        spine and every piece assigned to it pass, and it retains those
+        pieces through <span class="math inline">\Delta_e</span>. The
+        certificate is <span class="math inline">q</span> distinct
+        validator signatures on <span
+        class="math inline">\mathsf{Header}_e</span>.</p>
+        <p><strong>Lemma D.4 (certified validity and
+        retention).</strong> In quorum mode with at most <span
+        class="math inline">f_{\mathsf{val}}</span> faulty validators, a
+        certificate on <span
+        class="math inline">\mathsf{Header}_e</span> implies <span
+        class="math inline">\mathsf{PublicValid}_e</span>, and every
+        piece is retained through <span
+        class="math inline">\Delta_e</span> by at least one honest
+        certificate signer.</p>
+        <p><em>Proof.</em> Let <span class="math inline">\mathcal
+        Q_e</span> be the signer set, <span
+        class="math inline">|\mathcal Q_e|=q</span>. For each piece,
+        <span class="math inline">|\mathcal Q_e\cap\mathcal
+        V_{e,j}|\ge|\mathcal Q_e|+|\mathcal
+        V_{e,j}|-n_{\mathsf{val}}=2q-n_{\mathsf{val}}=f_{\mathsf{val}}+1</span>,
+        so some honest validator both signed the header and was assigned
+        piece <span class="math inline">j</span>. That validator checked
+        <span class="math inline">\pi_j</span> and the spine and retains
+        <span class="math inline">\mathcal P_{e,j}</span>. All
+        predicates passing implies <span
+        class="math inline">\mathsf{PublicValid}_e</span> by composition
+        soundness. The honest signer may differ per piece, which
+        suffices: the identical header, exhaustive assignment, and
+        quorum intersection jointly attest the complete relation, which
+        byte availability alone would not. <span
+        class="math inline">\square</span></p>
+        <p>A validity proof or TEE attestation may certify <span
+        class="math inline">\mathsf{PublicValid}_e</span> instead. It
+        must bind the deployment, registered anchor, header, exact
+        corpus digest, profile, and deadline.</p>
+        <p><strong>Definition D.5 (availability obligations).</strong>
+        Through <span class="math inline">t\le\Delta_e</span>, the
+        availability service returns, for the admitted close: the bound
+        corpus <span class="math inline">\mathcal D_e</span>,
+        authenticated row membership or ordered-absence proofs for any
+        account, opening-state membership proofs under <span
+        class="math inline">\mathsf{StateRoot}_e</span> for accounts
+        without rows, and component membership or ordered-absence proofs
+        under any row’s <span
+        class="math inline">\mathsf{HeadRoot}</span>. An
+        operator-controlled location or an unaccompanied digest does not
+        satisfy this. Validator retention (Lemma D.4) covers the corpus
+        and its openings, and proof and TEE modes require equivalent
+        availability evidence at admission, in the format <span
+        class="math inline">\mathsf{ValidityConfig}_e</span> fixes. The
+        frontier digests cannot produce opening-state proofs for
+        accounts inside omitted subtrees, so those proofs and the
+        complete state preimage of every root that may become the
+        survivor root of Section F need full state vectors, whose
+        retention <span
+        class="math inline">\mathsf{ValidityConfig}_e</span> assigns
+        explicitly, until the root stops being a possible survivor: its
+        successor slot finalizes, or unwind completes. Every mode
+        requires the recovery allowance</p>
+        <p><span class="math display">
+        \alpha_e+\lambda_{\mathsf{DA}}\le\Delta_e,
+        </span></p>
+        <p>where <span class="math inline">\lambda_{\mathsf{DA}}</span>
+        budgets corpus retrieval, holder detection, and challenge
+        inclusion after the latest possible admission.</p>
+        <h3 id="e.-receipt-challenges">E. Receipt challenges</h3>
+        <h4 id="e.1-why-challenges-exist">E.1 Why challenges exist</h4>
+        <p><strong>Proposition E.1 (admission blindness).</strong> Fix
+        any admission verifier <span class="math inline">V</span>,
+        deterministic or randomized, whose input is a header, corpus,
+        and accepting evidence <span
+        class="math inline">(\mathsf{Header}_e,\mathcal
+        D_e,\zeta)</span> together with any availability responses. For
+        every execution <span class="math inline">\Xi_0</span> in which
+        the operator signs exactly the receipts represented in <span
+        class="math inline">\mathcal D_e</span>, there is an execution
+        <span class="math inline">\Xi_1</span> in which it additionally
+        signs one more valid receipt and delivers it off-protocol, such
+        that <span class="math inline">V</span>’s input distribution is
+        identical in both. Hence <span class="math inline">\Pr[V\
+        \mathrm{accepts}\ \Xi_1]=\Pr[V\ \mathrm{accepts}\
+        \Xi_0]</span>.</p>
+        <p><em>Proof.</em> Construct <span
+        class="math inline">\Xi_1</span> from <span
+        class="math inline">\Xi_0</span> by having the operator sign one
+        extra receipt body after producing <span
+        class="math inline">(\mathcal D_e,\zeta)</span> and deliver it
+        on a channel <span class="math inline">V</span> does not read.
+        No part of <span class="math inline">V</span>’s input changes,
+        and <span class="math inline">V</span>’s acceptance is a
+        function of its input and coins. The argument is independent of
+        whether <span class="math inline">\zeta</span> is a quorum
+        certificate, a validity proof, or an attestation: each certifies
+        a relation over presented inputs, and none can certify the
+        nonexistence of an additional signature. <span
+        class="math inline">\square</span></p>
+        <p>Receipt completeness therefore cannot be an admission
+        property under any validity mode. It is enforced by holders
+        during the challenge window, and every guarantee about
+        undisclosed receipts in Section H is conditioned on timely
+        disclosure. Proposition E.1 shows no public-view verifier
+        detects the extra receipt. It does not make the receipt
+        unenforceable: enforcement is exactly Theorem E.2. One limit is
+        sharper still: challenges name admitted slots, so evidence
+        scoped to an anchor whose epoch never admits is outside the
+        challenge system, and preconfirmation holders bear operator
+        default until their epoch admits.</p>
+        <h4 id="e.2-public-reference-values">E.2 Public reference
+        values</h4>
+        <p>Every challenge names one admitted slot and authenticates all
+        public values from that slot’s header under Assumption BIND. An
+        <strong>account lookup</strong> for <span
+        class="math inline">a</span> proves row membership or ordered
+        absence under <span
+        class="math inline">\mathsf{ChangeRoot}_e</span>, and for an
+        absent row additionally proves <span
+        class="math inline">X_a^0</span> under <span
+        class="math inline">\mathsf{StateRoot}_e</span>. It yields the
+        public closing debit and terminal pair</p>
+        <p><span class="math display">
+        (D^\star,O^\star)=
+        \begin{cases}
+        (D_a^1,\mathsf{Out}_a),&amp;\text{row present},\\
+        (D_a^0,\bot),&amp;\text{row absent}.
+        \end{cases}
+        </span></p>
+        <p>A <strong>component lookup</strong> for <span
+        class="math inline">(b,\kappa)</span> continues from a present
+        row’s <span class="math inline">\mathsf{HeadRoot}_e(b)</span>
+        and proves the entry with identifier <span
+        class="math inline">\kappa</span> or its ordered absence,
+        yielding the public tip</p>
+        <p><span class="math display">
+        (G^\star,J^\star)=
+        \begin{cases}
+        \bigl(G(P^\star),\,J(P^\star)\bigr),&amp;\text{entry present,
+        with terminal pair }P^\star,\\
+        (0,0),&amp;\text{entry or row absent}.
+        \end{cases}
+        </span></p>
+        <p>The higher-tip challenge needs only the absence forms, while
+        the payer-debit challenge on an absent row needs the opening
+        state for <span class="math inline">D^\star</span>. Definition
+        D.5 keeps all of these obtainable through <span
+        class="math inline">\Delta_e</span>.</p>
+        <h4 id="e.3-the-four-predicates">E.3 The four predicates</h4>
+        <p><strong>Definition E.1 (receipt challenges).</strong> A
+        challenge is valid when it names an admitted slot, is included
+        at <span class="math inline">t\le\Delta_e</span>, every signed
+        pair it carries is scoped to that slot’s anchor and epoch, its
+        lookups verify, and its predicate holds. Dot notation reads
+        signed-body fields, so <span
+        class="math inline">S^+.D&#39;</span> is the retained send’s
+        debit and <span class="math inline">(R^+.G,R^+.J)</span> its
+        receipt marker. All comparisons use checked arithmetic.</p>
+        <table>
+        <colgroup>
+        <col style="width: 33%" />
+        <col style="width: 33%" />
+        <col style="width: 33%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: left;">Challenge</th>
+        <th style="text-align: left;">Evidence</th>
+        <th style="text-align: left;">Predicate</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;">Payer debit</td>
+        <td style="text-align: left;">matching pair <span
+        class="math inline">P^+</span> from payer <span
+        class="math inline">a</span>, account lookup</td>
+        <td style="text-align: left;"><span
+        class="math inline">S^+.D&#39;&gt;D^\star</span>, or <span
+        class="math inline">S^+.D&#39;=D^\star</span> with <span
+        class="math inline">P^+</span>’s canonical bodies differing from
+        <span class="math inline">O^\star</span>’s</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Higher receive-component tip</td>
+        <td style="text-align: left;">matching pair <span
+        class="math inline">P^+</span> for <span
+        class="math inline">(b,\kappa)</span>, account and component
+        lookups</td>
+        <td style="text-align: left;"><span
+        class="math inline">R^+.G&gt;G^\star\ \lor\
+        R^+.J&gt;J^\star</span>, coordinates compared independently</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Inconsistent range</td>
+        <td style="text-align: left;">linked upper pair <span
+        class="math inline">P^+</span>, and a linked lower pair <span
+        class="math inline">P^-</span> in the same scope or the
+        canonical origin <span class="math inline">(0,0)</span></td>
+        <td style="text-align: left;">an endpoint has an intrinsic range
+        fault, or <span class="math inline">J(P^-)&lt;J(P^+)</span> and
+        <span class="math inline">\mathsf{RangeOK}</span> fails from the
+        lower marker to <span class="math inline">P^+</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: left;">Receipt fork</td>
+        <td style="text-align: left;">two linked pairs with distinct
+        canonical receipt bodies</td>
+        <td style="text-align: left;">the bodies share <span
+        class="math inline">(\mathcal A_e,b,\kappa,J)</span> or share
+        <span class="math inline">(\mathcal
+        A_e,\mathsf{TxId})</span></td>
+        </tr>
+        </tbody>
+        </table>
+        <p>Distinct signature bytes over one identical body are one
+        receipt, never a fork. The range predicate demands strictly
+        increasing indices between its endpoints: presenting one pair
+        twice, or two pairs in reversed order, is not a contradiction,
+        and genuinely conflicting equal indices are the fork predicate’s
+        job. A bare send is not evidence: every predicate requires
+        operator-signed receipts, which is what makes a valid challenge
+        attributable to the operator. The pairs may be retained
+        privately or drawn from the disclosed corpus, so a retained pair
+        can be played against a published terminal. Malformed public
+        rows, prefixes, boundary totals, or sparse openings are not
+        challenge kinds: they are admission failures under Definition
+        D.2.</p>
+        <p>A valid challenge at slot <span class="math inline">j</span>
+        permanently faults the deployment, prevents slot <span
+        class="math inline">j</span> and every admitted descendant from
+        finalizing, and sets or lowers the fault cut of Section F to
+        <span class="math inline">j</span>. Earlier admitted slots keep
+        their windows and resolve in order. The challenge assigns blame,
+        not compensation.</p>
+        <p>The division of labor between the payer-debit and credit-side
+        challenges is deliberate. A retained pair whose debit sits
+        strictly below <span class="math inline">D^\star</span> is not a
+        debit contradiction even if the close committed a different
+        payment at that marker: the divergence is caught in the receive
+        component, by the higher-tip or fork predicate, using the same
+        retained pair.</p>
+        <p><strong>Example (higher-tip challenge).</strong> Continuing
+        the running example, suppose the operator signs one more receipt
+        in <span class="math inline">(b,\kappa_0)</span> for a payment
+        of 3, advancing that component’s tip to <span
+        class="math inline">(23,2)</span>, delivers it privately, and
+        admits the close with terminal <span
+        class="math inline">(20,1)</span> anyway, indistinguishable at
+        admission by Proposition E.1 (Figure 4). The recipient’s account
+        and component lookups authenticate <span
+        class="math inline">(G^\star,J^\star)=(20,1)</span> under the
+        admitted slot, its retained pair carries <span
+        class="math inline">(R^+.G,R^+.J)=(23,2)</span>, and either
+        strict inequality satisfies the higher-tip predicate. The slot
+        and its admitted descendants can no longer finalize, and the
+        fault cut falls to it.</p>
+        <h4 id="e.4-soundness">E.4 Soundness</h4>
+        <p><strong>Theorem E.1 (challenge soundness).</strong> Under
+        Assumptions SIG, CR, and BIND, if the operator follows Algorithm
+        C.1, closes each epoch per Section D, and observes the seal
+        discipline of Section G, so that no novel epoch-scoped payment
+        is accepted after that scope’s markers are fixed for the close,
+        then no valid challenge exists against any of its admitted
+        slots, except with negligible probability.</p>
+        <p><em>Proof.</em> A valid challenge carries at least one
+        receipt with a verifying operator signature. By Assumption SIG
+        every such receipt body was signed by the operator, hence
+        committed by Algorithm C.1 (Lemma C.1 item 3), and by Assumption
+        BIND the challenge’s lookups yield the operator’s actual close
+        values. The honest close publishes each payer’s terminal
+        committed pair and each component’s terminal committed pair with
+        exact aggregates, and the seal discipline makes those terminals
+        final. It remains to check each predicate against Lemma C.1.</p>
+        <p><em>Payer debit.</em> Committed send debits of payer <span
+        class="math inline">a</span> end at <span
+        class="math inline">D^\star</span> (item 1), so no acknowledged
+        <span class="math inline">S^+.D&#39;</span> exceeds <span
+        class="math inline">D^\star</span>. At most one committed body
+        exists per debit value and the close publishes the terminal one,
+        so equality with different canonical bodies is impossible. If
+        the row is absent, the honest operator accepted no send from
+        <span class="math inline">a</span>, so no matching pair from
+        <span class="math inline">a</span> exists at all (Lemma C.1 item
+        3), and the challenge cannot supply its required evidence.</p>
+        <p><em>Higher tip.</em> Committed markers of <span
+        class="math inline">(b,\kappa)</span> end at the published tip
+        (item 2), so every signed receipt in the component is
+        coordinatewise dominated. If the account or component is absent
+        from the close, no receipt was committed there, and the
+        reference <span class="math inline">(0,0)</span> dominates the
+        empty set.</p>
+        <p><em>Range.</em> A presentation with <span
+        class="math inline">J(P^-)\ge J(P^+)</span> fails the
+        predicate’s ordering requirement, and item 4 covers the rest:
+        committed receipts have no intrinsic fault, and <span
+        class="math inline">\mathsf{RangeOK}</span> holds from <span
+        class="math inline">(0,0)</span> and between every ordered
+        committed pair.</p>
+        <p><em>Fork.</em> Item 2: one committed body per component index
+        and per <span class="math inline">\mathsf{TxId}</span>. Two
+        distinct bodies sharing either key would need a signature over
+        an uncommitted body, contradicting item 3 under Assumption SIG.
+        <span class="math inline">\square</span></p>
+        <h4 id="e.5-discipline-and-completeness">E.5 Discipline and
+        completeness</h4>
+        <p><strong>Definition E.2 (holder discipline).</strong> An
+        honest <strong>payer</strong> durably persists each signed
+        request before transmitting it, keeps one send outstanding at a
+        time at the exact successor debit, retains the matching pair,
+        forwards it to the recipient, and advances its acknowledged
+        marker only after the receipt verifies. It derives its debit
+        marker only from evidence bearing its own signature, as the
+        coordinatewise maximum over its retained acknowledged pairs, its
+        persisted outstanding send, and any resync pair returned by
+        Algorithm C.1 step 2, so a stale resync pair never regresses the
+        marker. It never signs a second distinct body at a debit value
+        it has already signed until a finalized close shows the first
+        unaccepted, and when an epoch expires unadmitted it discards
+        markers acknowledged under that anchor and re-derives from the
+        last admitted closing state before signing under a newer anchor.
+        At close it compares its last acknowledged pair against <span
+        class="math inline">(D^\star,O^\star)</span>. An honest
+        <strong>recipient</strong> verifies it is the registered
+        identity named by each receipt, retains every delivered pair
+        tied to value it gave up, even pairs it rejects locally, and at
+        close checks against the public terminals: higher tips, forks,
+        and every adjacent range in each of its components from <span
+        class="math inline">(0,0)</span> through the public tip. Either
+        may delegate retention and checking to a watchtower. Detected
+        contradictions must be submitted within the recovery allowance
+        of Definition D.5.</p>
+        <p><strong>Theorem E.2 (challenge completeness).</strong>
+        Suppose epoch <span class="math inline">e</span> is admitted,
+        Definition D.5 holds, and a holder retains signed evidence
+        scoped to <span class="math inline">\mathcal A_e</span> such
+        that either</p>
+        <ol type="1">
+        <li>a matching pair <span class="math inline">P^+</span> from
+        payer <span class="math inline">a</span> has <span
+        class="math inline">S^+.D&#39;&gt;D^\star</span>, or <span
+        class="math inline">S^+.D&#39;=D^\star</span> with bodies
+        differing from the public terminal, or</li>
+        <li>a matching pair <span class="math inline">P^+</span> credits
+        component <span class="math inline">(b,\kappa)</span> with <span
+        class="math inline">(R^+.G,R^+.J)\not\le(G^\star,J^\star)</span>
+        coordinatewise, or</li>
+        <li>its linked pairs, alone or against the disclosed terminals,
+        witness an intrinsic fault, an ordered <span
+        class="math inline">\mathsf{RangeOK}</span> violation, or a fork
+        as in Definition E.1.</li>
+        </ol>
+        <p>Then that holder can construct the corresponding challenge
+        and have it included by <span
+        class="math inline">\Delta_e</span>.</p>
+        <p><em>Proof.</em> Cases 1 and 2 need the account lookup, and
+        case 2 the component lookup, obtainable through <span
+        class="math inline">\Delta_e</span> by Definition D.5, including
+        the absence and opening-state forms. Case 3 additionally draws
+        disclosed terminal pairs from the retrievable corpus. The
+        retained pairs supply the signed evidence and the predicate
+        holds by hypothesis. The recovery allowance <span
+        class="math inline">\alpha_e+\lambda_{\mathsf{DA}}\le\Delta_e</span>
+        budgets retrieval, detection, and the call’s inclusion after the
+        latest possible admission, so the challenge lands by the
+        deadline. <span class="math inline">\square</span></p>
+        <p>Theorems E.1 and E.2 make the challenge window exact: an
+        honest operator is never faulted, and any operator whose private
+        signatures exceed its public close in the sense above is faulted
+        by any harmed holder who follows Definition E.2.</p>
+        <h3 id="f.-settlement-transitions-exit-and-terminal-unwind">F.
+        Settlement transitions, exit, and terminal unwind</h3>
+        <h4 id="f.1-the-transition-system">F.1 The transition
+        system</h4>
+        <p>The chain state of Section B.3 evolves only through the
+        guarded transitions below, each invocable by any party. Every
+        transition first executes <span
+        class="math inline">\mathsf{Timeout}</span>. A guard failure
+        leaves state unchanged. Inclusive deadlines follow one
+        convention: equality belongs to registration, admission, and
+        challenge, never to finalization.</p>
+        <p><strong>Deposit.</strong> Guard: deployment live, the asset
+        adapter authenticates a finalized inbound transfer with a fresh
+        identifier to a registered account, and the account has no
+        unreleased full-close withdrawal. Effect: <span
+        class="math inline">E\mathrel{+}=x</span>, the identifier is
+        permanently consumed, and the record enters the open boundary,
+        or is held when the open boundary carries the account’s
+        withdrawal record or a full deposit quota (Section B.3). A
+        deposit has no deadline and no independent exit guarantee: if
+        terminal unwind occurs before its slot finalizes, it is returned
+        through the terminal payout (F.4).</p>
+        <p><strong>Withdrawal.</strong> Defined in F.2.</p>
+        <p><strong>Register.</strong> Guard: <span
+        class="math inline">t\le\alpha_e</span>, deployment live, <span
+        class="math inline">e</span> follows the last registered epoch,
+        at most one registration already outstanding, no outstanding
+        registration doomed, fewer than <span
+        class="math inline">K</span> slots pending. Effect: seal the
+        open boundary into <span class="math inline">\mathcal A_e</span>
+        and open a fresh boundary. No custody or root change. The chain
+        derives every anchor field from deployment state and the
+        profile’s epoch schedule, checking <span
+        class="math inline">\alpha_e&lt;\Delta_e</span> and <span
+        class="math inline">\alpha_e+\lambda_{\mathsf{DA}}\le\Delta_e</span>:
+        the caller supplies only the invocation.</p>
+        <p><strong>Admit.</strong> Guard:</p>
+        <ol type="1">
+        <li>the deployment is live, <span
+        class="math inline">t\le\alpha_e</span>, and <span
+        class="math inline">e</span> is the oldest outstanding
+        registration and is not doomed;</li>
+        <li>the submitted header names <span
+        class="math inline">\mathsf{AnchorId}_e</span> and opening root
+        <span
+        class="math inline">\mathsf{StateRoot}_e=\mathsf{rt}_\ell</span>;</li>
+        <li>the validity evidence verifies (Definition D.4 or the
+        proof/TEE form) and the availability evidence meets <span
+        class="math inline">\mathsf{ValidityConfig}_e</span>;</li>
+        <li>the admission payload opens the terminal row prefix under
+        <span class="math inline">\mathsf{ChangeRoot}_e</span> (or is
+        the canonical empty close) with totals matching the header and
+        with <span class="math inline">F_e</span> and <span
+        class="math inline">M_e</span> matching the sealed boundary,
+        plus one row opening per full-close record proving its
+        exhausting amount;</li>
+        <li>the pipeline has capacity and the checked liability <span
+        class="math inline">L_{\ell+1}=L_\ell+F_e-W_e</span> is
+        computable;</li>
+        <li>every queued unreleased withdrawal not carried by <span
+        class="math inline">\mathsf{Boundary}_e</span> is proven still
+        affordable and its account active under <span
+        class="math inline">\mathsf{rt}_{\ell+1}</span>, by openings
+        supplied with the call.</li>
+        </ol>
+        <p>Effect: append slot <span class="math inline">\ell+1</span>
+        carrying <span
+        class="math inline">(\mathsf{Header}_e,F_e,W_e)</span> and each
+        full-close record’s proven exhausting amount, persisting what
+        Section E’s challenges authenticate against and what Finalize’s
+        payout split needs, and clear the registration. Custody, <span
+        class="math inline">\mathsf{rt}_z</span>, and <span
+        class="math inline">L_z</span> are unchanged.</p>
+        <p><strong>Challenge.</strong> Guard: <span
+        class="math inline">t\le\Delta_e</span> for the named slot and
+        Definition E.1 holds. Effect: permanent fault, cut update per
+        F.3.</p>
+        <p><strong>Finalize.</strong> Guard: the front slot <span
+        class="math inline">z+1</span> is unchallenged and <span
+        class="math inline">t&gt;\Delta_{z+1}</span>. Effect: install
+        <span class="math inline">\mathsf{rt}_{z+1}</span> as finalized,
+        release its withdrawal records through the asset adapter, a full
+        close routing the signed amount to <span
+        class="math inline">v</span> and the exhausting excess to the
+        account’s canonical destination, consume its deposit records,
+        decrement custody, <span
+        class="math inline">E\mathrel{-}=W_{z+1}</span>, and advance
+        <span class="math inline">z</span>. As in the terminal payout,
+        zero amounts are omitted and their records are still consumed. A
+        descendant never finalizes before its ancestor, even when its
+        own window closes first. Deadlines of different slots need not
+        be ordered, and front-only finalization is what preserves one
+        state lineage regardless.</p>
+        <p><strong>Expiration.</strong> Guard: deployment live, <span
+        class="math inline">t&gt;\Delta_e</span> for the oldest
+        outstanding registration, never admitted. Effect: discard the
+        registration as work, merge its sealed records into the open
+        boundary under the assignment rule of Section B.3, and mark
+        every younger outstanding registration <strong>doomed</strong>.
+        A doomed registration can only expire, and Register is blocked
+        while one is outstanding, so recovery is a single bounded
+        expiration cascade. This is what keeps an epoch served on top of
+        a dropped predecessor’s proposed state from admitting against a
+        different opening: without it, a close rebuilt from the tail
+        could debit honest payers’ epoch-spanning markers while routing
+        the dropped epoch’s credits elsewhere. No custody or root
+        change.</p>
+        <p><strong>Timeout.</strong> Guard: some queued withdrawal is
+        unreleased at <span class="math inline">t\ge\tau</span>. Effect:
+        permanent fault (F.3), recording the minimum <span
+        class="math inline">(\tau_a,\mathsf{pos}(a))</span> among
+        overdue requests as the fault trigger: the permanent record of
+        what faulted the deployment. A repeated observation after fault
+        changes nothing.</p>
+        <p><strong>Unwind.</strong> Guard: deployment faulted and the
+        front has reached the fault cut, <span
+        class="math inline">z+1=c_\star</span>. Inputs and effect:
+        Section F.4.</p>
+        <h4 id="f.2-withdrawals">F.2 Withdrawals</h4>
+        <p>A withdrawal is the account-signed object</p>
+        <p><span class="math display">
+        q_a^{\mathsf{wd}}=(\mathsf{deployment},\mathsf{rt}_z,a,v,x,\gamma,\tau),\qquad
+        Q=(q_a^{\mathsf{wd}},\sigma_a^{\mathsf{wd}}),
+        </span></p>
+        <p>where <span class="math inline">v</span> is a destination the
+        asset adapter accepts, <span class="math inline">\gamma</span>
+        requests a full close, and <span class="math inline">\tau</span>
+        is an absolute deadline. It names the finalized root at signing,
+        never a future epoch or anchor.</p>
+        <p><strong>Withdrawal.</strong> Guard, evaluated at queueing
+        time <span class="math inline">t_q</span> with pipeline <span
+        class="math inline">(z,\ldots,\ell)</span>:</p>
+        <ol type="1">
+        <li>the deployment is live;</li>
+        <li>the signature verifies and <span
+        class="math inline">\mathsf{rt}_z</span> is the current
+        finalized root;</li>
+        <li><span class="math inline">a</span> is active and <span
+        class="math inline">x\le B_a</span> under every admitted root
+        <span
+        class="math inline">\mathsf{rt}_z,\ldots,\mathsf{rt}_\ell</span>,
+        proven by openings supplied with the call;</li>
+        <li><span class="math inline">x&gt;0</span>, or <span
+        class="math inline">x=0</span> with <span
+        class="math inline">\gamma=1</span> and <span
+        class="math inline">B_a=0</span> at every such root, and a full
+        close requires the exact balance <span
+        class="math inline">x=B_a</span> at <span
+        class="math inline">\mathsf{rt}_\ell</span>;</li>
+        <li><span class="math inline">a</span> has no other unreleased
+        withdrawal, and for <span class="math inline">\gamma=1</span> no
+        unconsumed deposit;</li>
+        <li><span class="math inline">\tau\ge t_q+\eta</span>, with
+        <span class="math inline">\eta&gt;0</span> fixed in <span
+        class="math inline">\Pi</span>.</li>
+        </ol>
+        <p>Effect: the record enters the open boundary, the account’s
+        deposit records there are re-held (Section B.3), and the
+        canonical withdrawal identifier <span
+        class="math inline">\mathcal
+        H_{\mathsf{wd}}(q_a^{\mathsf{wd}})</span> is permanently
+        consumed. A profile sets <span class="math inline">\eta</span>
+        above the worst-case release latency of a cleanly operating
+        deployment, including one registration-expiration cascade, or a
+        slow release turns into a fault. A full close is best-effort:
+        unconsumed third-party deposits defer it, and a <span
+        class="math inline">\gamma=0</span> withdrawal of the full
+        balance is the guaranteed value exit. Its signed amount is a
+        floor, not the row value: the close exhausts the account with
+        <span class="math inline">w_a\ge x</span> (Definition D.1 item
+        2), and release and unwind route <span
+        class="math inline">x</span> to <span
+        class="math inline">v</span> and the excess to the account. No
+        custody or root change. The withdrawal is
+        <strong>released</strong> when the slot carrying its boundary
+        finalizes, and <strong>unreleased</strong> until then. Guard 3
+        covers the roots admitted so far, and the Admit re-check covers
+        every later root except the carrying slot’s own, which can never
+        be the survivor root while the withdrawal is unreleased, so
+        together they cover every possible survivor root (Lemma F.1).
+        There is no operator withdrawal path: queueing is permissionless
+        like every transition, its openings are obtainable from the
+        retention of Definition D.5, and the operator’s cooperation
+        determines only whether release comes from a clean close or from
+        the terminal payout. The signed <span
+        class="math inline">\tau</span> is a fence, not a payout
+        promise: the challenge windows and the ordered pipeline stand
+        between queueing and payout, and Theorem F.2 states exactly what
+        <span class="math inline">\tau</span> buys.</p>
+        <h4 id="f.3-faults-and-the-fault-cut">F.3 Faults and the fault
+        cut</h4>
+        <p>The deployment enters permanent fault at the first valid
+        challenge or timeout observation. Fault fences all new work:
+        deposits, withdrawal queueing, registrations, admissions,
+        registration expiration, and the routing changes of Section G.
+        Freeze <span class="math inline">\ell_{\mathsf{fault}}</span> as
+        the tail at that moment. The <strong>fault cut</strong> <span
+        class="math inline">c_\star</span> is the first slot barred from
+        finalizing, and it only moves toward the front, never away:</p>
+        <p><span class="math display">
+        c_\star=
+        \begin{cases}
+        \ell_{\mathsf{fault}}+1,&amp;\text{fault entered by timeout},\\
+        j,&amp;\text{fault entered by a challenge at slot }j,
+        \end{cases}
+        \qquad
+        c_\star\leftarrow\min(c_\star,j)\ \text{on each later valid
+        challenge}.
+        </span></p>
+        <p>A timeout entry bars no admitted slot, and later timeout
+        observations change nothing. Slots before <span
+        class="math inline">c_\star</span> keep their challenge windows
+        and resolve from the front in order: each front slot finalizes
+        after its window or is itself challenged, lowering the cut.
+        Resolution ends when the front reaches <span
+        class="math inline">c_\star</span>, leaving survivor root <span
+        class="math inline">\mathsf{rt}_{c_\star-1}</span>.</p>
+        <p><strong>Example (resolution).</strong> With slots <span
+        class="math inline">z+1</span>, <span
+        class="math inline">z+2</span>, and <span
+        class="math inline">z+3</span> admitted, a valid challenge
+        against slot <span class="math inline">z+2</span> faults the
+        deployment and sets <span
+        class="math inline">c_\star=z+2</span>. Slot <span
+        class="math inline">z+1</span> keeps its window and finalizes
+        once it closes, the front reaches the cut, and terminal unwind
+        pays the complete state under the survivor root <span
+        class="math inline">\mathsf{rt}_{z+1}</span>, with the deposits
+        of slots <span class="math inline">z+2</span> and <span
+        class="math inline">z+3</span> returned through the terminal
+        payout.</p>
+        <h4 id="f.4-terminal-unwind">F.4 Terminal unwind</h4>
+        <p>Let <span class="math inline">F_{\mathsf{term}}</span>
+        collect the deposits of every unfinalized slot and every
+        unadmitted or held record, so <span
+        class="math inline">F_{\mathsf{term}}=F_\star+\sum_{i=c_\star}^{\ell_{\mathsf{fault}}}F_i</span>
+        after resolution. Terminal unwind authenticates the complete
+        registry-ordered state vector committed by <span
+        class="math inline">\mathsf{rt}_{c_\star-1}</span>, whose bound
+        aggregate is <span class="math inline">L_{c_\star-1}</span>,
+        together with every unfinalized boundary record. For each
+        account let <span class="math inline">w_a^{\mathsf{term}}</span>
+        be its unreleased signed withdrawal amount or zero, <span
+        class="math inline">f_a^{\mathsf{term}}</span> its terminal
+        deposit total, and <span
+        class="math inline">B_a^{\mathsf{surv}}</span> its balance under
+        the survivor root. The chain rechecks <span
+        class="math inline">w_a^{\mathsf{term}}\le
+        B_a^{\mathsf{surv}}</span>, which Lemma F.1 shows cannot fail,
+        and computes the residual</p>
+        <p><span class="math display">
+        r_a=B_a^{\mathsf{surv}}-w_a^{\mathsf{term}}+f_a^{\mathsf{term}}.
+        </span></p>
+        <p>In registry order the payout emits the positive withdrawal
+        amount to its signed destination <span
+        class="math inline">v</span> (a full close emits the signed
+        amount to <span class="math inline">v</span> and the residual to
+        <span class="math inline">a</span>), then the positive residual
+        to the account’s canonical destination fixed by <span
+        class="math inline">\Pi</span>. Deposit refunds inside <span
+        class="math inline">f_a^{\mathsf{term}}</span> ride the
+        residual, except that a record whose account is inactive under
+        the survivor root follows its bound source. Zero amounts are
+        omitted, equal destinations remain separate, and a zero-amount
+        full close is still consumed. One atomic chain-and-asset
+        transition executes the complete payout, consumes every
+        remaining record, zeroes custody and liability, and marks the
+        deployment permanently unwound. A failed transfer changes
+        nothing.</p>
+        <h4 id="f.5-custody-and-exit-theorems">F.5 Custody and exit
+        theorems</h4>
+        <p><strong>Theorem F.1 (custody invariant).</strong> Under
+        assumptions 1–3 of Section H.1, except with negligible
+        probability, every reachable chain state satisfies</p>
+        <p><span class="math display">
+        \boxed{
+        E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
+        =L_\ell+\sum_{i=z+1}^{\ell}W_i+F_\star,
+        }
+        </span></p>
+        <p>where <span class="math inline">F_\star</span> sums all
+        accepted deposits not yet carried by an admitted slot.</p>
+        <p><em>Proof.</em> The two forms agree by telescoping <span
+        class="math inline">L_i=L_{i-1}+F_i-W_i</span>. Induction over
+        transitions from the base state <span
+        class="math inline">E=L_0=0</span> with an empty pipeline and
+        boundary. <em>Deposit</em> adds <span
+        class="math inline">x</span> to both <span
+        class="math inline">E</span> and <span
+        class="math inline">F_\star</span>. <em>Withdrawal</em>,
+        <em>Register</em>, <em>Expiration</em>, <em>Challenge</em>, and
+        <em>Timeout</em> change no term: sealing, holding, and merging
+        move records within <span class="math inline">F_\star</span>.
+        <em>Admit</em> moves the sealed boundary’s <span
+        class="math inline">F_e</span> from <span
+        class="math inline">F_\star</span> into the pipeline sum, and
+        Lemma D.2 gives <span
+        class="math inline">L_{\ell+1}=L_\ell+F_e-W_e</span>, preserving
+        the second form. <em>Finalize</em> decreases <span
+        class="math inline">E</span> by <span
+        class="math inline">W_{z+1}</span>, advances <span
+        class="math inline">L_z</span> by <span
+        class="math inline">F_{z+1}-W_{z+1}</span>, and removes slot
+        <span class="math inline">z+1</span> from the sum, so both sides
+        fall by <span class="math inline">W_{z+1}</span>. The induction
+        establishes the invariant at every pre-unwind state, which is
+        what Lemma F.2 consumes, and <em>Unwind</em> then zeroes
+        custody, liability, and every record by construction, so the
+        post-unwind state satisfies it trivially. Withdrawals stay
+        inside custody until their own slot finalizes, which is why
+        admission can be pipelined without a speculative descendant
+        spending assets out from under an ancestor. <span
+        class="math inline">\square</span></p>
+        <p><strong>Lemma F.1 (survivor-root coverage).</strong> If
+        terminal unwind pays an unreleased withdrawal <span
+        class="math inline">Q</span> of account <span
+        class="math inline">a</span>, then <span
+        class="math inline">w_a^{\mathsf{term}}\le
+        B_a^{\mathsf{surv}}</span> and <span
+        class="math inline">a</span> is active under <span
+        class="math inline">\mathsf{rt}_{c_\star-1}</span>.</p>
+        <p><em>Proof.</em> Let <span class="math inline">\ell_q</span>
+        be the tail when <span class="math inline">Q</span> was queued.
+        If <span class="math inline">c_\star-1\le\ell_q</span>, the
+        queueing guard checked <span
+        class="math inline">\mathsf{rt}_{c_\star-1}</span> directly.
+        Otherwise slot <span class="math inline">c_\star-1</span> was
+        admitted after <span class="math inline">t_q</span> while <span
+        class="math inline">Q</span> was queued. <span
+        class="math inline">Q</span> is unreleased at unwind, so the
+        slot carrying its boundary never finalized, and since slots
+        finalize from the front in order, that carrying slot lies at or
+        beyond <span class="math inline">c_\star</span>. Slot <span
+        class="math inline">c_\star-1</span> therefore did not carry
+        <span class="math inline">Q</span>, and its Admit guard
+        re-proved affordability and activity under <span
+        class="math inline">\mathsf{rt}_{c_\star-1}</span>. Committed
+        roots are immutable, so the checked facts still hold at unwind.
+        Held and merged records preserve this: merging only moves <span
+        class="math inline">Q</span>’s boundary to a later slot, which
+        the same argument covers. <span
+        class="math inline">\square</span></p>
+        <p><strong>Lemma F.2 (payout exhaustion).</strong> The terminal
+        payout’s amounts sum exactly to <span
+        class="math inline">E</span>, and unwind zeroes custody.</p>
+        <p><em>Proof.</em> By Lemma F.1 every residual is nonnegative,
+        so the payout is well formed. Summing over accounts, withdrawals
+        cancel: <span
+        class="math inline">\sum_a(w_a^{\mathsf{term}}+r_a)=\sum_aB_a^{\mathsf{surv}}+\sum_af_a^{\mathsf{term}}=L_{c_\star-1}+F_{\mathsf{term}}</span>,
+        using the survivor root’s bound balance aggregate and the unique
+        assignment of every unconsumed deposit to exactly one <span
+        class="math inline">f_a^{\mathsf{term}}</span>. After resolution
+        finalizes every slot before <span
+        class="math inline">c_\star</span>, Theorem F.1 reads <span
+        class="math inline">E=L_{c_\star-1}+\sum_{i=c_\star}^{\ell_{\mathsf{fault}}}F_i+F_\star=L_{c_\star-1}+F_{\mathsf{term}}</span>.
+        <span class="math inline">\square</span></p>
+        <p><strong>Theorem F.2 (conditional exit).</strong> Operator
+        liveness is not assumed. If an honest account queues <span
+        class="math inline">Q</span> and it is unreleased at <span
+        class="math inline">t\ge\tau</span>, then: the first included
+        call permanently fences new work, the admitted prefix resolves
+        from the front in order, and once the front reaches the fault
+        cut, terminal unwind pays <span
+        class="math inline">w_a^{\mathsf{term}}</span> to the signed
+        destination, with affordability from Lemma F.1 and exhaustion
+        from Lemma F.2. Every needed call is permissionless, so the
+        exiting account can submit the observation, finalization, and
+        unwind calls itself, and each lands within <span
+        class="math inline">\delta_{\mathsf{incl}}</span>. The guarantee
+        is conditional on atomic asset execution and on availability of
+        the survivor preimage (Definition D.5). It is not a payout at
+        <span class="math inline">\tau</span>: resolution takes at most
+        the maximum remaining challenge window of the at most <span
+        class="math inline">K</span> admitted slots, plus <span
+        class="math inline">O(K)</span> inclusion delays, plus the
+        terminal transition.</p>
+        <p><em>Proof.</em> <span
+        class="math inline">\mathsf{Timeout}</span> precedes every
+        transition, so the first call included after <span
+        class="math inline">\tau</span> faults the deployment and
+        freezes <span class="math inline">\ell_{\mathsf{fault}}</span>.
+        Fault fences every transition that creates new state, so the
+        pipeline is a fixed finite deque. Each front slot either
+        finalizes once its window closes, by a permissionless call
+        included within <span
+        class="math inline">\delta_{\mathsf{incl}}</span>, or is validly
+        challenged by its own deadline, which lowers the cut and
+        shortens the deque. Both steps strictly advance the front toward
+        the cut, so resolution terminates within the stated bound. The
+        unwind guard is then satisfiable with the survivor preimage, and
+        Lemmas F.1 and F.2 give the payout. <span
+        class="math inline">\square</span></p>
+        <h3 id="g.-overlapped-epochs">G. Overlapped epochs</h3>
+        <p>Closing must not pause payments. Let epoch <span
+        class="math inline">e</span> be the predecessor and <span
+        class="math inline">e+1</span> the successor. Because
+        registration binds no root and two registrations may be
+        outstanding (Section B.4), <span class="math inline">\mathcal
+        A_{e+1}</span> exists while epoch <span
+        class="math inline">e</span> is still being closed, certified,
+        and admitted, so the two epochs serve concurrently during
+        <strong>draining</strong>, the period from <span
+        class="math inline">\mathcal A_{e+1}</span>’s registration to
+        the hard seal. The <strong>cut</strong> of an account is the
+        first event fixing its final predecessor debit, and the
+        <strong>hard seal</strong> is the operator action that cuts
+        every remaining account, ends predecessor acceptance in every
+        component, and must complete before close construction begins.
+        An <strong>execution shard</strong> owns the mutable serving
+        state of a contiguous account range, rollover is per account,
+        and each shard seals its owned accounts before the close is
+        built from any of them.</p>
+        <p><strong>Rules.</strong></p>
+        <ol type="1">
+        <li><p><strong>Cut.</strong> For each account, either its first
+        novel successor send atomically fixes its final predecessor
+        debit and moves it to successor service, or the hard seal does
+        so for accounts that never send. After the cut, novel
+        predecessor sends from that account are stale, and exact retries
+        return their original disposition.</p></li>
+        <li><p><strong>Seal discipline.</strong> The hard seal ends
+        predecessor acceptance in every component. After an account’s
+        cut no novel epoch-<span class="math inline">e</span> send is
+        accepted from it, and after the hard seal no novel epoch-<span
+        class="math inline">e</span> payment is accepted at all, so the
+        close’s terminal markers dominate every epoch-<span
+        class="math inline">e</span> body the operator ever signs, with
+        exact retries returning already-committed bodies.</p></li>
+        <li><p><strong>One-time boundary application.</strong> The
+        successor’s sealed per-account adjustment <span
+        class="math inline">(f_a,w_a)</span> applies exactly once to
+        successor serving state, before the account’s first successor
+        send and never to predecessor commitments. An exact replay is a
+        no-op, and conflicting bytes are rejected. From the operator’s
+        observation of a queued non-closing withdrawal, the account’s
+        outgoing sends freeze until the withdrawn amount is subtracted
+        from its live balance, and a sealed full close freezes the
+        account in both directions, which keeps its exhausting amount
+        near the signed floor. Chain observation lags: a send accepted
+        inside the lag can leave a close unable to satisfy the Admit
+        re-check, and the operator restores affordability with a payment
+        from an operator-controlled funded account before
+        sealing.</p></li>
+        <li><p><strong>Reconciliation.</strong> Let <span
+        class="math inline">\widetilde B_a</span> be the preserved
+        guarded balance after every accepted predecessor debit and every
+        predecessor credit already imported, and for each predecessor
+        component let <span
+        class="math inline">G^{\mathsf{term}}_{\kappa}</span> and <span
+        class="math inline">G^{\mathsf{imp}}_{\kappa}</span> be terminal
+        and imported credit. The remaining predecessor credit is <span
+        class="math inline">\rho_a=\sum_\kappa
+        G^{\mathsf{term}}_\kappa-\sum_\kappa
+        G^{\mathsf{imp}}_\kappa\ge0</span>. Reconciliation atomically
+        adds <span class="math inline">\rho_a</span> to <span
+        class="math inline">B_a^{\mathsf{live}}</span> and sets every
+        predecessor imported marker to its terminal, so it applies at
+        most once and every later predecessor import is a no-op under
+        Algorithm C.2’s coordinatewise rule. It never assigns the
+        predecessor close over the live head, which would erase accepted
+        successor debits.</p></li>
+        <li><p><strong>Ownership moves.</strong> The old owner is
+        authoritative through hard seal. A new owner initializes from an
+        authenticated, boundary-adjusted snapshot of the account’s
+        serving state. Routing changes are split-only: ranges may
+        divide, and accounts are never remapped or merged across live
+        owners.</p></li>
+        </ol>
+        <p><strong>Lemma G.1 (exact close under overlap).</strong> For
+        every account, from its cut until its reconciliation, the
+        canonical predecessor closing balance satisfies</p>
+        <p><span class="math display">
+        \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad\rho_a\ge0,}
+        </span></p>
+        <p>except that a full close ends at <span
+        class="math inline">B_a^1=0</span>, its exhausting <span
+        class="math inline">w_a=x+\widetilde B_a+\rho_a</span> absorbing
+        the residue above its signed amount <span
+        class="math inline">x</span>.</p>
+        <p><em>Proof.</em> At the cut, Lemma C.1 item 5 gives <span
+        class="math inline">\widetilde B_a=B_a^0+f_a-w_a-d_a+\sum_\kappa
+        G^{\mathsf{imp}}_\kappa</span>, and <span
+        class="math inline">c_a=\sum_\kappa
+        G^{\mathsf{term}}_\kappa</span> is fixed by the seal discipline,
+        so <span class="math inline">\widetilde B_a+\rho_a</span> equals
+        the balance equation’s <span class="math inline">B_a^1</span>.
+        For a full close, item 5’s boundary-applied amount is the signed
+        <span class="math inline">x</span> while the row’s <span
+        class="math inline">w_a</span> is the exhausting amount, so the
+        same substitution closes the account at <span
+        class="math inline">B_a^1=0</span> with <span
+        class="math inline">w_a=x+\widetilde B_a+\rho_a</span>. A later
+        predecessor import moves one component’s amount from <span
+        class="math inline">\rho_a</span> into <span
+        class="math inline">\widetilde B_a</span> without changing the
+        sum, and successor events touch only successor state.
+        Predecessor completion is one-sided: it can add unimported
+        credit but can never discover another accepted debit, because
+        debits end at the cut. Nonnegativity of <span
+        class="math inline">\rho_a</span> holds because Algorithm C.2
+        imports only signature-verified tips, which the honest chain
+        bounds by the terminal (Lemma C.1 item 2). A dishonest operator
+        can break <span class="math inline">\rho_a\ge0</span> only by
+        signing above its own published terminal, which is precisely the
+        higher-tip challenge, not a serving invariant. <span
+        class="math inline">\square</span></p>
+        <p><strong>Example (reconciliation).</strong> At its cut,
+        account <span class="math inline">a</span> has accepted one
+        predecessor debit of 20 from an opening 100, so <span
+        class="math inline">\widetilde B_a=80</span>, while an accepted
+        credit of 5 remains unimported, <span
+        class="math inline">\rho_a=5</span>, and the canonical close
+        binds <span class="math inline">B_a^1=85</span> (Figure 5). The
+        successor spends 20, reconciliation then adds <span
+        class="math inline">\rho_a</span> for a live head of 65, and a
+        further spend of 15 leaves <span
+        class="math inline">50=85-20-15</span>, with every successor
+        debit preserved.</p>
+        <p><strong>Theorem G.1 (rollover equivalence).</strong> An
+        overlapped execution produces the same rows, roots, corpus,
+        public-validity decision, and settlement transition for epoch
+        <span class="math inline">e</span> as the serialized execution
+        that accepts the same predecessor payments, seals the same
+        boundary, and then serves the successor. A successful challenge
+        against the predecessor invalidates its admitted descendants
+        exactly as in Section F.</p>
+        <p><em>Proof sketch.</em> Epoch-<span
+        class="math inline">e</span> close values are a per-account
+        function of the opening state, the sealed boundary, the accepted
+        predecessor debit sequence, and the terminal component markers.
+        Rule 1 fixes each account’s debit terminal at a definite cut and
+        rejects later predecessor mutations, rule 2 fixes the component
+        terminals at hard seal, rule 3 keeps successor boundary effects
+        out of predecessor inputs, and rule 4 only moves
+        already-promised predecessor credit into the live head.
+        Successor sends debit <span
+        class="math inline">B^{\mathsf{live}}</span> below the
+        predecessor close (Lemma G.1) and never touch predecessor
+        markers, so adjacent successor events and predecessor close
+        events operate on disjoint fields and commute. Rule 5 preserves
+        one authoritative copy of every account’s serving state across
+        moves. Induction on exchanges of adjacent commuting events
+        transforms any overlapped schedule into the serialized one with
+        identical per-account inputs, hence an identical close. <span
+        class="math inline">\square</span></p>
+        <h3 id="h.-assumptions-properties-and-main-theorems">H.
+        Assumptions, properties, and main theorems</h3>
+        <h4 id="h.1-assumption-summary">H.1 Assumption summary</h4>
+        <ol type="1">
+        <li><strong>Cryptography.</strong> Assumptions SIG, CR, BIND
+        (Section A.3).</li>
+        <li><strong>Chain and assets.</strong> Authenticated state and
+        time, ordered execution atomic across the chain and the asset
+        layer, permissionless calls, inclusion within <span
+        class="math inline">\delta_{\mathsf{incl}}</span> (Section A.2),
+        and an asset adapter whose accepted destinations are payable
+        (Section B.1).</li>
+        <li><strong>Validity.</strong> The admitted evidence certifies
+        <span class="math inline">\mathsf{PublicValid}_e</span>: Lemma
+        D.4 in quorum mode with at most <span
+        class="math inline">f_{\mathsf{val}}</span> faulty validators,
+        or a sound proof system or uncompromised TEE binding the objects
+        of Section D.3.</li>
+        <li><strong>Availability.</strong> Definition D.5, including the
+        recovery allowance and the survivor-preimage lifetime.</li>
+        <li><strong>Discipline.</strong> Per-party guarantees require
+        that party to follow Definition E.2, and exit guarantees require
+        the signed objects of Section F.</li>
+        <li><strong>Not assumed.</strong> Operator liveness or honesty,
+        honesty of any counterparty, or challenge-time cooperation from
+        the operator.</li>
+        </ol>
+        <p>Call evidence <strong>timely disclosed</strong> for epoch
+        <span class="math inline">e</span> when it reaches the public
+        corpus or the chain by <span
+        class="math inline">\Delta_e</span>.</p>
+        <h4 id="h.2-security-properties">H.2 Security properties</h4>
+        <p><strong>Definition H.1 (security properties).</strong> The
+        protocol targets, per deployment:</p>
+        <ol type="1">
+        <li><strong>Exact settlement.</strong> A finalized close changes
+        exactly the committed row accounts, each to its committed
+        closing state, and conserves liability against the sealed
+        boundary.</li>
+        <li><strong>Payer debit safety.</strong> No finalized close
+        debits an account beyond a marker that account signed, even when
+        the operator, all counterparties, and all faulty validators
+        collude.</li>
+        <li><strong>Receipt coverage.</strong> A finalized close
+        dominates all timely-disclosed acknowledged evidence: public
+        payer debits and component tips are coordinatewise upper bounds,
+        with no intrinsic fault, infeasible range, or fork among
+        committed and disclosed receipts.</li>
+        <li><strong>Solvency.</strong> Custody always covers finalized
+        liability plus every pipelined and pending boundary flow
+        (Theorem F.1).</li>
+        <li><strong>Bounded exit.</strong> An honest account can
+        unilaterally force the deployment onto the terminal path and be
+        paid its signed withdrawal from custody within a bound set by
+        the pending windows (Theorem F.2).</li>
+        </ol>
+        <p><strong>Theorem H.1 (clean finalization).</strong> Under
+        assumptions 1–4, if epoch <span class="math inline">e</span>’s
+        slot finalizes, then except with negligible probability:</p>
+        <ol type="1">
+        <li><span class="math inline">k\in\mathcal
+        J_e\Longleftrightarrow\mathbf S_k^1\ne\mathbf S_k^0</span>, each
+        row account closes at its committed <span
+        class="math inline">X_a^1</span>, and <span
+        class="math inline">L_{e+1}=L_e+F_e-W_e</span>.</li>
+        <li>Each account’s closing debit is its opening marker or a
+        payer-signed marker, and for an account following Definition E.2
+        it equals the maximum of its opening marker, the
+        operator-acknowledged markers it retains, and the publicly
+        committed terminal.</li>
+        <li>Each public component tip is coordinatewise no lower than
+        every timely-disclosed tip retained by a holder following
+        Definition E.2.</li>
+        <li>The committed and timely-disclosed receipt set contains no
+        intrinsic fault, fork, or infeasible range that any party
+        following Definition E.2 checks.</li>
+        </ol>
+        <p>Items 2–4 are conditioned on assumption 5 for the holders of
+        the evidence concerned: the guarantees cover exactly the
+        disclosed evidence some disciplined party checks.</p>
+        <p><em>Proof.</em> Admission verified the validity evidence, so
+        <span class="math inline">\mathsf{PublicValid}_e</span> holds by
+        assumption 3, and item 1 is Lemmas D.1 and D.2. For item 2’s
+        upper bound, any closing debit above the opening marker requires
+        <span class="math inline">\mathsf{Out}_a</span> to be a matching
+        pair whose send ends exactly at <span
+        class="math inline">D_a^1</span> (Definition D.1 item 5), and
+        matching requires the payer’s signature, unforgeable under
+        Assumption SIG. That terminal pair is itself
+        operator-acknowledged and publicly committed, so the maximum in
+        item 2 is attained, and a closing debit at the opening marker
+        attains it trivially. For the lower bound and items 3 and 4:
+        finalization implies no valid challenge was included by <span
+        class="math inline">\Delta_e</span>. By Theorem E.2 every
+        violation a disciplined party detects yields a constructible,
+        includable challenge, and Definition E.2 obligates that party to
+        submit it, so no such violation existed. <span
+        class="math inline">\square</span></p>
+        <p>Item 2’s restriction to retained evidence is exactly
+        Proposition E.1’s limit: no validity mode proves the
+        nonexistence of an additional private signature, so a receipt
+        the operator never delivered to any holder sits outside every
+        guarantee.</p>
+        <p><strong>Theorem H.2 (exit).</strong> Under assumptions 1–5,
+        bounded exit holds: Theorem F.2, with affordability from Lemma
+        F.1 and exhaustion from Lemma F.2.</p>
+        <h4 id="h.3-costs">H.3 Costs</h4>
+        <p><strong>Proposition H.1 (compression).</strong> With row,
+        pair, and digest sizes fixed by the profile:</p>
+        <ol type="1">
+        <li><span class="math inline">|\mathcal
+        D_e|=\Theta(A+H_e+|\Phi_e|)</span> with <span
+        class="math inline">|\Phi_e|=O(A\log(N/A))</span> for <span
+        class="math inline">1\le A\le N</span>, all independent of <span
+        class="math inline">T</span>. For repeated payments over a fixed
+        changed-account and component footprint, <span
+        class="math inline">(A+H_e+|\Phi_e|)/T\to0</span>.</li>
+        <li>The persistent chain record is the header, certificate,
+        per-slot full-close amounts, and the consumed deposit- and
+        withdrawal-identifier sets, the last linear in lifetime record
+        count. The admission payload adds one terminal row opening, one
+        row opening per full-close record, and the withdrawal re-check
+        openings, <span class="math inline">O(\log A)</span> each plus
+        <span class="math inline">O(\log N)</span> per queued
+        withdrawal, of which at most one exists per account.</li>
+        <li>A challenge carries at most two signed pairs and lookups of
+        <span class="math inline">O(\log A+\log h_b+\log N)</span>
+        digests.</li>
+        <li>Terminal unwind authenticates <span
+        class="math inline">\Theta(N)</span> records in one registry
+        scan. Aggregating a dense invalid suffix costs <span
+        class="math inline">O(KN\log(N+1))</span> work and <span
+        class="math inline">O(KN)</span> retained boundary data in the
+        worst case.</li>
+        </ol>
+        <p><em>Proof sketch.</em> Counting. Each changed account
+        contributes one row, each terminal component one pair, and the
+        paired opening one frontier digest per maximal omitted subtree,
+        of which at most <span class="math inline">O(A\log(N/A))</span>
+        exist for <span class="math inline">A</span> marked leaves in a
+        balanced tree over <span class="math inline">N</span>.
+        Definition D.3 caps <span class="math inline">A</span> and <span
+        class="math inline">H_e</span> independently of <span
+        class="math inline">T</span>. The unwind suffix bound covers
+        recomputing per-slot boundary effects across at most <span
+        class="math inline">K</span> unfinalized slots. <span
+        class="math inline">\square</span></p>
+        <p>Two costs sit outside the proposition. Definition D.5’s
+        survivor-preimage obligation holds the complete <span
+        class="math inline">\Theta(N)</span> state vector of each of the
+        up to <span class="math inline">K+1</span> possible survivor
+        roots throughout normal operation, distinct from item 4’s
+        unwind-time boundary data. Because withdrawals are never capped,
+        a mass exit drives <span class="math inline">\beta_e</span>, and
+        with it the close, its corpus, and the per-full-close admission
+        openings, to <span class="math inline">\Theta(N)</span>, and
+        concentrates up to <span class="math inline">\Theta(N)</span>
+        released transfers into the single atomic Finalize and Unwind
+        transitions covered by assumption 2 of Section H.1.</p>
+        <p><strong>Proposition H.2 (ordinary disclosure).</strong> In a
+        conforming close, an accepted pair appears in the public corpus
+        if and only if it is its payer’s terminal outgoing pair <span
+        class="math inline">\mathsf{Out}_a</span> or the terminal entry
+        of its receive component in <span class="math inline">\mathbf
+        Y_b</span>, directly from Definition D.1 items 5 and 6.
+        Superseded pairs stay out of ordinary settlement, though a
+        challenge may disclose retained pairs later, and the public
+        deltas, receipt counts, and terminal pairs still reveal
+        activity.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
