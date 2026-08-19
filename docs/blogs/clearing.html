@@ -270,7 +270,7 @@ O’Grady</a></div>
         class="math inline">(6,1)</span>.</p>
         <p>A hot recipient can end an epoch with many components, and
         proving one tip (we’ll get to this later) should not require
-        shipping the rest. Let’s sort the terminal records by component
+        shipping the rest. Sort the terminal records by component
         identifier and commit them as a Merkle tree under <span
         class="math inline">\mathsf{HeadRoot}_e(b)</span>. The root
         binds the exact component count, ordered records, total credit,
@@ -280,13 +280,16 @@ O’Grady</a></div>
         Account</h2>
         <p>Netting each account’s debits and credits gives exact closing
         balances <span class="math inline">(85,58,26,31)</span>, and
-        gross payment debit equals gross payment credit at 54. The
-        account row is the unit of public settlement. Write the opening
-        and closing states as <span class="math inline">X_a^0</span> and
-        <span class="math inline">X_a^1</span>, with checked debit and
-        credit deltas <span class="math inline">d_a=D_a^1-D_a^0</span>
-        and <span class="math inline">c_a=C_a^1-C_a^0</span>.</p>
-        <p>If the chain-sealed boundary assigns deposit <span
+        gross payment debit equals gross payment credit at 54 (i.e. the
+        changes net to zero). That is all settlement has to publish: not
+        the six payments, but the four accounts they changed, one row
+        each.</p>
+        <p>Write the opening and closing states as <span
+        class="math inline">X_a^0</span> and <span
+        class="math inline">X_a^1</span>, with checked debit and credit
+        deltas <span class="math inline">d_a=D_a^1-D_a^0</span> and
+        <span class="math inline">c_a=C_a^1-C_a^0</span>. If the
+        chain-sealed boundary assigns deposit <span
         class="math inline">f_a</span> and withdrawal <span
         class="math inline">w_a</span>, the exact balance relation
         is</p>

@@ -98,13 +98,13 @@ $$
 
 Suppose the operator assigns each of $b$'s three incoming payments to its own component. Their tips end at $(20,1)$, $(4,1)$, and $(6,1)$.
 
-A hot recipient can end an epoch with many components, and proving one tip (we'll get to this later) should not require shipping the rest. Let's sort the terminal records by component identifier and commit them as a Merkle tree under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
+A hot recipient can end an epoch with many components, and proving one tip (we'll get to this later) should not require shipping the rest. Sort the terminal records by component identifier and commit them as a Merkle tree under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
 
 ## One Row per Changed Account
 
-Netting each account's debits and credits gives exact closing balances $(85,58,26,31)$, and gross payment debit equals gross payment credit at 54. The account row is the unit of public settlement. Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$.
+Netting each account's debits and credits gives exact closing balances $(85,58,26,31)$, and gross payment debit equals gross payment credit at 54 (i.e. the changes net to zero). That is all settlement has to publish: not the six payments, but the four accounts they changed, one row each.
 
-If the chain-sealed boundary assigns deposit $f_a$ and withdrawal $w_a$, the exact balance relation is
+Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$. If the chain-sealed boundary assigns deposit $f_a$ and withdrawal $w_a$, the exact balance relation is
 
 $$
 \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
