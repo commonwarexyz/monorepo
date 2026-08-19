@@ -102,8 +102,7 @@ aws-sdk-s3 = { version = "1.138.0", default-features = false, features = [
 	"rt-tokio",
 	"sigv4a",
 ] }
-aws-smithy-runtime-api = { version = "1.13.0", features = ["client", "http-1x"] }
-aws-smithy-types = "1.6.1"
+aws-smithy-runtime-api = { version = "1.13.0", features = ["client"] }
 axum = "0.8.9"
 blake3 = { version = "1.8.5", default-features = false }
 blst = { version = "0.3.16", default-features = false }
@@ -162,7 +161,6 @@ glob = "0.3.3"
 governor = "0.10.4"
 gungraun = "0.19.4"
 hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
-http = "1.4.0"
 io-uring = "0.7.13"
 libc = "0.2.186"
 libfuzzer-sys = "0.4.13"

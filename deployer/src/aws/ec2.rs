@@ -38,6 +38,19 @@ type LaunchSdkError = SdkError<RunInstancesError>;
 
 // RunInstances disables SDK retries below, so its owner retains the SDK's standard transient
 // service categories while handling capacity responses at the availability-zone level.
+const FATAL_LAUNCH_ERROR_CODE_PREFIXES: &[&str] = &[
+    "UnauthorizedOperation",
+    "OptInRequired",
+    "VcpuLimitExceeded",
+    "InstanceLimitExceeded",
+    "MaxSpotInstanceCountExceeded",
+    "VolumeLimitExceeded",
+    "InvalidParameterValue",
+    "InvalidAMIID",
+    "InvalidSubnetID",
+    "InvalidGroup",
+    "InvalidKeyPair",
+];
 const RETRYABLE_LAUNCH_ERROR_CODES: &[&str] = &[
     "Throttling",
     "ThrottlingException",
@@ -612,17 +625,26 @@ fn is_subnet_unavailable_error(error: &LaunchSdkError) -> bool {
     launch_error_code(error) == Some("InsufficientFreeAddressesInSubnet")
 }
 
+/// Checks if an EC2 error code belongs to a fatal authorization, configuration, or quota family.
+/// Some EC2 code families append a subtype suffix, such as `InvalidAMIID.NotFound`.
+fn is_fatal_launch_error_code(code: &str) -> bool {
+    FATAL_LAUNCH_ERROR_CODE_PREFIXES
+        .iter()
+        .any(|prefix| code.starts_with(prefix))
+}
+
 /// Checks if retrying the same idempotent RunInstances request may resolve the failure.
 fn is_retryable_launch_error(error: &LaunchSdkError) -> bool {
     match error {
         SdkError::TimeoutError(_) | SdkError::ResponseError(_) => true,
-        SdkError::DispatchFailure(context) => context.is_io() || context.is_timeout(),
+        SdkError::DispatchFailure(context) => {
+            context.is_io() || context.is_timeout() || context.as_other().is_some()
+        }
         SdkError::ServiceError(context) => {
-            context
-                .err()
-                .code()
-                .is_some_and(|code| RETRYABLE_LAUNCH_ERROR_CODES.contains(&code))
-                || RETRYABLE_LAUNCH_STATUS_CODES.contains(&context.raw().status().as_u16())
+            let code = context.err().code();
+            !code.is_some_and(is_fatal_launch_error_code)
+                && (code.is_some_and(|code| RETRYABLE_LAUNCH_ERROR_CODES.contains(&code))
+                    || RETRYABLE_LAUNCH_STATUS_CODES.contains(&context.raw().status().as_u16()))
         }
         _ => false,
     }
@@ -1333,13 +1355,15 @@ mod tests {
         config::{AsyncSleep, Credentials, Sleep},
         error::BuildError,
     };
-    use aws_smithy_runtime_api::client::{
-        http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},
-        orchestrator::{HttpRequest, HttpResponse},
-        result::ConnectorError,
+    use aws_smithy_runtime_api::{
+        client::{
+            http::{HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn},
+            orchestrator::{HttpRequest, HttpResponse},
+            result::ConnectorError,
+            retries::ErrorKind,
+        },
+        http::StatusCode,
     };
-    use aws_smithy_types::body::SdkBody;
-    use http::Response;
     use std::{
         collections::{BTreeMap, BTreeSet},
         sync::{
@@ -1361,6 +1385,8 @@ mod tests {
 <Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>not authorized</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
     const OPT_IN_REQUIRED_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Response><Errors><Error><Code>OptInRequired</Code><Message>region is not enabled</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
+    const VCPU_LIMIT_ERROR: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>VcpuLimitExceeded</Code><Message>quota exceeded</Message></Error></Errors><RequestID>request-id</RequestID></Response>"#;
     const LAUNCH_SUCCESS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><instancesSet><item><instanceId>i-test</instanceId></item></instancesSet></RunInstancesResponse>"#;
 
@@ -1368,6 +1394,7 @@ mod tests {
     enum ResponseSpec {
         Http { status: u16, body: &'static str },
         IoError,
+        TransientOther,
     }
 
     fn replay_response(status: u16, body: &'static str) -> ResponseSpec {
@@ -1382,12 +1409,7 @@ mod tests {
     }
 
     fn http_response(status: u16, body: &'static str) -> HttpResponse {
-        Response::builder()
-            .status(status)
-            .body(SdkBody::from(body))
-            .unwrap()
-            .try_into()
-            .unwrap()
+        HttpResponse::new(StatusCode::try_from(status).unwrap(), body.into())
     }
 
     #[derive(Clone, Debug)]
@@ -1446,6 +1468,10 @@ mod tests {
                     Some(ResponseSpec::Http { status, body }) => Ok(http_response(status, body)),
                     Some(ResponseSpec::IoError) => Err(ConnectorError::io(
                         std::io::Error::other("scripted connection failure").into(),
+                    )),
+                    Some(ResponseSpec::TransientOther) => Err(ConnectorError::other(
+                        "scripted incomplete response".into(),
+                        Some(ErrorKind::TransientError),
                     )),
                     None => Err(ConnectorError::other(
                         "no scripted EC2 response remains".into(),
@@ -1599,12 +1625,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_connector_other_retries_same_request() {
+        let (client, connector) = client(vec![
+            ResponseSpec::TransientOther,
+            replay_response(200, LAUNCH_SUCCESS),
+        ]);
+
+        launch(&client)
+            .await
+            .expect("a typed transient connector failure should retry the same subnet");
+
+        let bodies = connector.request_bodies();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(client_token(&bodies[0]), client_token(&bodies[1]));
+    }
+
+    #[tokio::test]
     async fn permanent_service_errors_are_not_retried() {
         for (status, body) in [(400, UNAUTHORIZED_ERROR), (400, OPT_IN_REQUIRED_ERROR)] {
             let (client, connector) = client(vec![replay_response(status, body)]);
             let result = tokio::time::timeout(Duration::from_millis(50), launch(&client))
                 .await
                 .expect("permanent service error must return immediately");
+            assert!(result.is_err());
+            assert_eq!(connector.request_count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn fatal_service_code_overrides_retryable_status() {
+        for body in [UNAUTHORIZED_ERROR, OPT_IN_REQUIRED_ERROR, VCPU_LIMIT_ERROR] {
+            let (client, connector) = client(vec![replay_response(500, body)]);
+
+            let result = tokio::time::timeout(Duration::from_millis(50), launch(&client))
+                .await
+                .expect("a fatal service code must return immediately despite its status");
+
             assert!(result.is_err());
             assert_eq!(connector.request_count(), 1);
         }
