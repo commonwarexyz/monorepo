@@ -288,10 +288,13 @@ struct ShardParts<'a, T: Translator, V: Send + Sync> {
     spills: &'a Counter,
 }
 
+/// Per-shard extraction of the spilled partition maps a batch touches, one map per shard.
+type SpilledMinis<K, V> = Vec<HashMap<usize, BTreeMap<K, Vec<V>>>>;
+
 impl<'a, T: Translator, V: Send + Sync> ShardParts<'a, T, V> {
     /// Reborrow a shorter-lived view, letting a caller keep this one after a
     /// consuming call.
-    fn reborrow(&mut self) -> ShardParts<'_, T, V> {
+    const fn reborrow(&mut self) -> ShardParts<'_, T, V> {
         ShardParts {
             base: self.base,
             partitions: self.partitions,
@@ -306,7 +309,7 @@ impl<'a, T: Translator, V: Send + Sync> ShardParts<'a, T, V> {
     }
 
     /// The partition at global index `i`.
-    fn partition(&mut self, i: usize) -> &mut Partition<T::Key, V> {
+    const fn partition(&mut self, i: usize) -> &mut Partition<T::Key, V> {
         &mut self.partitions[i - self.base]
     }
 
@@ -703,7 +706,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                 (p_lo, p_hi)
             })
             .collect();
-        let mut minis: Vec<HashMap<usize, BTreeMap<T::Key, Vec<V>>>> =
+        let mut minis: SpilledMinis<T::Key, V> =
             (0..ranges.len()).map(|_| HashMap::new()).collect();
         if !self.spilled.is_empty() {
             // Extract exactly the spilled maps this batch touches: walk each

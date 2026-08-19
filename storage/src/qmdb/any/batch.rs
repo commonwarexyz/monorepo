@@ -722,7 +722,7 @@ fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
         move_commit_bit(&mut bitmap, *last_commit_loc, tip);
         drop(bitmap);
 
-        let diffs: Vec<(&[u8], Option<Location<F>>, Option<Location<F>>)> = batch
+        let diffs: Vec<crate::index::KeyValueDiff<'_, Location<F>>> = batch
             .diff
             .iter()
             .map(|(key, entry)| {
