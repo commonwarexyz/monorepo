@@ -300,8 +300,10 @@ O’Grady</a></div>
         pair <span class="math inline">\mathsf{Out}_a</span> when the
         account sent, its <span
         class="math inline">\mathsf{HeadRoot}</span>, and a running
-        total <span class="math inline">\mathsf{prefix}_a</span> of
-        every row quantity over the sorted rows so far:</p>
+        total <span class="math inline">\mathsf{prefix}_a</span> over
+        the sorted rows so far, where <span
+        class="math inline">\chi</span> flags a withdrawal record and
+        <span class="math inline">h</span> counts component heads:</p>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{prefix}_a&amp;=\sum_{a&#39;\le
@@ -309,31 +311,28 @@ O’Grady</a></div>
         \mathsf{Row}_a&amp;=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{HeadRoot}_e(a),\;\mathsf{prefix}_a\bigr).
         \end{aligned}
         </span></p>
-        <p>Here <span class="math inline">\chi_{a&#39;}</span> flags a
-        withdrawal record and <span
-        class="math inline">h_{a&#39;}</span> counts component heads.
-        Each prefix must extend its predecessor’s exactly, so the
-        terminal row alone carries the epoch’s totals.</p>
-        <p>The rows are strictly sorted by account, with exactly one for
-        every account whose authenticated state changes:</p>
+        <p>Each prefix must extend its predecessor’s exactly, so the
+        terminal row alone carries the epoch’s totals. The rows are
+        strictly sorted by account, with exactly one for every account
+        whose authenticated state changes:</p>
         <p><span class="math display">
         \mathbf
         A_e=(\mathsf{Row}_a,\;\mathsf{Row}_b,\;\mathsf{Row}_c,\;\mathsf{Row}_d),
         \qquad a&lt;b&lt;c&lt;d.
         </span></p>
         <h2 id="one-exact-close">One Exact Close</h2>
-        <p>The sorted rows form a length-bound <span
-        class="math inline">\mathsf{ChangeRoot}</span>, which
-        authenticates the compact change vector. The paired sparse
-        witness reconstructs the opening and closing roots together over
-        the row positions <span class="math inline">\mathcal J_e</span>.
-        Each row supplies its opening and closing leaf, while every
-        omitted subtree contributes one authenticated digest to both
-        sides, collected as the sparse frontier <span
-        class="math inline">\Phi_e</span>. Successful verification
-        proves every omitted position unchanged and every row position
-        changed to exactly its committed close. An account changes if
-        and only if it has a row.</p>
+        <p>Commit <span class="math inline">\mathbf A_e</span> under
+        <span class="math inline">\mathsf{ChangeRoot}_e</span>, a Merkle
+        root that binds the exact row count and every row in order. The
+        paired sparse witness reconstructs the opening and closing roots
+        together over the row positions <span
+        class="math inline">\mathcal J_e</span>. Each row supplies its
+        opening and closing leaf, while every omitted subtree
+        contributes one authenticated digest to both sides, collected as
+        the sparse frontier <span class="math inline">\Phi_e</span>.
+        Successful verification proves every omitted position unchanged
+        and every row position changed to exactly its committed close.
+        An account changes if and only if it has a row.</p>
         <p>The settlement chain retains a header <span
         class="math inline">\mathsf{Header}_e</span> containing the
         opening <span class="math inline">\mathsf{StateRoot}_e</span>,

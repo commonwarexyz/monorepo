@@ -110,7 +110,7 @@ $$
 \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
 $$
 
-Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{HeadRoot}$, and a running total $\mathsf{prefix}_a$ of every row quantity over the sorted rows so far:
+Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{HeadRoot}$, and a running total $\mathsf{prefix}_a$ over the sorted rows so far, where $\chi$ flags a withdrawal record and $h$ counts component heads:
 
 $$
 \begin{aligned}
@@ -119,9 +119,7 @@ $$
 \end{aligned}
 $$
 
-Here $\chi_{a'}$ flags a withdrawal record and $h_{a'}$ counts component heads. Each prefix must extend its predecessor's exactly, so the terminal row alone carries the epoch's totals.
-
-The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes:
+Each prefix must extend its predecessor's exactly, so the terminal row alone carries the epoch's totals. The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes:
 
 $$
 \mathbf A_e=(\mathsf{Row}_a,\;\mathsf{Row}_b,\;\mathsf{Row}_c,\;\mathsf{Row}_d),
@@ -130,7 +128,7 @@ $$
 
 ## One Exact Close
 
-The sorted rows form a length-bound $\mathsf{ChangeRoot}$, which authenticates the compact change vector. The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
+Commit $\mathbf A_e$ under $\mathsf{ChangeRoot}_e$, a Merkle root that binds the exact row count and every row in order. The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
 
 The settlement chain retains a header $\mathsf{Header}_e$ containing the opening $\mathsf{StateRoot}_e$, $\mathsf{ChangeRoot}_e$, and closing $\mathsf{StateRoot}_{e+1}$, together with the quorum certificate. Admission receives the terminal changed row and its Merkle opening separately, authenticates the row against $\mathsf{ChangeRoot}_e$, checks its aggregate prefixes, and retains neither.
 
