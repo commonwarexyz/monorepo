@@ -68,11 +68,15 @@ pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strateg
 
 type MerkleizedBatchArc<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item, S>>;
 
+/// Result of a merkleize job: the merkleized batch and its root digest.
+type MerkleizeResult<F, H, Item, S> =
+    Result<(MerkleizedBatchArc<F, H, Item, S>, <H as Hasher>::Digest), merkle::Error<F>>;
+
 impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     UnmerkleizedBatch<F, H, Item, S>
 {
     /// The batch's parent, if it has one (the committed journal otherwise).
-    pub(crate) fn parent(&self) -> Option<&MerkleizedParent<F, H, Item, S>> {
+    pub(crate) const fn parent(&self) -> Option<&MerkleizedParent<F, H, Item, S>> {
         self.parent.as_ref()
     }
 
@@ -356,12 +360,7 @@ where
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
         items: Vec<C::Item>,
         inactive_peaks: usize,
-    ) -> impl Future<
-        Output = Result<(MerkleizedBatchArc<F, H, C::Item, S>, H::Digest), merkle::Error<F>>,
-    >
-    + Send
-    + 'static
-    + use<F, E, C, H, S>
+    ) -> impl Future<Output = MerkleizeResult<F, H, C::Item, S>> + Send + 'static + use<F, E, C, H, S>
     where
         C::Item: 'static,
     {
