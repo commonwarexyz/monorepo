@@ -1,6 +1,7 @@
 //! Types for use as [crate::Read::Cfg].
 
 use core::{
+    cmp::Ordering,
     num::{NonZeroU8, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{Bound, RangeBounds},
 };
@@ -193,22 +194,39 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
     }
 
     /// Returns true if the value is within this range.
+    ///
+    /// Bounds are checked with inclusion tests rather than exclusion tests so
+    /// that values incomparable to a bound (such as `f64::NAN`) are rejected,
+    /// matching [`RangeBounds::contains`].
     pub fn contains(&self, value: &T) -> bool {
-        // Exclude by start bound
+        // Include by start bound. `partial_cmp` returns `None` for values
+        // incomparable to the bound, which is treated as out of range.
         match &self.start {
-            Bound::Included(s) if value < s => return false,
-            Bound::Excluded(s) if value <= s => return false,
-            _ => {}
+            Bound::Included(s) => match s.partial_cmp(value) {
+                Some(Ordering::Less | Ordering::Equal) => {}
+                _ => return false,
+            },
+            Bound::Excluded(s) => match s.partial_cmp(value) {
+                Some(Ordering::Less) => {}
+                _ => return false,
+            },
+            Bound::Unbounded => {}
         }
 
-        // Exclude by end bound
+        // Include by end bound
         match &self.end {
-            Bound::Included(e) if value > e => return false,
-            Bound::Excluded(e) if value >= e => return false,
-            _ => {}
+            Bound::Included(e) => match value.partial_cmp(e) {
+                Some(Ordering::Less | Ordering::Equal) => {}
+                _ => return false,
+            },
+            Bound::Excluded(e) => match value.partial_cmp(e) {
+                Some(Ordering::Less) => {}
+                _ => return false,
+            },
+            Bound::Unbounded => {}
         }
 
-        // If not excluded by either bound, the value is within the range
+        // Within both bounds
         true
     }
 }
@@ -446,5 +464,15 @@ mod tests {
         // Type inference when assigning to typed variable
         let cfg: RangeCfg<u32> = RangeCfg::new(0..1000);
         assert!(cfg.contains(&500));
+    }
+
+    #[test]
+    fn test_range_cfg_partial_ord_nan() {
+        // NaN is unordered: it is neither less than, greater than, nor equal
+        // to any bound. `RangeCfg::contains` must reject it, matching
+        // `RangeBounds::contains` from core.
+        let cfg = RangeCfg::new(0.0f64..=1.0f64);
+        assert!(!RangeBounds::contains(&cfg, &f64::NAN));
+        assert!(!cfg.contains(&f64::NAN));
     }
 }
