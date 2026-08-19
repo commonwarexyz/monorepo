@@ -110,29 +110,31 @@ O’Grady</a></div>
                         <div class="date">August 14th, 2026</div>
         </div>
         <p>$0.000001 payments cost more to replicate, settle onchain,
-        and index than they’re worth.</p>
-        <p>More blockspace, bandwidth, and storage let a network carry
-        more payment records. The economic question is whether every
-        payment needs one.</p>
-        <p>Existing designs answer with different guarantees, each at a
-        public cost that grows along its own axis. Direct onchain
-        settlement gives every payment public finality by publishing
-        every payment. A payment channel settles only the latest state
-        of one pre-funded pair, and a routed network extends that pair
-        across a path by reserving liquidity and enforceable claims at
-        every hop. A general-purpose rollup validates arbitrary
-        execution, paying in proofs and data for a generality payments
-        do not need. Between two fixed parties, payments are already
-        cheap and instant. Across an open set of accounts, nothing
-        is.</p>
+        and index than they’re worth. Yet your agents will make millions
+        of these tiny payments for you over the coming years.</p>
+        <p>Suppose blockspace scaled to a billion TPS. You still would
+        not want to land these payments there: at that rate a chain
+        replicates and indexes petabytes of $0.000001 payments every
+        day, forever. A chain needs to remember where balances end up,
+        not every payment that moved them.</p>
+        <p>Existing designs draw that line differently, each at a public
+        cost that grows along its own axis. Direct onchain settlement
+        gives every payment public finality by publishing every payment.
+        A payment channel settles only the latest state of one
+        pre-funded pair, and a routed network extends that pair across a
+        path by reserving liquidity and enforceable claims at every hop.
+        A general-purpose rollup validates arbitrary execution, paying
+        in proofs and data for a generality payments do not need, and
+        even a payments-only rollup that commits state diffs pays a
+        prover per payment and leaves its preconfirmations as its
+        operator’s word. Between two fixed parties, payments are already
+        cheap and instant. Across an open set of accounts—an agent
+        paying whoever serves it—nothing is.</p>
         <p>For payments this small over an open set of accounts, the
         design goals are a pair: cheap settlement at massive scale, and
         preconfirmations credible and fast enough that the recipient can
         act the moment an operator accepts a payment. Public finality
-        arrives later, as part of a larger close. Trust in the operator
-        spans only the gap between acceptance and admission: the close
-        is validated before it is admitted, and afterward a single
-        contradicting receipt is fatal.</p>
+        arrives later, as part of a larger close.</p>
         <p><strong>Bajillion</strong>, the account-level clearing
         protocol this post presents, is built for exactly that pair
         within one operator and custody system. It makes the account the
@@ -146,23 +148,27 @@ O’Grady</a></div>
         <p>The operator still verifies and durably records every
         payment. Users trust it for custody and online service. The
         savings appear in public settlement when many payments reuse the
-        same accounts.</p>
+        same accounts—exactly the shape of agent traffic, where the same
+        principals pay the same services millions of times.</p>
         <p>That choice defines the rest of the design. The close must
         prove exact account changes without replaying a public payment
         log. A privately delivered receipt must still constrain
-        settlement. Users need a recovery path if the operator stops,
-        and closing one epoch should not halt payments in the next.</p>
+        settlement, so trust in the operator spans only the gap between
+        acceptance and admission: the close is validated before it is
+        admitted, and afterward a single contradicting receipt is fatal.
+        Users need a recovery path if the operator stops, and closing
+        one epoch should not halt payments in the next.</p>
         <p>Both goals land at their floors. A preconfirmation cannot
         arrive in less than one round trip to the party that serializes
-        the payer’s spending, and acceptance here is that single round
-        trip, returning a receipt a conforming close must honor. A
-        settlement whose users can recover from public data alone cannot
-        make less than the changed state available, and the close
-        carries that state plus only terminal signed pairs and a sparse
-        frontier: the same size after one payment or a bajillion over a
-        fixed changed-account and component footprint.</p>
-        <p>The construction starts with the signed evidence for one
-        accepted payment.</p>
+        the payer’s spending, and acceptance here is exactly that round
+        trip. A settlement whose users can recover from public data
+        alone cannot make less than the changed state available, and the
+        close carries that state plus only terminal signed pairs and a
+        sparse frontier: the same size after one payment or a bajillion
+        over a fixed changed-account and component footprint.</p>
+        <p>The construction is deliberately simple—signatures, Merkle
+        openings, and one challenge window—and it starts with the signed
+        evidence for one accepted payment.</p>
         <h2 id="one-signed-payment">One Signed Payment</h2>
         <p>An epoch begins from an authenticated account vector and a
         chain-sealed anchor <span class="math inline">\mathcal
@@ -513,6 +519,15 @@ O’Grady</a></div>
         attestation. Each can certify the exact public-validity relation
         over selected inputs. None proves the nonexistence of an
         additional private signature.</p>
+        <p>That one fact has a single natural home. A payment is its
+        matching pair, handed to the payer and forwarded to its
+        recipient, so at close the recipient holds every payment it ever
+        received—outside the operator being checked, no other party
+        does. No verifier can do better than the recipient’s own record:
+        evidence of an undisclosed receipt exists nowhere except in its
+        holders’ hands, and a receipt delivered to no one has injured no
+        one who relied on it. The protocol places the completeness check
+        exactly where the complete record already sits.</p>
         <p>The challenge window is what makes a preconfirmation credible
         rather than reputational. Through the inclusive deadline <span
         class="math inline">t\le\Delta_e</span>, any holder or
@@ -967,6 +982,18 @@ O’Grady</a></div>
         and their sparse frontier rather than 300,000 payment records. A
         channel network would carry the same flow on three funded links
         whose liquidity the cycle merely shuffles.</p>
+        <p>A payment-specific validity rollup, such as <a
+        href="https://lighter.xyz">Lighter</a>, narrows execution to a
+        minimal operation set and commits state diffs, which brings its
+        settlement data close to this design’s rows. Two gaps remain.
+        Proving is priced per payment executed, expensive at this scale
+        even with recent advances, while Bajillion’s close is built and
+        checked with plain signatures and hashes. And a validity proof
+        certifies whatever its operator chose to execute—an undisclosed
+        promise is exactly the one fact validation cannot see—so its
+        preconfirmations stay the operator’s word. The receipt challenge
+        turns that word into enforceable evidence with no prover in the
+        loop.</p>
         <p>Plasma makes a different choice about what users can
         reconstruct. The <a href="https://plasma.io/plasma.pdf">original
         Plasma construction</a> commits roots of an ordered child-chain
