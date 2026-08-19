@@ -417,7 +417,7 @@ function buildPaymentMinimal(mount) {
   const svg = baseSvg(mount);
   const s = new Scene(
     svg,
-    'Accepting one payment',
+    'Accepting One Payment',
     'one round trip',
   );
 
@@ -638,7 +638,7 @@ function buildRolloverMinimal(mount) {
   const svg = baseSvg(mount);
   const s = new Scene(
     svg,
-    'Closing e while spending in e+1',
+    'Closing e While Spending in e+1',
     'same +5 • never overwrite',
   );
 
