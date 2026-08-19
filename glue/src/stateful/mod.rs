@@ -280,12 +280,9 @@ where
     /// voting, do not resolve this future yet. Abstaining is not represented by
     /// a special return value.
     ///
-    /// Validity is relative to the supplied inputs, and the boundary is the
-    /// applied anchor move. A verdict completed before the anchor moves stays
-    /// valid even when a competing branch finalizes afterward. A verdict that
-    /// completes after the anchor moved is answered from the new canonical
-    /// chain instead. True when the block itself became canonical, and false
-    /// when its branch is no longer reachable.
+    /// Validity is relative to the supplied inputs. A completed verdict stays
+    /// valid even when a competing branch finalizes: the wrapper may discard
+    /// the verified state instead of caching it, but the answer is unchanged.
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).

@@ -457,16 +457,19 @@ where
             );
             return Attempt::Done(VerificationResult::Decided(false));
         }
+        // Caching is retention, not part of the verdict. The execution matched
+        // the block's commitments on its own branch, and a finalization
+        // discarding the entry does not change that answer.
         if !self
             .execution
             .cache_pending(block_digest, parent.digest, round, merkleized)
         {
-            warn!(
+            debug!(
                 parent_digest = ?parent.digest,
                 ?block_digest,
-                "verification result became incompatible before caching"
+                "verified state not cached, overtaken by finalization"
             );
-            return Attempt::Done(VerificationResult::Decided(false));
+            return Attempt::Done(VerificationResult::Decided(true));
         }
         self.execution.update_pending_metric();
         drop(block);

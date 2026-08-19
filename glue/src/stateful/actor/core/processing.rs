@@ -682,6 +682,21 @@ mod tests {
             false,
         )
         .await;
+        spawn_gated_application_over(context, app, marshal)
+    }
+
+    /// Spawn the gated application's processing loop over a caller-supplied
+    /// marshal fixture.
+    fn spawn_gated_application_over(
+        context: &deterministic::Context,
+        app: GatedApp,
+        marshal: fixtures::MarshalFixture,
+    ) -> (
+        Mailbox<deterministic::Context, GatedApp>,
+        Subscriber<SnapshotsOf<TestDatabases, deterministic::Context>>,
+        Box<dyn std::any::Any>,
+        Handle<()>,
+    ) {
         let processor = Processor::new(
             app,
             test_databases(),
@@ -898,6 +913,68 @@ mod tests {
             assert!(verify.await);
             actor.abort();
             drop(marshal);
+        });
+    }
+
+    /// A valid verification overtaken by its own descendant's finalization
+    /// still answers true.
+    #[test]
+    fn overtaken_verification_of_finalized_block_answers_true() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                proposal_gate: Arc::new(Mutex::new(None)),
+                verify_valid: true,
+                stale_verifies: Arc::new(Mutex::new(0)),
+                observed_contexts: Arc::default(),
+            };
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&block, 2);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"gated-application", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "overtaken-canonical",
+                scheme,
+                &block,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (mut mailbox, _subscriber, marshal_guards, actor) =
+                spawn_gated_application_over(&context, app, marshal);
+
+            let block_context = block.context();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block_context),
+                ancestry::from_iter([Arc::new(block.clone()), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification should start");
+
+            // The candidate and then its child finalize while the verification
+            // is parked, moving the anchor past the candidate's height.
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block), acknowledgement));
+            waiter
+                .await
+                .expect("candidate finalization should be acknowledged");
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(child), acknowledgement));
+            waiter
+                .await
+                .expect("child finalization should be acknowledged");
+
+            // The resumed execution succeeds with no stale read to surface, and
+            // the refused cache does not change the verdict.
+            release.send(()).expect("verification should remain active");
+            assert!(verify.await);
+            actor.abort();
+            drop(marshal_guards);
         });
     }
 
@@ -1421,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_refuses_incompatible_verification_result() {
+    fn finalized_away_fork_verification_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (fork_gate, fork_started, fork_release) = application_gate();
             let (child_gate, child_started, child_release) = application_gate();
@@ -1477,14 +1554,14 @@ mod tests {
             }
 
             // The losing child runs to completion. Its parent is gone from the
-            // pending set, so caching its result is refused and the verdict is
-            // false.
+            // pending set, so caching its result is refused, and the verdict
+            // is unchanged.
             child_release
                 .send(())
                 .expect("the attempt should still be live after the apply");
             select! {
                 valid = &mut verify_child => {
-                    assert!(!valid, "verification on a finalized-away fork must fail");
+                    assert!(valid, "a branch-valid verification answers true on a finalized-away fork");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!("incompatible verification did not resolve");
@@ -1494,8 +1571,10 @@ mod tests {
         });
     }
 
+    /// A verification whose fork was swept by a finalization still answers its
+    /// branch-relative verdict.
     #[test]
-    fn finalization_rejects_deep_incompatible_verification() {
+    fn pruned_deep_fork_verification_answers_true() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (parent_gate, parent_started, parent_release) = application_gate();
             let (child_gate, child_started, child_release) = application_gate();
@@ -1575,8 +1654,8 @@ mod tests {
             actor.abort();
             assert_eq!(
                 result,
-                Some(false),
-                "verification on a pruned deep fork must resolve false",
+                Some(true),
+                "a branch-valid verification answers true even after its fork is pruned",
             );
         });
     }
