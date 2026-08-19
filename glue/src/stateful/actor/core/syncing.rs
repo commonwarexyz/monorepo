@@ -38,7 +38,7 @@ use commonware_utils::{
 };
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::Arc};
-use tracing::{Instrument as _, debug, error, info_span};
+use tracing::{Instrument as _, debug, error, info_span, warn};
 
 /// Finalized work needed to transition from syncing to processing.
 enum FinalizedHandoff<B> {
@@ -348,6 +348,10 @@ where
 
         let mut pending_prune = None;
 
+        // One signal for the whole handoff. Re-creating it per block would
+        // record an extra auditor event on the deterministic runtime each time.
+        let mut shutdown = context.stopped();
+
         for handoff in handoffs {
             match handoff {
                 FinalizedHandoff::Covered(block, acknowledgement)
@@ -358,15 +362,30 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
+                    // The stop signal covers the apply await, so an application
+                    // parked mid-apply cannot wedge shutdown. The block stays
+                    // unacknowledged, and marshal redelivers it after a restart.
                     let applied;
-                    (processor, applied) = processor
-                        .finalize(context.as_present(), block.as_ref())
-                        .await;
-                    let Applied {
+                    select! {
+                        _ = &mut shutdown => {
+                            warn!(
+                                height = block.height().get(),
+                                "exiting mid-handoff on shutdown"
+                            );
+                            return;
+                        },
+                        driven = processor.finalize(context.as_present(), block.as_ref()) => {
+                            (processor, applied) = driven;
+                        },
+                    }
+                    let Some(Applied {
                         snapshots,
                         barrier,
                         prune,
-                    } = applied.expect("sync handoff block cannot be a duplicate");
+                    }) = applied
+                    else {
+                        panic!("sync handoff block cannot be a duplicate")
+                    };
 
                     // The processing loop's flush pool does not exist yet, so observe the
                     // deferred flush inline. Keep state-sync metadata in progress until every

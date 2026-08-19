@@ -50,7 +50,7 @@ use futures::{
 };
 use rand_core::Rng;
 use std::{collections::BTreeSet, sync::mpsc::TryRecvError};
-use tracing::{Instrument as _, debug, info_span};
+use tracing::{Instrument as _, debug, info_span, warn};
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
@@ -235,6 +235,10 @@ where
                     loop {
                         if receive_messages {
                             select! {
+                                _ = &mut shutdown => {
+                                    debug!("shutdown signal received, stopping processing");
+                                    return;
+                                },
                                 _ = &mut proposal => break,
                                 message = self.mailbox.recv() => match message {
                                     Some(Message::Verify {
@@ -264,6 +268,10 @@ where
                             }
                         } else {
                             select! {
+                                _ = &mut shutdown => {
+                                    debug!("shutdown signal received, stopping processing");
+                                    return;
+                                },
                                 _ = &mut proposal => break,
                                 _ = verifications.next_completed() => {},
                             }
@@ -307,12 +315,26 @@ where
 
                     // The apply owns mutation. Live verification jobs pause at
                     // their next batch operation and resume afterward, so they
-                    // keep being polled throughout.
+                    // keep being polled throughout. The stop signal covers the
+                    // await: an application parked mid-apply cannot wedge
+                    // shutdown, and exiting just drops un-applied batches. The
+                    // block stays unacknowledged, and marshal redelivers it
+                    // after a restart.
                     let applied;
-                    (processor, applied) = verifications
-                        .drive(processor.finalize(self.context.as_present(), block.as_ref()))
-                        .instrument(process.clone())
-                        .await;
+                    select! {
+                        _ = &mut shutdown => {
+                            warn!(
+                                height = block.height().get(),
+                                "exiting mid-finalize on shutdown"
+                            );
+                            return;
+                        },
+                        driven = verifications
+                            .drive(processor.finalize(self.context.as_present(), block.as_ref()))
+                            .instrument(process.clone()) => {
+                            (processor, applied) = driven;
+                        },
+                    }
 
                     // Keep the publication bookkeeping under the same span.
                     let _span = process.entered();
@@ -2963,6 +2985,186 @@ mod tests {
             loop {
                 context.sleep(Duration::from_millis(100)).await;
             }
+        });
+    }
+
+    /// An application still parked inside execution when shutdown begins.
+    #[derive(Clone)]
+    struct ParkedApp {
+        /// Signals entry into `verify` or `apply`.
+        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl Application<deterministic::Context> for ParkedApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestApp as Application<deterministic::Context>>::Context;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            panic!("shutdown application genesis is not used")
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
+            panic!("shutdown application propose is not used")
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            mut ancestry: impl Ancestry<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
+            let _ = ancestry.next().await;
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            std::future::pending().await
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> Result<TestMerkleized, ExecutionError> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            std::future::pending().await
+        }
+    }
+
+    /// A spawned parked application's mailbox, execution entry signal, marshal
+    /// guard, and actor handle.
+    type SpawnedParkedApplication = (
+        Mailbox<deterministic::Context, ParkedApp>,
+        oneshot::Receiver<()>,
+        Box<dyn std::any::Any>,
+        Handle<()>,
+    );
+
+    fn spawn_parked_application(
+        context: &deterministic::Context,
+        marshal: fixtures::MarshalFixture,
+    ) -> SpawnedParkedApplication {
+        let (started_tx, started) = oneshot::channel();
+        let processor = Processor::new(
+            ParkedApp {
+                started: Arc::new(Mutex::new(Some(started_tx))),
+            },
+            test_databases(),
+            anchor(0, 0),
+            StatefulMetrics::new(context),
+            None,
+        );
+        let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let publication_context = context.child("publication");
+        let (publisher, _subscriber) = Publisher::new(&publication_context);
+        let processing = Processing {
+            context: ContextCell::new(context.child("processing")),
+            mailbox: receiver,
+            provider: (),
+            marshal: marshal.mailbox,
+            snapshot_publisher: publisher,
+            skip_finalized_until: None,
+        };
+        let actor = context
+            .child("loop")
+            .spawn(move |_| processing.start(processor, Vec::new()));
+        (Mailbox::new(sender), started, marshal.guards, actor)
+    }
+
+    /// The stop signal interrupting a finalize replay parked in the application
+    /// exits the actor loop instead of wedging it. The block stays
+    /// unacknowledged so marshal redelivers it after a restart.
+    #[test]
+    fn shutdown_interrupts_a_parked_finalize() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"shutdown-app", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "finalize-shutdown",
+                scheme,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let (mut mailbox, started, guards, actor) = spawn_parked_application(&context, marshal);
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block), acknowledgement));
+            started.await.expect("finalize replay should start");
+
+            let stopper = context.child("stopper");
+            context.child("stop").spawn(|_| async move {
+                stopper.stop(0, None).await.expect("runtime should stop");
+            });
+            assert!(
+                waiter.await.is_err(),
+                "an interrupted finalize must leave the block unacknowledged",
+            );
+            actor.await.expect("the actor should exit cleanly");
+            drop(guards);
+        });
+    }
+
+    /// A verification still in flight at shutdown never resolves for the
+    /// caller and never panics it, before or after the actor exits.
+    #[test]
+    fn verify_caller_parks_across_shutdown() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"shutdown-app", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "verify-shutdown",
+                scheme,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let (mut mailbox, started, guards, actor) = spawn_parked_application(&context, marshal);
+
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let mut verify = Box::pin(mailbox.verify(
+                (context.child("verify"), block.context()),
+                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification should start");
+
+            let stopper = context.child("stopper");
+            context.child("stop").spawn(|_| async move {
+                stopper.stop(0, None).await.expect("runtime should stop");
+            });
+            actor.await.expect("the actor should exit cleanly");
+            for _ in 0..64 {
+                assert!(
+                    poll!(&mut verify).is_pending(),
+                    "an unanswered verify must park its caller",
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            drop(guards);
         });
     }
 

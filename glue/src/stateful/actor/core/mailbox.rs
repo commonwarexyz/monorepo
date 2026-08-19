@@ -227,9 +227,13 @@ where
             ancestry: BoxedAncestry::new(ancestry),
             verification: Verification { response },
         });
-        receiver
-            .await
-            .expect("stateful actor dropped during verify")
+        match receiver.await {
+            Ok(valid) => valid,
+            // The actor exited or discarded the request while shutting down.
+            // Never fabricate a verdict. Park until the caller loses interest
+            // and drops this future.
+            Err(_) => std::future::pending().await,
+        }
     }
 }
 
