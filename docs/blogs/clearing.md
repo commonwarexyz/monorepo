@@ -216,25 +216,17 @@ A successful receipt challenge blocks the challenged slot and every admitted des
 
 ## A Deadline to Exit
 
-Blocking a contradicted close matters only if users can still recover their funds. The exit path starts with chain-sealed deposits and signed withdrawals.
-
-A deposit has no deadline. A finalized deposit immediately raises custody, and its record enters the next boundary that admits it. If terminal unwind begins before that boundary's slot finalizes, the deposit returns in the terminal payout. A stalled deposit alone can neither trigger deployment unwind nor claim a bounded exit.
-
-A withdrawal is signed against an existing finalized root $\mathsf{rt}_z$ and names no future epoch or anchor:
+A successful challenge stops a contested close from finalizing, but stopping it is not enough: users must still be able to get their funds out. So every account holds a unilateral exit, a signed withdrawal queued directly onchain.
 
 $$
-Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr),
+Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr).
 $$
 
-with an eligible destination $v$, amount $x$, full-close flag $\gamma$, and absolute deadline $\tau$. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address: the funds arrive at release, with no preconfirmation in between. Queueing is a direct, permissionless chain call. The operator neither submits nor approves it. Operator cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind.
+$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an amount $x$, a full-close flag $\gamma$, and an absolute deadline $\tau$. The operator neither submits nor approves it, and its cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address.
 
-If the admitted pipeline extends $\mathsf{rt}_z$ through $\mathsf{rt}_\ell$, where $\ell-z\le K$, queueing must prove the withdrawal affordable at each of those roots. Every later admission that does not carry it re-proves it at the new root, so every possible survivor root is covered. A full close must exhaust the balance at the pipeline tail, and the deadline must leave the configured notice $\eta>0$ after queueing.
+Queueing proves the withdrawal affordable at every admitted root, and every later admission re-proves it, so whichever root survives can pay it. Deposits need no deadline at all: an unconsumed deposit simply returns in the terminal payout.
 
-Queueing changes neither custody nor a state root. Clean front finalization atomically releases withdrawals, consumes deposits, advances the finalized root, and decrements custody.
-
-The operator can stop serving payments, but it cannot unilaterally spend deployment funds.
-
-Let $E$ be current custody. For admitted slots $z+1,\ldots,\ell$, let $F_i$ be the unfinalized deposits carried by slot $i$, and let $F_\star$ contain the deposits not yet carried by an admitted slot. Custody can be read either from finalized liability or from the pipeline tail:
+What makes the exit credible is that custody never leaves the chain. With finalized liability $L_z$, admitted slots $z+1,\ldots,\ell$ carrying boundary flows $(F_i,W_i)$, and not-yet-admitted deposits $F_\star$:
 
 $$
 \boxed{
@@ -243,15 +235,9 @@ E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
 }
 $$
 
-Withdrawals remain inside custody until their own slot reaches the front and finalizes. Admission can therefore be pipelined without letting a speculative descendant spend assets out from under an ancestor.
+Withdrawals stay inside custody until their own slot finalizes at the queue front, so a speculative descendant can never spend assets out from under an ancestor. The operator can stop serving payments, but it cannot take funds or send them without authorization.
 
-The signed deadline $\tau$ is a fence, not a payout promise. If an included valid call observes an unreleased $Q$ at $t\ge\tau$, it permanently blocks new work but does not erase already-admitted slots. Those slots remain challengeable and resolve from the front in order. Only an unadmitted registration is discarded.
-
-A pure timeout unwinds only after every admitted slot resolves. A successful challenge cuts the pipeline at the faulted slot and unwinds once every clean slot ahead of it resolves in order. Terminal unwind then authenticates the complete $N$-account state vector at the surviving finalized root, pays each signed withdrawal, and returns each residual balance together with any deposit never consumed by a surviving slot.
-
-The canonical payout must sum to $E$. One atomic transition then pays it, zeroes custody and liability, consumes every remaining record, and makes the deployment permanently unwound.
-
-Recovery is unilateral but deliberately coarse. One expired withdrawal kills the affected deployment. Terminal unwind requires an $O(N)$ scan of the complete survivor state. Aggregating a dense invalid suffix can raise worst-case work to $O(KN\log(N+1))$ and retained boundary data to $O(KN)$. The guarantee also depends on including valid timeout, finalization, and unwind calls and keeping the complete state preimage available.
+If $Q$ is still unreleased at $t\ge\tau$, one included call permanently freezes new work. The admitted slots then resolve from the front, each finalizing once its challenge window closes or falling to a challenge, and terminal unwind opens against the last root standing. Queued withdrawals pay to their signed destinations, and every account claims its remaining balance, and any unconsumed deposit, with one Merkle proof against that root.
 
 ## Close Without Pausing Payments
 

@@ -489,96 +489,60 @@ O’Grady</a></div>
         slots keep their ordinary challenge windows and may still
         finalize in order.</p>
         <h2 id="a-deadline-to-exit">A Deadline to Exit</h2>
-        <p>Blocking a contradicted close matters only if users can still
-        recover their funds. The exit path starts with chain-sealed
-        deposits and signed withdrawals.</p>
-        <p>A deposit has no deadline. A finalized deposit immediately
-        raises custody, and its record enters the next boundary that
-        admits it. If terminal unwind begins before that boundary’s slot
-        finalizes, the deposit returns in the terminal payout. A stalled
-        deposit alone can neither trigger deployment unwind nor claim a
-        bounded exit.</p>
-        <p>A withdrawal is signed against an existing finalized root
-        <span class="math inline">\mathsf{rt}_z</span> and names no
-        future epoch or anchor:</p>
+        <p>A successful challenge stops a contested close from
+        finalizing, but stopping it is not enough: users must still be
+        able to get their funds out. So every account holds a unilateral
+        exit, a signed withdrawal queued directly onchain.</p>
         <p><span class="math display">
-        Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr),
+        Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr).
         </span></p>
-        <p>with an eligible destination <span
-        class="math inline">v</span>, amount <span
-        class="math inline">x</span>, full-close flag <span
-        class="math inline">\gamma</span>, and absolute deadline <span
-        class="math inline">\tau</span>. Since <span
+        <p><span class="math inline">Q</span> names the finalized root
+        <span class="math inline">\mathsf{rt}_z</span> it was signed
+        against, a destination <span class="math inline">v</span>, an
+        amount <span class="math inline">x</span>, a full-close flag
+        <span class="math inline">\gamma</span>, and an absolute
+        deadline <span class="math inline">\tau</span>. The operator
+        neither submits nor approves it, and its cooperation decides
+        only whether the withdrawal settles through a clean close or
+        through terminal unwind. Since <span
         class="math inline">v</span> may be any destination the asset
         adapter accepts, paying an unregistered recipient is just a
-        withdrawal to its address: the funds arrive at release, with no
-        preconfirmation in between. Queueing is a direct, permissionless
-        chain call. The operator neither submits nor approves it.
-        Operator cooperation decides only whether the withdrawal settles
-        through a clean close or through terminal unwind.</p>
-        <p>If the admitted pipeline extends <span
-        class="math inline">\mathsf{rt}_z</span> through <span
-        class="math inline">\mathsf{rt}_\ell</span>, where <span
-        class="math inline">\ell-z\le K</span>, queueing must prove the
-        withdrawal affordable at each of those roots. Every later
-        admission that does not carry it re-proves it at the new root,
-        so every possible survivor root is covered. A full close must
-        exhaust the balance at the pipeline tail, and the deadline must
-        leave the configured notice <span
-        class="math inline">\eta&gt;0</span> after queueing.</p>
-        <p>Queueing changes neither custody nor a state root. Clean
-        front finalization atomically releases withdrawals, consumes
-        deposits, advances the finalized root, and decrements
-        custody.</p>
-        <p>The operator can stop serving payments, but it cannot
-        unilaterally spend deployment funds.</p>
-        <p>Let <span class="math inline">E</span> be current custody.
-        For admitted slots <span
-        class="math inline">z+1,\ldots,\ell</span>, let <span
-        class="math inline">F_i</span> be the unfinalized deposits
-        carried by slot <span class="math inline">i</span>, and let
-        <span class="math inline">F_\star</span> contain the deposits
-        not yet carried by an admitted slot. Custody can be read either
-        from finalized liability or from the pipeline tail:</p>
+        withdrawal to its address.</p>
+        <p>Queueing proves the withdrawal affordable at every admitted
+        root, and every later admission re-proves it, so whichever root
+        survives can pay it. Deposits need no deadline at all: an
+        unconsumed deposit simply returns in the terminal payout.</p>
+        <p>What makes the exit credible is that custody never leaves the
+        chain. With finalized liability <span
+        class="math inline">L_z</span>, admitted slots <span
+        class="math inline">z+1,\ldots,\ell</span> carrying boundary
+        flows <span class="math inline">(F_i,W_i)</span>, and
+        not-yet-admitted deposits <span
+        class="math inline">F_\star</span>:</p>
         <p><span class="math display">
         \boxed{
         E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
         =L_\ell+\sum_{i=z+1}^{\ell}W_i+F_\star.
         }
         </span></p>
-        <p>Withdrawals remain inside custody until their own slot
-        reaches the front and finalizes. Admission can therefore be
-        pipelined without letting a speculative descendant spend assets
-        out from under an ancestor.</p>
-        <p>The signed deadline <span class="math inline">\tau</span> is
-        a fence, not a payout promise. If an included valid call
-        observes an unreleased <span class="math inline">Q</span> at
-        <span class="math inline">t\ge\tau</span>, it permanently blocks
-        new work but does not erase already-admitted slots. Those slots
-        remain challengeable and resolve from the front in order. Only
-        an unadmitted registration is discarded.</p>
-        <p>A pure timeout unwinds only after every admitted slot
-        resolves. A successful challenge cuts the pipeline at the
-        faulted slot and unwinds once every clean slot ahead of it
-        resolves in order. Terminal unwind then authenticates the
-        complete <span class="math inline">N</span>-account state vector
-        at the surviving finalized root, pays each signed withdrawal,
-        and returns each residual balance together with any deposit
-        never consumed by a surviving slot.</p>
-        <p>The canonical payout must sum to <span
-        class="math inline">E</span>. One atomic transition then pays
-        it, zeroes custody and liability, consumes every remaining
-        record, and makes the deployment permanently unwound.</p>
-        <p>Recovery is unilateral but deliberately coarse. One expired
-        withdrawal kills the affected deployment. Terminal unwind
-        requires an <span class="math inline">O(N)</span> scan of the
-        complete survivor state. Aggregating a dense invalid suffix can
-        raise worst-case work to <span
-        class="math inline">O(KN\log(N+1))</span> and retained boundary
-        data to <span class="math inline">O(KN)</span>. The guarantee
-        also depends on including valid timeout, finalization, and
-        unwind calls and keeping the complete state preimage
-        available.</p>
+        <p>Withdrawals stay inside custody until their own slot
+        finalizes at the queue front, so a speculative descendant can
+        never spend assets out from under an ancestor. The operator can
+        stop serving payments, but it cannot take funds or send them
+        without authorization.</p>
+        <p>If <span class="math inline">Q</span> is still unreleased at
+        <span class="math inline">t\ge\tau</span>, one included call
+        permanently freezes new work. The admitted slots then resolve
+        from the front, each finalizing once its challenge window closes
+        or falling to a challenge, and terminal unwind opens against the
+        last root standing. Queued withdrawals pay to their signed
+        destinations, and every account claims its remaining balance,
+        and any unconsumed deposit, with one Merkle proof against that
+        root.</p>
+        <p>Recovery is unilateral but deliberately coarse: one expired
+        withdrawal kills the whole deployment, and every account must
+        come claim its own funds. That is the price of exits that need
+        nothing from the operator.</p>
         <h2 id="close-without-pausing-payments">Close Without Pausing
         Payments</h2>
         <p>Closing an epoch is asynchronous. Spending continues while
