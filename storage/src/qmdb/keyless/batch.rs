@@ -78,11 +78,8 @@ where
     }
 }
 
-/// Read the operation at `loc` from the chain's retained items.
-///
-/// The batch's journal retains its own items plus every ancestor's, so the lookup
-/// stays exact even after the ancestor batches themselves are dropped. Returns
-/// `None` below the retained range, where the committed DB answers.
+/// Read the operation at `loc` from the chain's retained items, or `None` below
+/// the retained range, where the committed DB answers.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
@@ -145,8 +142,8 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
-    /// Check that the live database is on this chain's own states before a committed read
-    /// (see [`Bounds::on_chain`]).
+    /// Prove the live database is on this chain's own states, returning the witness
+    /// committed reads require (see [`Bounds::on_chain`]).
     #[allow(clippy::type_complexity)]
     fn on_chain<'a, E, C>(
         &self,
@@ -430,8 +427,7 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant of it) is merkleized. Once merkleized, a batch retains everything it
-    /// needs on its own.
+    /// descendant of it) is merkleized.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,

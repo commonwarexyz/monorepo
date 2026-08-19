@@ -260,9 +260,6 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
 ///
 /// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
 /// parameter, so the batch is lifetime-free and can be stored independently of the DB.
-/// Every such method first checks that the database is on this chain's own states and
-/// refuses the operation with [`crate::qmdb::Error::StaleRead`] otherwise (see
-/// [`crate::qmdb::batch_chain`]).
 pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update,
@@ -1340,8 +1337,8 @@ where
         (self.mutations, m)
     }
 
-    /// Check that the live database is on this chain's own states before a committed read
-    /// (see [`Bounds::on_chain`]).
+    /// Prove the live database is on this chain's own states, returning the witness
+    /// committed reads require (see [`Bounds::on_chain`]).
     #[allow(clippy::type_complexity)]
     pub(crate) fn on_chain<'a, E, C, I, const N: usize>(
         &self,
@@ -1407,8 +1404,8 @@ where
         Ok((start..end, values, self))
     }
 
-    /// Check that the live database is on the underlying batch's chain (see
-    /// [`Bounds::on_chain`]).
+    /// Prove the live database is on the underlying batch's chain, returning the
+    /// witness committed reads require (see [`Bounds::on_chain`]).
     #[allow(clippy::type_complexity)]
     pub(crate) fn on_chain<'a, E, C, I, const N: usize>(
         &self,
@@ -1763,8 +1760,6 @@ where
     where
         U::Value: Send + Sync,
     {
-        // The parent's retained diffs cover the whole chain, so reads stay exact
-        // even after older ancestor batches are dropped.
         let diffs: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut diffs = vec![parent.diff.as_slice()];
             diffs.extend(parent.ancestor_diffs.iter().map(|diff| diff.as_slice()));
@@ -2635,8 +2630,7 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant of it) is merkleized. Once merkleized, a batch retains everything it
-    /// needs on its own.
+    /// descendant of it) is merkleized.
     #[tracing::instrument(
         name = "qmdb.any.batch.new.from_batch",
         level = "debug",
@@ -2674,8 +2668,6 @@ where
         if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
             return Ok(entry.value().cloned());
         }
-        // The diffs were captured at merkleize time, so reads stay exact even
-        // after the ancestor batches themselves are dropped.
         for diff in &self.ancestor_diffs {
             if let Some(entry) = lookup_sorted(diff.as_slice(), key) {
                 return Ok(entry.value().cloned());
@@ -2703,8 +2695,6 @@ where
             return Ok(Vec::new());
         }
 
-        // The diffs were captured at merkleize time, so reads stay exact even
-        // after the ancestor batches themselves are dropped.
         let diffs: Vec<_> = self
             .ancestor_diffs
             .iter()

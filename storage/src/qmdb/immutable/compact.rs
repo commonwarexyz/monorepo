@@ -195,8 +195,8 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
-    /// Check that the live database is on this chain's own states before a committed read
-    /// (see [`Bounds::on_chain`]).
+    /// Prove the live database is on this chain's own states, returning the witness
+    /// committed reads require (see [`Bounds::on_chain`]).
     #[allow(clippy::type_complexity)]
     fn on_chain<'a, E, C>(
         &self,

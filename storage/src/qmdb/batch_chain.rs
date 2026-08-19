@@ -140,20 +140,16 @@ impl<F: Family, D: Digest> Bounds<F, D> {
         }
     }
 
-    /// Check a committed read through a chain with these bounds. The live state must be
-    /// one the chain accounts for -- this batch's own tip (reads through an already
-    /// applied batch stay valid), the chain's database boundary, or an ancestor's tip.
-    /// Anything else means a batch from a different fork was applied or the database was
-    /// rewound off the chain, and reading through it would mix two forks, so the read is
-    /// refused with [`Error::StaleRead`].
+    /// Check that the live state is one this chain accounts for -- the batch's own tip
+    /// (reads through an already applied batch stay valid), the chain's database
+    /// boundary, or an ancestor's tip. Anything else means a foreign batch was applied
+    /// or the database was rewound off the chain, so the read is refused with
+    /// [`Error::StaleRead`] rather than mixing two forks.
     ///
-    /// Every member state is reachable only by applying this chain's own batches, whose
-    /// diffs shadow every key they touched, so a read that passes this check is exact.
-    /// The overlays are retained on the merkleized batch itself, so this holds even
-    /// after the ancestor batches are dropped.
-    ///
-    /// Membership compares full commitments (size and root), never sizes alone, because a
-    /// sibling fork can commit the same operation count with different contents.
+    /// A passing read is exact, since member states are reachable only by applying this
+    /// chain's own batches, whose retained diffs shadow every key they touched.
+    /// Membership compares size and root together, since a sibling fork can commit the
+    /// same operation count with different contents.
     pub(crate) fn on_chain<'a, T>(
         &self,
         db: &'a T,
