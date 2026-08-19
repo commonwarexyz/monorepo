@@ -173,6 +173,21 @@ impl Policy {
         self.entries.len()
     }
 
+    /// Whether the spawn entry for this call site has recorded at least one sample
+    /// (a choose-created but never-recorded entry has no estimates).
+    #[cfg(test)]
+    pub(super) fn spawn_recorded(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+    ) -> bool {
+        let key = Key::new(caller, len, len, parallelism);
+        self.spawn_entries
+            .get(&key)
+            .is_some_and(|entry| entry.offload_ns.is_some() || entry.inline_ns.is_some())
+    }
+
     #[cfg(test)]
     pub(super) fn get_entry(
         &self,
