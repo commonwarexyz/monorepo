@@ -1,8 +1,8 @@
 use super::{
     Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, VerificationProgress, await_or_cancel, fetch_ancestor, is_already_processed,
+    VerificationResult, await_or_cancel, fetch_ancestor, is_already_processed,
 };
-use crate::stateful::{actor::core::Verification, db::DatabaseSet};
+use crate::stateful::{ExecutionError, actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
     Heightable, Roundable,
     marshal::{
@@ -37,6 +37,18 @@ enum PrepareFailure {
     Invalid,
     /// Preparation ended without a verdict because its request was cancelled.
     Cancelled,
+    /// A competing finalization landed mid-preparation. Re-check the candidate
+    /// against the new canonical state.
+    Stale,
+}
+
+/// Outcome of one execution attempt of the candidate against applied state.
+enum Attempt {
+    /// The attempt finished with a result.
+    Done(VerificationResult),
+    /// A competing finalization made the attempt's batches stale. Re-check the
+    /// candidate against the new canonical state and try again.
+    Stale,
 }
 
 /// A candidate's parent and forked batches, ready for application verification.
@@ -54,6 +66,9 @@ where
 }
 
 /// Executes one independently-polled verification request.
+///
+/// Carries only read capability and speculative state, so a job outlives any
+/// number of applies. Its batch operations pause while one is running.
 pub(in crate::stateful::actor) struct Verifier<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -91,9 +106,8 @@ where
         marshal: MarshalMailbox<S, V>,
         consensus_context: A::Context,
         ancestry: impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
-    ) -> Option<bool>
+    ) -> VerificationResult
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -109,68 +123,127 @@ where
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
                 verification.cancelled().await;
-                return None;
+                return VerificationResult::Cancelled;
             }
             None => {
                 debug!("verification request cancelled before initial block arrived");
-                return None;
+                return VerificationResult::Cancelled;
             }
         };
         let block_digest = block.digest();
 
         if self.execution.pending_contains(&block_digest) {
             timer.observe(context);
-            return Some(true);
+            return VerificationResult::Decided(true);
         }
 
-        // A finalized candidate cannot be re-executed against newer database
-        // state. Prove it belongs to the canonical chain before accepting it.
-        match self
-            .check_processed(marshal.clone(), block.as_ref(), verification)
-            .await
-        {
-            ProcessedBlock::Continue => {}
-            ProcessedBlock::Accepted => {
-                timer.observe(context);
-                return Some(true);
+        // Each iteration classifies the candidate against the canonical chain,
+        // then executes it. A stale or invalid-looking attempt means a
+        // finalization landed while this one ran, and re-classifying answers
+        // correctly whether the finalized block was the candidate itself, an
+        // ancestor, or a competitor. The loop is bounded because each retry
+        // consumes an anchor move, and classification decides outright once the
+        // anchor reaches the candidate's height. Each attempt consumes its own
+        // ancestry clone, so a retry starts from the same position after the
+        // candidate.
+        loop {
+            let seen = self.execution.last_processed();
+
+            // A finalized candidate cannot be re-executed against newer database
+            // state. Prove it belongs to the canonical chain before accepting it.
+            match self
+                .check_processed(marshal.clone(), block.as_ref(), verification)
+                .await
+            {
+                ProcessedBlock::Continue => {}
+                ProcessedBlock::Accepted => {
+                    timer.observe(context);
+                    return VerificationResult::Decided(true);
+                }
+                ProcessedBlock::Rejected => return VerificationResult::Decided(false),
+                ProcessedBlock::Cancelled => return VerificationResult::Cancelled,
             }
-            ProcessedBlock::Rejected => return Some(false),
-            ProcessedBlock::Cancelled => return None,
-        }
 
-        // Reconstruct the candidate's parent state. This is the only phase
-        // shared across requests, keyed by the acquired parent's block digest.
-        let parent = match self
-            .prepare_parent(
-                context,
-                marshal,
-                block_digest,
-                &mut ancestry,
-                progress,
-                verification,
-            )
-            .await
-        {
-            Ok(parent) => parent,
-            Err(PrepareFailure::Invalid) => return Some(false),
-            Err(PrepareFailure::Cancelled) => return None,
-        };
+            // Reconstruct the candidate's parent state. This is the only phase
+            // shared across requests, keyed by the acquired parent's block digest.
+            let mut attempt_ancestry = ancestry.clone();
+            let parent = match self
+                .prepare_parent(
+                    context,
+                    marshal.clone(),
+                    block_digest,
+                    &mut attempt_ancestry,
+                    verification,
+                )
+                .await
+            {
+                Ok(parent) => parent,
+                Err(PrepareFailure::Invalid) => {
+                    // A finalization that completed while this attempt waited can
+                    // make valid ancestry look invalid (the parent swept below the
+                    // new anchor), so classify once more before answering false.
+                    match self
+                        .check_processed(marshal.clone(), block.as_ref(), verification)
+                        .await
+                    {
+                        ProcessedBlock::Accepted => {
+                            timer.observe(context);
+                            return VerificationResult::Decided(true);
+                        }
+                        ProcessedBlock::Cancelled => return VerificationResult::Cancelled,
+                        ProcessedBlock::Rejected => return VerificationResult::Decided(false),
+                        // The candidate still sits above the anchor. An anchor
+                        // that moved during this attempt may have invalidated the
+                        // walk itself, so retry against the new anchor. A stable
+                        // anchor means the ancestry is genuinely invalid.
+                        ProcessedBlock::Continue => {
+                            if self.execution.last_processed().digest != seen.digest {
+                                continue;
+                            }
+                            return VerificationResult::Decided(false);
+                        }
+                    }
+                }
+                Err(PrepareFailure::Cancelled) => return VerificationResult::Cancelled,
+                Err(PrepareFailure::Stale) => {
+                    if await_or_cancel(verification, self.execution.anchor_past(&seen))
+                        .await
+                        .is_none()
+                    {
+                        return VerificationResult::Cancelled;
+                    }
+                    continue;
+                }
+            };
 
-        progress.verifying(block_digest, parent.digest, consensus_context.round());
-        let result = self
-            .verify(
-                context,
-                consensus_context,
-                block,
-                parent,
-                ancestry,
-                verification,
-            )
-            .await;
-        if result == Some(true) {
-            timer.observe(context);
+            match self
+                .verify(
+                    context,
+                    consensus_context.clone(),
+                    Arc::clone(&block),
+                    parent,
+                    attempt_ancestry,
+                    verification,
+                )
+                .await
+            {
+                Attempt::Done(result) => {
+                    if matches!(result, VerificationResult::Decided(true)) {
+                        timer.observe(context);
+                    }
+                    return result;
+                }
+                Attempt::Stale => {
+                    if await_or_cancel(verification, self.execution.anchor_past(&seen))
+                        .await
+                        .is_none()
+                    {
+                        return VerificationResult::Cancelled;
+                    }
+                    continue;
+                }
+            }
         }
-        result
     }
 
     /// Classifies a candidate at or below the applied height without
@@ -210,8 +283,8 @@ where
                 verification.cancelled().await;
                 ProcessedBlock::Cancelled
             }
-            Err(PrepareBatchesError::Invalid) => {
-                unreachable!("processed-block check cannot return Invalid")
+            Err(PrepareBatchesError::Invalid | PrepareBatchesError::Stale) => {
+                unreachable!("processed-block check cannot return Invalid or Stale")
             }
         }
     }
@@ -223,7 +296,6 @@ where
         marshal: MarshalMailbox<S, V>,
         block_digest: PendingDigest<A, E>,
         ancestry: &mut impl Ancestry<A::Block>,
-        progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
     ) -> Result<PreparedParent<A, E>, PrepareFailure>
     where
@@ -239,8 +311,8 @@ where
                     "verification request waiting on incomplete parent ancestry"
                 );
 
-                // As with incomplete candidate ancestry, only cancellation or
-                // actor-driven invalidation should release this pending request.
+                // As with incomplete candidate ancestry, only the caller
+                // leaving should release this pending request.
                 verification.cancelled().await;
                 return Err(PrepareFailure::Cancelled);
             }
@@ -261,10 +333,7 @@ where
                 marshal,
                 block.clone(),
                 verification,
-                Some(ReplayTracking {
-                    flights: &self.replays,
-                    progress,
-                }),
+                Some(&self.replays),
             )
             .await
         {
@@ -296,6 +365,14 @@ where
                 );
                 return Err(PrepareFailure::Cancelled);
             }
+            Err(PrepareBatchesError::Stale) => {
+                debug!(
+                    parent_digest = ?digest,
+                    ?block_digest,
+                    "verification went stale during prepare_batches"
+                );
+                return Err(PrepareFailure::Stale);
+            }
         };
 
         Ok(PreparedParent {
@@ -314,7 +391,7 @@ where
         parent: PreparedParent<A, E>,
         ancestry: impl Ancestry<A::Block>,
         verification: &mut Verification,
-    ) -> Option<bool> {
+    ) -> Attempt {
         let block_digest = block.digest();
         let round = consensus_context.round();
 
@@ -334,13 +411,24 @@ where
         )
         .await
         {
-            Some(result) => result,
+            Some(Ok(result)) => result,
+            Some(Err(ExecutionError::Stale)) => {
+                debug!(
+                    parent_digest = ?parent.digest,
+                    ?block_digest,
+                    "verification went stale during application execution"
+                );
+                return Attempt::Stale;
+            }
+            Some(Err(err @ ExecutionError::Fatal(_))) => {
+                panic!("application verification failed: {err}")
+            }
             None => {
                 debug!(
                     parent_digest = ?parent.digest,
                     "verification request cancelled during verify"
                 );
-                return None;
+                return Attempt::Done(VerificationResult::Cancelled);
             }
         };
 
@@ -350,7 +438,7 @@ where
                 ?block_digest,
                 "verification rejected: app.verify returned None"
             );
-            return Some(false);
+            return Attempt::Done(VerificationResult::Decided(false));
         };
         let tail = info_span!(
             "stateful.processor.match_commitments",
@@ -367,7 +455,7 @@ where
                 ?block_digest,
                 "verification rejected: verified state must match block commitments"
             );
-            return Some(false);
+            return Attempt::Done(VerificationResult::Decided(false));
         }
         if !self
             .execution
@@ -378,11 +466,11 @@ where
                 ?block_digest,
                 "verification result became incompatible before caching"
             );
-            return Some(false);
+            return Attempt::Done(VerificationResult::Decided(false));
         }
         self.execution.update_pending_metric();
         drop(block);
         drop(tail);
-        Some(true)
+        Attempt::Done(VerificationResult::Decided(true))
     }
 }
