@@ -532,7 +532,7 @@ fn reshare_e2e_state_sync_active_player_late_restart(#[case] network: Network) {
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     })
     .crash(Crash::DelayRound {
         participants: vec![delayed.clone()],
@@ -590,7 +590,7 @@ fn reshare_e2e_late_state_sync_carries_share_across_failure(#[case] network: Net
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: Probability!(1.0),
     })
     .crash(Crash::DelayRound {
         participants: vec![delayed.clone()],
