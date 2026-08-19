@@ -86,9 +86,9 @@ $$
 (G_{\kappa'},J_{\kappa'})\text{ unchanged for every }\kappa'\ne\kappa.
 $$
 
-Payments assigned to different components never contend, so a hot account scales \~linearly across parallel workers. At close, one terminal signed pair represents each component, no matter how many payments advanced it (and the sum of all components is the recipient's credit).
+Payments assigned to different components never contend, so a hot account scales \~linearly across parallel workers. When the epoch ends, one terminal signed pair represents each component, no matter how many payments advanced it (and the sum of all components is the recipient's credit).
 
-In the same ledger, accounts $(a,b,c,d)$ open with balances $(100,40,25,35)$ and the epoch accepts
+Consider accounts $(a,b,c,d)$ that open with balances $(100,40,25,35)$ and the epoch accepts
 
 $$
 a\xrightarrow{20}b,\quad b\xrightarrow{12}c,\quad
@@ -96,11 +96,13 @@ c\xrightarrow{7}d,\quad d\xrightarrow{5}a,\quad
 c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
 $$
 
-Their exact closing balances are $(85,58,26,31)$. Gross payment debit equals gross payment credit at 54.
+Suppose the operator assigns each of $b$'s three incoming payments to its own component. Their tips end at $(20,1)$, $(4,1)$, and $(6,1)$.
 
-For recipient $b$, sort the terminal records by component identifier and commit them under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count. In this example, $b$'s three heads end at $(20,1)$, $(4,1)$, and $(6,1)$, so the root summary is $(h_b,G_b,J_b)=(3,30,3)$.
+Sort the terminal records by component identifier and commit them under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
 
-The account row is the unit of public settlement. Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$.
+## One Row per Changed Account
+
+Netting each account's debits and credits gives exact closing balances $(85,58,26,31)$, and gross payment debit equals gross payment credit at 54. The account row is the unit of public settlement. Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$.
 
 If the chain-sealed boundary assigns deposit $f_a$ and withdrawal $w_a$, the exact balance relation is
 
@@ -108,15 +110,27 @@ $$
 \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
 $$
 
-Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{HeadRoot}$, and the aggregate prefixes needed for conservation:
+Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{HeadRoot}$, and a running total $\mathsf{prefix}_a$ of every row quantity over the sorted rows so far:
 
 $$
-\mathsf{Row}_a=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{HeadRoot}_e(a),\;\mathsf{prefix}_a\bigr).
+\begin{aligned}
+\mathsf{prefix}_a&=\sum_{a'\le a}\bigl(d_{a'},\;c_{a'},\;f_{a'},\;w_{a'},\;\chi_{a'},\;h_{a'}\bigr),\\[0.3em]
+\mathsf{Row}_a&=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{HeadRoot}_e(a),\;\mathsf{prefix}_a\bigr).
+\end{aligned}
 $$
 
-The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes.
+Here $\chi_{a'}$ flags a withdrawal record and $h_{a'}$ counts component heads. Each prefix must extend its predecessor's exactly, so the terminal row alone carries the epoch's totals.
 
-The $A$ rows form a length-bound $\mathsf{ChangeRoot}$, which authenticates the compact change vector. The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
+The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes:
+
+$$
+\mathbf A_e=(\mathsf{Row}_a,\;\mathsf{Row}_b,\;\mathsf{Row}_c,\;\mathsf{Row}_d),
+\qquad a<b<c<d.
+$$
+
+## One Exact Close
+
+The sorted rows form a length-bound $\mathsf{ChangeRoot}$, which authenticates the compact change vector. The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
 
 The settlement chain retains a header $\mathsf{Header}_e$ containing the opening $\mathsf{StateRoot}_e$, $\mathsf{ChangeRoot}_e$, and closing $\mathsf{StateRoot}_{e+1}$, together with the quorum certificate. Admission receives the terminal changed row and its Merkle opening separately, authenticates the row against $\mathsf{ChangeRoot}_e$, checks its aggregate prefixes, and retains neither.
 
@@ -131,8 +145,7 @@ $$
 \mathsf{HeadRoot}_e(b)
 \hookrightarrow \mathsf{Row}_b,\\
 \mathbf A_e
-&=(\mathsf{Row}_a,\mathsf{Row}_b,\mathsf{Row}_c,\mathsf{Row}_d)
-\xrightarrow{\ \mathsf{Merkle}\ }
+&\xrightarrow{\ \mathsf{Merkle}\ }
 \mathsf{ChangeRoot}_e.
 \end{aligned}
 $$
