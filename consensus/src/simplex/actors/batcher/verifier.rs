@@ -18,8 +18,12 @@ use std::{future::Future, mem, sync::Arc};
 use tracing::{Instrument as _, Span, info_span};
 
 /// Runs a CPU-bound job through [Strategy::spawn], entering `span` on the worker thread and
-/// instrumenting the awaited future so the offloaded work stays attributed to the caller's trace.
-async fn offload<P, F, T>(len: usize, span: Span, strategy: &P, job: F) -> T
+/// instrumenting the returned future so the offloaded work stays attributed to the caller's trace.
+///
+/// `#[track_caller]` forwards each call site's location into [Strategy::spawn], so the adaptive
+/// policy keys its decisions per call site instead of sharing one entry across all of them.
+#[track_caller]
+fn offload<P, F, T>(len: usize, span: Span, strategy: &P, job: F) -> impl Future<Output = T> + Send
 where
     P: Strategy,
     F: FnOnce(P) -> T + Send + 'static,
@@ -29,7 +33,6 @@ where
     strategy
         .spawn(len, move |strategy| worker_span.in_scope(|| job(strategy)))
         .instrument(span)
-        .await
 }
 
 /// Certification progress for one kind of vote.

@@ -1115,18 +1115,22 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                             .unwrap_or_else(|_| panic!("strategy job dropped before completion"));
                     }
                 };
-                if let Some((Some(policy), caller, len, threads, setup)) = recorder {
-                    policy.record_spawn(
-                        caller,
-                        len,
-                        threads,
-                        policy::SpawnExecution::Offload,
-                        setup.saturating_add(poll_start.elapsed()),
-                        job_wall,
-                    );
-                }
                 match result {
-                    Ok(value) => value,
+                    Ok(value) => {
+                        // Record successful runs only, matching the inline arm: a panicked
+                        // job's wall time says nothing about the job size.
+                        if let Some((Some(policy), caller, len, threads, setup)) = recorder {
+                            policy.record_spawn(
+                                caller,
+                                len,
+                                threads,
+                                policy::SpawnExecution::Offload,
+                                setup.saturating_add(poll_start.elapsed()),
+                                job_wall,
+                            );
+                        }
+                        value
+                    }
                     Err(payload) => panic::resume_unwind(payload),
                 }
             })
@@ -1343,6 +1347,53 @@ mod test {
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
+    }
+
+    /// Call `spawn` with this helper so the policy entry is keyed by the helper's call
+    /// site (both `track_caller` locations resolve to the same line).
+    #[track_caller]
+    fn spawn_flagged(
+        strategy: &Rayon,
+        panics: bool,
+    ) -> (
+        &'static std::panic::Location<'static>,
+        impl core::future::Future<Output = usize> + Send + 'static,
+    ) {
+        (
+            std::panic::Location::caller(),
+            strategy.spawn(64, move |_| {
+                if panics {
+                    panic!("job panic");
+                }
+                7
+            }),
+        )
+    }
+
+    fn spawn_recorded(strategy: &Rayon, loc: &'static std::panic::Location<'static>) -> bool {
+        let parallelism = strategy.manual().parallelism();
+        strategy
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.spawn_recorded(loc, 64, parallelism))
+    }
+
+    /// A panicking offloaded job must not update the spawn policy: its wall time says
+    /// nothing about the job size and would train the policy toward inlining.
+    #[test]
+    fn spawn_panic_records_nothing() {
+        let strategy = parallel_strategy();
+
+        let (loc, job) = spawn_flagged(&strategy, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(job)
+        }));
+        assert!(result.is_err());
+        assert!(!spawn_recorded(&strategy, loc));
+
+        let (loc, job) = spawn_flagged(&strategy, false);
+        assert_eq!(futures::executor::block_on(job), 7);
+        assert!(spawn_recorded(&strategy, loc));
     }
 
     fn policy_len(strategy: &Rayon) -> usize {
