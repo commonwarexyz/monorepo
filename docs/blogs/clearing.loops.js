@@ -149,7 +149,7 @@ function makeStroke(x0, y0, x1, y1, styleName) {
 }
 
 class Scene {
-  constructor(svg, title, tag) {
+  constructor(svg, title) {
     this.svg = svg;
     this.staticLayer = svgEl('g');
     this.dynamicLayer = svgEl('g');
@@ -160,13 +160,7 @@ class Scene {
       'font-size': 18,
       'font-weight': 700,
     });
-    const tagNode = textEl(1000, 30, tag, {
-      'font-size': 14,
-      'font-weight': 600,
-      'text-anchor': 'end',
-      fill: BLUE,
-    });
-    this.staticLayer.append(titleNode, tagNode);
+    this.staticLayer.appendChild(titleNode);
   }
 
   guide(x1, y1, x2, y2, attrs = {}) {
@@ -417,8 +411,7 @@ function buildPaymentMinimal(mount) {
   const svg = baseSvg(mount);
   const s = new Scene(
     svg,
-    'Accepting One Payment',
-    'one round trip',
+    'The Payment Lifecycle',
   );
 
   // Multimmit-style message-sequence timeline: rows are participants and the
@@ -639,7 +632,6 @@ function buildRolloverMinimal(mount) {
   const s = new Scene(
     svg,
     'Closing e While Spending in e+1',
-    'same +5 • never overwrite',
   );
 
   s.label(191, 77, 'epoch e', {

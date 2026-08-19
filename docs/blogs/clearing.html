@@ -109,12 +109,12 @@ O’Grady</a></div>
         we do? Payment channels are cheap and instant between two funded
         parties, but reaching a new recipient means opening a new
         channel or asking existing ones to route for you (locking their
-        liquidity and risking forced closure along the way). A rollup
-        either proves each transaction or publishes every payment so
-        anyone can challenge the state transition. Not to mention,
-        sequencer preconfirmations still need a separate challenge to
-        account for signed payments omitted from the batch (more on this
-        later).</p>
+        liquidity and risking forced closure along the way). Rollups
+        either prove a batch’s state transition or publish enough
+        transaction data for anyone to replay and challenge it. Even
+        then, binding sequencer preconfirmations need a separate
+        challenge for signed payments omitted from the batch (more on
+        this later).</p>
         <p><strong>Bajillion</strong> is a new optimistic clearing
         protocol for many-to-many payments at massive scale. At each
         settlement, all of that activity becomes a few-kilobyte
@@ -123,10 +123,10 @@ O’Grady</a></div>
         holds the system honest. Payments flow through a non-custodial
         operator selected by the sender: if the operator disappears or
         censors an account, senders and recipients alike can force
-        recovery through the settlement chain alone. And the protocol
+        recovery through the settlement chain alone. The protocol
         requires only signatures and Merkle openings.</p>
-        <p>For a given set of accounts, one payment or a bajillion costs
-        the same to settle.</p>
+        <p>For fixed accounts and parallelism, settlement costs the same
+        for one payment or a bajillion.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
         <p>A Bajillion epoch starts from an authenticated account vector
@@ -140,14 +140,14 @@ O’Grady</a></div>
         class="math inline">B_a</span>, cumulative debit <span
         class="math inline">D_a</span>, operator-promised credit <span
         class="math inline">C_a</span>, a receipt count, and an activity
-        flag. To send <span class="math inline">x&gt;0</span> from <span
-        class="math inline">a</span> to <span
+        flag. To send <span class="math inline">x&gt;0</span> base units
+        from <span class="math inline">a</span> to <span
         class="math inline">b</span>, the payer signs the exact next
         debit, and the operator accepts by advancing the recipient’s
-        receive component <span class="math inline">\kappa</span> from
-        its current tip <span class="math inline">(G,J)</span> (which
-        may or may not have been registered with the operator at the
-        start of the epoch):</p>
+        receive shard <span class="math inline">\kappa</span> from its
+        current tip <span class="math inline">(G,J)</span> (which may or
+        may not have been registered with the operator at the start of
+        the epoch):</p>
         <p><span class="math display">
         S=\mathsf{Sign}_a\bigl(\mathcal
         A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
@@ -157,7 +157,7 @@ O’Grady</a></div>
         </span></p>
         <p>After authenticating <span class="math inline">S</span> and
         checking spendability, the operator atomically commits the
-        debit, component advance, close reservation, replay record, and
+        debit, shard advance, close reservation, replay record, and
         receipt body. It then signs and returns <span
         class="math inline">R</span>.</p>
         <p>The matching pair <span class="math inline">(S,R)</span> is
@@ -165,8 +165,7 @@ O’Grady</a></div>
         and retains it, then forwards it to the recipient (if not
         forwarded by the operator already). A rejection before the
         commit changes nothing. If the response is lost, retrying the
-        same request returns the same pair without a second debit, until
-        the payer sends again.</p>
+        same request returns the same pair without a second debit.</p>
         <p>Figure 1 begins with <span class="math inline">a</span> at
         100, <span class="math inline">b</span> at 40, and the payment
         <span class="math inline">a\xrightarrow{20}b</span>.</p>
@@ -198,7 +197,7 @@ O’Grady</a></div>
             }
           </style>
         </noscript>
-        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and component kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop. A dashed line shows the operator could instead relay the same pair to b directly, one hop sooner.">
+        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and receive shard kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop. A dashed line shows the operator could instead relay the same pair to b directly, one hop sooner.">
           <noscript>Account a sends one request to one operator and receives one signed response. Verification, atomic storage, and receipt signing are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the same matching pair directly to b without another operator hop, and the operator could equally deliver the pair to b one hop sooner.</noscript>
         </div>
         <script type="module" src="clearing.loops.js"></script>
@@ -207,7 +206,7 @@ O’Grady</a></div>
         response. The operator verifies, commits, and signs locally,
         adding no network round trip. The commit moves <span
         class="math inline">a</span> from 100 to 80 and advances <span
-        class="math inline">b</span>’s component <span
+        class="math inline">b</span>’s receive shard <span
         class="math inline">\kappa_0</span> from <span
         class="math inline">(0,0)</span> to <span
         class="math inline">(20,1)</span> before <span
@@ -224,10 +223,10 @@ O’Grady</a></div>
         <p>A single incoming counter would serialize every payment to a
         popular recipient. Instead, the operator shards each recipient’s
         incoming payments across a configurable number of receive
-        components, identified by <span class="math inline">(\mathcal
+        shards, identified by <span class="math inline">(\mathcal
         A_e,b,\kappa)</span>. A payment of <span
-        class="math inline">x</span> assigned to component <span
-        class="math inline">\kappa</span> advances only that component’s
+        class="math inline">x</span> assigned to shard <span
+        class="math inline">\kappa</span> advances only that shard’s
         running credit and receipt count:</p>
         <p><span class="math display">
         (G_\kappa,J_\kappa)\longrightarrow(G_\kappa+x,J_\kappa+1),
@@ -235,12 +234,12 @@ O’Grady</a></div>
         (G_{\kappa&#39;},J_{\kappa&#39;})\text{ unchanged for every
         }\kappa&#39;\ne\kappa.
         </span></p>
-        <p>Payments assigned to different components never contend, so a
-        hot account scales approximately linearly across parallel
-        workers. When the epoch ends, one terminal signed pair
-        represents each component, no matter how many payments advanced
-        it (and the sum of all components is the recipient’s
-        credit).</p>
+        <p>Payments assigned to different shards never contend on
+        recipient state, so a hot account’s incoming path scales
+        approximately linearly across parallel workers. When the epoch
+        ends, one terminal signed pair represents each shard, no matter
+        how many payments advanced it (and the sum of all shards is the
+        recipient’s credit).</p>
         <p>Consider accounts <span class="math inline">(a,b,c,d)</span>
         that open with balances <span
         class="math inline">(100,40,25,35)</span> and the epoch
@@ -252,17 +251,17 @@ O’Grady</a></div>
         </span></p>
         <p>Suppose the operator assigns each of <span
         class="math inline">b</span>’s three incoming payments to its
-        own component. Their tips end at <span
+        own shard. Their tips end at <span
         class="math inline">(20,1)</span>, <span
         class="math inline">(4,1)</span>, and <span
         class="math inline">(6,1)</span>.</p>
-        <p>A hot recipient can end an epoch with many components, but
+        <p>A hot recipient can end an epoch with many shards, but
         proving one tip does not require shipping the rest. Sort the
-        terminal records by component identifier and commit them as a
-        Merkle tree under <span
+        terminal records by shard identifier and commit them as a Merkle
+        tree under <span
         class="math inline">\mathsf{CreditRoot}_e(b)</span>. The root
-        binds the exact component count, ordered records, total credit,
-        and total receipt count: here <span
+        binds the exact shard count, ordered records, total credit, and
+        total receipt count: here <span
         class="math inline">(h_b,G_b,J_b)=(3,30,3)</span>.</p>
         <h2 id="one-row-per-changed-account">One Row per Changed
         Account</h2>
@@ -291,7 +290,7 @@ O’Grady</a></div>
         total <span class="math inline">\mathsf{prefix}_a</span> over
         the sorted rows so far, where <span
         class="math inline">\chi</span> flags a withdrawal record and
-        <span class="math inline">h</span> counts component heads:</p>
+        <span class="math inline">h</span> counts shard heads:</p>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{prefix}_a&amp;=\sum_{a&#39;\le
@@ -299,7 +298,7 @@ O’Grady</a></div>
         \mathsf{Row}_a&amp;=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{CreditRoot}_e(a),\;\mathsf{prefix}_a\bigr).
         \end{aligned}
         </span></p>
-        <p>Each prefix must extend its predecessor’s exactly, so the
+        <p>Each prefix must extend the preceding prefix exactly, so the
         terminal row alone carries the epoch’s totals. The rows are
         strictly sorted by account, with exactly one for every account
         whose authenticated state changes:</p>
@@ -331,11 +330,11 @@ O’Grady</a></div>
         accounts, and a real registry holds a million. The paired sparse
         witness instead collapses each untouched subtree into one digest
         <span class="math inline">\Phi_i</span>, its Merkle root, no
-        matter how many accounts it covers. Both roots then reconstruct
-        in one pass, every changed account supplying its opening and
-        closing leaf while the shared frontier <span
-        class="math inline">\Phi_e=(\Phi_1,\Phi_2,\Phi_3)</span> fills
-        everything else:</p>
+        matter how many accounts it covers. The witness then
+        reconstructs both roots in one pass: every changed account
+        supplies its opening and closing leaf while the shared frontier
+        <span class="math inline">\Phi_e=(\Phi_1,\Phi_2,\Phi_3)</span>
+        fills everything else:</p>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{StateRoot}_e&amp;\xleftarrow{\ \mathsf{Merkle}\
@@ -365,25 +364,25 @@ O’Grady</a></div>
         class="math inline">D_e</span>, credit <span
         class="math inline">C_e</span>, deposits <span
         class="math inline">F_e</span>, and withdrawals <span
-        class="math inline">W_e</span>, with the row, record, and
-        component counts alongside. To verify them, the chain is handed
-        the terminal row and its Merkle opening once, checks the row
-        against <span class="math inline">\mathsf{ChangeRoot}_e</span>,
-        and retains neither. The component vectors, remaining changed
-        rows, and paired witness stay off the chain as an authenticated
-        corpus <span class="math inline">\mathcal D_e</span> that must
-        remain retrievable through the challenge deadline <span
+        class="math inline">W_e</span>, with the row, record, and shard
+        counts alongside. To verify them, the chain is handed the
+        terminal row and its Merkle opening once, checks the row against
+        <span class="math inline">\mathsf{ChangeRoot}_e</span>, and
+        retains neither. The shard vectors, remaining changed rows, and
+        paired witness stay off the chain as an authenticated corpus
+        <span class="math inline">\mathcal D_e</span> that must remain
+        retrievable through the challenge deadline <span
         class="math inline">\Delta_e</span>.</p>
         <h2 id="validate-everything-up-front">Validate Everything Up
         Front</h2>
         <p>Before the chain queues a close for finalization, someone
-        must check all of it. A validator committee (or TEE or
-        SNARK/STARK, if desired) verifies the complete public close,
-        every row, every prefix, and the exact state transition, and
-        signs the header only when all of it holds. Exhaustive
-        validation keeps malformed or inexact closes out of the
-        finalization queue and reduces any remaining private-receipt
-        dispute to one tagged, non-interactive submission.</p>
+        must check all of it. A validator committee verifies the
+        complete public close, every row, every prefix, and the exact
+        state transition, and signs the header only when all of it
+        holds. Exhaustive validation keeps malformed or inexact closes
+        out of the finalization queue and reduces any remaining
+        private-receipt dispute to one tagged, non-interactive
+        submission.</p>
         <p>Prefix continuity ties the header’s totals to the rows
         beneath them. The deposit total and withdrawal record count must
         reproduce the chain-sealed boundary, each withdrawal must cover
@@ -451,9 +450,9 @@ O’Grady</a></div>
         or the same debit with a different send or receipt body. A bare
         payer request is insufficient. The receipt proves operator
         acknowledgement.</p></li>
-        <li><p><strong>Higher receive-component tip.</strong>
-        Authenticate the public tip <span
-        class="math inline">(G^\star,J^\star)</span> for one component,
+        <li><p><strong>Higher receive-shard tip.</strong> Authenticate
+        the public tip <span
+        class="math inline">(G^\star,J^\star)</span> for one shard,
         using <span class="math inline">(0,0)</span> for authenticated
         absence, and present a matching retained receipt at <span
         class="math inline">(G^+,J^+)</span>. Either strict increase,
@@ -461,14 +460,14 @@ O’Grady</a></div>
         class="math inline">J^+&gt;J^\star</span>, is a
         contradiction.</p></li>
         <li><p><strong>Inconsistent receipt range.</strong> For lower
-        and upper pairs in one anchor, recipient, and component, where
-        each receipt is linked to its own valid send, adjacent receipts
-        must increase credit by exactly the upper payment, and an index
-        gap must leave at least one unit for each omitted positive
+        and upper pairs in one anchor, recipient, and shard, where each
+        receipt is linked to its own valid send, adjacent receipts must
+        increase credit by exactly the upper payment, and an index gap
+        must leave at least one base unit for each omitted positive
         payment. A violation is a contradiction.</p></li>
         <li><p><strong>Receipt fork.</strong> Two distinct linked
-        receipt bodies either reuse one receipt index within a component
-        or acknowledge the same payer transaction differently. Different
+        receipt bodies either reuse one receipt index within a shard or
+        acknowledge the same payer transaction differently. Different
         signature bytes over one identical receipt body are not a
         fork.</p></li>
         </ol>
@@ -524,14 +523,14 @@ O’Grady</a></div>
         stop serving payments, but it cannot take funds or send them
         without authorization.</p>
         <p>If <span class="math inline">Q</span> is still unreleased at
-        <span class="math inline">t\ge\tau</span>, one included call
-        permanently freezes new work. The pending slots then resolve
-        from the front, each finalizing once its challenge window closes
-        or falling to a challenge, and terminal unwind opens against the
-        last root standing. Queued withdrawals pay to their signed
-        destinations, and every account uses one Merkle proof against
-        that root to claim its remaining balance and any unconsumed
-        deposit.</p>
+        <span class="math inline">t\ge\tau</span>, the first time-aware
+        onchain call to observe the deadline permanently freezes new
+        work. The pending slots then resolve from the front, each
+        finalizing once its challenge window closes or falling to a
+        challenge, and terminal unwind opens against the last root
+        standing. Queued withdrawals pay to their signed destinations,
+        and every account uses one Merkle proof against that root to
+        claim its remaining balance and any unconsumed deposit.</p>
         <h2 id="streamlined-epoch-transitions">Streamlined Epoch
         Transitions</h2>
         <p>Closing an epoch is asynchronous: spending continues in epoch
@@ -607,11 +606,11 @@ O’Grady</a></div>
         receive, spaced evenly among the senders.</p>
         <p>The matrix independently varies <span
         class="math inline">A</span>, the number of changed accounts,
-        and <span class="math inline">h</span>, the credits on each
-        credited account. No payment count appears because none is
-        needed: rows and component tips carry fixed-width cumulative
-        totals, so every size in the table is the same for any <span
-        class="math inline">T</span>.</p>
+        and <span class="math inline">h</span>, the number of receive
+        shards on each credited account. No payment count appears
+        because none is needed: rows and shard tips carry fixed-width
+        cumulative totals, so every size in the table is the same for
+        any <span class="math inline">T</span>.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -653,10 +652,10 @@ O’Grady</a></div>
             <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
             <tr>
               <td style="padding-left:20px;">assignment</td>
-              <td style="text-align:right;">1.39 MB <span style="color:#666;">(67%)</span></td>
-              <td style="text-align:right;">79.4 MB <span style="color:#666;">(68%)</span></td>
-              <td style="text-align:right;">436 MB <span style="color:#666;">(67%)</span></td>
-              <td style="text-align:right;">514 MB <span style="color:#666;">(67%)</span></td>
+              <td style="text-align:right;">1.39 MB <span style="color:#666;">(-33%)</span></td>
+              <td style="text-align:right;">79.4 MB <span style="color:#666;">(-32%)</span></td>
+              <td style="text-align:right;">436 MB <span style="color:#666;">(-33%)</span></td>
+              <td style="text-align:right;">514 MB <span style="color:#666;">(-33%)</span></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">check and sign</td>
@@ -697,26 +696,28 @@ O’Grady</a></div>
           </tbody>
         </table>
         </div>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 components per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
         <div class="image-caption">
         <p>Figure 4: These are four measured profiles, not an
         interpolation. Points are arithmetic means, and each panel has
         its own millisecond scale. Blue holds <span
         class="math inline">A=1{,}024</span> and green holds <span
         class="math inline">A=1{,}000{,}000</span> while the horizontal
-        axis changes the components on each credited account from <span
-        class="math inline">h=1</span> to <span
+        axis changes the receive shards on each credited account from
+        <span class="math inline">h=1</span> to <span
         class="math inline">h=512</span>.</p>
         </div>
         <p>Increasing <span class="math inline">A</span> makes the state
         transition dense. Increasing <span class="math inline">h</span>
-        concentrates more authenticated component leaves and signatures
+        concentrates more authenticated shard leaves and signatures
         behind each credited row.</p>
-        <p>All four profiles register the same million accounts, yet at
-        <span class="math inline">A=1{,}024</span> the validator’s
-        assignment is 1.39 MB. Distribution follows the changed rows and
-        the shared frontier, not the registry, so it is sublinear in
-        registered accounts as well as in payments.</p>
+        <p>Even the busiest validator assignment is 32–33% smaller than
+        the public corpus because it contains only that validator’s
+        assigned pieces. At <span class="math inline">A=1{,}024</span>
+        and <span class="math inline">h=1</span>, it is 1.39 MB despite
+        a registry of one million accounts. Distribution follows the
+        changed rows and the shared frontier, not the registry, so it is
+        sublinear in registered accounts as well as in payments.</p>
         <p>The offchain public corpus is constant for a profile, so
         accepted payments only divide it. Ten million payments spread
         the sparse profile’s 2.07 MB to about 0.2 offchain bytes per
@@ -725,10 +726,10 @@ O’Grady</a></div>
         across the four profiles: 0.0056–0.0059 bytes per payment at one
         million, and 0.0000056–0.0000059 at one billion. It carries only
         the header, quorum certificate, and terminal prefix opening
-        rather than the rows or component leaves.</p>
+        rather than the rows or shard leaves.</p>
         <p>This fixture queues no withdrawals and no full closes, whose
         re-check and row openings would otherwise add to it. The
-        challenge rows submit one proven higher-tip challenge: its
+        challenge measurements use one proven higher-tip challenge: its
         payload grows only with the two lookup depths, and its check
         verifies two signatures and two openings.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain public-corpus bytes per payment for the four A-by-h profiles; the right shows onchain commitment bytes per payment for the two A profiles. Blue is 1,024 changed accounts and green is one million; solid is h=1 and dashed is h=512. Every line falls as 1/T.">
@@ -738,11 +739,11 @@ O’Grady</a></div>
         exactly as <span class="math inline">1/T</span>. The offchain
         public corpus (left) depends on <span
         class="math inline">A</span> and <span
-        class="math inline">h</span>: components move the
-        million-account corpus by only <span
-        class="math inline">1.2\times</span> but the sparse corpus by
-        <span class="math inline">57\times</span>. The onchain
-        commitment (right) stays 5.62–5.94 KB across profiles.</p>
+        class="math inline">h</span>: shards move the million-account
+        corpus by only <span class="math inline">1.2\times</span> but
+        the sparse corpus by <span class="math inline">57\times</span>.
+        The onchain commitment (right) stays 5.62–5.94 KB across
+        profiles.</p>
         </div>
         <p>The timers cover warm, in-memory close construction and
         validation on an 18-core Apple M5 Pro with 64 GiB, with the
@@ -752,39 +753,33 @@ O’Grady</a></div>
         <p>Canonical encoding for hashing and signature verification
         remains included. Corpus bytes count each of the 256 pieces
         once, before replication to its 67 holders. The validator rows
-        report the busiest of the 100 assignments with its share of the
-        public corpus in parentheses, and the challenge rows target a
-        mid-registry credited account’s mid-set component.</p>
-        <p>The timers ran under a ten-million-payment build of each
-        fixture. The sizes hold for any payment count: rebuilding each
-        fixture at counts from ten thousand (one million where all
-        accounts change) up to ten million reproduced every size in the
-        table, with the corpus and chain payloads identical to the
-        byte.</p>
-        <h2 id="a-bajillion-payments-one-close">A Bajillion Payments,
-        One Close</h2>
+        report the busiest of the 100 assignments, with its percentage
+        reduction from the public corpus in parentheses, and the
+        challenge rows target a mid-registry credited account’s mid-set
+        shard.</p>
+        <h2 id="a-bajillion-payments-one-settlement">A Bajillion
+        Payments, One Settlement</h2>
         <p>The operator’s work scales with payments: it verifies,
         durably commits, and signs every one of the <span
         class="math inline">T</span> payments it accepts. The public
-        close never grows with <span class="math inline">T</span>. It
-        carries one row per changed account (<span
-        class="math inline">A</span>), one terminal pair per receive
-        component (<span class="math inline">H</span>), and one frontier
-        digest per untouched subtree (<span
-        class="math inline">\Phi</span>):</p>
+        close has no per-payment term. It carries one row per changed
+        account (<span class="math inline">A</span>), one terminal pair
+        per receive shard (<span class="math inline">H</span>), and one
+        frontier digest per untouched subtree (<span
+        class="math inline">|\Phi_e|</span>):</p>
         <p><span class="math display">
         \text{payments }T
         \quad\longrightarrow\quad
-        \text{rows }A+\text{components }H+\text{frontier }\Phi.
+        \text{rows }A+\text{shards }H+\text{frontier digests }|\Phi_e|.
         </span></p>
         <p>For repeated activity over a fixed set of accounts and
-        components, <span class="math inline">(A+H+\Phi)/T\to 0</span>.
+        shards, <span class="math inline">(A+H+|\Phi_e|)/T\to 0</span>.
         Account-level clearing compresses repetition, not change: every
-        changed account still pays for its row and every component for
-        its terminal pair, but additional payments between them add
-        nothing. No traffic pattern adds a per-payment term to the close
-        either, because acceptance reserves room per account and per
-        component, never per payment.</p>
+        changed account still pays for its row and every shard for its
+        terminal pair, but additional payments between them add nothing.
+        No traffic pattern adds a per-payment term to the close either,
+        because acceptance reserves room per account and per shard,
+        never per payment.</p>
         <p>And this is as good as the trust model allows. A
         preconfirmation cannot arrive in less than one round trip to the
         operator that serializes spending. A close cannot quietly drop a
