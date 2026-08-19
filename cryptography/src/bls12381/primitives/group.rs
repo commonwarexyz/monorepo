@@ -1098,22 +1098,6 @@ impl G1 {
         out
     }
 
-    /// Multi-scalar multiplication with tiny unsigned coefficients.
-    ///
-    /// Computes `sum_i coefficients[i] * affine[i]`, reading `bits` bits (at
-    /// most 8) of each one-byte coefficient. Uses blst's Pippenger routine,
-    /// whose bucket accumulation sums points batch-affine (one field inversion
-    /// per bucket), so this is far cheaper than a sequence of point additions.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn small_msm(affine: &[blst_p1_affine], coefficients: &[u8], bits: usize) -> Self {
-        assert_eq!(affine.len(), coefficients.len());
-        assert!(bits <= 8);
-        if affine.is_empty() {
-            return Self::zero();
-        }
-        Self::msm_sequential(affine, coefficients, bits)
-    }
-
     /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
