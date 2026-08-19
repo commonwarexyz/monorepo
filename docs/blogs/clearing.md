@@ -409,4 +409,4 @@ For repeated activity over a fixed set of accounts and components, $(A+H+\Phi)/T
 
 And this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault. Settlement cannot make less than the changed state available to users who recover from public data alone, and this close adds only the terminal pairs and the frontier that splices the change into the registry.
 
-In a clean close, those involved keep the receipts; everyone else sees only the change.
+When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.
