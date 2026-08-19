@@ -315,15 +315,15 @@ pub(crate) async fn finalize<D: ManagedDb<deterministic::Context>>(
     writer: Writer<D>,
     batch: D::Merkleized,
 ) -> (Writer<D>, D::Snapshot, Handle<()>) {
-    let (writer, (snapshot, sync)) = writer
+    let (writer, (snapshot, handle)) = writer
         .mutate(|db| async move {
-            let (db, snapshot, sync) = D::finalize(db, batch)
+            let (db, snapshot, handle) = D::finalize(db, batch)
                 .await
                 .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
-            (db, (snapshot, sync))
+            (db, (snapshot, handle))
         })
         .await;
-    (writer, snapshot, sync)
+    (writer, snapshot, handle)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

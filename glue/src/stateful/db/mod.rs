@@ -547,9 +547,9 @@ where
     }
 
     async fn finalize(self, batches: Self::Merkleized) -> (Self, Self::Snapshots, Barrier) {
-        let (member, snapshot, sync) = finalize_or_panic(self, batches, None).await;
+        let (member, snapshot, handle) = finalize_or_panic(self, batches, None).await;
         let barrier = Barrier {
-            syncs: vec![(core::any::type_name::<T>(), None, sync)],
+            syncs: vec![(core::any::type_name::<T>(), None, handle)],
         };
         (member, snapshot, barrier)
     }
@@ -1720,10 +1720,10 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     // Mutable finalize failures are fatal by design because the batch may already have been
     // applied to other databases in the same set, leaving partially applied state.
     let Single { writer } = member;
-    let (writer, (snapshot, sync)) = writer
+    let (writer, (snapshot, handle)) = writer
         .mutate(|database| async move {
             match database.finalize(batch).await {
-                Ok((database, snapshot, sync)) => (database, (snapshot, sync)),
+                Ok((database, snapshot, handle)) => (database, (snapshot, handle)),
                 Err(err) => {
                     let index = index.map_or(String::new(), |i| format!("index {i}, "));
                     panic!(
@@ -1734,7 +1734,7 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
             }
         })
         .await;
-    (Single { writer }, snapshot, sync)
+    (Single { writer }, snapshot, handle)
 }
 
 #[tracing::instrument(name = "stateful.db.rewind_or_panic", level = "info", skip_all, fields(index = index))]
@@ -2153,9 +2153,9 @@ mod tests {
                 .merkleize()
                 .await
                 .expect("empty batch must merkleize");
-            let (_writer, snapshot, sync) = finalize(writer, batch).await;
+            let (_writer, snapshot, handle) = finalize(writer, batch).await;
             drop(snapshot);
-            sync.await.expect("empty batch finalize flush failed");
+            handle.await.expect("empty batch finalize flush failed");
         }
 
         #[rstest]
@@ -2227,9 +2227,9 @@ mod tests {
                 .merkleize()
                 .await
                 .expect("first batch must merkleize");
-            let (writer, snapshot, sync) = finalize(writer, batch).await;
+            let (writer, snapshot, handle) = finalize(writer, batch).await;
             drop(snapshot);
-            sync.await.expect("first finalize flush failed");
+            handle.await.expect("first finalize flush failed");
             let target = reader.read().await.sync_target();
 
             let batch = T::new_batch(reader.clone())
@@ -2237,9 +2237,9 @@ mod tests {
                 .merkleize()
                 .await
                 .expect("second batch must merkleize");
-            let (writer, snapshot, sync) = finalize(writer, batch).await;
+            let (writer, snapshot, handle) = finalize(writer, batch).await;
             drop(snapshot);
-            sync.await.expect("second finalize flush failed");
+            handle.await.expect("second finalize flush failed");
 
             let (_writer, ()) = writer
                 .mutate(|db| {

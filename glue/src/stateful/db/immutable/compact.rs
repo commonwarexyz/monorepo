@@ -263,9 +263,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, sync) = db.start_sync().await?;
+        let (db, handle) = db.start_sync().await?;
         let snapshot = Self::snapshot(&db);
-        Ok((db, snapshot, sync))
+        Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -345,9 +345,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner)?;
-        let (db, sync) = db.start_sync().await?;
+        let (db, handle) = db.start_sync().await?;
         let snapshot = Self::snapshot(&db);
-        Ok((db, snapshot, sync))
+        Ok((db, snapshot, handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {

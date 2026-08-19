@@ -551,9 +551,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, sync) = db.start_sync().await?;
+        let (db, handle) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), sync))
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -664,9 +664,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, sync) = db.start_sync().await?;
+        let (db, handle) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), sync))
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -859,9 +859,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, sync) = db.start_sync().await?;
+        let (db, handle) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), sync))
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
@@ -981,9 +981,9 @@ where
         batch: Self::Merkleized,
     ) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        let (db, sync) = db.start_sync().await?;
+        let (db, handle) = db.start_sync().await?;
         let (db, snapshot) = db.snapshot().await?;
-        Ok((db, Arc::new(snapshot), sync))
+        Ok((db, Arc::new(snapshot), handle))
     }
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
