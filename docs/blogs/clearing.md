@@ -264,7 +264,7 @@ $$
 ```
 
 ::: {.image-caption}
-Figure 5: Both rails branch from the same preserved 80. The upper rail computes the exact epoch-$e$ close, $80+\rho_a=85$. The lower rail keeps the epoch-$e+1$ head live, $80-20+\rho_a-15=50$. The single vertical $\rho_a=5$ marker is the same predecessor credit in both calculations. The two values serve different roles: 85 is the canonical predecessor close, while 50 is the current live head. Reconciliation adds $\rho_a$ to the live value and preserves every successor debit.
+Figure 3: Both rails branch from the same preserved 80. The upper rail computes the exact epoch-$e$ close, $80+\rho_a=85$. The lower rail keeps the epoch-$e+1$ head live, $80-20+\rho_a-15=50$. The single vertical $\rho_a=5$ marker is the same predecessor credit in both calculations. The two values serve different roles: 85 is the canonical predecessor close, while 50 is the current live head. Reconciliation adds $\rho_a$ to the live value and preserves every successor debit.
 :::
 
 The live balance is not monotone, since successor payments spend it down. The one-sidedness is all on the predecessor's side: completion can add missing credit but can never discover another accepted debit. Boundary operations and shard moves obey the same rule: the live head is only ever adjusted, never overwritten.
@@ -370,10 +370,10 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 ```
 
 ::: {.image-caption}
-Benchmark chart: These are four measured profiles, not an interpolation. Points are arithmetic means, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the components on each credited account from $h=1$ to $h=512$.
+Figure 4: These are four measured profiles, not an interpolation. Points are arithmetic means, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the components on each credited account from $h=1$ to $h=512$.
 :::
 
-Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated component leaves and signatures behind each credited row. Neither cost disappears behind the phrase “one row per account.”
+Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated component leaves and signatures behind each credited row. 
 
 All four profiles register the same million accounts, yet at $A=1{,}024$ the validator's assignment is 1.39 MB. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments.
 
@@ -386,7 +386,7 @@ This fixture queues no withdrawals and no full closes, whose re-check and row op
 ```
 
 ::: {.image-caption}
-Bytes-per-payment chart: fixed-width rows keep each profile's corpus constant in $T$, so each line is that profile's corpus from the table over the payment count and falls exactly as $1/T$. The two $A=1{,}000{,}000$ lines nearly coincide because components move that corpus by only $1.2\times$, while at $A=1{,}024$ they separate it by $57\times$.
+Figure 5: Fixed-width rows keep each profile's corpus constant in $T$, so each line is that profile's corpus from the table over the payment count and falls exactly as $1/T$. The two $A=1{,}000{,}000$ lines nearly coincide because components move that corpus by only $1.2\times$, while at $A=1{,}024$ they separate it by $57\times$.
 :::
 
 The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution.
@@ -394,44 +394,6 @@ The timers cover warm, in-memory close construction and validation on an 18-core
 Canonical encoding for hashing and signature verification remains included. Corpus bytes count each of the 256 pieces once, before replication to its 67 holders. The validator rows report the busiest of the 100 assignments with its share of the public corpus in parentheses, and the challenge rows target a mid-registry credited account's mid-set component.
 
 The timers ran under a ten-million-payment build of each fixture. The sizes hold for any payment count: rebuilding each fixture at counts from ten thousand (one million where all accounts change) up to ten million reproduced every size in the table, with the corpus and chain payloads identical to the byte.
-
-## What Clearing Trades
-
-### Channels
-
-Payment channels pursue the same two goals, but draw the settlement boundary around a pair. A bilateral channel compresses repeated transfers between two parties while preserving bilateral self-custody. A routed network such as the one in the [original Lightning paper](https://lightning.network/lightning-network-paper.pdf) extends that pairwise guarantee across a path, reserving directional liquidity and individually enforceable timed state at every hop.
-
-Bajillion draws the boundary around an account. It relies on one operator for online payment service during normal operation, while the settlement chain holds custody and enforces withdrawals. It then nets every sender and recipient under one account-wide close. Reaching a new counterparty needs only its registered account. There is no channel to open, route to find, or liquidity to lock. There is no routed-hop state. The deployment maps payments into bounded receive components, and the close carries one terminal head per component used.
-
-That broader netting boundary is why a cycle can be cheap. If $a\to b$, $b\to c$, and $c\to a$ repeat 100,000 times, the epoch contains $T=300{,}000$ payments but only $A=3$ changed accounts. With one component per recipient, it also has $H=3$.
-
-Gross debit still equals gross credit, but the public close carries three rows, three terminal pairs, and their sparse frontier rather than 300,000 payment records. A channel network would carry the same flow on three funded links whose liquidity the cycle merely shuffles.
-
-### Rollups
-
-A rollup picks between two costs. A validity rollup can commit only state diffs, bringing its settlement data close to this design's rows, but it proves every payment it executes, expensive at this scale even with recent advances. An optimistic rollup drops the prover, but its faults are proven against published inputs, so every payment must land in data availability, and a one-shot ZK fault proof shrinks the dispute, not the log. Bajillion also touches every payment, but with a signature instead of a proof, and it publishes neither a log nor a trace: the dispute object is a signed receipt already in its holder's hands.
-
-Under either flavor, the chain settles whatever the operator chose to execute, and an undisclosed promise is exactly the one fact validation cannot see. A sequencer could sign its preconfirmations and answer a challenge for dropping one, but that concedes the point: binding a preconfirmation takes a challenge protocol under any proof system. Bajillion starts there. Its signed receipt is the preconfirmation, and a one-shot challenge with no prover in the loop binds it.
-
-### Plasma
-
-Plasma makes a different choice about what users can reconstruct. The [original Plasma construction](https://plasma.io/plasma.pdf) commits roots of an ordered child-chain history to a parent while users retain the data needed to exit. Validity-proven [generalized Plasma](https://vitalik.eth.limo/general/2024/10/17/futures2.html#generalized-plasma) can prove general state transitions and let a user act from an available proven branch.
-
-Bajillion deliberately discards the payment history as a settlement object. It orders only real conflicts, namely successive sends from one payer and receipts within one component, then authenticates their terminal effects through a payment-specific relation.
-
-### What It Gives Up
-
-That narrower relation buys compression by giving up generality. Bajillion is an account-wide netting protocol, not a general execution environment or a reconstructible payment history.
-
-Its privacy benefit is data minimization: superseded pairs can stay out of ordinary public settlement. Every payment remains known to its payer, recipient, and operator, as well as any watchtower they involve. The persistent chain state contains commitments. The retrievable public corpus reveals the exact changed-account states, each account's terminal outgoing pair when it sent, and each receive component's terminal pair.
-
-For an accepted pair in a conforming close, ordinary disclosure is exact: the pair appears in the public corpus if and only if it is one of those terminals. A holder challenge may reveal a superseded pair later. The public account deltas, receipt counts, and terminal pairs still leak activity, and the protocol provides no anonymity or amount hiding.
-
-A deployment binds one asset. Supporting more requires separate deployments or an asset-indexed extension.
-
-No validity mode removes the availability assumptions. The public corpus must stay retrievable, and holders must retain their own evidence through the challenge window. Retained receipts police the close, while recovering custody needs only publicly retained data: the corpus and the survivor state preimage. Enforcement begins at admission, so preconfirmation holders bear operator default until their epoch admits.
-
-Users keep the unilateral withdrawal path, but failure containment is coarse. A proven receipt contradiction or expired withdrawal kills the affected deployment, and terminal unwind needs the complete authenticated survivor state. Users receive no separate enforceable exit object for every payment, route, or account branch. In return, the close nets across counterparties and follows changed account state. General-purpose rollup execution and per-payment channel exits are outside its scope.
 
 ## A Bajillion Payments, One Close
 
