@@ -273,9 +273,9 @@ Rollover changes only live serving state. The close still produces the canonical
 
 ## The Close Never Grows (with Payments)
 
-Each profile below fixes $N=1{,}000{,}000$ registered accounts, 512 credited accounts, 256 deterministic pieces, a 100-validator committee, and an eight-thread worker pool. Every changed account sends. The same 512 accounts receive in every profile, evenly spaced among the accounts that change.
+Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, a corpus split into 256 pieces for validator assignment, and an eight-thread worker pool. Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders.
 
-The matrix independently varies $A$, the number of changed accounts, and $h$, the numnts on each credited account. No payment count appears because none is needed: rows and component tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. A bajillion is not a number, and the close never asks for one.
+The matrix independently varies $A$, the number of changed accounts, and $h$, the credits on each credited account. No payment count appears because none is needed: rows and component tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. 
 
 ```{=html}
 <div class="clearing-benchmark-table">
