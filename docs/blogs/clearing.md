@@ -19,13 +19,11 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 Settlement cost is a function of the accounts that change, not the payments that move them. Make one payment or a bajillion: the close remains the same size. Without expensive incremental processing or complex challenges to police what happened. 
 
-## One Signed Payment
+## Payments as Fast as Browsing the Web
 
-An epoch starts from an authenticated account vector and a chain-sealed anchor $\mathcal A_e$. Deposits and user-signed withdrawals are fixed before online payments begin. Suppose account $a$ opens with 100 and wants to pay account $b$ 20.
+A Bajillion epoch starts from an authenticated account vector and an onchain anchor $\mathcal A_e$. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
 
-Its persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag ([§B of the formal spec](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#b-deployment-and-chain-state)).
-
-To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing one epoch-local receive component $\kappa$ from its current tip $(G,J)$:
+$a$'s persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag ([§B of the formal spec](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#b-deployment-and-chain-state)). To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing the recipient's receive component $\kappa$ from its current tip $(G,J)$ (which may or may not have been registered with the operator at the start of the epoch):
 
 $$
 S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
