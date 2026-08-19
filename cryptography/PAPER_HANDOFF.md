@@ -367,7 +367,25 @@ the above; 2025/1311 is the SOTA, 2026/749 the only 2026 item (per-point).
    else present with estimates.
 7. *"Bad-point identification?"* Out of scope, same as KEF §5; cite the
    identification literature; note consensus use-case rejects whole batches.
-8. *Memory:* per round transiently ~224 bytes/point (buf 96 + copied op list
+8. *"If T_j is chosen as a function of the other T_i, it is not independent
+   of Σc_iT_i — with small weights the sum's distribution is tied to the T_i."*
+   (Raised by Lucas, 2026-08-19; the classic objection — answer it in the
+   paper preemptively.) Quantifier order does the work: the lemma is
+   ∀(T_1..T_n) fixed, probability over coins alone; the adversary commits
+   points (arbitrarily correlated, T_j = f(T_1..T_n) included) BEFORE coins
+   are drawn. The proof's independence is between the COINS c_j and
+   U = −Σ_{i≠j}c_iT_i (a function of other coins and constants), and the
+   conditional bound Pr[c_jT_j = U | U = u] ≤ 1/3 is uniform in u, so U's
+   distribution — however structured or T_j-correlated — is irrelevant. No
+   independence of the sum from the points is ever used. Worst case realizes
+   the concern and meets the bound with equality: T_2 = −T_1 escapes iff
+   c_1 = c_2, exactly 1/3. Counterpoint to the "large weights would fix it"
+   premise: they would not — in an order-3 component any coefficient acts mod
+   3, so full-width weights leave the pair a ≥1/3 escape (the barrier lemma);
+   more combinations is the only lever. What the model genuinely requires:
+   fresh, verifier-private, unpredictable coins per batch — no reuse.
+   Documented in the module docs (commit 89ca68b44) and artifact remark (v).
+9. *Memory:* per round transiently ~224 bytes/point (buf 96 + copied op list
    ~104 + denominators 24); at n=10⁵ with 17 concurrent rounds ≈ 380 MB worst
    case. Fine on servers; mention.
 
