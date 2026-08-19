@@ -178,3 +178,9 @@ name = "bulletproofs"
 harness = false
 path = "src/zk/bulletproofs/benches/bench.rs"
 required-features = [ "std" ]
+
+[[bench]]
+name = "pari"
+harness = false
+path = "src/zk/pari/benches/bench.rs"
+required-features = [ "std" ]
