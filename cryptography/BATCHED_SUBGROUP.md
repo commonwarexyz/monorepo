@@ -182,8 +182,8 @@ round) reach the target. Points of comparison, from the paper itself:
 Strategy C therefore fills exactly the gap their cost model assumes away: it
 makes the no-prefilter multi-combination route cost `⌈81/m⌉` passes instead of
 81 MSMs, which is what turns batch SMT on **unmodified BLS12-381** from "slower
-than naive" (their result) into 3.2–7.4× serial / 18–43× parallel (ours, at a
-stronger 2⁻¹²⁸ target). Their binary-coefficient variant also shows how C
+than naive" (their result) into 3.2–7.1× serial (7.1–7.4 across runs at
+n=100 000) and 18–43× parallel (ours, at a stronger 2⁻¹²⁸ target). Their binary-coefficient variant also shows how C
 extends to even-cofactor curves (e.g. BLS12-377): use `{0,1}` coefficient
 vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
 
