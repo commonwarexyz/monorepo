@@ -21,7 +21,7 @@ use commonware_runtime::{
     Clock, Metrics,
     telemetry::metrics::{Counter, CounterFamily, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::futures::Aborter;
+use commonware_utils::{bitmap::BitMap, futures::Aborter};
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -166,6 +166,10 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
+    /// Participants whose fast-skip has been spent since the last finalization,
+    /// indexed by participant.
+    fast_skipped: BitMap,
+
     current_view: Gauge,
     tracked_views: Gauge,
     issuance_window_probes: Counter,
@@ -230,6 +234,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let nullifications = context.family("nullifications", "nullifications");
 
         let lookahead = Lookahead::new(&cfg.elector.terms());
+        let fast_skipped = BitMap::zeroes(cfg.scheme.participants().len() as u64);
 
         Self {
             context,
@@ -251,6 +256,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             failed_certifications: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
+            fast_skipped,
             current_view,
             tracked_views,
             issuance_window_probes,
@@ -634,6 +640,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if view > self.last_finalized {
             self.last_finalized = view;
 
+            // Progress restores every participant's fast-skip.
+            self.fast_skipped.set_all(false);
+
             // Finalization overrides local certification rejections at or
             // below its view.
             self.failed_certifications = self.failed_certifications.split_off(&view.next());
@@ -851,6 +860,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Immediately expires `view` on first timeout, forcing a timeout to fire on the next tick.
     ///
+    /// A leader can only be fast-skipped once between finalizations; later timeouts
+    /// for the same leader expire on the round's own deadlines instead.
+    ///
     /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
     ///
@@ -878,6 +890,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // ignore it (other timeout reasons still latch).
         if matches!(reason, TimeoutReason::Inactivity) && round.has_unequivocated_proposal() {
             return;
+        }
+        // Avoid fast-skipping the same leader twice before finalization to avoid
+        // network-speed view churn.
+        if let Some(leader) = round.leader() {
+            let idx = u64::from(leader.idx.get());
+            if self.fast_skipped.get(idx) {
+                return;
+            }
+            self.fast_skipped.set(idx, true);
         }
         round.latch_timeout(now, reason);
     }
@@ -2704,6 +2725,111 @@ mod tests {
             let (deadline, reason) = state.next_timeout();
             assert_eq!(reason, TimeoutReason::Inactivity);
             assert_eq!(deadline, now);
+        });
+    }
+
+    /// Advances to the view after `view` by nullifying it.
+    fn nullify_view(
+        state: &mut TestState,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+        view: View,
+    ) {
+        let round = Rnd::new(state.epoch(), view);
+        assert!(state.add_nullification(build_nullification(verifier, schemes, round)));
+    }
+
+    /// Every participant is fast-skipped at most once between finalizations, so a
+    /// leader that comes back around waits out its leader timeout instead.
+    #[test]
+    fn fast_skip_spent_once_per_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state(&mut context, 4, 7, 10, 1);
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            // Each of the four leaders spends its own skip.
+            for view in 1..=4 {
+                let view = View::new(view);
+                assert_eq!(state.current_view(), view);
+                let now = context.current();
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
+                nullify_view(&mut state, &verifier, &schemes, view);
+            }
+
+            // View 5 returns to view 1's leader, whose skip is already spent.
+            let view = View::new(5);
+            assert_eq!(state.current_view(), view);
+            let now = context.current();
+            state.trigger_timeout(view, TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    /// A skip is spent by any fast-skip reason, not just inactivity.
+    #[test]
+    fn fast_skip_spans_timeout_reasons() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state(&mut context, 4, 7, 10, 1);
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            let now = context.current();
+            state.trigger_timeout(View::new(1), TimeoutReason::MissingProposal);
+            assert_eq!(state.next_timeout(), (now, TimeoutReason::MissingProposal));
+            for view in 1..=4 {
+                nullify_view(&mut state, &verifier, &schemes, View::new(view));
+            }
+
+            state.trigger_timeout(View::new(5), TimeoutReason::Inactivity);
+            assert_eq!(
+                state.next_timeout(),
+                (now + Duration::from_secs(1), TimeoutReason::LeaderTimeout)
+            );
+        });
+    }
+
+    /// Finalizing proves the network is making progress and restores every skip.
+    #[test]
+    fn finalization_restores_fast_skip() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (fixture, mut state) = setup_state(&mut context, 4, 7, 10, 1);
+            let Fixture {
+                schemes, verifier, ..
+            } = fixture;
+
+            for view in 1..=4 {
+                let view = View::new(view);
+                state.trigger_timeout(view, TimeoutReason::Inactivity);
+                nullify_view(&mut state, &verifier, &schemes, view);
+            }
+
+            // Finalizing view 5 clears the spent skips and enters view 6, whose
+            // leader led view 2.
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(5)),
+                GENESIS_VIEW,
+                Sha256Digest::from([123u8; 32]),
+            );
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &proposal))
+                    .0
+            );
+            assert_eq!(state.current_view(), View::new(6));
+
+            let now = context.current();
+            state.trigger_timeout(View::new(6), TimeoutReason::Inactivity);
+            assert_eq!(state.next_timeout(), (now, TimeoutReason::Inactivity));
         });
     }
 
