@@ -140,7 +140,21 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<F, Op, D>, FeedbackTx), Error<F>> {
-        validate_tip_request(self.size(), &request)?;
+        // The request must target exactly the committed size and start at the
+        // commit's location.
+        let tip = self.size();
+        if request.size() > tip || request.size() == 0 {
+            return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        if request.size() < tip {
+            return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
+        }
+        if request.start() >= request.size() {
+            return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
+        }
+        if request.start() < request.size() - 1 {
+            return Err(crate::journal::Error::ItemPruned(*request.start()).into());
+        }
         let response = match request {
             Request::Operations { .. } => Response::Operations {
                 proof: self.proof.clone(),
@@ -625,24 +639,6 @@ where
     }
     let entry = journal.read(size - 1).await?;
     rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)
-}
-
-/// Validate that `request` targets exactly the committed size `tip` and starts at the
-/// commit's location.
-fn validate_tip_request<F: Family>(tip: Location<F>, request: &Request<F>) -> Result<(), Error<F>> {
-    if request.size() > tip || request.size() == 0 {
-        return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
-    }
-    if request.size() < tip {
-        return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
-    }
-    if request.start() >= request.size() {
-        return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
-    }
-    if request.start() < request.size() - 1 {
-        return Err(crate::journal::Error::ItemPruned(*request.start()).into());
-    }
-    Ok(())
 }
 
 /// Rebuild the Merkle from `witness` and derive its tip.

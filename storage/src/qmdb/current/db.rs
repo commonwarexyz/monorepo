@@ -536,7 +536,7 @@ where
     }
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
+    /// index.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.

@@ -20,7 +20,7 @@
 //! Commits carry an inactivity floor for wire-format compatibility with
 //! [`crate::qmdb::immutable::Immutable`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
-//! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
+//! full variant. The floor has no effect on pruning or index rebuilding here; all
 //! historical in-memory state is discarded whenever a witness is published.
 
 use super::operation::Operation;
