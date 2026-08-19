@@ -346,7 +346,7 @@ impl<P: Simplex> Validator<P> {
     }
 
     /// Removes the installed resolver so a caller can wrap it (for example in an
-    /// observing adapter) before starting the actor with [`Self::start_with`].
+    /// observing adapter) before starting the actor with [`Self::start_with_buffer`].
     pub(crate) fn take_resolver(&mut self) -> MarshalResolver<P> {
         self.resolver
             .take()

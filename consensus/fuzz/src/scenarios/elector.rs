@@ -6,13 +6,13 @@
 //! ([`BYZANTINE_IDX`]) as the leader of a chosen live `attack_view` and falls back
 //! to round-robin everywhere else, so the byzantine leader fault actually runs.
 
-use crate::{BYZANTINE_IDX, simplex::round_robin};
+use crate::BYZANTINE_IDX;
 use commonware_consensus::{
     simplex::{
         elector::{Config as ElectorConfig, Elector, RoundRobin, Terms},
         scheme::Scheme,
     },
-    types::{Participant, Round, TermLength, View},
+    types::{Participant, Round, View},
 };
 use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
 
@@ -42,7 +42,7 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for ByzantineLeaderAtView {
     fn build(self, participants: &commonware_utils::ordered::Set<S::PublicKey>) -> Self::Elector {
         ByzantineLeaderAtViewElector {
             attack_view: self.attack_view,
-            fallback: round_robin(TermLength::ONE).build(participants),
+            fallback: RoundRobin::<Sha256>::default().build(participants),
         }
     }
 }

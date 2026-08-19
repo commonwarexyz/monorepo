@@ -4,11 +4,11 @@
 //! a node's archives before its marshal actor starts, and wraps each node's
 //! resolver in an observing adapter. The prefix drives the honest core into a
 //! source-defined state through the [`FuzzScenarioStandardHarness`] and verifies
-//! the [`ScenarioHandoff`] before any engine starts. The fuzzing phase starts the
-//! engines from the handoff floor (honestly, or with node 0 replaced by the
-//! full-channel adversary), heals the network at a GST boundary, and checks
-//! recovery liveness and the marshal-layer safety invariants selected by the
-//! handoff.
+//! the [`ScenarioHandoff`](super::environment::ScenarioHandoff) before any engine
+//! starts. The fuzzing phase starts the engines from the handoff floor (honestly,
+//! or with node 0 replaced by the full-channel adversary), heals the network at a
+//! GST boundary, and checks recovery liveness and the marshal-layer safety
+//! invariants selected by the handoff.
 
 use super::{
     adversary,
@@ -35,7 +35,7 @@ use crate::{
             },
         },
     },
-    simplex::{Simplex, round_robin},
+    simplex::Simplex,
     utils::apply_partition,
 };
 use commonware_consensus::{
@@ -46,11 +46,11 @@ use commonware_consensus::{
             harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE},
         },
     },
-    simplex::types::Artifact,
-    types::{TermLength, View},
+    simplex::{elector::RoundRobin, types::Artifact},
+    types::View,
 };
 use commonware_cryptography::{
-    Digestible, certificate::Verifier as _, sha256::Digest as Sha256Digest,
+    Digestible, Sha256, certificate::Verifier as _, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{Link, Oracle};
@@ -172,8 +172,9 @@ where
             // delivery while the real fetch, deliver, and serve paths stay
             // live for the fuzzing phase.
             let (resolver_override, injection_handler) = if idx == Node::B.idx() {
+                let injectable_ctx = validator_ctx.child("injectable");
                 let (pair, handler) = init_injectable::<P>(
-                    &validator_ctx.child("injectable"),
+                    &injectable_ctx,
                     &oracle,
                     validator.clone(),
                 )
@@ -402,7 +403,7 @@ where
                     &oracle,
                     validator.clone(),
                     schemes[idx].clone(),
-                    round_robin(TermLength::ONE),
+                    RoundRobin::<Sha256>::default(),
                     node.builder.clone(),
                     node.builder.clone(),
                     node.mailbox.clone(),

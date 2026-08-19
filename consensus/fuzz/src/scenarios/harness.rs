@@ -11,8 +11,8 @@
 //! backfill request each state produces and script the response to one.
 //!
 //! A prefix drives the honest core into a source-defined state and returns a
-//! [`ScenarioHandoff`], which [`Self::finish`] mechanically verifies before the
-//! engines start.
+//! [`ScenarioHandoff`], which [`FuzzScenarioStandardHarness::finish`]
+//! mechanically verifies before the engines start.
 
 use super::{
     environment::{

@@ -6,8 +6,9 @@
 //! hand the marshal exactly the notarized or finalized bytes it asked for.
 //! That helper is `cfg(test)` inside `consensus/src`, but its mechanism is
 //! public: [`handler::init`] builds the receiver/handler pair, and the
-//! [`Handler`](handler::Handler) is the [`Consumer`] whose `deliver` enqueues
-//! the same delivery message.
+//! [`Handler`](handler::Handler) is the
+//! [`Consumer`](commonware_resolver::Consumer) whose `deliver` enqueues the same
+//! delivery message.
 //!
 //! This is the fuzz-crate equivalent, in three wirings:
 //! - [`RecordingResolver::holding`]: no network, the source-faithful shape for
@@ -301,9 +302,10 @@ impl<P: Simplex> TargetedResolver for RecordingResolver<P> {
 /// Replicate the marshal P2P resolver wiring
 /// (`marshal::resolver::p2p::init`) around a handler pair the caller holds:
 /// the returned receiver/mailbox go to the marshal actor as usual, while the
-/// returned handler is the resolver-side [`Consumer`] whose `deliver` injects
-/// an armed payload into the same receiver the actor consumes. Registers the
-/// marshal backfill channel for `validator`.
+/// returned handler is the resolver-side
+/// [`Consumer`](commonware_resolver::Consumer) whose `deliver` injects an armed
+/// payload into the same receiver the actor consumes. Registers the marshal
+/// backfill channel for `validator`.
 pub(crate) async fn init_injectable<P: Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
