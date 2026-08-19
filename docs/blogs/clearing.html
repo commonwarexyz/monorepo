@@ -539,45 +539,40 @@ O’Grady</a></div>
         destinations, and every account claims its remaining balance,
         and any unconsumed deposit, with one Merkle proof against that
         root.</p>
-        <p>Recovery is unilateral but deliberately coarse: one expired
-        withdrawal kills the whole deployment, and every account must
-        come claim its own funds. That is the price of exits that need
-        nothing from the operator.</p>
-        <h2 id="close-without-pausing-payments">Close Without Pausing
-        Payments</h2>
-        <p>Closing an epoch is asynchronous. Spending continues while
-        the final payer debit markers and receive-component tips are
-        authenticated and admitted. Otherwise, account-level compression
-        would create a throughput cliff at every epoch boundary.</p>
-        <p>Rollover happens independently for each payer. Before an
-        account can send in epoch <span class="math inline">e+1</span>,
-        its final epoch-<span class="math inline">e</span> debit marker
-        and preserved spendable balance are fixed. Accounts that do not
-        send are fixed when the predecessor epoch seals.</p>
-        <p>The key invariant applies immediately before any successor
-        deposit or withdrawal is applied. Let <span
-        class="math inline">\widetilde B_a</span> be the preserved
-        guarded balance after every accepted predecessor debit and every
-        predecessor credit already imported for spending. Let <span
-        class="math inline">B_a^1</span> be the exact predecessor
-        closing balance. Then</p>
+        <h2 id="streamlined-epoch-transitions">Streamlined Epoch
+        Transitions</h2>
+        <p>Closing an epoch is asynchronous: spending continues in epoch
+        <span class="math inline">e+1</span> while epoch <span
+        class="math inline">e</span>’s close is still being built,
+        certified, and admitted. Otherwise every epoch boundary would be
+        a throughput cliff.</p>
+        <p>What makes this safe is an asymmetry. When an account rolls
+        over, the operator carries forward its preserved head:
+        everything it started with, minus every accepted debit, plus
+        every credit already imported. Debits ended at the rollover, so
+        the predecessor credit still in flight can only add to that head
+        later, never subtract. Writing <span
+        class="math inline">\widetilde B_a</span> for the preserved head
+        and <span class="math inline">\rho_a</span> for the credit in
+        flight, the exact predecessor close is</p>
         <p><span class="math display">
-        \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0,}
+        \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
         </span></p>
-        <p>where <span class="math inline">\rho_a</span> is the total
-        unimported predecessor credit. The live head is the payer’s safe
-        spendable balance. The authenticated predecessor close is
-        computed separately.</p>
-        <p>Successor debits continue on the same head, so reconciliation
-        adds <span class="math inline">\rho_a</span> to the live value.
-        Assigning <span class="math inline">B_a^1</span> over it would
-        erase those debits. In the running example, <span
+        <p>The preserved head is a floor, and a floor is safe to spend
+        against: the operator pre-authorizes successor payments on <span
+        class="math inline">\widetilde B_a</span> before <span
+        class="math inline">B_a^1</span> is even computed.
+        Reconciliation later adds <span
+        class="math inline">\rho_a</span> to the live value. It never
+        assigns <span class="math inline">B_a^1</span> over it, which
+        would erase successor debits already accepted.</p>
+        <p>In the running example, <span
         class="math inline">a\xrightarrow{20}b</span> leaves the
         preserved head at 80 while the not-yet-imported <span
         class="math inline">d\xrightarrow{5}a</span> credit makes the
-        exact predecessor close 85. If <span
-        class="math inline">a</span> spends 20 and then 15 in the
-        successor while the missing credit arrives between them,</p>
+        exact close 85. If <span class="math inline">a</span> spends 20
+        and then 15 in the successor while the missing credit arrives
+        between them,</p>
         <p><span class="math display">
         80-20+5-15=50=(85)-20-15.
         </span></p>
@@ -598,33 +593,29 @@ O’Grady</a></div>
         class="math inline">\rho_a</span> to the live value and
         preserves every successor debit.</p>
         </div>
-        <p>The live balance is not monotone: successor payments spend it
-        down. Only predecessor completion is one-sided, because it can
-        add missing credit but cannot discover another accepted
-        debit.</p>
-        <p>Successor boundary operations and shard moves must preserve
+        <p>The live balance is not monotone, since successor payments
+        spend it down. The one-sidedness is all on the predecessor’s
+        side: completion can add missing credit but can never discover
+        another accepted debit. Boundary operations and shard moves obey
         the same rule: the live head is only ever adjusted, never
         overwritten.</p>
-        <p>Rollover changes only live serving state. The ordinary close
-        still produces the canonical rows, state root, and public
-        corpus, which go through the same validity and admission checks.
-        A challenge against the predecessor invalidates its admitted
-        descendants.</p>
+        <p>Rollover changes only live serving state. The close still
+        produces the canonical rows, state root, and public corpus,
+        checked exactly as before, and a challenge against the
+        predecessor invalidates its admitted descendants.</p>
         <h2 id="the-close-never-grows-with-payments">The Close Never
-        Grows with Payments</h2>
-        <p>The asymptotics say what stops growing. A controlled
-        benchmark shows what still costs time.</p>
+        Grows (with Payments)</h2>
         <p>Each profile below fixes <span
         class="math inline">N=1{,}000{,}000</span> registered accounts,
         512 credited accounts, 256 deterministic pieces, a 100-validator
-        committee with quorum 67, and an eight-thread worker pool. Every
-        changed account sends. The same 512 accounts receive in every
-        profile, evenly spaced among the accounts that change.</p>
+        committee, and an eight-thread worker pool. Every changed
+        account sends. The same 512 accounts receive in every profile,
+        evenly spaced among the accounts that change.</p>
         <p>The matrix independently varies <span
         class="math inline">A</span>, the number of changed accounts,
-        and <span class="math inline">h</span>, the number of components
-        on each credited account. No payment count appears because none
-        is needed: rows and component tips carry fixed-width cumulative
+        and <span class="math inline">h</span>, the numnts on each
+        credited account. No payment count appears because none is
+        needed: rows and component tips carry fixed-width cumulative
         totals, so every size in the table is the same for any <span
         class="math inline">T</span>. A bajillion is not a number, and
         the close never asks for one.</p>
