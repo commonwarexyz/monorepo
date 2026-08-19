@@ -181,7 +181,14 @@ $$
 \boxed{L_{e+1}=L_e+F_e-W_e.}
 $$
 
-The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it (scaling sublinearly over the changed accounts). Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With 100 validators, 33 tolerated faults, and quorum 67, every piece's holders share at least 34 validators with the certificate. 
+The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it (scaling sublinearly over the changed accounts). Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With $n$ validators, $f$ tolerated faults, and quorum $q$, every piece $j$'s holders share more than $f$ validators with the certificate's signers:
+
+$$
+\begin{aligned}
+n&=100,\qquad f=33,\qquad q=2f+1=67,\\[0.3em]
+|\mathsf{signers}\;\cap\;\mathsf{holders}_j|&\;\ge\;2q-n=34>f.
+\end{aligned}
+$$ 
 
 ## The Unavoidable Challenge
 
@@ -193,11 +200,7 @@ $$
 \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
 $$
 
-If it accepts $\Xi_0$, it must accept $\Xi_1$. Any of the three modes can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
-
-That is the blind spot. A payment is its matching pair, handed to the payer and forwarded to its recipient, so at close the recipient holds every payment it received. Outside the operator being checked, no other party does, and no verifier can do better than the recipient's own record. A receipt delivered to no one has injured no one who relied on it. The protocol puts the completeness check where the complete record already sits.
-
-The challenge window turns a preconfirmation from a promise into evidence. Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
+If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature. Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
 
 1. **Payer debit contradiction.** A matching acknowledged pair carries a debit above the public debit marker, or the same debit with a different send or receipt body. A bare payer request is insufficient. The receipt proves operator acknowledgement.
 
@@ -207,56 +210,9 @@ The challenge window turns a preconfirmation from a promise into evidence. Throu
 
 4. **Receipt fork.** Two distinct linked receipt bodies either reuse one receipt index within a component or acknowledge the same payer transaction differently. Different signature bytes over one identical receipt body are not a fork.
 
-Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call. The fraud proof is about receipts, not arbitrary execution, which is what keeps that surface small.
+Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call. 
 
-The higher-tip challenge combines three sources in one bounded onchain call. The settlement chain provides the admitted header and its $\mathsf{ChangeRoot}$. The availability service provides the authenticated account and component lookups that open $b$ and then $\kappa_0$. The recipient provides the signed pair it retained privately.
-
-$$
-\begin{aligned}
-\mathsf{Challenge}^{\mathsf{higher}}_e=\bigl(&
-\underbrace{\mathsf{slotId}_e}_{\text{chain reference}},\\[-0.1em]
-&\underbrace{P^+_{a\to b,\kappa_0}}_{\text{retained by the recipient}},\\[-0.1em]
-&\underbrace{
-  \mathsf{AccountLookup}(b),
-  \mathsf{ComponentLookup}(\kappa_0)
-}_{\text{from the availability service}}
-\bigr).
-\end{aligned}
-$$
-
-The call resolves the two authenticated lookups in sequence:
-
-$$
-\begin{aligned}
-\mathsf{slotId}_e
-&\longmapsto
-\mathsf{Header}_e[\mathsf{ChangeRoot}_e],\\
-\mathsf{ChangeRoot}_e
-&\xrightarrow{\ \mathsf{AccountLookup}(b)\ }
-\mathsf{Row}_b[\mathsf{CreditRoot}_e(b)]
-\xrightarrow{\ \mathsf{ComponentLookup}(\kappa_0)\ }
-(G^\star,J^\star)=(20,1),\\
-P^+_{a\to b,\kappa_0}
-&\xrightarrow{\ \mathsf{Verify}(\mathcal A_e,b,\kappa_0)\ }
-(G^+,J^+)=(23,2).
-\end{aligned}
-$$
-
-$$
-\bigl(G^+>G^\star\bigr)\lor\bigl(J^+>J^\star\bigr)
-\;\Longleftrightarrow\;
-(23>20)\lor(2>1)
-\;\Longrightarrow\;
-\mathsf{HigherTip}.
-$$
-
-::: {.image-caption}
-Figure 4: The first display identifies the challenge inputs and the source of each one. The second authenticates the committed component tip by following $\mathsf{ChangeRoot}_e\to \mathsf{Row}_b\to\mathsf{CreditRoot}_e(b)\to\kappa_0$, then verifies the retained pair in the same scope. Either strict coordinate inequality proves the contradiction. If row $b$ were absent, the account lookup would instead carry the neighboring-row openings that prove its ordered absence.
-:::
-
-There is no fifth challenge for boundary omissions. Deposits and withdrawals were serialized by the settlement chain before the epoch, so wrong roots, totals, signatures, or account effects are public registration or admission failures.
-
-A successful receipt challenge blocks the challenged slot and every admitted descendant from finalizing. Earlier admitted slots keep their ordinary challenge windows and may still finalize in order. The challenge itself provides neither reimbursement nor slashing. Collateral, insurance, and repair allocation are deployment policy.
+A successful receipt challenge blocks the challenged slot and every admitted descendant from finalizing. Earlier admitted slots keep their ordinary challenge windows and may still finalize in order. 
 
 ## A Deadline to Exit
 
