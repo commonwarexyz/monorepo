@@ -146,6 +146,10 @@ pub trait Cursor: Send + Sync {
 
 /// A trait defining the operations provided by a memory-efficient index that maps translated keys
 /// to arbitrary values, with no ordering assumed over the key space.
+/// One entry in a key-sorted diff batch: the translated key bytes with the value to
+/// replace (`None` inserts) and the value to store (`None` deletes).
+pub type KeyValueDiff<'a, V> = (&'a [u8], Option<V>, Option<V>);
+
 pub trait Unordered: Send + Sync {
     /// The type of values the index stores.
     type Value: Send + Sync;
@@ -206,7 +210,7 @@ pub trait Unordered: Send + Sync {
     fn apply_sorted_diffs<S: Strategy>(
         &mut self,
         _strategy: &S,
-        diffs: &[(&[u8], Option<Self::Value>, Option<Self::Value>)],
+        diffs: &[KeyValueDiff<'_, Self::Value>],
     ) where
         Self::Value: PartialEq + Copy,
     {
