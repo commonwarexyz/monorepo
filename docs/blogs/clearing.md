@@ -1,6 +1,6 @@
 ---
 title: "Keep the Change"
-description: "Account-level clearing makes millions of tiny payments economical by settling account changes instead of publishing every transaction. At internet scale, digital signatures and Merkle trees make its public settlement cost per payment effectively zero."
+description: "Bajillion is an account-level clearing protocol that makes millions of tiny payments economical by settling account changes instead of publishing every transaction. At internet scale, digital signatures and Merkle trees make its public settlement cost per payment effectively zero."
 date: "August 14th, 2026"
 published-time: "2026-08-14T00:00:00Z"
 modified-time: "2026-08-14T00:00:00Z"
@@ -19,7 +19,7 @@ That depends on the guarantee. Direct onchain settlement publishes each payment 
 
 At this scale, the payer and recipient can accept an operator's signed preconfirmation now and wait for public finality. The signature gives them evidence they can retain immediately, while finality arrives later as part of a larger close.
 
-Account-level clearing applies that trade within one operator and custody system. It makes the account the unit of settlement. The operator accepts payments throughout an epoch. At close, each changed account contributes one row that commits its exact opening and closing state. Repeated payments over the same set of accounts share those rows even when the pairings differ.
+**Bajillion**, the account-level clearing protocol this post presents, applies that trade within one operator and custody system. It makes the account the unit of settlement. The operator accepts payments throughout an epoch. At close, each changed account contributes one row that commits its exact opening and closing state. Repeated payments over the same set of accounts share those rows even when the pairings differ.
 
 The operator still verifies and durably records every payment. Users trust it for custody and online service. The savings appear in public settlement when many payments reuse the same accounts.
 
@@ -357,7 +357,7 @@ Rollover changes only live serving state. The ordinary close still produces the 
 
 The asymptotics say what stops growing. A controlled benchmark shows what still costs time.
 
-Each profile below fixes $N=1{,}000{,}000$ registered accounts, 512 credited accounts, 256 deterministic pieces, a 100-validator committee with quorum 67, and an eight-thread worker pool. Every changed account sends. The same 512 accounts receive in every profile, evenly spaced among the accounts that change. The matrix independently varies $A$, the number of changed accounts, and $h$, the number of component heads on each credited account. No payment count appears because none is needed: rows and heads carry fixed-width cumulative totals, so every size in the table is the same for any $T$.
+Each profile below fixes $N=1{,}000{,}000$ registered accounts, 512 credited accounts, 256 deterministic pieces, a 100-validator committee with quorum 67, and an eight-thread worker pool. Every changed account sends. The same 512 accounts receive in every profile, evenly spaced among the accounts that change. The matrix independently varies $A$, the number of changed accounts, and $h$, the number of component heads on each credited account. No payment count appears because none is needed: rows and heads carry fixed-width cumulative totals, so every size in the table is the same for any $T$. A bajillion is not a number, and the close never asks for one.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -469,7 +469,7 @@ The timers cover warm, in-memory close construction and validation on an 18-core
 
 ## The Account-Level Trade
 
-Payment channels attack the same economic problem with a different settlement boundary. A bilateral channel compresses repeated transfers between two parties while preserving bilateral self-custody. A routed network such as the one in the [original Lightning paper](https://lightning.network/lightning-network-paper.pdf) extends that guarantee across a path, which means reserving directional liquidity and individually enforceable timed state at every hop. This construction instead trusts one operator and custody system during normal operation, then nets every sender and recipient under one account-wide close. It has no routed-hop state: the close carries only the terminal head of each receive component used, and the deployment chooses how payments map into those bounded concurrency domains.
+Payment channels attack the same economic problem with a different settlement boundary. A bilateral channel compresses repeated transfers between two parties while preserving bilateral self-custody. A routed network such as the one in the [original Lightning paper](https://lightning.network/lightning-network-paper.pdf) extends that guarantee across a path, which means reserving directional liquidity and individually enforceable timed state at every hop. Bajillion instead trusts one operator and custody system during normal operation, then nets every sender and recipient under one account-wide close. It has no routed-hop state: the close carries only the terminal head of each receive component used, and the deployment chooses how payments map into those bounded concurrency domains.
 
 That broader netting boundary is why a cycle can be cheap. If $a\to b$, $b\to c$, and $c\to a$ repeat 100,000 times, the epoch contains $T=300{,}000$ payments but only $A=3$ changed accounts. With one component per recipient, it also has $H=3$. Gross debit still equals gross credit, but the public close carries three rows, three heads, and their sparse frontier rather than 300,000 payment records.
 
@@ -501,9 +501,9 @@ For repeated activity over a fixed changed-account and component footprint, $(A+
 
 Sign every payment. Settle each changed account once.
 
-The construction has not yet been peer-reviewed or uploaded to arXiv.
+Bajillion has not yet been peer-reviewed or uploaded to arXiv.
 
-## Appendix: Formal Specification
+## Appendix: Bajillion Formal Specification
 
 - **A.** Model: participants, timing, cryptographic primitives, and the adversary.
 - **B.** Deployment, registry, boundaries, and chain state.
@@ -551,7 +551,7 @@ The **operator** is a single logical server. It serves online payments, maintain
 
 The **settlement chain** is an append-only state machine trusted for safety and liveness. It is authoritative for the account registry, custody, epoch boundaries, committed roots, deadlines, and transition order. It exposes a monotone authenticated time $t$, and it executes each included call atomically: a call either performs its complete effect or leaves state unchanged. Every transition of Section F is permissionless: any party that supplies the required inputs may invoke it. The chain's own consensus is outside this model.
 
-A **deployment** is one settlement-chain instance of the protocol. It binds an immutable profile $\Pi$ (Section B.1), a registry, an operator key, and an asset adapter, and it owns custody $E$, the slot pipeline, and a lifecycle flag among live, faulted, and unwound.
+A **deployment** is one settlement-chain instance of Bajillion. It binds an immutable profile $\Pi$ (Section B.1), a registry, an operator key, and an asset adapter, and it owns custody $E$, the slot pipeline, and a lifecycle flag among live, faulted, and unwound.
 
 A **validity checker** certifies the public close relation of Section D. Depending on the deployment's mode it is a committee of $n_{\mathsf{val}}=3f_{\mathsf{val}}+1$ validators of which at most $f_{\mathsf{val}}$ are faulty, a proof system for the relation, or a trusted execution environment (TEE).
 
