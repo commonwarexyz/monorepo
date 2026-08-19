@@ -10,11 +10,11 @@
 
     <title>commonware > Keep the Change</title>
     <meta name="description" content="Bajillion is an account-level
-clearing protocol built for two goals: cheap settlement at massive scale
-and credible, fast preconfirmations. A payment is one operator round
-trip, and the close settles account changes instead of publishing every
-transaction, making public settlement cost per payment effectively
-zero.">
+clearing protocol built for two goals: cheap settlement of many-to-many
+payments at massive scale and credible, fast preconfirmations. A payment
+is one operator round trip, and the close settles account changes
+instead of publishing every transaction, making public settlement cost
+per payment effectively zero.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -24,11 +24,11 @@ zero.">
     <meta property="og:image" content="https://commonware.xyz/imgs/clearing.png" />
     <meta property="og:title" content="Keep the Change" />
     <meta property="og:description" content="Bajillion is an
-account-level clearing protocol built for two goals: cheap settlement at
-massive scale and credible, fast preconfirmations. A payment is one
-operator round trip, and the close settles account changes instead of
-publishing every transaction, making public settlement cost per payment
-effectively zero." />
+account-level clearing protocol built for two goals: cheap settlement of
+many-to-many payments at massive scale and credible, fast
+preconfirmations. A payment is one operator round trip, and the close
+settles account changes instead of publishing every transaction, making
+public settlement cost per payment effectively zero." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-08-14T00:00:00Z" />
     <meta property="article:modified_time" content="2026-08-14T00:00:00Z" />
@@ -40,11 +40,11 @@ effectively zero." />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/clearing" />
     <meta property="twitter:title" content="Keep the Change" />
     <meta property="twitter:description" content="Bajillion is an
-account-level clearing protocol built for two goals: cheap settlement at
-massive scale and credible, fast preconfirmations. A payment is one
-operator round trip, and the close settles account changes instead of
-publishing every transaction, making public settlement cost per payment
-effectively zero." />
+account-level clearing protocol built for two goals: cheap settlement of
+many-to-many payments at massive scale and credible, fast
+preconfirmations. A payment is one operator round trip, and the close
+settles account changes instead of publishing every transaction, making
+public settlement cost per payment effectively zero." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/clearing.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
@@ -109,8 +109,8 @@ effectively zero." />
 O’Grady</a></div>
                         <div class="date">August 14th, 2026</div>
         </div>
-        <p>A $0.000001 payment costs more to replicate, settle onchain,
-        and index than it’s worth.</p>
+        <p>$0.000001 payments cost more to replicate, settle onchain,
+        and index than they’re worth.</p>
         <p>More blockspace, bandwidth, and storage let a network carry
         more payment records. The economic question is whether every
         payment needs one.</p>
@@ -122,16 +122,20 @@ O’Grady</a></div>
         general-purpose rollup validates arbitrary execution. These
         designs ask the chain to settle a payment, a channel state, or a
         general state transition.</p>
-        <p>At this scale, the design goals are a pair: cheap settlement
-        at massive scale, and preconfirmations credible and fast enough
-        that the recipient can act the moment a payment is accepted. The
-        payer and recipient take an operator’s signed preconfirmation
-        now, and public finality arrives later as part of a larger
-        close.</p>
+        <p>For payments this small, the design goals are a pair: cheap
+        settlement at massive scale, and preconfirmations credible and
+        fast enough that the recipient can act the moment a payment is
+        accepted. Public finality arrives later, as part of a larger
+        close. Trust in the operator spans only the gap between
+        acceptance and admission: the close is validated before it is
+        admitted, and afterward a single contradicting receipt is
+        fatal.</p>
         <p><strong>Bajillion</strong>, the account-level clearing
         protocol this post presents, is built for exactly that pair
         within one operator and custody system. It makes the account the
-        unit of settlement. The operator accepts payments throughout an
+        unit of settlement, and its payments are many-to-many: any
+        registered account can pay any other, with no pre-funded
+        pairwise state. The operator accepts payments throughout an
         epoch. At close, each changed account contributes one row that
         commits its exact opening and closing state. Repeated payments
         over the same set of accounts share those rows even when the
@@ -146,13 +150,14 @@ O’Grady</a></div>
         settlement. Users need a recovery path if the operator stops,
         and closing one epoch should not halt payments in the next.</p>
         <p>Both goals land at their floors. A preconfirmation cannot
-        exist in less than one round trip to the party that serializes
+        arrive in less than one round trip to the party that serializes
         the payer’s spending, and acceptance here is that single round
         trip, returning a receipt a conforming close must honor. A
         settlement whose users can recover from public data alone cannot
-        publish less than the changed state, and for a fixed set of
-        changed accounts the close is the same size after one payment or
-        a bajillion.</p>
+        make less than the changed state available, and the close
+        carries that state plus only terminal signed pairs and a sparse
+        frontier: the same size after one payment or a bajillion over a
+        fixed changed-account and component footprint.</p>
         <p>The construction starts with the signed evidence for one
         accepted payment.</p>
         <h2 id="one-signed-payment">One Signed Payment</h2>
@@ -499,8 +504,8 @@ O’Grady</a></div>
         attestation. Each can certify the exact public-validity relation
         over selected inputs. None proves the nonexistence of an
         additional private signature.</p>
-        <p>This window is what makes a preconfirmation credible rather
-        than reputational. Through the inclusive deadline <span
+        <p>The challenge window is what makes a preconfirmation credible
+        rather than reputational. Through the inclusive deadline <span
         class="math inline">t\le\Delta_e</span>, any holder or
         watchtower may submit one of four bounded contradictions:</p>
         <ol type="1">
@@ -918,20 +923,22 @@ O’Grady</a></div>
         reproduced every size in the table, with the corpus and chain
         payloads identical to the byte.</p>
         <h2 id="the-account-level-trade">The Account-Level Trade</h2>
-        <p>Payment channels pursue the same pair of goals with a
-        different settlement boundary. A bilateral channel compresses
-        repeated transfers between two parties while preserving
-        bilateral self-custody. A routed network such as the one in the
-        <a
+        <p>Payment channels pursue the same two goals with a different
+        settlement boundary, and they are one-to-one. A bilateral
+        channel compresses repeated transfers between two parties while
+        preserving bilateral self-custody. A routed network such as the
+        one in the <a
         href="https://lightning.network/lightning-network-paper.pdf">original
-        Lightning paper</a> extends that guarantee across a path, which
-        means reserving directional liquidity and individually
-        enforceable timed state at every hop. Bajillion instead trusts
-        one operator and custody system during normal operation, then
-        nets every sender and recipient under one account-wide close. It
-        has no routed-hop state: the close carries only the terminal
-        head of each receive component used, and the deployment chooses
-        how payments map into those bounded concurrency domains.</p>
+        Lightning paper</a> extends that pairwise guarantee across a
+        path, which means reserving directional liquidity and
+        individually enforceable timed state at every hop. Bajillion is
+        many-to-many: it trusts one operator and custody system during
+        normal operation, then nets every sender and recipient under one
+        account-wide close. Reaching a new counterparty needs only its
+        registered account—no channel to open, no route to find, no
+        liquidity to lock. It has no routed-hop state: the deployment
+        chooses how payments map into bounded receive components, and
+        the close carries one terminal head per component used.</p>
         <p>That broader netting boundary is why a cycle can be cheap. If
         <span class="math inline">a\to b</span>, <span
         class="math inline">b\to c</span>, and <span
@@ -941,8 +948,9 @@ O’Grady</a></div>
         accounts. With one component per recipient, it also has <span
         class="math inline">H=3</span>. Gross debit still equals gross
         credit, but the public close carries three rows, three heads,
-        and their sparse frontier rather than 300,000 payment
-        records.</p>
+        and their sparse frontier rather than 300,000 payment records. A
+        channel network would carry the same flow on three funded links
+        whose liquidity the cycle merely shuffles.</p>
         <p>Plasma makes a different choice about what users can
         reconstruct. The <a href="https://plasma.io/plasma.pdf">original
         Plasma construction</a> commits roots of an ordered child-chain
@@ -977,7 +985,11 @@ O’Grady</a></div>
         requires separate deployments or an asset-indexed extension.</p>
         <p>No validity mode removes the availability assumptions: the
         public corpus must stay retrievable and holders must retain
-        their own evidence through the challenge window.</p>
+        their own evidence through the challenge window. Retained
+        receipts police the close, while recovering custody at a
+        finalized root needs only the public corpus. Enforcement begins
+        at admission, so preconfirmation holders bear operator default
+        until their epoch admits.</p>
         <p>A user retains a unilateral path: queue a signed withdrawal,
         prove that it is affordable at the finalized root and every
         admitted successor, and permanently fence new work if it remains
@@ -1007,11 +1019,10 @@ O’Grady</a></div>
         <p>Admission validates the complete public close. The challenge
         window covers what no validity mode can establish: that the
         operator’s signed receipts, disclosed or not, contain no
-        contradiction. Holders retain the signed evidence needed to
-        expose a concrete contradiction. An included call that observes
-        an overdue queued withdrawal fences new work. The admitted
-        prefix must still resolve, and terminal unwind requires the
-        complete survivor state.</p>
+        contradiction. An included call that observes an overdue queued
+        withdrawal fences new work. The admitted prefix must still
+        resolve, and terminal unwind requires the complete survivor
+        state.</p>
         <p>For repeated activity over a fixed changed-account and
         component footprint, <span class="math inline">(A+H+\Phi)/T\to
         0</span>. Unchanged subtrees cost one frontier digest apiece no
@@ -1027,8 +1038,9 @@ O’Grady</a></div>
         epoch issued, or a single retained pair proves the fault. Cheap
         settlement bottoms out at the changed state itself: no design
         whose users recover from public data alone can make less
-        available, and the close adds only each component’s terminal
-        pair and the frontier that splices the change into the
+        available, and the close adds only each account’s terminal
+        pairs—the outgoing pair when it sent and one per receive
+        component—and the frontier that splices the change into the
         registry.</p>
         <p>Sign every payment. Settle each changed account once.</p>
         <p>Bajillion has not yet been peer-reviewed or uploaded to
