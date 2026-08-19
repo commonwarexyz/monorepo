@@ -19,7 +19,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Heightable as _, Relay, Reporter,
+    Automaton, CertifiableAutomaton, Relay, Reporter,
     marshal::{
         Config, Start, Update,
         core::{Actor, Buffer, Mailbox},
@@ -39,7 +39,7 @@ use commonware_consensus::{
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Digestible as _, Hasher as _, PublicKey, Sha256,
+    Digest, Hasher as _, PublicKey, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
@@ -48,12 +48,12 @@ use commonware_p2p::{
     Receiver, Sender,
     simulated::{Config as NetworkConfig, Network as SimulatedNetwork, Oracle},
 };
-use commonware_resolver::TargetedResolver;
 use commonware_parallel::Sequential;
+use commonware_resolver::TargetedResolver;
 use commonware_runtime::{
     Clock, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_storage::archive::{Archive as _, immutable};
+use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -379,125 +379,6 @@ impl<P: Simplex> Validator<P> {
     }
 }
 
-/// An explicit representation of the on-disk rows a restart scenario seeds into
-/// a node's archives before its marshal actor starts.
-///
-/// `finalized_blocks` are block rows keyed by height; `finalizations_by_height`
-/// are finalization rows keyed by height. A gap (a finalization whose block is
-/// absent) is expressed by omitting the block. This mirrors the source restart
-/// tests' `seed_inconsistent_restart_state`.
-pub(crate) struct PrestartSeed<P: Simplex> {
-    pub(crate) finalized_blocks: Vec<B<P>>,
-    pub(crate) finalizations_by_height: Vec<(Height, Finalization<SchemeOf<P>, Sha256Digest>)>,
-}
-
-impl<P: Simplex> Default for PrestartSeed<P> {
-    fn default() -> Self {
-        Self {
-            finalized_blocks: Vec::new(),
-            finalizations_by_height: Vec::new(),
-        }
-    }
-}
-
-impl<P: Simplex> PrestartSeed<P> {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.finalized_blocks.is_empty() && self.finalizations_by_height.is_empty()
-    }
-}
-
-/// Writes `seed` directly into `validator`'s finalized-block and
-/// finalization-by-height archives, using the exact partition names
-/// [`setup_validator`] reopens, so a subsequently-initialized marshal actor
-/// replays the seeded rows at startup. Must be called before [`setup_validator`]
-/// for the same validator.
-pub(crate) async fn seed_prestart<P: Simplex>(
-    context: deterministic::Context,
-    validator: &PublicKeyOf<P>,
-    seed: &PrestartSeed<P>,
-) {
-    let partition_prefix = format!("validator-{validator}");
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-    let replay_buffer = NZUsize!(1024);
-    let write_buffer = NZUsize!(1024);
-
-    let mut finalizations_by_height: Finalizations<P> = immutable::Archive::init(
-        context.child("seed_finalizations_by_height"),
-        immutable::Config {
-            metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
-            freezer_table_partition: format!(
-                "{partition_prefix}-finalizations-by-height-freezer-table"
-            ),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_key_partition: format!("{partition_prefix}-finalizations-by-height-freezer-key"),
-            freezer_key_page_cache: page_cache.clone(),
-            freezer_value_partition: format!(
-                "{partition_prefix}-finalizations-by-height-freezer-value"
-            ),
-            freezer_value_target_size: 1024,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
-            items_per_section: NZU64!(10),
-            codec_config: SchemeOf::<P>::certificate_codec_config_unbounded(),
-            replay_buffer,
-            freezer_key_write_buffer: write_buffer,
-            freezer_value_write_buffer: write_buffer,
-            ordinal_write_buffer: write_buffer,
-        },
-    )
-    .await
-    .expect("failed to initialize seeded finalizations archive");
-
-    let mut finalized_blocks: FinalizedBlocks<P> = immutable::Archive::init(
-        context.child("seed_finalized_blocks"),
-        immutable::Config {
-            metadata_partition: format!("{partition_prefix}-finalized-blocks-metadata"),
-            freezer_table_partition: format!("{partition_prefix}-finalized-blocks-freezer-table"),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_key_partition: format!("{partition_prefix}-finalized-blocks-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition_prefix}-finalized-blocks-freezer-value"),
-            freezer_value_target_size: 1024,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{partition_prefix}-finalized-blocks-ordinal"),
-            items_per_section: NZU64!(10),
-            codec_config: (),
-            replay_buffer,
-            freezer_key_write_buffer: write_buffer,
-            freezer_value_write_buffer: write_buffer,
-            ordinal_write_buffer: write_buffer,
-        },
-    )
-    .await
-    .expect("failed to initialize seeded finalized blocks archive");
-
-    for block in &seed.finalized_blocks {
-        finalized_blocks = finalized_blocks
-            .put(block.height().get(), block.digest(), block.clone())
-            .await
-            .expect("failed to seed finalized block");
-    }
-    finalized_blocks
-        .sync()
-        .await
-        .expect("failed to sync seeded finalized blocks");
-
-    for (height, finalization) in &seed.finalizations_by_height {
-        finalizations_by_height = finalizations_by_height
-            .put(height.get(), finalization.proposal.payload, finalization.clone())
-            .await
-            .expect("failed to seed finalization");
-    }
-    finalizations_by_height
-        .sync()
-        .await
-        .expect("failed to sync seeded finalizations");
-}
-
 pub(crate) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
     let parent = Sha256::hash(&[b""]);
     let context = Ctx::<P> {
@@ -545,12 +426,18 @@ pub(crate) async fn setup_network_links<P: Simplex>(
     }
 }
 
+/// `resolver` overrides the marshal backfill resolver: `None` registers the
+/// backfill channel and builds the standard P2P resolver here; `Some` uses a
+/// caller-built pair (the caller has already registered the backfill channel,
+/// and the wedge does not apply to it).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_validator<P: Simplex>(
     context: deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    genesis: B<P>,
+    start: Start<SchemeOf<P>, Sha256Digest, B<P>>,
+    resolver: Option<MarshalResolver<P>>,
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
 ) -> Validator<P> {
@@ -564,7 +451,7 @@ pub(crate) async fn setup_validator<P: Simplex>(
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-        start: Start::Genesis(genesis),
+        start,
         mailbox_size: NZUsize!(100),
         view_retention: ViewDelta::new(10),
         max_repair: NZUsize!(10),
@@ -579,30 +466,36 @@ pub(crate) async fn setup_validator<P: Simplex>(
         strategy: Sequential,
     };
     let control = oracle.control(validator.clone());
-    let (backfill_sender, backfill_receiver) = control.register(1, TEST_QUOTA).await.unwrap();
-    let backfill = (
-        backfill_sender,
-        WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
-            backfill_receiver,
-            wedge.clone(),
-            WedgeChannel::MarshalBackfill,
-        ),
-    );
-    let resolver = resolver::init(
-        context.child("resolver"),
-        resolver::Config {
-            public_key: validator.clone(),
-            peer_provider: oracle.manager(),
-            blocker: oracle.control(validator.clone()),
-            mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        },
-        backfill,
-    );
+    let resolver = match resolver {
+        Some(resolver) => resolver,
+        None => {
+            let (backfill_sender, backfill_receiver) =
+                control.register(1, TEST_QUOTA).await.unwrap();
+            let backfill = (
+                backfill_sender,
+                WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
+                    backfill_receiver,
+                    wedge.clone(),
+                    WedgeChannel::MarshalBackfill,
+                ),
+            );
+            resolver::init(
+                context.child("resolver"),
+                resolver::Config {
+                    public_key: validator.clone(),
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(validator.clone()),
+                    mailbox_size: config.mailbox_size,
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+                backfill,
+            )
+        }
+    };
 
     let (broadcast_engine, buffer) = buffered::Engine::new(
         context.child("broadcast"),

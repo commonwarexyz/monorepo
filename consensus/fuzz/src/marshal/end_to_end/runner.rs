@@ -74,9 +74,12 @@ use crate::{
 };
 use commonware_consensus::{
     Block,
-    marshal::mocks::{
-        application::Application,
-        harness::{LINK, NUM_VALIDATORS},
+    marshal::{
+        Start,
+        mocks::{
+            application::Application,
+            harness::{LINK, NUM_VALIDATORS},
+        },
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, TermLength, View, coding::Commitment},
@@ -472,7 +475,8 @@ fn run_standard_disrupter<P: Simplex>(
                 &mut oracle,
                 validator.clone(),
                 provider,
-                genesis_marshal_block.clone(),
+                Start::Genesis(genesis_marshal_block.clone()),
+                None,
                 MAX_PENDING_ACKS,
                 None,
             )

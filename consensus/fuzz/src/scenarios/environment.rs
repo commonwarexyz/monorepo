@@ -1,44 +1,39 @@
-//! Scripted marshal environment: the verbs a [`Scenario`](super::scenarios::Scenario)
-//! prefix uses to drive four validators into an interesting state.
+//! Scenario addressing and the verified-handoff description.
 //!
-//! The verbs act directly on the marshal mailboxes below the consensus engine,
-//! so a scenario can build a canonical chain, fabricate quorum certificates over
-//! a chosen signer subset, report them, and install floors without a running
-//! engine. The prefix network carries no links, so state cannot leak between
-//! nodes: every fetch a prefix provokes stays pending until the fuzzing phase
-//! applies the input topology. The prefix stops at a chosen semantic point and
-//! hands back a [`FuzzPoint`] describing the certified floor the engines then
-//! start from.
+//! [`Node`] names the four validators. [`ScenarioHandoff`] is the explicit,
+//! source-derived description of the state a prefix leaves for the fuzzing
+//! phase: the floor the engines start from, the artifacts every honest engine
+//! recovers from its seeded voter journal, the anchor the adversary attacks,
+//! the reference chain (when the source has one), the resolver fetches each
+//! node must have issued, the blocks each node must hold or lack, and the
+//! invariant-selection hint. The scenario
+//! harness ([`super::harness`]) mechanically asserts this description at
+//! handoff rather than deriving the floor or attack metadata implicitly from a
+//! canonical tip.
 
 use crate::{
-    marshal::end_to_end::twins::{B, Ctx, PublicKeyOf, SchemeOf},
+    marshal::end_to_end::twins::{B, SchemeOf},
     simplex::Simplex,
 };
-use commonware_broadcast::buffered;
+use bytes::Bytes;
 use commonware_consensus::{
-    Heightable, Reporter as _,
-    marshal::{
-        core::{CommitmentFallback, DigestFallback, Mailbox},
-        standard::Standard,
-    },
-    simplex::types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
-    types::{Epoch, Height, Round, View},
+    marshal::resolver::handler::{Annotation, Finalized, Key},
+    simplex::{Floor, types::Notarization},
+    types::{Height, Round, View},
 };
-use commonware_cryptography::{Digestible, Sha256, sha256::Digest as Sha256Digest};
-use commonware_p2p::Recipients;
-use commonware_parallel::Sequential;
-use commonware_runtime::{Clock, deterministic};
-use commonware_utils::channel::oneshot;
-use std::{sync::Arc, time::Duration};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
 
-/// Marshal mailbox for the standard variant over the mock block.
-pub(crate) type Mb<P> = Mailbox<SchemeOf<P>, Standard<B<P>>>;
+/// The standard marshal mailbox for the mock block.
+pub(crate) type Mb<P> = commonware_consensus::marshal::core::Mailbox<
+    SchemeOf<P>,
+    commonware_consensus::marshal::standard::Standard<B<P>>,
+>;
 
 /// A validator of the four-node cluster, addressed by its participant index.
 ///
-/// In the adversarial mode [`Node::A`] (index 0) is the byzantine node, so
-/// scenarios only script the honest core {B, C, D}; that keeps a scenario
-/// identical in both fuzzing modes.
+/// In the adversarial mode [`Node::A`] (index 0) is the byzantine node and has
+/// no marshal, so scenarios only script the honest core {B, C, D}; that keeps a
+/// scenario identical in both fuzzing modes.
 #[allow(dead_code)] // `A` names node 0, addressed by the adversary rather than scenarios.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Node {
@@ -54,319 +49,270 @@ impl Node {
     }
 }
 
-/// Certificate signer set for a fabricated quorum: the three honest validators.
+/// Certificate signer set for a fabricated quorum. The source signs every
+/// fabricated certificate with `schemes[0..QUORUM]`, and scenarios translate
+/// source participants through one uniform permutation (source 0 -> B,
+/// 1 -> C, 2 -> D, 3 -> A), so the signer set is {B, C, D}: the source
+/// certificate up to the S6 node relabeling (under the mock scheme the signer
+/// indices are part of the certificate identity). Every signer is an
+/// always-honest, marshal-holding node in both modes; the adversary's own
+/// attack messages are signed separately by the disrupters.
 pub(crate) const QUORUM_SIGNERS: [Node; 3] = [Node::B, Node::C, Node::D];
 
-/// The scripted-prefix surface handed to a scenario.
+/// The kind of a fabricated certificate, recorded in the ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CertificateKind {
+    Notarization,
+    Finalization,
+}
+
+/// A ledger entry for one fabricated certificate, retained so the harness can
+/// mechanically assert composition soundness (I1) at handoff.
 ///
-/// `context` and `buffers` back the timing and broadcast verbs, which the
-/// current scenarios do not need but future ones may.
-pub(crate) struct ScenarioEnv<P: Simplex> {
+/// `payload` completes the recorded certificate identity; it is surfaced through
+/// the ledger for inspection rather than read by the I1 check itself. `encoded`
+/// is the certificate's full wire encoding, compared exactly against the
+/// recovered-journal entries for certificates above the engine floor.
+#[derive(Clone, Debug)]
+pub(crate) struct PrefixCertificate {
+    pub(crate) kind: CertificateKind,
+    pub(crate) round: Round,
+    pub(crate) parent_view: View,
     #[allow(dead_code)]
-    pub(crate) context: deterministic::Context,
-    pub(crate) participants: Vec<PublicKeyOf<P>>,
-    pub(crate) schemes: Vec<SchemeOf<P>>,
-    pub(crate) mailboxes: Vec<Mb<P>>,
-    #[allow(dead_code)]
-    pub(crate) buffers: Vec<buffered::Mailbox<PublicKeyOf<P>, B<P>>>,
-    pub(crate) genesis: B<P>,
-    pub(crate) canonical: Vec<B<P>>,
-    /// Receivers for block subscriptions the prefix registered. Held here so
-    /// the subscriptions stay alive through the fuzzing phase (dropping a
-    /// receiver cancels its subscription); scenarios never await them.
-    pub(crate) subscriptions: Vec<oneshot::Receiver<Arc<B<P>>>>,
+    pub(crate) payload: Sha256Digest,
+    pub(crate) signers: Vec<Node>,
+    pub(crate) scenario: &'static str,
+    pub(crate) encoded: Bytes,
 }
 
-/// The verbs a scenario uses. Some are unused by the current five scenarios but
-/// document the authoring surface and are exercised by future scenarios.
+/// The height, view, and digest the fuzz adversary attacks: the first live view
+/// above the engine floor.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AttackAnchor {
+    pub(crate) height: Height,
+    pub(crate) view: View,
+    pub(crate) digest: Sha256Digest,
+}
+
+/// A backfill request the source produces, expressed precisely enough to
+/// distinguish states that share a wire key (a `ByRound` fetch and a `ByHeight`
+/// fetch are different source states even though both serialize as
+/// [`Key::Block`]).
+// `FinalizedByRound` and `FinalizedByHeight` distinguish finalized-block
+// backfills that share the `Key::Block` wire key; they are part of the matcher
+// surface and exercised by unit tests, reserved for finalized-fetch scenarios.
 #[allow(dead_code)]
-impl<P: Simplex> ScenarioEnv<P> {
-    fn round(view: u64) -> Round {
-        Round::new(Epoch::zero(), View::new(view))
-    }
-
-    /// The block a fresh canonical block extends: the last canonical block, or
-    /// genesis when the chain is empty.
-    fn parent(&self) -> &B<P> {
-        self.canonical.last().unwrap_or(&self.genesis)
-    }
-
-    /// Build and append the next canonical block at `view`, led by `leader`.
-    ///
-    /// `view` need not equal the height: a nullified view can be skipped by
-    /// giving a later canonical block a higher view than its height.
-    pub(crate) fn block(&mut self, leader: Node, view: u64) -> B<P> {
-        let parent = self.parent();
-        let parent_digest = parent.digest();
-        let parent_view = parent.context.round.view();
-        let height = Height::new(parent.height().get() + 1);
-        let block = self.build_block(leader, view, parent_view, parent_digest, height);
-        self.canonical.push(block.clone());
-        block
-    }
-
-    /// Build a same-round equivocation of `block`: identical context (round,
-    /// leader, parent) and height, distinguished only by `timestamp`. Not
-    /// appended to the canonical chain.
-    pub(crate) fn equivocate(&self, block: &B<P>, timestamp: u64) -> B<P> {
-        B::<P>::new::<Sha256>(
-            block.context.clone(),
-            block.context.parent.1,
-            block.height(),
-            timestamp,
-        )
-    }
-
-    /// Build a side/fork block on an explicit parent without appending it to the
-    /// canonical chain.
-    pub(crate) fn fork_block(
-        &self,
-        parent: &B<P>,
-        leader: Node,
-        view: u64,
-        height: Height,
-    ) -> B<P> {
-        self.build_block(
-            leader,
-            view,
-            parent.context.round.view(),
-            parent.digest(),
-            height,
-        )
-    }
-
-    fn build_block(
-        &self,
-        leader: Node,
-        view: u64,
-        parent_view: View,
-        parent_digest: Sha256Digest,
-        height: Height,
-    ) -> B<P> {
-        let context = Ctx::<P> {
-            round: Self::round(view),
-            leader: self.participants[leader.idx()].clone(),
-            parent: (parent_view, parent_digest),
-        };
-        B::<P>::new::<Sha256>(context, parent_digest, height, height.get())
-    }
-
-    /// Persist `block` as verified at `view` on `node`, asserting durability.
-    /// This is the harness `propose`/`verify`: it does not broadcast.
-    pub(crate) async fn verify(&self, node: Node, view: u64, block: &B<P>) {
-        assert!(
-            self.mailboxes[node.idx()]
-                .verified(Self::round(view), block.clone())
-                .await,
-            "verified must be durable: node={:?} view={view}",
-            node,
-        );
-    }
-
-    /// Persist `block` as certified at `view` on `node`, asserting durability.
-    pub(crate) async fn certify(&self, node: Node, view: u64, block: &B<P>) {
-        assert!(
-            self.mailboxes[node.idx()]
-                .certified(Self::round(view), block.clone())
-                .await,
-            "certified must be durable: node={:?} view={view}",
-            node,
-        );
-    }
-
-    /// Build a notarization over `block`, reading its view and parent view from
-    /// the block context, signed by `signers`.
-    pub(crate) fn notarization(
-        &self,
-        block: &B<P>,
-        signers: &[Node],
-    ) -> Notarization<SchemeOf<P>, Sha256Digest> {
-        self.notarization_at(
-            block.context.round.view().get(),
-            block.context.parent.0.get(),
-            block,
-            signers,
-        )
-    }
-
-    /// Build a notarization over `block` at an explicit `view`/`parent_view`.
-    pub(crate) fn notarization_at(
-        &self,
-        view: u64,
-        parent_view: u64,
-        block: &B<P>,
-        signers: &[Node],
-    ) -> Notarization<SchemeOf<P>, Sha256Digest> {
-        let proposal = Proposal::new(Self::round(view), View::new(parent_view), block.digest());
-        let notarizes: Vec<_> = signers
-            .iter()
-            .map(|node| {
-                Notarize::sign(&self.schemes[node.idx()], proposal.clone())
-                    .expect("notarize sign failed")
-            })
-            .collect();
-        Notarization::from_notarizes(&self.schemes[signers[0].idx()], &notarizes, &Sequential)
-            .expect("notarization assembly failed")
-    }
-
-    /// Build a finalization over `block`, reading its view and parent view from
-    /// the block context, signed by `signers`.
-    pub(crate) fn finalization(
-        &self,
-        block: &B<P>,
-        signers: &[Node],
-    ) -> Finalization<SchemeOf<P>, Sha256Digest> {
-        self.finalization_at(
-            block.context.round.view().get(),
-            block.context.parent.0.get(),
-            block,
-            signers,
-        )
-    }
-
-    /// Build a finalization over `block` at an explicit `view`/`parent_view`.
-    pub(crate) fn finalization_at(
-        &self,
-        view: u64,
-        parent_view: u64,
-        block: &B<P>,
-        signers: &[Node],
-    ) -> Finalization<SchemeOf<P>, Sha256Digest> {
-        let proposal = Proposal::new(Self::round(view), View::new(parent_view), block.digest());
-        let finalizes: Vec<_> = signers
-            .iter()
-            .map(|node| {
-                Finalize::sign(&self.schemes[node.idx()], proposal.clone())
-                    .expect("finalize sign failed")
-            })
-            .collect();
-        Finalization::from_finalizes(&self.schemes[signers[0].idx()], &finalizes, &Sequential)
-            .expect("finalization assembly failed")
-    }
-
-    /// Report a notarization to `node`'s marshal (fire-and-forget).
-    pub(crate) fn report_notarization(
-        &self,
-        node: Node,
-        notarization: Notarization<SchemeOf<P>, Sha256Digest>,
-    ) {
-        let mut mailbox = self.mailboxes[node.idx()].clone();
-        let _ = mailbox.report(Activity::Notarization(notarization));
-    }
-
-    /// Report a finalization to `node`'s marshal (fire-and-forget).
-    pub(crate) fn report_finalization(
-        &self,
-        node: Node,
-        finalization: Finalization<SchemeOf<P>, Sha256Digest>,
-    ) {
-        let mut mailbox = self.mailboxes[node.idx()].clone();
-        let _ = mailbox.report(Activity::Finalization(finalization));
-    }
-
-    /// Issue a round-bound backfill hint for a notarized commitment on `node`.
-    pub(crate) fn hint_notarized(&self, node: Node, view: u64, commitment: Sha256Digest) {
-        self.mailboxes[node.idx()].hint_notarized(Self::round(view), commitment);
-    }
-
-    /// Register a pending block subscription by digest on `node`, waiting for
-    /// local availability only.
-    pub(crate) fn subscribe_wait(&mut self, node: Node, digest: Sha256Digest) {
-        let receiver = self.mailboxes[node.idx()].subscribe_by_digest(digest, DigestFallback::Wait);
-        self.subscriptions.push(receiver);
-    }
-
-    /// Register a pending block subscription by digest on `node` with a
-    /// round-bound fetch fallback.
-    pub(crate) fn subscribe_fetch_by_round(&mut self, node: Node, view: u64, digest: Sha256Digest) {
-        let receiver = self.mailboxes[node.idx()].subscribe_by_digest(
-            digest,
-            DigestFallback::FetchByRound {
-                round: Self::round(view),
-            },
-        );
-        self.subscriptions.push(receiver);
-    }
-
-    /// Register a pending block subscription by commitment on `node` with a
-    /// round-bound fetch fallback: the exact mailbox call the wrapper's verify
-    /// makes for a missing parent.
-    pub(crate) fn subscribe_commitment_fetch_by_round(
-        &mut self,
-        node: Node,
-        view: u64,
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FetchMatch {
+    /// A block requested by commitment, any annotation.
+    Block(Sha256Digest),
+    /// A block requested for the finalized chain by finalization round.
+    FinalizedByRound {
         commitment: Sha256Digest,
-    ) {
-        let receiver = self.mailboxes[node.idx()].subscribe_by_commitment(
-            commitment,
-            CommitmentFallback::FetchByRound {
-                round: Self::round(view),
-            },
-        );
-        self.subscriptions.push(receiver);
-    }
+        round: Round,
+    },
+    /// A block requested for the finalized chain by known height.
+    FinalizedByHeight {
+        commitment: Sha256Digest,
+        height: Height,
+    },
+    /// A block requested for a certified chain by known height.
+    CertifiedHeight {
+        commitment: Sha256Digest,
+        height: Height,
+    },
+    /// A notarized proposal requested by round.
+    NotarizedRound(Round),
+    /// A finalization requested by height (`Key::Finalized`).
+    FinalizationByHeight(Height),
+}
 
-    /// Install a finalization as the marshal floor on `node`.
-    pub(crate) fn set_floor(
-        &self,
-        node: Node,
-        finalization: Finalization<SchemeOf<P>, Sha256Digest>,
-    ) {
-        self.mailboxes[node.idx()].set_floor(finalization);
-    }
-
-    /// Seed `block` into `from`'s broadcast buffer addressed to `to`. The
-    /// prefix network has no links, so nothing is delivered before the fuzzing
-    /// phase.
-    pub(crate) fn broadcast(&self, from: Node, to: &[Node], block: &B<P>) {
-        let recipients = Recipients::Some(
-            to.iter()
-                .map(|node| self.participants[node.idx()].clone())
-                .collect(),
-        );
-        let _ = self.buffers[from.idx()].broadcast_shared(recipients, Arc::new(block.clone()));
-    }
-
-    /// FIFO barrier: a round-trip that flushes prior fire-and-forget messages so
-    /// the prefix reaches a deterministic stop point.
-    pub(crate) async fn barrier(&self, node: Node) -> Option<Height> {
-        self.mailboxes[node.idx()].get_processed_height().await
-    }
-
-    /// Fence a pending state: assert `digest` is not locally available on
-    /// `node`. The round-trip doubles as a FIFO barrier, so the absence is
-    /// validated after every prior message has been processed.
-    pub(crate) async fn missing(&self, node: Node, digest: Sha256Digest) {
-        assert!(
-            self.mailboxes[node.idx()]
-                .get_block(&digest)
-                .await
-                .is_none(),
-            "block must still be missing at handoff: node={node:?} digest={digest}",
-        );
-    }
-
-    /// Advance simulated time.
-    pub(crate) async fn settle(&self, duration: Duration) {
-        self.context.sleep(duration).await;
+impl FetchMatch {
+    /// Whether an observed `(key, annotation)` matches this expectation.
+    pub(crate) fn matches(&self, key: &Key<Sha256Digest>, annotation: &Annotation) -> bool {
+        match *self {
+            Self::Block(commitment) => {
+                matches!(key, Key::Block(observed) if *observed == commitment)
+            }
+            Self::FinalizedByRound { commitment, round } => matches!(
+                (key, annotation),
+                (Key::Block(observed), Annotation::Finalized(Finalized::ByRound { round: annotation_round }))
+                    if *observed == commitment && *annotation_round == round
+            ),
+            Self::FinalizedByHeight { commitment, height } => matches!(
+                (key, annotation),
+                (Key::Block(observed), Annotation::Finalized(Finalized::ByHeight { height: annotation_height }))
+                    if *observed == commitment && *annotation_height == height
+            ),
+            Self::CertifiedHeight { commitment, height } => matches!(
+                (key, annotation),
+                (Key::Block(observed), Annotation::Certified { height: annotation_height })
+                    if *observed == commitment && *annotation_height == height
+            ),
+            Self::NotarizedRound(round) => matches!(
+                (key, annotation),
+                (Key::Notarized { round: key_round }, Annotation::Notarization { round: annotation_round })
+                    if *key_round == round && *annotation_round == round
+            ),
+            Self::FinalizationByHeight(height) => matches!(
+                (key, annotation),
+                (
+                    Key::Finalized { height: key_height },
+                    Annotation::Finalized(Finalized::ByHeight { height: annotation_height }),
+                ) if *key_height == height && *annotation_height == height
+            ),
+        }
     }
 }
 
-/// The state the prefix leaves for the fuzzing phase.
-pub(crate) struct FuzzPoint<P: Simplex> {
-    /// The canonical tip finalization every honest engine starts from.
-    pub(crate) floor: Finalization<SchemeOf<P>, Sha256Digest>,
-    /// The canonical chain the honest nodes reconstruct.
-    pub(crate) canonical: Vec<B<P>>,
-    /// Per-scenario invariant-selection hints.
+/// Invariant-selection hint for the fuzzing phase, expressed in the terms of
+/// the ground-truth checks in
+/// `consensus/fuzz/src/marshal/end_to_end/invariants.rs`.
+pub(crate) struct Expectation {
+    /// The floor height every honest node started from, anchoring the
+    /// ground-truth first-delivery check; `None` for genesis-started clusters
+    /// (floor 0). The hint selects only among the parameters the ground-truth
+    /// checks already accept; it can never weaken them.
+    pub(crate) all_floor_rooted: Option<Height>,
+}
+
+impl Expectation {
+    /// Genesis-rooted: every honest node delivers contiguously from genesis.
+    pub(crate) const fn genesis_rooted() -> Self {
+        Self {
+            all_floor_rooted: None,
+        }
+    }
+}
+
+/// Blocks one node must hold or lack at handoff, looked up by digest through
+/// the node's marshal (buffer plus local storage).
+#[derive(Clone, Debug)]
+pub(crate) struct NodeExpectation {
+    pub(crate) node: Node,
+    pub(crate) present: Vec<Sha256Digest>,
+    pub(crate) absent: Vec<Sha256Digest>,
+}
+
+impl NodeExpectation {
+    pub(crate) fn new(node: Node) -> Self {
+        Self {
+            node,
+            present: Vec::new(),
+            absent: Vec::new(),
+        }
+    }
+
+    /// Require the node to hold the block with `digest` at handoff.
+    pub(crate) fn holds(mut self, digest: Sha256Digest) -> Self {
+        self.present.push(digest);
+        self
+    }
+
+    /// Require the node to lack the block with `digest` at handoff.
+    pub(crate) fn lacks(mut self, digest: Sha256Digest) -> Self {
+        self.absent.push(digest);
+        self
+    }
+}
+
+/// The verified state a prefix hands the fuzzing phase.
+pub(crate) struct ScenarioHandoff<P: Simplex> {
+    /// The floor the engines start from: Genesis or a source-existing Finalized.
+    pub(crate) engine_floor: Floor<SchemeOf<P>, Sha256Digest>,
+    /// Certificates every honest engine recovers from its seeded voter journal
+    /// at startup, replayed before the live loop. The runner writes each as an
+    /// `Artifact::Notarization` into the engine's journal partition before
+    /// `Engine::new`, and the composition proof (I1) requires every
+    /// above-floor prefix certificate to match one of these entries exactly.
+    pub(crate) engine_journal: Vec<Notarization<SchemeOf<P>, Sha256Digest>>,
+    /// Height, view, and digest the adversary attacks: the first live view
+    /// above the floor and the recovered journal state.
+    pub(crate) attack_anchor: AttackAnchor,
+    /// The reference chain the honest nodes deliver, when the source has one.
+    pub(crate) reference_chain: Vec<B<P>>,
+    /// The complete fetch history each listed node must have issued by handoff,
+    /// as an exact multiset (an empty list requires the node to have issued no
+    /// fetch at all). Nodes absent in the adversarial mode are skipped.
+    pub(crate) node_fetches: Vec<(Node, Vec<FetchMatch>)>,
+    /// The fetches that must still be active (not retained away) on each listed
+    /// node at handoff, as an exact multiset.
+    pub(crate) node_active_fetches: Vec<(Node, Vec<FetchMatch>)>,
+    /// Block presence and absence each listed node must exhibit at handoff:
+    /// the defining state names which marshal holds each candidate and which
+    /// must lack it. Nodes absent in the adversarial mode are skipped.
+    pub(crate) expected_nodes: Vec<NodeExpectation>,
+    /// Invariant-selection hint for the fuzzing phase.
     pub(crate) expectation: Expectation,
 }
 
-/// Scenario shape that selects which safety invariant applies.
-pub(crate) struct Expectation {
-    /// A node whose marshal floor was advanced in the prefix, so its delivery
-    /// begins at the floor height rather than height 1. It is still checked for
-    /// cross-node agreement and parent linkage; only the genesis-rooted
-    /// in-order rule is replaced with a floor-aware one.
-    pub(crate) floor_started: Option<Node>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Hasher as _, Sha256};
+
+    fn round(view: u64) -> Round {
+        Round::new(commonware_consensus::types::Epoch::zero(), View::new(view))
+    }
+
+    #[test]
+    fn fetch_match_distinguishes_annotations_sharing_a_block_key() {
+        let commitment = Sha256::hash(&[b"block"]);
+        let by_round_key = Key::Block(commitment);
+        let by_round = Annotation::Finalized(Finalized::ByRound { round: round(7) });
+        let by_height = Annotation::Finalized(Finalized::ByHeight {
+            height: Height::new(7),
+        });
+        let certified = Annotation::Certified {
+            height: Height::new(7),
+        };
+
+        // ByRound and ByHeight serialize to the same wire key but are distinct
+        // source states.
+        assert!(
+            FetchMatch::FinalizedByRound {
+                commitment,
+                round: round(7)
+            }
+            .matches(&by_round_key, &by_round)
+        );
+        assert!(
+            !FetchMatch::FinalizedByRound {
+                commitment,
+                round: round(7)
+            }
+            .matches(&by_round_key, &by_height)
+        );
+        assert!(
+            FetchMatch::FinalizedByHeight {
+                commitment,
+                height: Height::new(7)
+            }
+            .matches(&by_round_key, &by_height)
+        );
+        assert!(
+            !FetchMatch::FinalizedByHeight {
+                commitment,
+                height: Height::new(7)
+            }
+            .matches(&by_round_key, &by_round)
+        );
+        assert!(
+            FetchMatch::CertifiedHeight {
+                commitment,
+                height: Height::new(7)
+            }
+            .matches(&by_round_key, &certified)
+        );
+
+        // The bare Block matcher accepts any annotation for the commitment.
+        assert!(FetchMatch::Block(commitment).matches(&by_round_key, &by_round));
+        assert!(FetchMatch::Block(commitment).matches(&by_round_key, &by_height));
+
+        // A notarized-round request is a different key entirely.
+        let notarized_key = Key::Notarized { round: round(1) };
+        let notarized = Annotation::Notarization { round: round(1) };
+        assert!(FetchMatch::NotarizedRound(round(1)).matches(&notarized_key, &notarized));
+        assert!(!FetchMatch::Block(commitment).matches(&notarized_key, &notarized));
+    }
 }

@@ -6,9 +6,9 @@
 //! mutations (mutate the proposal and let the disrupter re-sign it, so the
 //! message is validly signed but adversarial) while confining the adversary to
 //! the live window above the attack view: it overrides the faulty-view schedule
-//! to `[first_view, last_view]`, clamps every emitted proposal/nullify round to
-//! that lower bound, and disables raw byte corruption so emissions are semantic
-//! only. The window excludes the attack view itself, which the block-dissemination
+//! to `[first_view, last_view]`, confines every emitted proposal/nullify round to
+//! that window (keeping `parent_view < round`), and disables raw byte corruption
+//! so emissions are semantic only. The window excludes the attack view itself, which the block-dissemination
 //! fault owns, so there is a single vote producer per view. Fault density tracks
 //! the inner strategy's own schedule length.
 
@@ -34,17 +34,26 @@ impl<S: Strategy> LiveScope<S> {
         }
     }
 
-    /// Raise a mutated proposal's round to the live window if the inner strategy
-    /// shifted it at or below the attack view, so every emission stays a single
-    /// vote producer strictly above the attack view (and off the finalized
-    /// prefix). Parent view is left untouched: an old parent is a valid
-    /// adversarial header, and only the round drives the leader slot.
+    /// Confine a mutated proposal's round to the live window `[first_view,
+    /// last_view]`, so every emission stays a single vote producer strictly above
+    /// the attack view (off the finalized prefix) and below the live ceiling.
+    /// When the round is clamped, the parent view is lowered if necessary to keep
+    /// the header well-formed (`parent_view < round`) rather than clamped into a
+    /// self-parent.
     fn lift_round(&self, proposal: Proposal<Sha256Digest>) -> Proposal<Sha256Digest> {
-        if proposal.view().get() < self.first_view {
-            self.inner.proposal_with_view(&proposal, self.first_view)
-        } else {
+        let view = proposal.view().get();
+        let target = view.clamp(self.first_view, self.last_view);
+        let mut result = if target == view {
             proposal
+        } else {
+            self.inner.proposal_with_view(&proposal, target)
+        };
+        if result.parent.get() >= target {
+            result = self
+                .inner
+                .proposal_with_parent_view(&result, target.saturating_sub(1));
         }
+        result
     }
 }
 
@@ -101,7 +110,23 @@ impl<S: Strategy> Strategy for LiveScope<S> {
             last_notarized_view,
             last_nullified_view,
         );
-        self.lift_round(mutated)
+        let lifted = self.lift_round(mutated);
+        // Guarantee the emission is a real (non-no-op) semantic mutation: if
+        // clamping the round back into the window reproduced the original
+        // proposal, introduce a well-formed difference (a lower parent view, which
+        // stays `< round`, or failing that a different payload the disrupter
+        // re-signs).
+        if lifted != *proposal {
+            return lifted;
+        }
+        if lifted.parent.get() > 0 {
+            self.inner
+                .proposal_with_parent_view(&lifted, lifted.parent.get() - 1)
+        } else {
+            let mut changed = lifted;
+            changed.payload = self.inner.random_payload(rng);
+            changed
+        }
     }
 
     fn mutate_nullify_view(
@@ -120,7 +145,7 @@ impl<S: Strategy> Strategy for LiveScope<S> {
                 last_notarized_view,
                 last_nullified_view,
             )
-            .max(self.first_view)
+            .clamp(self.first_view, self.last_view)
     }
 
     fn random_view_for_proposal(

@@ -1,18 +1,22 @@
 //! Three-phase driver: setup, scripted prefix, and fuzzing.
 //!
-//! Setup builds four validators on the deterministic runtime with a marshal
-//! stack whose wrapper and application come from the chosen scenario. The prefix
-//! drives the honest core into an interesting state and returns a certified
-//! floor. The fuzzing phase starts the engines from that floor (honestly, or
-//! with node 0 replaced by the full-channel adversary), heals the network at a
-//! GST boundary, and checks recovery liveness, block safety, and the scenario's
-//! own expectations.
+//! Setup builds four validators on the deterministic runtime, optionally seeding
+//! a node's archives before its marshal actor starts, and wraps each node's
+//! resolver in an observing adapter. The prefix drives the honest core into a
+//! source-defined state through the [`FuzzScenarioStandardHarness`] and verifies
+//! the [`ScenarioHandoff`] before any engine starts. The fuzzing phase starts the
+//! engines from the handoff floor (honestly, or with node 0 replaced by the
+//! full-channel adversary), heals the network at a GST boundary, and checks
+//! recovery liveness and the marshal-layer safety invariants selected by the
+//! handoff.
 
 use super::{
     adversary,
     elector::ByzantineLeaderAtView,
-    environment::{Mb, Node, ScenarioEnv},
+    environment::Node,
+    harness::{App, BufferSend, FuzzScenarioStandardHarness, HarnessNode, RecordingBuffer},
     input::{ConsensusMutation, MarshalScenarioPrefixInput},
+    recording_resolver::{RecordingResolver, init_injectable},
     scenarios,
 };
 use crate::{
@@ -35,44 +39,56 @@ use crate::{
     utils::apply_partition,
 };
 use commonware_consensus::{
-    Heightable,
-    marshal::mocks::{
-        application::Application,
-        harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS},
+    marshal::{
+        Start,
+        mocks::{
+            application::Application,
+            harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE},
+        },
     },
-    simplex::Floor,
-    types::{Height, TermLength, View},
+    simplex::types::Artifact,
+    types::{TermLength, View},
 };
 use commonware_cryptography::{
-    Digestible, certificate::ConstantProvider, sha256::Digest as Sha256Digest,
+    Digestible, certificate::Verifier as _, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{Link, Oracle};
-use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::FuzzRng;
+use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_utils::{FuzzRng, NZUsize};
 use futures::future::{join_all, select_all};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicUsize},
+    time::Duration,
+};
 
-/// The always-accept block builder wired under every marshal variant.
-type App<P> = AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>>;
+/// The scenario harness generic over the marshal wrapper `M`.
+type Harness<P, M> = FuzzScenarioStandardHarness<P, M>;
 
 /// Per-node marshal handles produced by setup, for the `M` marshal variant.
 struct MarshalNode<P: Simplex, M: TwinsMarshal<P, App<P>>> {
-    mailbox: Mb<P>,
-    buffer: commonware_broadcast::buffered::Mailbox<PublicKeyOf<P>, B<P>>,
+    mailbox: super::environment::Mb<P>,
     application: Application<B<P>>,
     progress: ProgressHandle,
     builder: M::Wrapper,
+    resolver: RecordingResolver<P>,
+    sends: Arc<commonware_utils::sync::Mutex<Vec<BufferSend<P>>>>,
+    subscriptions: Arc<AtomicUsize>,
+    forwarding: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Pre-GST fault window: an upper bound for how long faults act before the heal.
-/// Progressing runs leave early via the delivery-height subscription, so this
-/// only caps a stalled (e.g. no-quorum-partition) run.
 const FAULT_PHASE: Duration = Duration::from_secs(12);
+/// Minimum pre-GST fault window: a lower bound so the heal never fires before the
+/// adversary has had time to emit (the dissemination announce runs after a
+/// sub-second delay, and the Simplex disrupter faults the first live views). This
+/// keeps an adversarial run's fault phase non-empty even when honest progress
+/// reaches the phase-1 ceiling immediately.
+const MIN_FAULT_PHASE: Duration = Duration::from_secs(4);
 /// Post-GST recovery budget.
 const LIVENESS_WINDOW: Duration = Duration::from_secs(360);
-/// Live views past the attack view the disrupter may fault, beyond the target
-/// height, to cover views nullified by the fault.
+/// Live views past the attack view the disrupter may fault.
 const LIVE_FAULT_MARGIN: u64 = 5;
 /// Single-epoch delivery ceiling (epoch-0 boundary).
 const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;
@@ -107,45 +123,6 @@ async fn apply_degraded_network<P: Simplex>(
     }
 }
 
-/// Floor-aware in-order check: `set_floor` prunes below the floor, so after an
-/// optional genesis delivery the first distinct height must be the floor height,
-/// with contiguous delivery from there. Delivery below the floor, duplicate
-/// heights with different digests, gaps, and out-of-order delivery are rejected.
-fn check_floor_started_order(
-    idx: usize,
-    delivered: &[(Height, Sha256Digest)],
-    floor_height: u64,
-    stack: &str,
-) {
-    if let Some((first, _)) = delivered.first() {
-        assert!(
-            first.get() == 0 || first.get() == floor_height,
-            "floor-started node{idx} first delivery {} is neither genesis nor floor {floor_height}; \
-             stack={stack}",
-            first.get(),
-        );
-    }
-    for window in delivered.windows(2) {
-        let (height_0, digest_0) = &window[0];
-        let (height_1, digest_1) = &window[1];
-        if height_1 == height_0 && digest_1 == digest_0 {
-            continue;
-        }
-        let allowed = if height_0.get() == 0 {
-            height_1.get() == floor_height
-        } else {
-            height_0.get().checked_add(1) == Some(height_1.get())
-        };
-        assert!(
-            allowed,
-            "floor-started node{idx} below-floor, out-of-order, gap, or same-height fork \
-             delivery: {} -> {} floor={floor_height}; sequence={delivered:?}; stack={stack}",
-            height_0.get(),
-            height_1.get(),
-        );
-    }
-}
-
 /// Deferred-variant entry point.
 pub fn fuzz_marshal_scenario_prefix_deferred<P: Simplex>(input: MarshalScenarioPrefixInput) {
     run::<P, DeferredMarshal>(input, MarshalChoice::Deferred);
@@ -157,8 +134,6 @@ pub fn fuzz_marshal_scenario_prefix_inline<P: Simplex>(input: MarshalScenarioPre
 }
 
 /// Run one scenario prefix and its fuzzing phase under the `M` marshal variant.
-/// `marshal` matches `M` (the concrete `DeferredMarshal`/`InlineMarshal` selectors
-/// ignore it; it documents the variant).
 fn run<P: Simplex, M>(input: MarshalScenarioPrefixInput, marshal: MarshalChoice)
 where
     M: TwinsMarshal<P, App<P>>,
@@ -171,9 +146,6 @@ where
     executor.start(|mut context| async move {
         // === SETUP ===
         let (participants, schemes) = P::setup(&mut context, crate::NAMESPACE, NUM_VALIDATORS);
-        // No links yet: the prefix runs on a link-less network so scripted state
-        // stays exactly as built (a pending fetch cannot resolve early); the
-        // fuzzing phase applies the input topology below.
         let mut oracle = setup_network::<P>(context.child("network"), participants.clone()).await;
 
         let genesis = genesis_block::<P>(participants[0].clone());
@@ -192,17 +164,31 @@ where
             engine_channels
                 .push(Some(register_engine_networks::<P>(&oracle, validator.clone()).await));
             if byzantine && idx == Node::A.idx() {
-                // Node 0 has no marshal: the dissemination-layer disrupter owns
-                // its ch1/ch2 and the Simplex disrupter owns ch3/4/5.
                 nodes.push(None);
                 continue;
             }
+            // The victim's P2P resolver is built around a handler pair the
+            // runner holds, so the prefix can inject the source's armed
+            // delivery while the real fetch, deliver, and serve paths stay
+            // live for the fuzzing phase.
+            let (resolver_override, injection_handler) = if idx == Node::B.idx() {
+                let (pair, handler) = init_injectable::<P>(
+                    &validator_ctx.child("injectable"),
+                    &oracle,
+                    validator.clone(),
+                )
+                .await;
+                (Some(pair), Some(handler))
+            } else {
+                (None, None)
+            };
             let mut validator_state = setup_validator::<P>(
                 validator_ctx.child("marshal"),
                 &mut oracle,
                 validator.clone(),
-                ConstantProvider::new(schemes[idx].clone()),
-                genesis.clone(),
+                commonware_cryptography::certificate::ConstantProvider::new(schemes[idx].clone()),
+                Start::Genesis(genesis.clone()),
+                resolver_override,
                 DEFAULT_MAX_PENDING_ACKS,
                 None,
             )
@@ -225,58 +211,137 @@ where
                 application,
                 validator_state.mailbox.clone(),
             );
-            validator_state.start(builder.clone());
+            // Wrap the real resolver so the prefix can observe exact fetches
+            // (and inject deliveries on the victim), and the real broadcast
+            // buffer so it can observe dispatched blocks and local waits.
+            let (resolver_rx, real_resolver) = validator_state.take_resolver();
+            let resolver = match injection_handler {
+                Some(handler) => RecordingResolver::<P>::injectable(handler, real_resolver),
+                None => RecordingResolver::<P>::observing(real_resolver),
+            };
+            let sends = Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
+            let subscriptions = Arc::new(AtomicUsize::new(0));
+            // Recording-only during the prefix; the runner enables forwarding
+            // before the engines start.
+            let forwarding = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let buffer = RecordingBuffer::<P>::new(
+                validator_state.buffer.clone(),
+                sends.clone(),
+                forwarding.clone(),
+                subscriptions.clone(),
+            );
+            validator_state.start_with_buffer(
+                builder.clone(),
+                (resolver_rx, resolver.clone()),
+                buffer,
+            );
             nodes.push(Some(MarshalNode {
                 mailbox: validator_state.mailbox.clone(),
-                buffer: validator_state.buffer.clone(),
                 application: validator_state.application.clone(),
                 progress,
                 builder,
+                resolver,
+                sends,
+                subscriptions,
+                forwarding,
             }));
         }
 
-        // A mailbox/buffer for every index: scenarios only address the honest
-        // core {B, C, D}, so node 0's absent slot is filled with a placeholder.
-        let reference = nodes.iter().flatten().next().expect("at least one marshal node");
-        let placeholder_mailbox = reference.mailbox.clone();
-        let placeholder_buffer = reference.buffer.clone();
-        let mailboxes: Vec<Mb<P>> = nodes
-            .iter()
-            .map(|node| node.as_ref().map_or_else(|| placeholder_mailbox.clone(), |node| node.mailbox.clone()))
-            .collect();
-        let buffers = nodes
-            .iter()
-            .map(|node| node.as_ref().map_or_else(|| placeholder_buffer.clone(), |node| node.buffer.clone()))
-            .collect();
-
         // === PREFIX ===
-        let mut env = ScenarioEnv::<P> {
-            context: context.child("prefix"),
-            participants: participants.clone(),
-            schemes: schemes.clone(),
-            mailboxes,
-            buffers,
+        let harness_nodes: Vec<Option<HarnessNode<P, M>>> = nodes
+            .iter()
+            .map(|node| {
+                node.as_ref().map(|node| HarnessNode {
+                    mailbox: node.mailbox.clone(),
+                    wrapper: node.builder.clone(),
+                    resolver: node.resolver.clone(),
+                    application: node.application.clone(),
+                    sends: node.sends.clone(),
+                    subscriptions: node.subscriptions.clone(),
+                })
+            })
+            .collect();
+        let mut harness = Harness::<P, M>::new(
+            context.child("prefix"),
+            participants.clone(),
+            schemes.clone(),
             genesis,
-            canonical: Vec::new(),
-            subscriptions: Vec::new(),
-        };
-        let point = scenarios::drive(input.scenario, &mut env).await;
-        let tip = point.canonical.last().expect("scenario built a canonical chain");
-        let floor_height = tip.height().get();
-        let floor_view = tip.context.round.view().get();
-        let floor_digest = tip.digest();
-        let floor = Floor::Finalized(point.floor.clone());
-        // The adversary leads the first view above the floor.
-        let attack_view = View::new(floor_view + 1);
-        let attack_height = Height::new(floor_height + 1);
+            harness_nodes,
+        );
+        let handoff = scenarios::drive::<P, M>(input.scenario, &mut harness).await;
+        harness.finish(&handoff).await;
+
+        // The prefix is validated; enable broadcast forwarding so the fuzzing
+        // phase disseminates blocks normally (the prefix buffer was recording-only).
+        for node in nodes.iter().flatten() {
+            node.forwarding
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Seed the recovered-journal artifacts into every honest engine's voter
+        // journal (partition `scenario-{idx}`) before `Engine::new`: startup
+        // replay installs the recovered proposal ahead of the live loop and
+        // re-drives its certification, the Simplex recovery path this feature
+        // composes with.
+        if !handoff.engine_journal.is_empty() {
+            for idx in 0..NUM_VALIDATORS as usize {
+                if nodes[idx].is_none() {
+                    continue;
+                }
+                let mut journal = Journal::<_, Artifact<SchemeOf<P>, Sha256Digest>>::init(
+                    context.child("journal_seed").with_attribute("index", idx),
+                    JConfig {
+                        partition: format!("scenario-{idx}"),
+                        compression: None,
+                        codec_config: schemes[idx].certificate_codec_config(),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        write_buffer: NZUsize!(1024 * 1024),
+                    },
+                )
+                .await
+                .expect("failed to initialize seeded voter journal");
+                for notarization in &handoff.engine_journal {
+                    let view = notarization.round().view();
+                    let artifact = Artifact::Notarization(notarization.clone());
+                    (journal, _, _) = journal
+                        .append(view.get(), &artifact)
+                        .await
+                        .expect("failed to append seeded voter artifact");
+                    journal = journal
+                        .sync(view.get())
+                        .await
+                        .expect("failed to sync seeded voter journal");
+                }
+                let _ = journal;
+            }
+        }
+
+        let floor = handoff.engine_floor.clone();
+        // The adversary extends the recovered state: its attack block's parent
+        // is the anchor digest at the view and height directly below the attack
+        // (the engine floor when nothing is recovered above it; the handoff
+        // assertions pin this correspondence).
+        let anchor_parent_digest = handoff.attack_anchor.digest;
+        let anchor_parent_view = View::new(handoff.attack_anchor.view.get().saturating_sub(1));
+        let anchor_parent_height = handoff.attack_anchor.height.get().saturating_sub(1);
+        let attack_view = handoff.attack_anchor.view;
+        let attack_height = handoff.attack_anchor.height;
 
         // === FUZZING PHASE ===
+        // Install the complete pre-heal topology before releasing any engine or
+        // disrupter, so none can emit into a partially-installed network. The
+        // marshals (already running since setup) may backfill over the new links;
+        // that is the intended post-handoff fuzzing behaviour, and the handoff
+        // assertions above already validated the engine-free prefix state.
+        apply_partition(&oracle, &participants, input.partition.set_partition(), &LINK).await;
+        if input.degraded_network {
+            apply_degraded_network::<P>(&oracle, &participants).await;
+        }
+
         for (idx, validator) in participants.iter().enumerate() {
             let channels = engine_channels[idx].take().expect("engine channels");
             if byzantine && idx == Node::A.idx() {
                 let (vote, certificate, resolver) = channels;
-                // Dissemination-layer disrupter on ch1/ch2 (leader announce on a
-                // clone of the vote sender at the attack view).
                 let dissemination_ctx = context.child("adversary").child("dissemination");
                 adversary::start_dissemination_disrupter::<P>(
                     &dissemination_ctx,
@@ -285,16 +350,14 @@ where
                     schemes[idx].clone(),
                     schemes.clone(),
                     participants.clone(),
-                    floor_digest,
-                    View::new(floor_view),
+                    anchor_parent_digest,
+                    anchor_parent_view,
                     attack_view,
                     attack_height,
                     vote.0.clone(),
                     input.fault_plan,
                 )
                 .await;
-                // Simplex-layer disrupter on ch3/4/5, faulting live views above
-                // the attack view (disjoint from the announce → no shadowing).
                 if matches!(input.fault_plan.consensus, ConsensusMutation::Corrupt) {
                     let span = input.required_containers.max(1);
                     adversary::start_simplex_disrupter::<P>(
@@ -353,18 +416,6 @@ where
             }
         }
 
-        // The network was still link-less while the engines and disrupters
-        // started, so every one of them starts from exactly the validated
-        // prefix state; only now is the input topology built, gating the first
-        // possible delivery behind startup.
-        apply_partition(&oracle, &participants, input.partition.set_partition(), &LINK).await;
-        if input.degraded_network {
-            apply_degraded_network::<P>(&oracle, &participants).await;
-        }
-
-        // Honest apps (for the safety invariants) and per-node delivery-height
-        // progress handles (for the subscription-based liveness watch); every
-        // index that has a marshal.
         let honest_apps: Vec<(usize, Application<B<P>>)> = nodes
             .iter()
             .enumerate()
@@ -376,16 +427,10 @@ where
             .filter_map(|(idx, node)| node.as_ref().map(|node| (idx, node.progress.clone())))
             .collect();
 
-        // Liveness. Phase 1: let the pre-GST faults act until the fastest honest
-        // node advances the requested run depth past the prefix floor, or the fault
-        // window elapses. Deriving the target from `required_containers` keeps a
-        // shallow run close to the interesting scenario state instead of racing to
-        // a fixed height; the cap keeps it below the single-epoch boundary so a
-        // fresh baseline + 1 stays achievable. Each node's delivery-height watcher
-        // races against one deadline (no polling), and the first to reach the
-        // ceiling ends the phase.
+        // Liveness phase 1: let pre-GST faults act until the fastest honest node
+        // advances the requested run depth past the floor, or the window elapses.
         let phase1_ceiling =
-            (floor_height + input.required_containers).min(MAX_REQUIRED.saturating_sub(1));
+            (anchor_parent_height + input.required_containers).min(MAX_REQUIRED.saturating_sub(1));
         let phase1_watchers: Vec<_> = honest_progress
             .iter()
             .map(|(_, progress)| {
@@ -400,17 +445,30 @@ where
                 })
             })
             .collect();
+        // The heal must not fire before the adversary has had time to act. When
+        // the honest nodes already sit at (or race to) the phase-1 ceiling before
+        // the adversary emits (for example a restart scenario whose floor already
+        // sits at the ceiling, or a disrupter whose faults land a few views ahead),
+        // the ceiling watchers alone would heal a zero-length fault phase. Requiring
+        // a minimum pre-heal window ensures the dissemination announce and the
+        // Simplex disrupter's live-view faults are exercised before the heal.
+        let min_fault_phase = if byzantine {
+            MIN_FAULT_PHASE
+        } else {
+            Duration::ZERO
+        };
         select! {
-            _ = select_all(phase1_watchers) => {},
+            _ = async {
+                futures::future::join(
+                    select_all(phase1_watchers),
+                    context.sleep(min_fault_phase),
+                )
+                .await;
+            } => {},
             _ = context.sleep(FAULT_PHASE) => {},
         }
 
-        // Heal unconditionally, then capture each honest node's baseline plus a
-        // receiver for fresh updates. Subscribing *after* the heal completes is
-        // load-bearing: the heal awaits many link remove/add requests while
-        // consensus keeps running, so a delivery mid-heal must not count as
-        // post-GST progress. `subscribe` reads the latest height and registers the
-        // receiver under one lock, so no post-heal delivery is missed.
+        // Heal unconditionally, then capture each honest node's baseline.
         apply_partition(&oracle, &participants, None, &LINK).await;
         let baselines: Vec<(usize, u64, _)> = honest_progress
             .iter()
@@ -420,20 +478,31 @@ where
             })
             .collect();
 
-        // Phase 2: every honest node that still has epoch headroom must make fresh
-        // post-GST progress (baseline + 1). A node already at the epoch ceiling has
-        // completed the epoch's maximal work and cannot advance further, so it is
-        // excluded from the measurement rather than passed vacuously. If none
-        // remains measurable (all completed the epoch before the heal), the run is
-        // healthy but unmeasurable, so the check is skipped and only safety runs.
-        // Otherwise all measurable watchers race against one recovery deadline.
-        let measurable: Vec<(usize, u64, _)> = baselines
+        // Liveness phase 2: every honest node with epoch headroom must make fresh
+        // post-GST progress; nodes already at the epoch ceiling are excluded.
+        let (measurable, at_ceiling): (Vec<_>, Vec<_>) = baselines
             .into_iter()
-            .filter(|(_, baseline, _)| *baseline < MAX_REQUIRED)
-            .collect();
-        if !measurable.is_empty() {
-            let targets: Vec<(usize, u64)> =
-                measurable.iter().map(|(idx, baseline, _)| (*idx, baseline + 1)).collect();
+            .partition(|(_, baseline, _)| *baseline < MAX_REQUIRED);
+        if measurable.is_empty() {
+            // The check is skipped, never silently: report the reason on
+            // stdout so an ordinary `#[test]` run surfaces it.
+            let skipped: Vec<(usize, u64)> = at_ceiling
+                .iter()
+                .map(|(idx, baseline, _)| (*idx, *baseline))
+                .collect();
+            if cfg!(not(fuzzing)) {
+                println!(
+                    "scenario liveness skipped: scenario={:?} marshal={marshal} \
+                     byzantine={byzantine} skipped={skipped:?} reason=\"every honest node \
+                     already at the single-epoch delivery ceiling ({MAX_REQUIRED})\"",
+                    input.scenario,
+                );
+            }
+        } else {
+            let targets: Vec<(usize, u64)> = measurable
+                .iter()
+                .map(|(idx, baseline, _)| (*idx, baseline + 1))
+                .collect();
             let watchers: Vec<_> = measurable
                 .into_iter()
                 .map(|(_, baseline, mut updates)| {
@@ -467,26 +536,64 @@ where
         }
 
         // === SAFETY (marshal-layer invariants; last observation point) ===
-        let floor_started = point.expectation.floor_started.map(Node::idx);
-        invariants::agreement(&honest_apps, &stack_label);
-        for (idx, app) in &honest_apps {
-            if Some(*idx) == floor_started {
-                invariants::check_parent_linkage::<Sha256Digest, PublicKeyOf<P>>(
-                    *idx,
-                    &app.blocks(),
-                    genesis_commitment,
-                    &stack_label,
-                );
-                check_floor_started_order(*idx, &app.delivered(), floor_height, &stack_label);
-            } else {
-                invariants::check_local_blocks::<Sha256Digest, PublicKeyOf<P>>(
-                    *idx,
-                    app,
-                    genesis_commitment,
-                    &stack_label,
-                );
-            }
+        // I6: after the unconditional heal restores every link losslessly, no
+        // honest node may blocklist an honest peer. Pairs touching the byzantine
+        // node (index 0, adversarial mode only) are exempt, since blocklisting a
+        // poison-serving adversary is correct.
+        let byzantine_key = byzantine.then(|| participants[Node::A.idx()].clone());
+        let blocked = oracle.blocked().await.expect("blocklist query failed");
+        for (blocker, blocked_peer) in &blocked {
+            let touches_byzantine = byzantine_key
+                .as_ref()
+                .is_some_and(|adversary| blocker == adversary || blocked_peer == adversary);
+            assert!(
+                touches_byzantine,
+                "I6 violated: honest node blocklisted an honest peer at the measurement point: \
+                 {blocker} -> {blocked_peer}; scenario={:?}",
+                input.scenario,
+            );
         }
+
+        let floor_height = handoff
+            .expectation
+            .all_floor_rooted
+            .unwrap_or(commonware_consensus::types::Height::zero());
+        invariants::check_all_blocks(
+            &honest_apps,
+            genesis_commitment,
+            floor_height,
+            Some(&stack_label),
+        );
+
+        // The checks are not vacuous: report how many nodes were checked and
+        // how many blocks were delivered at the measurement point, and require
+        // both counts to be nonzero. The report goes to stdout so an ordinary
+        // `#[test]` run surfaces it, and names the marshal variant so it is
+        // identifiable per configuration; fuzz runs stay silent.
+        let nodes_checked = honest_apps.len();
+        let blocks_delivered: usize = honest_apps
+            .iter()
+            .map(|(_, app)| app.delivered().len())
+            .sum();
+        if cfg!(not(fuzzing)) {
+            println!(
+                "scenario measurement point: scenario={:?} marshal={marshal} \
+                 byzantine={byzantine} nodes_checked={nodes_checked} \
+                 blocks_delivered={blocks_delivered}",
+                input.scenario,
+            );
+        }
+        assert!(
+            nodes_checked > 0,
+            "measurement vacuous: no honest node was checked; scenario={:?}",
+            input.scenario,
+        );
+        assert!(
+            blocks_delivered > 0,
+            "measurement vacuous: no block was delivered at the measurement point; \
+             scenario={:?} nodes_checked={nodes_checked}",
+            input.scenario,
+        );
     });
 }
 
@@ -500,8 +607,8 @@ mod tests {
     };
     use commonware_consensus::simplex::ForwardingPolicy;
 
-    fn run(scenario: ScenarioKind, config: Configuration) {
-        let input = MarshalScenarioPrefixInput {
+    fn input(scenario: ScenarioKind, config: Configuration) -> MarshalScenarioPrefixInput {
+        MarshalScenarioPrefixInput {
             raw_bytes: vec![0u8; 64],
             scenario,
             config,
@@ -516,158 +623,48 @@ mod tests {
             degraded_network: false,
             partition: Partition::Connected,
             forwarding: ForwardingPolicy::Disabled,
-        };
-        // Exercise both Standard variants with the same input.
-        fuzz_marshal_scenario_prefix_deferred::<SimplexCertificateMock>(input.clone());
-        fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input);
+        }
     }
 
-    #[test]
-    fn honest_missing_candidate() {
-        run(ScenarioKind::MissingCandidate, N4F0C4);
+    /// Run one scenario configuration under one Standard variant.
+    fn run_one(scenario: ScenarioKind, config: Configuration, marshal: MarshalChoice) {
+        let input = input(scenario, config);
+        match marshal {
+            MarshalChoice::Deferred => {
+                fuzz_marshal_scenario_prefix_deferred::<SimplexCertificateMock>(input)
+            }
+            MarshalChoice::Inline => {
+                fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input)
+            }
+        }
     }
 
-    #[test]
-    fn honest_finalization_without_block() {
-        run(ScenarioKind::FinalizationWithoutBlock, N4F0C4);
-    }
-
-    #[test]
-    fn honest_subscribe_before_block() {
-        run(ScenarioKind::SubscribeBeforeBlock, N4F0C4);
-    }
-
-    #[test]
-    fn honest_same_height_different_views() {
-        run(ScenarioKind::SameHeightDifferentViews, N4F0C4);
-    }
-
-    #[test]
-    fn honest_pending_floor_anchor() {
-        run(ScenarioKind::PendingFloorAnchor, N4F0C4);
-    }
-
-    #[test]
-    fn adversarial_missing_candidate() {
-        run(ScenarioKind::MissingCandidate, N4F1C3);
-    }
-
-    #[test]
-    fn adversarial_finalization_without_block() {
-        run(ScenarioKind::FinalizationWithoutBlock, N4F1C3);
-    }
-
-    #[test]
-    fn adversarial_subscribe_before_block() {
-        run(ScenarioKind::SubscribeBeforeBlock, N4F1C3);
-    }
-
-    #[test]
-    fn adversarial_same_height_different_views() {
-        run(ScenarioKind::SameHeightDifferentViews, N4F1C3);
-    }
-
-    #[test]
-    fn adversarial_pending_floor_anchor() {
-        run(ScenarioKind::PendingFloorAnchor, N4F1C3);
-    }
-
-    // Smoke: an honest run with a degraded deprived-node link exercises the
-    // marshal-layer invariants and liveness under lossy backfill.
-    #[test]
-    fn honest_pending_floor_anchor_degraded() {
-        let input = MarshalScenarioPrefixInput {
-            raw_bytes: vec![0],
-            scenario: ScenarioKind::PendingFloorAnchor,
-            config: N4F0C4,
-            fault_plan: FaultPlan {
-                block_fault: BlockFault::Omit,
-                backfill: BackfillFault::Withhold,
-                consensus: ConsensusMutation::Corrupt,
-            },
-            fault_rounds: 1,
-            fault_rounds_bound: 1,
-            required_containers: 1,
-            degraded_network: true,
-            partition: Partition::Connected,
-            forwarding: ForwardingPolicy::Disabled,
-        };
-        // Exercise both Standard variants with the same input.
-        fuzz_marshal_scenario_prefix_deferred::<SimplexCertificateMock>(input.clone());
-        fuzz_marshal_scenario_prefix_inline::<SimplexCertificateMock>(input);
-    }
-
+    // One `#[test]` per configuration (scenario x mode x variant), so a failure
+    // in one variant cannot mask the other variant's result.
     macro_rules! scenario_smoke {
-        ($honest:ident, $adversarial:ident, $kind:ident) => {
-            #[test]
-            fn $honest() {
-                run(ScenarioKind::$kind, N4F0C4);
-            }
-            #[test]
-            fn $adversarial() {
-                run(ScenarioKind::$kind, N4F1C3);
+        ($module:ident, $kind:ident) => {
+            mod $module {
+                use super::*;
+
+                #[test]
+                fn honest_deferred() {
+                    run_one(ScenarioKind::$kind, N4F0C4, MarshalChoice::Deferred);
+                }
+                #[test]
+                fn honest_inline() {
+                    run_one(ScenarioKind::$kind, N4F0C4, MarshalChoice::Inline);
+                }
+                #[test]
+                fn adversarial_deferred() {
+                    run_one(ScenarioKind::$kind, N4F1C3, MarshalChoice::Deferred);
+                }
+                #[test]
+                fn adversarial_inline() {
+                    run_one(ScenarioKind::$kind, N4F1C3, MarshalChoice::Inline);
+                }
             }
         };
     }
 
-    scenario_smoke!(
-        honest_byzantine_parent_equivocation,
-        adversarial_byzantine_parent_equivocation,
-        ByzantineParentEquivocation
-    );
-    scenario_smoke!(
-        honest_conflicting_verify_no_cert_poison,
-        adversarial_conflicting_verify_no_cert_poison,
-        ConflictingVerifyNoCertPoison
-    );
-    scenario_smoke!(
-        honest_equivocated_block_persists,
-        adversarial_equivocated_block_persists,
-        EquivocatedBlockPersists
-    );
-    scenario_smoke!(
-        honest_conflicting_proposals_both_ack,
-        adversarial_conflicting_proposals_both_ack,
-        ConflictingProposalsBothAck
-    );
-    scenario_smoke!(
-        honest_height_lie_parent_fetch,
-        adversarial_height_lie_parent_fetch,
-        HeightLieParentFetch
-    );
-    scenario_smoke!(
-        honest_internal_missing_finalized_block,
-        adversarial_internal_missing_finalized_block,
-        InternalMissingFinalizedBlock
-    );
-    scenario_smoke!(
-        honest_multiple_trailing_gaps,
-        adversarial_multiple_trailing_gaps,
-        MultipleTrailingGaps
-    );
-    scenario_smoke!(
-        honest_large_pending_tip,
-        adversarial_large_pending_tip,
-        LargePendingTip
-    );
-    scenario_smoke!(
-        honest_floor_repairs_gap_after_anchor,
-        adversarial_floor_repairs_gap_after_anchor,
-        FloorRepairsGapAfterAnchor
-    );
-    scenario_smoke!(
-        honest_newer_floor_supersedes_older,
-        adversarial_newer_floor_supersedes_older,
-        NewerFloorSupersedesOlder
-    );
-    scenario_smoke!(
-        honest_deferred_certify_fallback,
-        adversarial_deferred_certify_fallback,
-        DeferredCertifyFallback
-    );
-    scenario_smoke!(
-        honest_first_block_fetches_genesis_parent,
-        adversarial_first_block_fetches_genesis_parent,
-        FirstBlockFetchesGenesisParent
-    );
+    scenario_smoke!(missing_candidate, MissingCandidate);
 }

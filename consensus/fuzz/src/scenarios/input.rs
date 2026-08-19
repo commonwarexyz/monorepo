@@ -1,9 +1,8 @@
 //! Libfuzzer-facing input for the scenario-based marshal target.
 //!
-//! A minimal input selects the first scenario in the adversarial `N4F1C3` config
-//! with a connected network; larger inputs pick other scenarios, the honest
-//! `N4F0C4` config, and reshape the pre-GST topology, byzantine strategy, and
-//! forwarding around them.
+//! A minimal input selects the scenario in the adversarial `N4F1C3` config
+//! with a connected network; larger inputs pick the honest `N4F0C4` config and
+//! reshape the pre-GST topology, byzantine strategy, and forwarding around it.
 
 use crate::{
     Configuration, N4F0C4, N4F1C3,
@@ -28,26 +27,14 @@ fn sample_fault_rounds(
     Ok((fault_rounds, fault_rounds_bound))
 }
 
-/// The concrete scenario a run replays as its prefix.
+/// The concrete scenario a run replays as its prefix. Each variant names an
+/// authoritative `consensus/src/marshal` test it faithfully reproduces.
 #[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScenarioKind {
+    /// `test_standard_certify_missing_candidate_fetches_by_round`, composed
+    /// with the engines through certification recovery from a seeded voter
+    /// journal (see `scenarios.rs`).
     MissingCandidate,
-    FinalizationWithoutBlock,
-    SubscribeBeforeBlock,
-    SameHeightDifferentViews,
-    PendingFloorAnchor,
-    ByzantineParentEquivocation,
-    ConflictingVerifyNoCertPoison,
-    EquivocatedBlockPersists,
-    ConflictingProposalsBothAck,
-    HeightLieParentFetch,
-    InternalMissingFinalizedBlock,
-    MultipleTrailingGaps,
-    LargePendingTip,
-    FloorRepairsGapAfterAnchor,
-    NewerFloorSupersedesOlder,
-    DeferredCertifyFallback,
-    FirstBlockFetchesGenesisParent,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.

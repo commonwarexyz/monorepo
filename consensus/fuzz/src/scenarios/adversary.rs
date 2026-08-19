@@ -110,8 +110,8 @@ pub(crate) async fn start_dissemination_disrupter<P: Simplex>(
     scheme: SchemeOf<P>,
     schemes: Vec<SchemeOf<P>>,
     participants: Vec<PublicKeyOf<P>>,
-    floor_digest: Sha256Digest,
-    floor_view: View,
+    parent_digest: Sha256Digest,
+    parent_view: View,
     attack_view: View,
     attack_height: Height,
     vote_sender: Sender<PublicKeyOf<P>, deterministic::Context>,
@@ -129,8 +129,8 @@ pub(crate) async fn start_dissemination_disrupter<P: Simplex>(
         node.clone(),
         scheme,
         honest,
-        floor_digest,
-        floor_view,
+        parent_digest,
+        parent_view,
         attack_view,
         attack_height,
         vote_sender,
@@ -142,8 +142,8 @@ pub(crate) async fn start_dissemination_disrupter<P: Simplex>(
         oracle,
         node,
         schemes,
-        floor_digest,
-        floor_view,
+        parent_digest,
+        parent_view,
         attack_height,
         plan.backfill,
     )
@@ -158,8 +158,8 @@ async fn disseminate<P: Simplex>(
     node: PublicKeyOf<P>,
     scheme: SchemeOf<P>,
     honest: Vec<PublicKeyOf<P>>,
-    floor_digest: Sha256Digest,
-    floor_view: View,
+    parent_digest: Sha256Digest,
+    parent_view: View,
     attack_view: View,
     attack_height: Height,
     mut vote_sender: Sender<PublicKeyOf<P>, deterministic::Context>,
@@ -189,9 +189,9 @@ async fn disseminate<P: Simplex>(
         let block_context = Ctx::<P> {
             round,
             leader: node.clone(),
-            parent: (floor_view, floor_digest),
+            parent: (parent_view, parent_digest),
         };
-        B::<P>::new::<Sha256>(block_context, floor_digest, attack_height, timestamp)
+        B::<P>::new::<Sha256>(block_context, parent_digest, attack_height, timestamp)
     };
 
     context
@@ -202,7 +202,7 @@ async fn disseminate<P: Simplex>(
             let announce = |sender: &mut Sender<PublicKeyOf<P>, deterministic::Context>,
                             block: &B<P>,
                             to: Recipients<PublicKeyOf<P>>| {
-                let proposal = Proposal::new(round, floor_view, block.digest());
+                let proposal = Proposal::new(round, parent_view, block.digest());
                 if let Some(vote) = Notarize::sign(&scheme, proposal) {
                     let message = Vote::<SchemeOf<P>, Sha256Digest>::Notarize(vote).encode();
                     let _ = sender.send(to, message, true);
@@ -256,8 +256,8 @@ async fn serve_backfill<P: Simplex>(
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     node: PublicKeyOf<P>,
     schemes: Vec<SchemeOf<P>>,
-    floor_digest: Sha256Digest,
-    floor_view: View,
+    parent_digest: Sha256Digest,
+    parent_view: View,
     attack_height: Height,
     fault: BackfillFault,
 ) {
@@ -281,8 +281,13 @@ async fn serve_backfill<P: Simplex>(
             let payload = match fault {
                 BackfillFault::ServeError => ResolverPayload::Error,
                 BackfillFault::Poison => match key {
-                    MarshalKey::Notarized { round } => {
-                        let proposal = Proposal::new(round, floor_view, UNAVAILABLE_PAYLOAD);
+                    // A well-formed notarization needs `parent_view < round`. The
+                    // poison uses `parent = parent_view`, so a request at or below
+                    // the attack anchor's parent view cannot be answered with a
+                    // well-formed certificate; serve an error instead of a
+                    // malformed one.
+                    MarshalKey::Notarized { round } if round.view() > parent_view => {
+                        let proposal = Proposal::new(round, parent_view, UNAVAILABLE_PAYLOAD);
                         let notarizes: Vec<_> = schemes
                             .iter()
                             .take(QUORUM as usize)
@@ -296,11 +301,11 @@ async fn serve_backfill<P: Simplex>(
                         let context = Ctx::<P> {
                             round,
                             leader: leader.clone(),
-                            parent: (floor_view, floor_digest),
+                            parent: (parent_view, parent_digest),
                         };
                         let block = B::<P>::new::<Sha256>(
                             context,
-                            floor_digest,
+                            parent_digest,
                             attack_height,
                             round.view().get(),
                         );
