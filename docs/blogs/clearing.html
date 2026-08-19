@@ -110,55 +110,26 @@ O’Grady</a></div>
                         <div class="date">August 14th, 2026</div>
         </div>
         <p>$0.000001 payments cost more to replicate, settle onchain,
-        and index than they’re worth. Yet your agents will make millions
+        and index than they’re worth. Yet you’ll need to make millions
         of them over the coming years.</p>
-        <p>Even if blockspace reached a billion TPS, you would not want
-        to put these payments onchain. A chain would replicate petabytes
-        of $0.000001 payments every day, forever, and every indexer and
-        archive around it would carry them again. The only record worth
-        keeping forever is where balances ended up.</p>
-        <p>Two goals follow. Agents pay arbitrary counterparties and act
-        the moment an operator accepts a payment, which demands
-        credible, fast preconfirmations. Settlement needs only the
-        changed account state, which lets it stay cheap at massive
-        scale. Public finality is delayed settlement: every payment the
-        epoch accepted shares one close, so the delay spans many
-        payments but, at these sizes, little money per account.</p>
-        <p><strong>Bajillion</strong> is an account-level clearing
-        protocol built for both goals. Its payments are many-to-many:
-        any registered account can pay any other without pre-funded
-        pairwise state. The operator accepts payments throughout an
-        epoch. At close, each changed account contributes one row
-        committing its exact opening and closing state. Repeated
-        payments over the same accounts share those rows even when the
-        pairings differ.</p>
-        <p>The operator still verifies and durably records every
-        payment. Users rely on it for online payment service and signed
-        receipts, not for custody. The settlement chain holds the
-        deployment’s assets, and no withdrawal path runs through the
-        operator. The savings appear at public settlement, when many
-        payments reuse the same accounts. This is the shape of agent
-        traffic, where the same principals pay the same services
-        millions of times.</p>
-        <p>Never publishing those payments creates the hard parts: the
-        close must prove exact account changes without replaying them,
-        and a privately delivered receipt must still constrain
-        settlement. Trust in the operator lasts only from acceptance to
-        admission: the close is validated before admission, and one
-        contradicting receipt is enough to stop it. Users need a
-        recovery path if the operator disappears, and closing one epoch
-        cannot stop payments in the next.</p>
-        <p>Both goals press against their lower bounds. A
-        preconfirmation cannot arrive in less than one round trip to the
-        party that serializes the payer’s spending, and this one takes
-        exactly that round trip. A settlement recoverable from public
-        data cannot make less than the changed state available. This
-        close carries that state, plus terminal signed pairs and a
-        sparse frontier, so its size is unchanged when one payment
-        becomes a bajillion, provided the changed accounts and
-        components stay fixed.</p>
-        <p>The mechanism is simple: signatures, Merkle openings, and one
-        challenge window. Start with one accepted payment.</p>
+        <p>If we can’t use blockspace to scale to a billion TPS (or at
+        least don’t want to cover the tab of doing so), what else could
+        we do? Payment channels are cheap and instant between two funded
+        parties, but reaching an arbitrary counterparty means opening a
+        new channel or negotiating with existing channels to let you
+        route through them (without risking to grief via forced closure
+        or taking too much of their liquidity). A payment rollup can
+        compress what settles, but proof cost scales per payment and its
+        preconfirmations are not binding and contestable.</p>
+        <p><strong>Bajillion</strong> is a simple, optimistic clearing
+        protocol that does just enough to be useful. Payments are
+        many-to-many and settle efficiently to any chain that can verify
+        and store a few kilobyte commitment. Payment preconfirmations
+        are as fast as browsing the web and serve as succinct proof for
+        holding the system honest. If all breaks down or an account is
+        censored, both senders and recipients can force recovery of
+        their funds with one onchain challenge. No fancy cryptography or
+        SNARK/STARK required.</p>
         <h2 id="one-signed-payment">One Signed Payment</h2>
         <p>An epoch starts from an authenticated account vector and a
         chain-sealed anchor <span class="math inline">\mathcal
@@ -645,11 +616,14 @@ O’Grady</a></div>
         class="math inline">v</span>, amount <span
         class="math inline">x</span>, full-close flag <span
         class="math inline">\gamma</span>, and absolute deadline <span
-        class="math inline">\tau</span>. Queueing is a direct,
-        permissionless chain call. The operator neither submits nor
-        approves it. Operator cooperation decides only whether the
-        withdrawal settles through a clean close or through terminal
-        unwind.</p>
+        class="math inline">\tau</span>. Since <span
+        class="math inline">v</span> may be any destination the asset
+        adapter accepts, paying an unregistered recipient is just a
+        withdrawal to its address: the funds arrive at release, with no
+        preconfirmation in between. Queueing is a direct, permissionless
+        chain call. The operator neither submits nor approves it.
+        Operator cooperation decides only whether the withdrawal settles
+        through a clean close or through terminal unwind.</p>
         <p>If the admitted pipeline extends <span
         class="math inline">\mathsf{rt}_z</span> through <span
         class="math inline">\mathsf{rt}_\ell</span>, where <span

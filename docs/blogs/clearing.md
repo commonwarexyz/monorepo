@@ -15,15 +15,7 @@ katex: true
 
 If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching an arbitrary counterparty means opening a new channel or negotiating with existing channels to let you route through them (without risking to grief via forced closure or taking too much of their liquidity). A payment rollup can compress what settles, but proof cost scales per payment and its preconfirmations are not binding and contestable.
 
-**Bajillion** is a simple, optimistic clearing protocol that does just enough to be useful. Payments are many-to-many and settle efficiently to any chain that can verify and store a few kilobyte commitment. Payment preconfirmations are as fast as browsing the web and serve as succinct proof for holding the system honest. If all breaks down or an account is censored, both senders and recipients can force recovery of their funds with one onchain challenge. No fancy cryptography or SNARK/STARK required.
-
-The operator still verifies and durably records every payment. Users rely on it for online payment service and signed receipts, not for custody. The settlement chain holds the deployment's assets, and no withdrawal path runs through the operator. The savings appear at public settlement, when many payments reuse the same accounts. This is the shape of agent traffic, where the same principals pay the same services millions of times.
-
-Never publishing those payments creates the hard parts: the close must prove exact account changes without replaying them, and a privately delivered receipt must still constrain settlement. Trust in the operator lasts only from acceptance to admission: the close is validated before admission, and one contradicting receipt is enough to stop it. Users need a recovery path if the operator disappears, and closing one epoch cannot stop payments in the next.
-
-Both goals press against their lower bounds. A preconfirmation cannot arrive in less than one round trip to the party that serializes the payer's spending, and this one takes exactly that round trip. A settlement recoverable from public data cannot make less than the changed state available. This close carries that state, plus terminal signed pairs and a sparse frontier, so its size is unchanged when one payment becomes a bajillion, provided the changed accounts and components stay fixed.
-
-The mechanism is simple: signatures, Merkle openings, and one challenge window. Start with one accepted payment.
+Bajillion is a simple, optimistic clearing protocol that does just enough to be useful. It supports many-to-many payments and settles them efficiently to any chain that can store a few kilobyte commitment. It offers payment preconfirmations as fast as browsing the web and serve as succinct proof for holding the system honest. If all breaks down or an account is censored, both senders and recipients can force recovery of their funds with one onchain challenge. No fancy cryptography or SNARK/STARK required.
 
 ## One Signed Payment
 
