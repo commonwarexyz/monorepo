@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-A \$0.000001 payment costs more to replicate, settle onchain, and index than it's worth.
+\$0.000001 payments cost more to replicate, settle onchain, and index than they're worth.
 
 More blockspace, bandwidth, and storage let a network carry more payment records. The economic question is whether every payment needs one.
 
