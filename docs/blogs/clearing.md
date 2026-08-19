@@ -1,6 +1,6 @@
 ---
 title: "Keep the Change"
-description: "Bajillion is an account-level clearing protocol that makes millions of tiny payments economical by settling account changes instead of publishing every transaction. At internet scale, digital signatures and Merkle trees make its public settlement cost per payment effectively zero."
+description: "Bajillion is an account-level clearing protocol built for two goals: cheap settlement at massive scale and credible, fast preconfirmations. A payment is one operator round trip, and the close settles account changes instead of publishing every transaction, making public settlement cost per payment effectively zero."
 date: "August 14th, 2026"
 published-time: "2026-08-14T00:00:00Z"
 modified-time: "2026-08-14T00:00:00Z"
@@ -11,19 +11,21 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-A \$0.000001 payment costs more to settle onchain than it is worth.
+A \$0.000001 payment costs more to replicate, settle onchain, and index than it's worth.
 
 More blockspace, bandwidth, and storage let a network carry more payment records. The economic question is whether every payment needs one.
 
 That depends on the guarantee. Direct onchain settlement publishes each payment and gives it public finality. A payment channel keeps enforceable state between two parties and settles only its latest state. A routed channel links those states across a path, with liquidity and claims at every hop. A general-purpose rollup validates arbitrary execution. These designs ask the chain to settle a payment, a channel state, or a general state transition.
 
-At this scale, the payer and recipient can accept an operator's signed preconfirmation now and wait for public finality. The signature gives them evidence they can retain immediately, while finality arrives later as part of a larger close.
+At this scale, the design goals are a pair: cheap settlement at massive scale, and preconfirmations credible and fast enough that the recipient can act the moment a payment is accepted. The payer and recipient take an operator's signed preconfirmation now, and public finality arrives later as part of a larger close.
 
-**Bajillion**, the account-level clearing protocol this post presents, applies that trade within one operator and custody system. It makes the account the unit of settlement. The operator accepts payments throughout an epoch. At close, each changed account contributes one row that commits its exact opening and closing state. Repeated payments over the same set of accounts share those rows even when the pairings differ.
+**Bajillion**, the account-level clearing protocol this post presents, is built for exactly that pair within one operator and custody system. It makes the account the unit of settlement. The operator accepts payments throughout an epoch. At close, each changed account contributes one row that commits its exact opening and closing state. Repeated payments over the same set of accounts share those rows even when the pairings differ.
 
 The operator still verifies and durably records every payment. Users trust it for custody and online service. The savings appear in public settlement when many payments reuse the same accounts.
 
 That choice defines the rest of the design. The close must prove exact account changes without replaying a public payment log. A privately delivered receipt must still constrain settlement. Users need a recovery path if the operator stops, and closing one epoch should not halt payments in the next.
+
+Both goals land at their floors. A preconfirmation cannot exist in less than one round trip to the party that serializes the payer's spending, and acceptance here is that single round trip, returning a receipt a conforming close must honor. A settlement whose users can recover from public data alone cannot publish less than the changed state, and for a fixed set of changed accounts the close is the same size after one payment or a bajillion.
 
 The construction starts with the signed evidence for one accepted payment.
 
@@ -43,7 +45,7 @@ $\mathsf{TxId}$ hashes only the canonical request body, so signature bytes never
 
 That acceptance is transactional. After authenticating $S$ and checking spendability, freshness, and room in the close, the operator atomically commits the debit, the component advance, the close reservation, the replay record, and the receipt body, and only then signs and returns $R$.
 
-The matching pair $(S,R)$ is the accepted payment. The payer verifies and retains it, then forwards it to the recipient. Rejection before the commit changes nothing, and until the payer sends again, an exact retry of a lost response returns the same pair without a second debit.
+The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and retains it, then forwards it to the recipient. Rejection before the commit changes nothing, and until the payer sends again, an exact retry of a lost response returns the same pair without a second debit.
 
 Figures 1–5 use one registry with $N=8$ positions. Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
 
@@ -219,7 +221,7 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. The argument is independent of whether $\zeta$ is a quorum certificate, a zero-knowledge proof, or a TEE attestation. Each can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
 
-Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
+This window is what makes a preconfirmation credible rather than reputational. Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
 
 1. **Payer debit contradiction.** A matching acknowledged pair carries a debit above the public debit marker, or the same debit with a different send or receipt body. A bare payer request is insufficient. The receipt proves operator acknowledgement.
 
@@ -469,7 +471,7 @@ The timers cover warm, in-memory close construction and validation on an 18-core
 
 ## The Account-Level Trade
 
-Payment channels attack the same economic problem with a different settlement boundary. A bilateral channel compresses repeated transfers between two parties while preserving bilateral self-custody. A routed network such as the one in the [original Lightning paper](https://lightning.network/lightning-network-paper.pdf) extends that guarantee across a path, which means reserving directional liquidity and individually enforceable timed state at every hop. Bajillion instead trusts one operator and custody system during normal operation, then nets every sender and recipient under one account-wide close. It has no routed-hop state: the close carries only the terminal head of each receive component used, and the deployment chooses how payments map into those bounded concurrency domains.
+Payment channels pursue the same pair of goals with a different settlement boundary. A bilateral channel compresses repeated transfers between two parties while preserving bilateral self-custody. A routed network such as the one in the [original Lightning paper](https://lightning.network/lightning-network-paper.pdf) extends that guarantee across a path, which means reserving directional liquidity and individually enforceable timed state at every hop. Bajillion instead trusts one operator and custody system during normal operation, then nets every sender and recipient under one account-wide close. It has no routed-hop state: the close carries only the terminal head of each receive component used, and the deployment chooses how payments map into those bounded concurrency domains.
 
 That broader netting boundary is why a cycle can be cheap. If $a\to b$, $b\to c$, and $c\to a$ repeat 100,000 times, the epoch contains $T=300{,}000$ payments but only $A=3$ changed accounts. With one component per recipient, it also has $H=3$. Gross debit still equals gross credit, but the public close carries three rows, three heads, and their sparse frontier rather than 300,000 payment records.
 
@@ -498,6 +500,8 @@ $$
 Admission validates the complete public close. The challenge window covers what no validity mode can establish: that the operator's signed receipts, disclosed or not, contain no contradiction. Holders retain the signed evidence needed to expose a concrete contradiction. An included call that observes an overdue queued withdrawal fences new work. The admitted prefix must still resolve, and terminal unwind requires the complete survivor state.
 
 For repeated activity over a fixed changed-account and component footprint, $(A+H+\Phi)/T\to 0$. Unchanged subtrees cost one frontier digest apiece no matter how many accounts they hold, and receive components keep a hot recipient from becoming a shared online counter. Every changed account and represented component still contributes to the close. Account-level clearing compresses repetition, not change.
+
+Measured against the two goals, this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending, and a close cannot quietly drop one: it must agree with every receipt its epoch issued, or a single retained pair proves the fault. Cheap settlement bottoms out at the changed state itself: no design whose users recover from public data alone can make less available, and the close adds only each component's terminal pair and the frontier that splices the change into the registry.
 
 Sign every payment. Settle each changed account once.
 
