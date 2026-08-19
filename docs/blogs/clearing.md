@@ -11,13 +11,11 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-\$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agents will make millions of them over the coming years.
+\$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet you'll need to make millions of them over the coming years.
 
-Even if blockspace reached a billion TPS, you would not want to put these payments onchain. A chain would replicate petabytes of \$0.000001 payments every day, forever, and every indexer and archive around it would carry them again. The only record worth keeping forever is where balances ended up.
+If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching an arbitrary counterparty means opening a new channel or negotiating with existing channels to let you route through them (without risking to grief via forced closure or taking too much of their liquidity). A payment rollup can compress what settles, but proof cost scales per payment and its preconfirmations are not binding and contestable.
 
-Two goals follow. Agents pay arbitrary counterparties and act the moment an operator accepts a payment, which demands credible, fast preconfirmations. Settlement needs only the changed account state, which lets it stay cheap at massive scale. Public finality is delayed settlement: every payment the epoch accepted shares one close, so the delay spans many payments but, at these sizes, little money per account.
-
-**Bajillion** is an account-level clearing protocol built for both goals. Its payments are many-to-many: any registered account can pay any other without pre-funded pairwise state. The operator accepts payments throughout an epoch. At close, each changed account contributes one row committing its exact opening and closing state. Repeated payments over the same accounts share those rows even when the pairings differ.
+**Bajillion** is a simple, optimistic clearing protocol that does just enough to be useful. Payments are many-to-many and settle efficiently to any chain that can verify and store a few kilobyte commitment. Payment preconfirmations are as fast as browsing the web and serve as succinct proof for holding the system honest. If all breaks down or an account is censored, both senders and recipients can force recovery of their funds with one onchain challenge. No fancy cryptography or SNARK/STARK required.
 
 The operator still verifies and durably records every payment. Users rely on it for online payment service and signed receipts, not for custody. The settlement chain holds the deployment's assets, and no withdrawal path runs through the operator. The savings appear at public settlement, when many payments reuse the same accounts. This is the shape of agent traffic, where the same principals pay the same services millions of times.
 
@@ -298,7 +296,7 @@ $$
 Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr),
 $$
 
-with an eligible destination $v$, amount $x$, full-close flag $\gamma$, and absolute deadline $\tau$. Queueing is a direct, permissionless chain call. The operator neither submits nor approves it. Operator cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind.
+with an eligible destination $v$, amount $x$, full-close flag $\gamma$, and absolute deadline $\tau$. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address: the funds arrive at release, with no preconfirmation in between. Queueing is a direct, permissionless chain call. The operator neither submits nor approves it. Operator cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind.
 
 If the admitted pipeline extends $\mathsf{rt}_z$ through $\mathsf{rt}_\ell$, where $\ell-z\le K$, queueing must prove the withdrawal affordable at each of those roots. Every later admission that does not carry it re-proves it at the new root, so every possible survivor root is covered. A full close must exhaust the balance at the pipeline tail, and the deadline must leave the configured notice $\eta>0$ after queueing.
 

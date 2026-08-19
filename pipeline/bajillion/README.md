@@ -539,7 +539,7 @@ q_a^{\mathsf{wd}}=(\mathsf{deployment},\mathsf{rt}_z,a,v,x,\gamma,\tau),\qquad
 Q=(q_a^{\mathsf{wd}},\sigma_a^{\mathsf{wd}}),
 $$
 
-where $v$ is a destination the asset adapter accepts, $\gamma$ requests a full close, and $\tau$ is an absolute deadline. It names the finalized root at signing, never a future epoch or anchor.
+where $v$ is a destination the asset adapter accepts, $\gamma$ requests a full close, and $\tau$ is an absolute deadline. It names the finalized root at signing, never a future epoch or anchor. This is also how a registered account pays an unregistered recipient: name its destination as $v$, and the amount reaches it at release or through the terminal payout.
 
 **Withdrawal.** Guard, evaluated at queueing time $t_q$ with pipeline $(z,\ldots,\ell)$:
 
