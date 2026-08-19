@@ -18,14 +18,14 @@ use sha2::{Digest, Sha512};
 /// key in its point-processing phase.
 #[derive(Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
-pub(super) struct VerifyingKeyBytes([u8; 32]);
+pub struct VerifyingKeyBytes([u8; 32]);
 
 impl VerifyingKeyBytes {
-    pub(super) const fn new(bytes: [u8; 32]) -> Self {
+    pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub(super) const fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
