@@ -23,23 +23,32 @@
 //!
 //! Write each point as its in-subgroup part plus a "cofactor part" living in the
 //! group of order `h` (the G1 cofactor). `Q` lies in G1 exactly when the
-//! coefficient-weighted sum of the cofactor parts vanishes. If some `P_j` has a
-//! nonzero cofactor part, consider the smallest prime `p | h` where it is
-//! nonzero. Because the three coefficients `{0, 1, 2}` take three distinct
-//! values modulo any prime `p >= 3` (and are uniform modulo `3`), the weighted
-//! sum hits the single value `0` in that component with probability at most
-//! `1/3` per round. So `r` rounds accept a bad point with probability at most
-//! `3^{-r}`, independent of the cofactor's factorization.
+//! coefficient-weighted sum of the cofactor parts vanishes. The G1 cofactor
+//! `h = 3 * (11 * 10177 * 859267 * 52437899)^2` is odd, so every nonzero
+//! cofactor part `T` has order at least 3, making `0*T`, `1*T`, and `2*T` three
+//! distinct group elements. Pick any bad point `P_j` (nonzero `T_j`) and
+//! condition on every other coefficient: the round accepts only if `c_j * T_j`
+//! hits the single fixed value `-sum_{i != j} c_i T_i`, and as `c_j` ranges
+//! uniformly over `{0, 1, 2}` it takes three distinct values, so at most one
+//! works — probability at most `1/3`, for any number of bad points and any
+//! structure of the cofactor group. `r` rounds accept with probability at most
+//! `3^{-r}`.
 //!
-//! For BLS12-381 the G1 cofactor's smallest prime factor is `3`, so for a
-//! single combination per round this `1/3` bound is tight: larger coefficients
-//! cannot lower a round's error, only make it more expensive. This is not the
-//! only design point, though. Partitioning the points into `B` buckets and
-//! checking each bucket sum separately lowers the per-round error to `1/B`
-//! (needing fewer rounds), at the cost of `B` subgroup checks per round instead
-//! of one; which is faster depends on the relative cost of a subgroup check and
-//! a point summation. This module takes the single-combination approach, whose
-//! one fast check per round pairs well with blst's endomorphism-based test.
+//! The bound requires an odd cofactor: an order-2 part `T` has `2*T = 0`, so
+//! `c * T` escapes with probability `2/3` per round. A curve whose cofactor is
+//! even (e.g. BLS12-377 G1, with `2^92 | h`) cannot use this scheme as-is.
+//!
+//! For BLS12-381 the `1/3` bound is also tight (a lone bad point escapes a
+//! round exactly when `c_j = 0`, and `3 | h`), so for a single combination per
+//! round larger coefficients cannot lower the error, only make each round more
+//! expensive. This is not the only design point, though. Partitioning the
+//! points into `B` buckets and checking each bucket sum separately lowers the
+//! per-round error to `1/B` (needing fewer rounds), at the cost of `B` subgroup
+//! checks per round instead of one; which is faster depends on the relative
+//! cost of a subgroup check and a point summation. This module takes the
+//! single-combination approach, whose one fast check per round pairs well with
+//! blst's endomorphism-based test. See `cryptography/BATCHED_SUBGROUP.md` for
+//! the full comparison.
 
 use super::group::G1;
 #[cfg(not(feature = "std"))]
@@ -122,6 +131,10 @@ pub fn batch_in_g1(
 /// Each accepted byte below `3^5 = 243` yields five independent uniform trits
 /// (its base-3 digits); bytes at or above 243 are rejected so the trits stay
 /// exactly uniform. Bytes are drawn in bulk to amortize RNG calls.
+///
+/// Exact uniformity is load-bearing: at 81 rounds the margin over `2^-128` is
+/// only `0.38` bits, and the bias of a `byte % 3` shortcut (max probability
+/// `86/256`) would drop the total to `127.5` bits, below the target.
 struct Trits<'a, R: CryptoRng> {
     rng: &'a mut R,
     buffer: [u8; 256],
