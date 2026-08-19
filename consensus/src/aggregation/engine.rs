@@ -104,7 +104,7 @@ pub struct Engine<
 
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
-    digest_requests: FuturesPool<DigestRequest<D>>,
+    digest_requests: FuturesPool<'static, DigestRequest<D>>,
 
     // State
     /// The current epoch.

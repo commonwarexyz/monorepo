@@ -72,7 +72,7 @@ where
     V: Variant<ApplicationBlock = A::Block>,
 {
     marshal: MarshalMailbox<S, V>,
-    jobs: Pool<JobResult<E, A>>,
+    jobs: Pool<'static, JobResult<E, A>>,
     controls: BTreeMap<u64, JobControl<PendingDigest<A, E>>>,
     next_id: u64,
 }
