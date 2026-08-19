@@ -10,11 +10,12 @@
 //! - The scalar component `s` must be canonical (`s < L`), ruling out signature malleability.
 //! - The verification equation is cofactored: `[8](s·B - R - H(R || A || M)·A) == identity`.
 //!
-//! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply exactly the same criteria, so
-//! batch and individual verification agree on every signature: a batch is valid precisely when
-//! each of its signatures verifies individually. See [this
-//! post](https://hdevalence.ca/blog/2020-10-04-its-25519am) for why these criteria matter.
+//! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria. A batch of at
+//! most `u32::MAX` signatures is always accepted when every signature verifies individually.
+//! Because batch verification checks a randomized linear combination, an invalid batch may be
+//! accepted with probability about `2^-128`. See [this post] for why these criteria matter.
 //!
+//! [this post]: https://hdevalence.ca/blog/2020-10-04-its-25519am
 //! [ZIP215]: https://zips.z.cash/zip-0215
 
 mod core;
@@ -338,7 +339,11 @@ impl VerifyingKey {
     }
 }
 
-/// An object demonstrating that the owner of a [`VerifyingKey`] approved a message.
+/// An Ed25519 signature.
+///
+/// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
+/// the holder of the corresponding [`SigningKey`]. A maliciously generated verifying key can
+/// admit a signature that verifies for any message.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature {
     bytes: [u8; 64],
@@ -429,12 +434,13 @@ impl BatchVerifier {
         });
     }
 
-    /// Check all the signatures in the batch.
+    /// Checks all the signatures in the batch.
     ///
-    /// This returns true precisely when all the signatures in the batch are valid under the
-    /// [module's validation criteria](self), matching [`VerifyingKey::verify`] on every
-    /// signature: an invalid batch is only ever accepted if the random coefficients drawn from
-    /// `rng` collide, an event of negligible probability (about `2^-128`).
+    /// Batches containing more than `u32::MAX` signatures are rejected. Within that limit, a
+    /// batch is always accepted when every signature verifies individually under the [module's
+    /// validation criteria](self). Because this checks a randomized linear combination, an
+    /// invalid batch may be accepted when the random weights make the combined equation hold, an
+    /// event of negligible probability (about `2^-128`).
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self

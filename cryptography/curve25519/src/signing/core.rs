@@ -290,15 +290,14 @@ fn verify_batch_inner<B: Backend>(
     let mut seed = [0u8; 32];
     rng.fill_bytes(&mut seed);
 
-    // Including the original index in the sort key makes the order (and therefore the
-    // position-derived coefficients) a deterministic function of the input, independent of the
-    // sort algorithm.
+    // Stable sorting keeps byte-identical keys in their original order, making the
+    // position-derived coefficients deterministic across supported strategies.
     let mut order: Vec<(VerifyingKeyBytes, u32)> = items
         .iter()
         .enumerate()
         .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
         .collect();
-    strategy.sort_by(&mut order, |x, y| x.cmp(y));
+    strategy.sort_by(&mut order, |x, y| x.0.cmp(&y.0));
 
     let Some((blocks, s_sum)) = scalar_phase(items, &order, &seed, strategy) else {
         return false;
@@ -373,8 +372,8 @@ fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
     })
 }
 
-/// Verifies a batch of `(verifying_key_bytes, signature, message)` triples, returning `true`
-/// only if every item is valid.
+/// Verifies a batch of `(verifying_key_bytes, signature, message)` triples using a randomized
+/// linear combination.
 ///
 /// `A` is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so
 /// a signer reused across the batch is decompressed once, not once per signature, and the

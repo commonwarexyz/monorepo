@@ -85,6 +85,9 @@ jobs:
           - package: commonware-cryptography
             test_flags: ""
             lint_flags: ""
+          - package: commonware-cryptography-curve25519
+            test_flags: ""
+            lint_flags: ""
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"

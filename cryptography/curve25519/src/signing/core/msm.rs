@@ -362,10 +362,10 @@ pub(super) fn multiscalar_mul<B: Backend>(
         end: usize,
     }
 
-    let strategy = strategy.manual();
+    let parallelism = strategy.manual().parallelism();
     let total = total_terms(chunks);
     let windows = num_windows(width);
-    let ranges = partition_ranges(total, range_count(total, windows, strategy.parallelism()));
+    let ranges = partition_ranges(total, range_count(total, windows, parallelism));
     let mut tiles = Vec::with_capacity(windows * ranges.len());
     for &(start, end) in &ranges {
         for window in 0..windows {

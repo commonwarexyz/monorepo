@@ -1,6 +1,7 @@
 //! Throughput of the public batch-verification API across batch sizes. Each signature is from an
 //! independent key over an independent 32-byte message (no key/message reuse to amortize), the
 //! harder case for the underlying MSM. Fixture generation and verifier construction are not timed.
+
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier, Signature, SigningKey, VerifyingKey,
 };
