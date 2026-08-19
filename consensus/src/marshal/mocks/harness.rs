@@ -49,7 +49,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, test_rng, vec::NonEmptyVec};
+use commonware_utils::{NZU16, NZU64, NZUsize, Probability, TestRng, test_rng, vec::NonEmptyVec};
 use futures::StreamExt;
 use rand::{
     RngExt as _,
@@ -88,12 +88,12 @@ pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
 pub const LINK: Link = Link {
     latency: Duration::from_millis(100),
     jitter: Duration::from_millis(1),
-    success_rate: 1.0,
+    success_rate: Probability!(1.0),
 };
 pub const UNRELIABLE_LINK: Link = Link {
     latency: Duration::from_millis(200),
     jitter: Duration::from_millis(50),
-    success_rate: 0.7,
+    success_rate: Probability!(0.7),
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 

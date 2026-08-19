@@ -24,7 +24,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
@@ -1015,10 +1015,12 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
+        // Replayed artifacts become in-memory state, so journal pages need not
+        // remain in the OS page cache.
         let replayed;
         (self, replayed) = async {
             let mut replay = journal
-                .replay(0, 0, self.replay_buffer)
+                .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {

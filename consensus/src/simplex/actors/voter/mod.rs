@@ -95,7 +95,9 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, channel::oneshot, sync::Mutex};
+    use commonware_utils::{
+        NZU16, NZU32, NZUsize, Probability, channel::oneshot, sync::Mutex,
+    };
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
@@ -2702,7 +2704,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -5520,7 +5522,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await
@@ -10296,7 +10298,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: Probability!(1.0),
                     },
                 )
                 .await

@@ -1,5 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Buf, Error, IoBuf};
+use crate::{Blob, Buf, Error, IoBuf, ReadOptions};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -37,6 +37,8 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
+    /// Options applied to every blob read.
+    read_options: ReadOptions,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -54,6 +56,7 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         prefetch_count: usize,
         page_size: NonZeroU16,
+        read_options: ReadOptions,
     ) -> Self {
         let page_size = page_size.get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
@@ -74,6 +77,7 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             blob_page: 0,
             prefetch_count,
+            read_options,
         }
     }
 
@@ -118,7 +122,7 @@ impl<B: Blob> PageReader<B> {
         // Read physical data
         let physical_buf = self
             .blob
-            .read_at(start_offset, bytes_to_read)
+            .read_at(start_offset, bytes_to_read, self.read_options)
             .await?
             .coalesce()
             .freeze();
@@ -408,7 +412,10 @@ mod tests {
             append.sync().await.unwrap();
 
             // Create Replay
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Ensure all data is available
             replay.ensure(300).await.unwrap();
@@ -445,7 +452,10 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Ensure all data is available
             replay.ensure(data.len()).await.unwrap();
@@ -477,7 +487,10 @@ mod tests {
             // Create Replay with buffer size that results in prefetch_count=1.
             // Physical page size = 103 + 12 = 115 bytes.
             // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
-            let mut replay = append.replay(NZUsize!(115)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(115), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Ensure all data - this requires 4 separate fill() calls (one per page).
             // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
@@ -529,7 +542,10 @@ mod tests {
             assert_eq!(append.size(), 0);
 
             // Create Replay on empty blob
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Verify initial state - remaining is 0, but not yet marked exhausted
             // (exhausted is set after first fill attempt)
@@ -569,7 +585,10 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Seek forward, read, then seek backward
             replay.seek_to(150).unwrap();
