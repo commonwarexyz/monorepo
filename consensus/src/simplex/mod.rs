@@ -1927,7 +1927,7 @@ mod tests {
                 Link {
                     latency: link_latency,
                     jitter: Duration::from_millis(0),
-                    success_rate: 1.0,
+                    success_rate: Probability!(1.0),
                 },
                 RoundRobin::<Sha256>::default()
                     .with_term(
@@ -1991,7 +1991,7 @@ mod tests {
                 Link {
                     latency: link_latency,
                     jitter: Duration::from_millis(0),
-                    success_rate: 1.0,
+                    success_rate: Probability!(1.0),
                 },
                 RoundRobin::<Sha256>::default().with_pipelined_handoff(),
                 /* propose_latency */ (10.0, 0.0),
