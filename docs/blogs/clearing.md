@@ -15,7 +15,7 @@ katex: true
 
 If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching an arbitrary counterparty means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). A rollup either pays a prover per payment or publishes every payment so faults can be disputed. 
 
-[Bajillion](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md) is a simple, optimistic clearing protocol that does just enough to be useful. It provides many-to-many payments and efficiently settles them on any chain that can process a few-kilobyte commitment. Its preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. No SNARKs and no fancy cryptography: just signatures, Merkle openings, and one-shot challenges.
+**Bajillion** is a simple, optimistic clearing protocol that does just enough to be useful. It provides many-to-many payments and efficiently settles them on any chain that can process a few-kilobyte commitment. Its preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. No SNARKs and no fancy cryptography: just signatures, Merkle openings, and one-shot challenges.
 
 Settlement cost is a function of the accounts that change, not the payments that move them. Make one payment or a bajillion: the close remains the same size. Without expensive incremental processing or complex challenges to police what happened. 
 
@@ -23,7 +23,7 @@ Settlement cost is a function of the accounts that change, not the payments that
 
 A Bajillion epoch starts from an authenticated account vector and an onchain anchor $\mathcal A_e$. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
 
-$a$'s persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag ([§B of the formal spec](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#b-deployment-and-chain-state)). To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing the recipient's receive component $\kappa$ from its current tip $(G,J)$ (which may or may not have been registered with the operator at the start of the epoch):
+$a$'s persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag. To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing the recipient's receive component $\kappa$ from its current tip $(G,J)$ (which may or may not have been registered with the operator at the start of the epoch):
 
 $$
 S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
@@ -98,7 +98,7 @@ $$
 
 Suppose the operator assigns each of $b$'s three incoming payments to its own component. Their tips end at $(20,1)$, $(4,1)$, and $(6,1)$.
 
-A hot recipient can end an epoch with many components, and proving one tip (we'll get to this later) should not require shipping the rest. Sort the terminal records by component identifier and commit them as a Merkle tree under $\mathsf{HeadRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
+A hot recipient can end an epoch with many components, and proving one tip (we'll get to this later) should not require shipping the rest. Sort the terminal records by component identifier and commit them as a Merkle tree under $\mathsf{CreditRoot}_e(b)$. The root binds the exact component count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
 
 ## One Row per Changed Account
 
@@ -110,12 +110,12 @@ $$
 \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
 $$
 
-Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{HeadRoot}$, and a running total $\mathsf{prefix}_a$ over the sorted rows so far, where $\chi$ flags a withdrawal record and $h$ counts component heads:
+Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{CreditRoot}$, and a running total $\mathsf{prefix}_a$ over the sorted rows so far, where $\chi$ flags a withdrawal record and $h$ counts component heads:
 
 $$
 \begin{aligned}
 \mathsf{prefix}_a&=\sum_{a'\le a}\bigl(d_{a'},\;c_{a'},\;f_{a'},\;w_{a'},\;\chi_{a'},\;h_{a'}\bigr),\\[0.3em]
-\mathsf{Row}_a&=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{HeadRoot}_e(a),\;\mathsf{prefix}_a\bigr).
+\mathsf{Row}_a&=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{CreditRoot}_e(a),\;\mathsf{prefix}_a\bigr).
 \end{aligned}
 $$
 
@@ -126,7 +126,7 @@ $$
 \qquad a<b<c<d.
 $$
 
-## One Exact Close
+## Proving Exact Change
 
 Commit $\mathbf A_e$ under $\mathsf{ChangeRoot}_e$, a Merkle root that binds the exact row count and every row in order:
 
@@ -157,25 +157,19 @@ $$
 Figure 2: One witness recomputes both roots from the same material. Each changed account supplies its paired leaves, $X^0$ on the opening side and $X^1$ on the closing side, while each untouched subtree contributes one shared digest ($\Phi_2$ covers two accounts at once). Identical frontiers on both sides prove every omitted account unchanged.
 :::
 
-Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
-
-The settlement chain retains only a header:
+Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row. The settlement chain retains only a header:
 
 $$
 \mathsf{Header}_e=\bigl(\mathsf{StateRoot}_e,\;\mathsf{ChangeRoot}_e,\;\mathsf{StateRoot}_{e+1},\;D_e,\;C_e,\;F_e,\;W_e,\;\ldots\bigr).
 $$
 
-The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and head counts alongside. Admission receives the terminal changed row and its Merkle opening separately, authenticates the row against $\mathsf{ChangeRoot}_e$, checks its aggregate prefixes, and retains neither. The component vectors, remaining changed rows, and paired witness stay off the chain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$. [Spec §D](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#d-closing-an-epoch) tabulates the evidence lifetimes.
+The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and component counts alongside. To verify them, the chain is handed the terminal row and its Merkle opening once, checks the row against $\mathsf{ChangeRoot}_e$, and retains neither. The component vectors, remaining changed rows, and paired witness stay off the chain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$ (we'll get to this).
 
-Write $T$ for accepted payments, $A$ for changed-account rows, $H=H_e=\sum_a h_a$ for terminal receive-component heads, $\Phi=|\Phi_e|$ for sparse-frontier hashes, and $N$ for registered account positions.
+## Validate Everything Up Front
 
-$H$ is the price of receive concurrency. More components remove online contention but enlarge the close. The protocol therefore caps both the number of terminal components and the close size independently of $T$. A payment is accepted only when the operator can reuse a component or reserve room for a new one without exceeding either cap.
+Before the chain admits a close, someone must check all of it. A validator committee (or TEE or SNARK/STARK, if desired) verifies the complete public close, every row, every prefix, and the exact state transition, and signs the header only when all of it holds. This "pre-work" ensures nothing malformed or inexact ever enters the finalization queue (dramatically simplifying the challenge space). 
 
-## Validate Before Admission
-
-A close cannot enter the pending queue until admission has checked the public data for malformation and exactness. Challenges handle a different problem: contradictions among operator-signed receipts, whether those receipts are private or part of the disclosed corpus.
-
-For sorted rows, the authenticated prefixes telescope to exactly the header's totals. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
+Prefix continuity ties the header's totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
 
 $$
 \boxed{D_e=C_e.}
@@ -187,31 +181,11 @@ $$
 \boxed{L_{e+1}=L_e+F_e-W_e.}
 $$
 
-The types matter. Deposits and withdrawals come from the chain-sealed boundary. Debits and credits come from signed cumulative debit and credit markers. Equal totals do not let one type impersonate another.
+The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it (scaling sublinearly over the changed accounts). Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With 100 validators, 33 tolerated faults, and quorum 67, every piece's holders share at least 34 validators with the certificate. 
 
-The reference deployment partitions the public corpus into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it.
+## The Unavoidable Challenge
 
-Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. At the reference parameters, with 100 validators, 33 tolerated faults, and quorum 67, every piece's holders share at least 34 validators with the certificate. The identical header, exhaustive assignment, and quorum intersection together attest to the complete public relation. Byte availability alone would not.
-
-Admission appends the close as a pending slot without changing custody or the finalized root. Registration has already sealed the epoch's boundary and opened the next. Only an unchallenged queue front can install its root and release its withdrawals:
-
-$$
-\mathsf{Serving}_e
-\xrightarrow[\text{finalized root and custody unchanged}]{\mathsf{admit},\ t\le\alpha_e}
-\underbrace{\mathsf{Pending}_e}_{\mathsf{challengeable}\ t\le\Delta_e}
-\xrightarrow[\mathsf{front\ only}]{\mathsf{finalize},\ t>\Delta_e}
-\mathsf{Finalized}_e.
-$$
-
-::: {.image-caption}
-Figure 3: Admission appends the fully validated close to the pending queue, changing neither custody nor the finalized root. An unchallenged slot finalizes only from the queue front, once its window closes.
-:::
-
-The admission cutoff $\alpha_e$ precedes the challenge deadline: $\alpha_e<\Delta_e$. The chain may pipeline a bounded number $K$ of consecutive pending slots, but only the front can finalize. This preserves one state lineage even when a later slot's challenge window closes first.
-
-## The One Fact Validation Cannot See
-
-Under the selected validity mode—quorum certification, a validity proof, or a TEE attestation—validation establishes that the bound corpus satisfies the public relation. It cannot establish that the corpus contains every receipt the operator signed and delivered privately.
+Validation establishes that the bound corpus satisfies the public relation. However, it cannot establish that the corpus contains every receipt the operator signed and delivered privately.
 
 Fix a public corpus $\mathcal D_e$ and accepting certificate, proof, or attestation $\zeta$. Compare two executions: in $\Xi_0$ the operator signs exactly the receipts represented by $\mathcal D_e$, while in $\Xi_1$ it produces the same $(\mathcal D_e,\zeta)$ and privately delivers one more valid receipt $R^+$. The admission verifier has the same view in both:
 
@@ -232,8 +206,6 @@ The challenge window turns a preconfirmation from a promise into evidence. Throu
 3. **Inconsistent receipt range.** For lower and upper pairs in one anchor, recipient, and component, where each receipt is linked to its own valid send, adjacent receipts must increase credit by exactly the upper payment, and an index gap must leave at least one unit for each omitted positive payment. A violation is a contradiction.
 
 4. **Receipt fork.** Two distinct linked receipt bodies either reuse one receipt index within a component or acknowledge the same payer transaction differently. Different signature bytes over one identical receipt body are not a fork.
-
-[Spec §E](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#e-receipt-challenges) gives the exact checked-arithmetic and fork predicates.
 
 Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call. The fraud proof is about receipts, not arbitrary execution, which is what keeps that surface small.
 
@@ -261,7 +233,7 @@ $$
 \mathsf{Header}_e[\mathsf{ChangeRoot}_e],\\
 \mathsf{ChangeRoot}_e
 &\xrightarrow{\ \mathsf{AccountLookup}(b)\ }
-\mathsf{Row}_b[\mathsf{HeadRoot}_e(b)]
+\mathsf{Row}_b[\mathsf{CreditRoot}_e(b)]
 \xrightarrow{\ \mathsf{ComponentLookup}(\kappa_0)\ }
 (G^\star,J^\star)=(20,1),\\
 P^+_{a\to b,\kappa_0}
@@ -279,7 +251,7 @@ $$
 $$
 
 ::: {.image-caption}
-Figure 4: The first display identifies the challenge inputs and the source of each one. The second authenticates the committed component tip by following $\mathsf{ChangeRoot}_e\to \mathsf{Row}_b\to\mathsf{HeadRoot}_e(b)\to\kappa_0$, then verifies the retained pair in the same scope. Either strict coordinate inequality proves the contradiction. If row $b$ were absent, the account lookup would instead carry the neighboring-row openings that prove its ordered absence.
+Figure 4: The first display identifies the challenge inputs and the source of each one. The second authenticates the committed component tip by following $\mathsf{ChangeRoot}_e\to \mathsf{Row}_b\to\mathsf{CreditRoot}_e(b)\to\kappa_0$, then verifies the retained pair in the same scope. Either strict coordinate inequality proves the contradiction. If row $b$ were absent, the account lookup would instead carry the neighboring-row openings that prove its ordered absence.
 :::
 
 There is no fifth challenge for boundary omissions. Deposits and withdrawals were serialized by the settlement chain before the epoch, so wrong roots, totals, signatures, or account effects are public registration or admission failures.
@@ -306,8 +278,6 @@ Queueing changes neither custody nor a state root. Clean front finalization atom
 
 The operator can stop serving payments, but it cannot unilaterally spend deployment funds.
 
-[Spec §F](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#f-settlement-transitions-exit-and-terminal-unwind) gives the complete queueing and terminal-payout predicates.
-
 Let $E$ be current custody. For admitted slots $z+1,\ldots,\ell$, let $F_i$ be the unfinalized deposits carried by slot $i$, and let $F_\star$ contain the deposits not yet carried by an admitted slot. Custody can be read either from finalized liability or from the pipeline tail:
 
 $$
@@ -325,7 +295,7 @@ A pure timeout unwinds only after every admitted slot resolves. A successful cha
 
 The canonical payout must sum to $E$. One atomic transition then pays it, zeroes custody and liability, consumes every remaining record, and makes the deployment permanently unwound.
 
-Recovery is unilateral but deliberately coarse. One expired withdrawal kills the affected deployment. Terminal unwind requires an $O(N)$ scan of the complete survivor state. In the reference path, aggregating a dense invalid suffix can raise worst-case work to $O(KN\log(N+1))$ and retained boundary data to $O(KN)$. The guarantee also depends on including valid timeout, finalization, and unwind calls and keeping the complete state preimage available.
+Recovery is unilateral but deliberately coarse. One expired withdrawal kills the affected deployment. Terminal unwind requires an $O(N)$ scan of the complete survivor state. Aggregating a dense invalid suffix can raise worst-case work to $O(KN\log(N+1))$ and retained boundary data to $O(KN)$. The guarantee also depends on including valid timeout, finalization, and unwind calls and keeping the complete state preimage available.
 
 ## Close Without Pausing Payments
 
@@ -359,7 +329,7 @@ Figure 5: Both rails branch from the same preserved 80. The upper rail computes 
 
 The live balance is not monotone: successor payments spend it down. Only predecessor completion is one-sided, because it can add missing credit but cannot discover another accepted debit.
 
-Successor boundary operations and shard moves must preserve the same rule: the live head is only ever adjusted, never overwritten. [Spec §G](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#g-overlapped-epochs) gives the one-time application and authenticated-snapshot conditions.
+Successor boundary operations and shard moves must preserve the same rule: the live head is only ever adjusted, never overwritten.
 
 Rollover changes only live serving state. The ordinary close still produces the canonical rows, state root, and public corpus, which go through the same validity and admission checks. A challenge against the predecessor invalidates its admitted descendants.
 
@@ -369,7 +339,7 @@ The asymptotics say what stops growing. A controlled benchmark shows what still 
 
 Each profile below fixes $N=1{,}000{,}000$ registered accounts, 512 credited accounts, 256 deterministic pieces, a 100-validator committee with quorum 67, and an eight-thread worker pool. Every changed account sends. The same 512 accounts receive in every profile, evenly spaced among the accounts that change.
 
-The matrix independently varies $A$, the number of changed accounts, and $h$, the number of component heads on each credited account. No payment count appears because none is needed: rows and heads carry fixed-width cumulative totals, so every size in the table is the same for any $T$. A bajillion is not a number, and the close never asks for one.
+The matrix independently varies $A$, the number of changed accounts, and $h$, the number of components on each credited account. No payment count appears because none is needed: rows and component tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$. A bajillion is not a number, and the close never asks for one.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -460,11 +430,11 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 ```
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 heads per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 components per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
 ```
 
 ::: {.image-caption}
-Benchmark chart: These are four measured profiles, not an interpolation. Points are arithmetic means, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the heads on each credited account from $h=1$ to $h=512$.
+Benchmark chart: These are four measured profiles, not an interpolation. Points are arithmetic means, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the components on each credited account from $h=1$ to $h=512$.
 :::
 
 Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated component leaves and signatures behind each credited row. Neither cost disappears behind the phrase “one row per account.”
@@ -476,11 +446,11 @@ The corpus is constant for a profile, so accepted payments only divide it. Ten m
 This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge rows submit one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Log-log plot of public corpus bytes per accepted payment against payments accepted in the epoch, from one million to one billion payments, with four lines for the four table profiles. With 1,024 changed accounts, one head per credited account falls from about 2 bytes per payment to 0.002, and 512 heads from 117 to 0.12. With one million changed accounts the two head counts nearly coincide, falling from about 649 and 764 bytes to 0.65 and 0.76. Each line is its profile's constant corpus divided by the payment count.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Log-log plot of public corpus bytes per accepted payment against payments accepted in the epoch, from one million to one billion payments, with four lines for the four table profiles. With 1,024 changed accounts, one component per credited account falls from about 2 bytes per payment to 0.002, and 512 components from 117 to 0.12. With one million changed accounts the two component counts nearly coincide, falling from about 649 and 764 bytes to 0.65 and 0.76. Each line is its profile's constant corpus divided by the payment count.">
 ```
 
 ::: {.image-caption}
-Bytes-per-payment chart: fixed-width rows keep each profile's corpus constant in $T$, so each line is that profile's corpus from the table over the payment count and falls exactly as $1/T$. The two $A=1{,}000{,}000$ lines nearly coincide because heads move that corpus by only $1.2\times$, while at $A=1{,}024$ they separate it by $57\times$.
+Bytes-per-payment chart: fixed-width rows keep each profile's corpus constant in $T$, so each line is that profile's corpus from the table over the payment count and falls exactly as $1/T$. The two $A=1{,}000{,}000$ lines nearly coincide because components move that corpus by only $1.2\times$, while at $A=1{,}024$ they separate it by $57\times$.
 :::
 
 The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution.
@@ -499,7 +469,7 @@ Bajillion draws the boundary around an account. It relies on one operator for on
 
 That broader netting boundary is why a cycle can be cheap. If $a\to b$, $b\to c$, and $c\to a$ repeat 100,000 times, the epoch contains $T=300{,}000$ payments but only $A=3$ changed accounts. With one component per recipient, it also has $H=3$.
 
-Gross debit still equals gross credit, but the public close carries three rows, three heads, and their sparse frontier rather than 300,000 payment records. A channel network would carry the same flow on three funded links whose liquidity the cycle merely shuffles.
+Gross debit still equals gross credit, but the public close carries three rows, three terminal pairs, and their sparse frontier rather than 300,000 payment records. A channel network would carry the same flow on three funded links whose liquidity the cycle merely shuffles.
 
 ### Rollups
 
@@ -521,7 +491,7 @@ Its privacy benefit is data minimization: superseded pairs can stay out of ordin
 
 For an accepted pair in a conforming close, ordinary disclosure is exact: the pair appears in the public corpus if and only if it is one of those terminals. A holder challenge may reveal a superseded pair later. The public account deltas, receipt counts, and terminal pairs still leak activity, and the protocol provides no anonymity or amount hiding.
 
-The reference deployment binds one asset. Supporting more requires separate deployments or an asset-indexed extension.
+A deployment binds one asset. Supporting more requires separate deployments or an asset-indexed extension.
 
 No validity mode removes the availability assumptions. The public corpus must stay retrievable, and holders must retain their own evidence through the challenge window. Retained receipts police the close, while recovering custody needs only publicly retained data: the corpus and the survivor state preimage. Enforcement begins at admission, so preconfirmation holders bear operator default until their epoch admits.
 
@@ -529,17 +499,21 @@ Users keep the unilateral withdrawal path, but failure containment is coarse. A 
 
 ## A Bajillion Payments, One Close
 
+Write $T$ for accepted payments, $A$ for changed-account rows, $H=H_e=\sum_a h_a$ for terminal receive components, $\Phi=|\Phi_e|$ for sparse-frontier hashes, and $N$ for registered account positions.
+
 The operator still performs $O(T)$ payment work. It verifies $T$ requests, commits $T$ durable updates, and signs $T$ receipts. Public settlement counts something else:
 
 $$
 \text{payments }T
 \quad\longrightarrow\quad
-\text{rows }A+\text{heads }H+\text{frontier }\Phi.
+\text{rows }A+\text{components }H+\text{frontier }\Phi.
 $$
 
 A close must pass complete public validation. An included call that observes an overdue queued withdrawal fences new work. The admitted prefix must still resolve, and terminal unwind requires the complete survivor state.
 
-For repeated activity over a fixed changed-account and component footprint, $(A+H+\Phi)/T\to 0$. Unchanged subtrees cost one frontier digest apiece no matter how many accounts they hold, and receive components keep a hot recipient from becoming a shared online counter. Every changed account and represented component still contributes to the close. Account-level clearing compresses repetition, not change.
+For repeated activity over a fixed changed-account and component footprint, $(A+H+\Phi)/T\to 0$. Unchanged subtrees cost one frontier digest apiece no matter how many accounts they hold. Every changed account and represented component still contributes to the close. Account-level clearing compresses repetition, not change.
+
+$H$ is the price of receive concurrency. More components remove online contention but enlarge the close. The protocol therefore caps both the number of terminal components and the close size independently of $T$. A payment is accepted only when the operator can reuse a component or reserve room for a new one without exceeding either cap.
 
 Within one operator-backed service and chain custody, and for users recovering from public data alone, these are the trust model's floors. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault.
 
@@ -547,4 +521,4 @@ Cheap settlement bottoms out at the changed state itself, since no design whose 
 
 Sign every payment. Settle each changed account once.
 
-Bajillion has not yet been peer-reviewed or uploaded to arXiv. The complete formal specification—model, close relation, challenge predicates, settlement transitions, and main theorems—lives in the [Commonware monorepo](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md).
+Bajillion has not yet been peer-reviewed or uploaded to arXiv.
