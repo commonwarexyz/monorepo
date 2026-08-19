@@ -55,8 +55,10 @@ technique; claim the composition + analysis + measured result.
 - Rejected naive-bucketing prototype: local branch
   `gv/subgroup-bucketed-prototype` (NOT pushed; counting sort + per-bucket
   `blst_p1s_add`; measured numbers below).
-- Cryptographer-facing explainer artifact (private; has the formal Lemma 1
-  proof, the diagram, all tables):
+- Cryptographer-facing explainer (formal Lemma 1 proof with all five remarks,
+  the round-pipeline diagram, all tables incl. the same-engine comparison and
+  the related-work positioning): source committed on this branch as
+  `cryptography/PAPER_EXPLAINER.html`; also published privately at
   https://claude.ai/code/artifact/ef1bf48b-e421-4c6f-8a0d-e09e528f551d
 - Toolchain: rustc 1.95.0, blst 0.3.16, commonware-parallel (adaptive Rayon
   strategy). Machine: 18-core Apple Silicon, macOS (Darwin 25.6.0).
