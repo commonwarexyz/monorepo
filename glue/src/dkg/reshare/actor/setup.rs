@@ -114,6 +114,25 @@ fn startup_height(
     processed.map_or_else(Height::zero, Height::next)
 }
 
+/// Retains a dealer that can still produce a selectable log.
+///
+/// During the early phase, missing acknowledgements can still arrive. Afterward,
+/// a recovered dealer is useful only when its durable acknowledgements already
+/// form a quorum.
+fn dealer_for_phase<V, C>(
+    phase: EpochPhase,
+    players: usize,
+    dealer: Option<Dealer<V, C>>,
+) -> Option<Dealer<V, C>>
+where
+    V: BlsVariant,
+    C: Signer,
+{
+    dealer.filter(|dealer| {
+        phase == EpochPhase::Early || dealer.has_acknowledgement_quorum::<N3f1>(players)
+    })
+}
+
 impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
@@ -316,6 +335,7 @@ where
         } else {
             None
         };
+        let dealer = dealer_for_phase(phase, participants.players.len(), dealer);
         let player = participants.players.position(&public_key).and_then(|_| {
             store.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone())
         });
@@ -332,9 +352,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{startup_height, state_sync_skips_inclusion_prefix};
+    use super::{dealer_for_phase, startup_height, state_sync_skips_inclusion_prefix};
+    use crate::dkg::{
+        reshare::store::Store,
+        tests::mocks::{MemorySecretStore, TestBlsVariant},
+    };
     use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height};
-    use commonware_utils::NZU64;
+    use commonware_cryptography::{
+        Signer,
+        bls12381::{
+            dkg::feldman_desmedt::{Info, Verdict, deal},
+            primitives::sharing::Mode,
+        },
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::{N3f1, NZU32, NZU64, ordered::Set, test_rng};
+
+    const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SETUP_TEST";
 
     #[test]
     fn state_sync_start_does_not_precede_certified_floor() {
@@ -377,5 +412,90 @@ mod tests {
         ));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(midpoint)));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, None));
+    }
+
+    #[test]
+    fn recovered_dealer_after_dealing_requires_ack_quorum() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let epoch = Epoch::new(1);
+            let signers = (0..4).map(PrivateKey::from_seed).collect::<Vec<_>>();
+            let players = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let (previous, shares) =
+                deal::<TestBlsVariant, _, N3f1>(test_rng(), Mode::NonZeroCounter, players.clone())
+                    .expect("trusted previous output");
+            let signer = signers[0].clone();
+            let share = shares
+                .get_value(&signer.public_key())
+                .expect("dealer share")
+                .clone();
+            let info = Info::new::<N3f1>(
+                TEST_NAMESPACE,
+                epoch.get(),
+                Some(previous),
+                Mode::NonZeroCounter,
+                players.clone(),
+                players.clone(),
+            )
+            .expect("valid reshare info");
+            let secret_store = MemorySecretStore::default();
+            let mut store = Store::<_, _, TestBlsVariant, PublicKey>::init(
+                context.child("store"),
+                "recovered-dealer-after-dealing",
+                NZU32!(16),
+                secret_store,
+            )
+            .await;
+            let seed = store.seed_or_random(epoch, test_rng()).await;
+            let (early_dealer, incomplete_dealer, mut recovered_dealer) = {
+                let new_dealer = || {
+                    store
+                        .create_dealer::<PrivateKey, N3f1>(
+                            epoch,
+                            signer.clone(),
+                            info.clone(),
+                            Some(share.clone()),
+                            seed,
+                        )
+                        .expect("current dealer")
+                };
+                (new_dealer(), new_dealer(), new_dealer())
+            };
+            assert!(
+                dealer_for_phase(EpochPhase::Early, players.len(), Some(early_dealer)).is_some()
+            );
+            assert!(
+                dealer_for_phase(EpochPhase::Midpoint, players.len(), Some(incomplete_dealer))
+                    .is_none()
+            );
+
+            let dealer_key = signer.public_key();
+            for player_signer in &signers[1..] {
+                let player_key = player_signer.public_key();
+                let mut player = store
+                    .create_player::<PrivateKey, N3f1>(epoch, player_signer.clone(), info.clone())
+                    .expect("current player");
+                let (_, public, private) = recovered_dealer
+                    .shares_to_distribute()
+                    .find(|(recipient, _, _)| recipient == &player_key)
+                    .expect("player dealing");
+                let Verdict::Valid(ack) = player
+                    .handle(&mut store, epoch, dealer_key.clone(), public, private)
+                    .await
+                else {
+                    panic!("valid dealing");
+                };
+                assert!(matches!(
+                    recovered_dealer
+                        .handle(&mut store, epoch, player_key, ack)
+                        .await,
+                    Verdict::Valid(())
+                ));
+            }
+            assert!(
+                dealer_for_phase(EpochPhase::Midpoint, players.len(), Some(recovered_dealer))
+                    .is_some()
+            );
+        });
     }
 }

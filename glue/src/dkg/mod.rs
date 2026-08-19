@@ -40,10 +40,17 @@
 //! # State Sync
 //!
 //! Reshare supports nodes that join through state sync. A node can participate in
-//! the synced epoch when its certified floor is at or before the epoch midpoint,
-//! because marshal replays the complete dealer-log inclusion window. A later floor
-//! has skipped part of that public history, so the actor follows the rest of the
-//! epoch instead.
+//! the synced epoch's reshare ceremony when its certified floor is at or before
+//! the epoch midpoint, because marshal replays the complete dealer-log inclusion
+//! window. A later floor has skipped part of that public history, so the reshare
+//! actor follows that ceremony for the rest of the epoch instead.
+//!
+//! Follower mode affects only resharing. State-sync startup first registers the
+//! certified current-epoch consensus scheme, so a node with a recovered share can
+//! still sign ordinary non-boundary blocks. It cannot locally derive the next
+//! [`types::EpochInfo`] needed to propose or complete verification of the final
+//! block, and resumes resharing after learning that block's externally finalized
+//! outcome.
 //!
 //! A `player` that missed private dealings may need public reveals to recover its
 //! share and must treat a revealed share as public. To preserve share privacy, a

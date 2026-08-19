@@ -137,7 +137,15 @@
 //! certified floor at or before an epoch's midpoint preserves the complete public
 //! dealer-log inclusion window, so the actor can participate in that epoch. A
 //! floor after the midpoint has skipped part of that history, so the actor follows
-//! the remainder of the epoch and resumes at the next boundary.
+//! the reshare ceremony for the remainder of the epoch and resumes at the next
+//! boundary.
+//!
+//! State-sync startup still registers the certified current-epoch consensus
+//! scheme before entering follower mode. A follower with a recovered share may
+//! sign ordinary non-boundary blocks, but cannot locally derive the next
+//! [`EpochInfo`](crate::dkg::types::EpochInfo) needed to propose or complete
+//! verification of the final block. It learns that outcome from external
+//! finalization instead.
 //!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a
