@@ -28,8 +28,8 @@ use commonware_macros::{select, select_loop};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, Metrics, Spawner, Storage as RuntimeStorage, signal,
-    telemetry::traces::TracedExt as _,
+    BufferPooler, Clock, Error as RuntimeError, Handle, Metrics, Spawner,
+    Storage as RuntimeStorage, signal, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
     Acknowledgement, N3f1,
@@ -290,6 +290,19 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
     fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
         assert!(self.task.is_none(), "verification task already running");
         self.task = Some(task).into();
+    }
+
+    /// Returns phase termination when supervision has closed the worker.
+    ///
+    /// Every other runtime error remains a verification failure.
+    fn join(
+        result: Result<VerifiedLogs<V, C>, RuntimeError>,
+    ) -> ControlFlow<(), VerifiedLogs<V, C>> {
+        match result {
+            Ok(completed) => ControlFlow::Continue(completed),
+            Err(RuntimeError::Closed) => ControlFlow::Break(()),
+            Err(error) => panic!("verification task failed: {error}"),
+        }
     }
 
     /// Retains one tagged result, preferring the current canonical view.
@@ -695,7 +708,9 @@ where
                 return ControlFlow::Break(());
             },
             completed = &mut work.verification.task => {
-                let completed = completed.expect("verification task failed");
+                let ControlFlow::Continue(completed) = Verification::join(completed) else {
+                    return ControlFlow::Break(());
+                };
                 self.complete_verification(epoch, store, &mut work, completed)
                     .await;
                 advance = Some(std::future::ready(())).into();
@@ -757,7 +772,7 @@ where
                         "dkg.reshare.actor.inclusion.finalized",
                         height = block.height().traced()
                     );
-                    let done = async {
+                    let outcome = async {
                         let bounds = self
                             .epocher
                             .containing(block.height())
@@ -791,15 +806,19 @@ where
                         .await;
 
                         let done = block.height() == bounds.last();
-                        if done {
-                            self.complete_epoch_artifact(
+                        if done
+                            && self
+                                .complete_epoch_artifact(
                                 epoch,
                                 info,
                                 store,
                                 &mut work,
                                 block.as_ref(),
                             )
-                            .await;
+                            .await
+                            .is_break()
+                        {
+                            return ControlFlow::Break(());
                         }
 
                         finalized_tip = Some(FinalizedTip {
@@ -821,10 +840,13 @@ where
                         }
 
                         response.acknowledge();
-                        done
+                        ControlFlow::Continue(done)
                     }
                     .instrument(process)
                     .await;
+                    let ControlFlow::Continue(done) = outcome else {
+                        return ControlFlow::Break(());
+                    };
                     if done {
                         return ControlFlow::Continue(());
                     }
@@ -904,7 +926,7 @@ where
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         work: &mut ArtifactWork<B, V, C>,
         block: &B,
-    ) {
+    ) -> ControlFlow<()> {
         // The final block fixes one canonical log snapshot for durable epoch
         // state. Preserve a cached artifact because admitted speculative
         // completion may replace the one-entry cache with another view.
@@ -918,9 +940,11 @@ where
         // verdict. Publish that bounded work before reconstructing the canonical
         // artifact.
         if work.verification.task.is_some() {
-            let completed = (&mut work.verification.task)
-                .await
-                .expect("verification task failed");
+            let ControlFlow::Continue(completed) =
+                Verification::join((&mut work.verification.task).await)
+            else {
+                return ControlFlow::Break(());
+            };
             self.complete_verification(epoch, store, work, completed)
                 .await;
         }
@@ -941,9 +965,11 @@ where
                     store,
                     canonical_logs.clone(),
                 );
-                let completed = (&mut work.verification.task)
-                    .await
-                    .expect("verification task failed");
+                let ControlFlow::Continue(completed) =
+                    Verification::join((&mut work.verification.task).await)
+                else {
+                    return ControlFlow::Break(());
+                };
                 work.verification.task = None.into();
                 assert_eq!(
                     completed.logs.as_ref(),
@@ -968,6 +994,7 @@ where
         work.requests.drain_pending();
         self.handle_finalized_epoch_info(epoch, store, artifact.as_ref(), block.payload())
             .await;
+        ControlFlow::Continue(())
     }
 
     /// Starts the oldest live ancestry scan when the verifier is idle.
@@ -1529,7 +1556,7 @@ mod tests {
     };
     use commonware_p2p::simulated::{Config as NetworkConfig, Network};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
         ordered::Set, sequence::Unit, sync::Mutex, test_rng,
@@ -1835,6 +1862,64 @@ mod tests {
             drop(verification);
 
             dropped_rx.await.expect("task should be aborted");
+        });
+    }
+
+    #[test]
+    fn closed_terminal_verification_exits_without_acknowledging() {
+        let executor = deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_timeout(Some(Duration::from_secs(30)))
+                .with_catch_panics(true),
+        );
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                signed_log: _,
+                public_key,
+            } = setup_inclusion_harness(&mut context, "closed-verification", NZU64!(6)).await;
+
+            // A task context whose owning task has exited rejects descendants
+            // with Error::Closed.
+            let closed_context = context
+                .child("closed_context")
+                .spawn(|context| async move { context })
+                .await
+                .expect("context task should finish");
+            actor.context = ContextCell::new(closed_context);
+
+            let genesis = mocks::genesis_block(public_key);
+            let final_block = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(5),
+                1,
+            ));
+            let inclusion = context.child("inclusion").spawn(|_| async move {
+                let result = actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await;
+                (result, store)
+            });
+
+            let (final_ack, final_waiter) = Exact::handle();
+            assert_eq!(
+                mailbox.report(marshal::Update::Block(final_block, final_ack)),
+                Feedback::Ok
+            );
+            assert!(
+                final_waiter.await.is_err(),
+                "canceled finalization must remain unacknowledged"
+            );
+            let (result, store) = inclusion
+                .await
+                .expect("canceled verification should stop inclusion cleanly");
+            assert!(result.is_break());
+            assert!(store.current().is_none());
         });
     }
 
