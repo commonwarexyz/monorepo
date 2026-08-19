@@ -17,7 +17,7 @@
     .series { stroke-width: 3; }
   </style>
 
-  <text class="title" x="34" y="39">What moves the close?</text>
+  <text class="title" x="34" y="39">What still costs time?</text>
   <text class="subtitle" x="34" y="67">N = 1,000,000 • 512 credited accounts • 256 pieces • 8 threads • busiest of 100 validator assignments</text>
 
   <line class="blue series" x1="916" y1="38" x2="956" y2="38"/>
@@ -30,7 +30,7 @@
   <!-- Commitment-root construction. -->
   <rect class="frame" x="30" y="90" width="400" height="360" rx="3"/>
   <text class="panel-title" x="230" y="122">Operator: build roots</text>
-  <text class="axis" x="55" y="143">ms</text>
+  <text class="axis" x="95" y="138" text-anchor="end">ms</text>
   <line class="grid" x1="105" y1="150" x2="395" y2="150"/>
   <line class="grid" x1="105" y1="205" x2="395" y2="205"/>
   <line class="grid" x1="105" y1="260" x2="395" y2="260"/>
@@ -57,7 +57,7 @@
   <!-- All-piece proof construction. -->
   <rect class="frame" x="460" y="90" width="400" height="360" rx="3"/>
   <text class="panel-title" x="660" y="122">Operator: build piece proofs</text>
-  <text class="axis" x="485" y="143">ms</text>
+  <text class="axis" x="525" y="138" text-anchor="end">ms</text>
   <line class="grid" x1="535" y1="150" x2="825" y2="150"/>
   <line class="grid" x1="535" y1="205" x2="825" y2="205"/>
   <line class="grid" x1="535" y1="260" x2="825" y2="260"/>
@@ -84,7 +84,7 @@
   <!-- Maximum-load validator. -->
   <rect class="frame" x="890" y="90" width="400" height="360" rx="3"/>
   <text class="panel-title" x="1090" y="122">Validator: check and sign</text>
-  <text class="axis" x="915" y="143">ms</text>
+  <text class="axis" x="955" y="138" text-anchor="end">ms</text>
   <line class="grid" x1="965" y1="150" x2="1255" y2="150"/>
   <line class="grid" x1="965" y1="205" x2="1255" y2="205"/>
   <line class="grid" x1="965" y1="260" x2="1255" y2="260"/>
