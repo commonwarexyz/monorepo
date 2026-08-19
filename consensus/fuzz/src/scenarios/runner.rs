@@ -675,4 +675,8 @@ mod tests {
         first_block_genesis_parent,
         StandardCertifyFirstBlockFetchesGenesisParent
     );
+    scenario_smoke!(
+        height_lie_parent_fetch,
+        StandardVerifyHeightLieParentFetchIsRoundBound
+    );
 }

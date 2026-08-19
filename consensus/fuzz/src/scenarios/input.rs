@@ -40,6 +40,12 @@ pub enum ScenarioKind {
     /// no fetch, and the engines start bare from the genesis floor
     /// (see `scenarios.rs`).
     StandardCertifyFirstBlockFetchesGenesisParent,
+    /// `test_standard_verify_height_lie_parent_fetch_is_round_bound`: the
+    /// victim verifies a height-lying child whose parent fetch must be bound
+    /// to the parent's round, never derived from the claimed height, and the
+    /// engines start bare from the genesis floor with that fetch still
+    /// outstanding (see `scenarios.rs`).
+    StandardVerifyHeightLieParentFetchIsRoundBound,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.
