@@ -1,9 +1,9 @@
 ---
 title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
-date: "August 14th, 2026"
-published-time: "2026-08-14T00:00:00Z"
-modified-time: "2026-08-14T00:00:00Z"
+date: "August 19th, 2026"
+published-time: "2026-08-19T00:00:00Z"
+modified-time: "2026-08-19T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
