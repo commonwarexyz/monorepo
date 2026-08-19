@@ -245,7 +245,7 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _, WriteOptions,
+        Blob, BufferPoolConfig, ReadOptions, Storage as _, WriteOptions,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -297,7 +297,11 @@ mod tests {
 
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 11);
-        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        let read = blob
+            .read_at(0, 11, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
         assert_eq!(read.as_ref(), b"hello world");
     }
 
@@ -346,7 +350,10 @@ mod tests {
         assert_eq!(&raw_content[data_offset as usize..], data);
 
         // Test 3: Read at logical offset 0 returns data from the data offset
-        let read_buf = blob.read_at(0, data.len()).await.unwrap();
+        let read_buf = blob
+            .read_at(0, data.len(), ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // Test 4: Resize with logical length
@@ -378,7 +385,7 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(0, 9).await.unwrap();
+        let read_buf = blob2.read_at(0, 9, ReadOptions::default()).await.unwrap();
         assert_eq!(read_buf.coalesce(), b"test data");
         drop(blob2);
 
@@ -498,7 +505,7 @@ mod tests {
             // The healed blob round-trips through a reopen with its data intact.
             let (blob, size) = storage.open("partition", b"torn").await.unwrap();
             assert_eq!(size, 4);
-            let read = blob.read_at(0, 4).await.unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
         }
@@ -581,7 +588,7 @@ mod tests {
             drop(blob);
             let (blob, size) = storage.open("partition", name).await.unwrap();
             assert_eq!(size, 4);
-            let read = blob.read_at(0, 4).await.unwrap();
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
             drop(blob);
 
@@ -649,7 +656,10 @@ mod tests {
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();
         assert_eq!(size, payload.len() as u64);
         assert_eq!(
-            blob.read_at(0, payload.len()).await.unwrap().coalesce(),
+            blob.read_at(0, payload.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
             payload
         );
         blob.write_at(size, b"!".to_vec(), WriteOptions::default())

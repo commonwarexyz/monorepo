@@ -30,7 +30,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
@@ -1053,9 +1053,10 @@ impl<
         let journal = {
             debug!(?sequencer, "journal replay begin");
 
-            // Prepare the reader
+            // Replay retains the highest tip in memory, so journal pages need
+            // not remain in the OS page cache.
             let mut replay = journal
-                .replay(0, 0, self.journal_replay_buffer)
+                .replay(0, 0, self.journal_replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("unable to replay journal");
 

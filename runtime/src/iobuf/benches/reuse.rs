@@ -1,9 +1,9 @@
-//! End-to-end buffer reuse after partial lazy growth.
+//! End-to-end buffer reuse.
 //!
-//! Each worker creates and returns a sparse batch before timing starts, then
-//! repeatedly allocates and returns that batch with thread-local caching
-//! disabled. This isolates whether lazy slot placement improves later global
-//! freelist access.
+//! The batch rows create and return sparse buffers before timing, then reuse
+//! them with thread-local caching disabled. The TLS rows use a working set one
+//! larger than the local cache, forcing one batched global refill and spill per
+//! iteration while retaining the surrounding local-cache work.
 
 use super::utils::start_pool;
 use commonware_runtime::{BufferPool, BufferPoolConfig, IoBufMut};
@@ -16,46 +16,47 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Capacity 4096 yields 64 bitmap words. Sequential creation spreads the first
-// 64 slots across all words, while probe-affine creation gives each worker's
-// eight slots to its distinct home word. Any eight consecutive probe ids have
-// distinct home words, so the fixture is independent of the global id phase.
+// Capacity 4096 leaves ample global room for eight workers while parallelism 8
+// gives each worker an independent freelist stripe in the uncontended case.
 const SIZE: usize = 1024;
 const CAPACITY: u32 = 4096;
 const PARALLELISM: usize = 8;
 const THREADS: usize = 8;
-const BATCH: usize = 8;
+const BATCHES: &[usize] = &[1, 8];
+const TLS_CACHE_CAPACITIES: &[usize] = &[16, 256];
 
 struct State {
     pool: BufferPool,
     buffers: Vec<IoBufMut>,
+    batch: usize,
 }
 
 impl State {
-    fn new(pool: BufferPool, grown: &Barrier) -> Self {
-        let mut buffers = Vec::with_capacity(BATCH);
-        for _ in 0..BATCH {
-            buffers.push(
-                pool.try_alloc(SIZE)
-                    .expect("lazy-growth pool exhausted during setup"),
-            );
+    fn new(pool: BufferPool, grown: &Barrier, batch: usize) -> Self {
+        let mut buffers = Vec::with_capacity(batch);
+        for _ in 0..batch {
+            buffers.push(pool.try_alloc(SIZE).expect("pool exhausted during setup"));
         }
 
-        // Keep every new buffer checked out until all workers have created
-        // their batch, so setup cannot reuse a slot created by another worker.
+        // Keep every setup buffer checked out until all workers have built
+        // their batch, so setup cannot reuse a buffer held by another worker.
         grown.wait();
         buffers.clear();
 
-        Self { pool, buffers }
+        Self {
+            pool,
+            buffers,
+            batch,
+        }
     }
 
     #[inline]
     fn step(&mut self) {
-        for _ in 0..BATCH {
+        for _ in 0..self.batch {
             self.buffers.push(
                 self.pool
                     .try_alloc(SIZE)
-                    .expect("lazy-growth pool exhausted during reuse"),
+                    .expect("pool exhausted during reuse"),
             );
         }
         black_box(self.buffers.as_slice());
@@ -64,17 +65,31 @@ impl State {
 }
 
 pub fn bench(c: &mut Criterion) {
-    let name = format!(
-        "{}/size={SIZE} capacity={CAPACITY} threads={THREADS} parallelism={PARALLELISM} batch={BATCH}",
-        module_path!(),
-    );
+    for &batch in BATCHES {
+        let name = format!(
+            "{}/size={SIZE} capacity={CAPACITY} threads={THREADS} parallelism={PARALLELISM} batch={batch}",
+            module_path!(),
+        );
 
-    c.bench_function(&name, |b| {
-        b.iter_custom(|iters| measure(iters, build_pool()));
-    });
+        c.bench_function(&name, |b| {
+            b.iter_custom(|iters| measure(iters, build_pool(false, 0), batch));
+        });
+    }
+
+    for &cache in TLS_CACHE_CAPACITIES {
+        // Exceeding the cache by one forces one refill and one spill each step.
+        let working_set = cache + 1;
+        let name = format!(
+            "{}/size={SIZE} capacity={CAPACITY} threads={THREADS} parallelism={PARALLELISM} mode=tls cache={cache} working_set={working_set}",
+            module_path!(),
+        );
+        c.bench_function(&name, |b| {
+            b.iter_custom(|iters| measure(iters, build_pool(true, cache), working_set));
+        });
+    }
 }
 
-fn measure(iters: u64, pool: BufferPool) -> Duration {
+fn measure(iters: u64, pool: BufferPool, batch: usize) -> Duration {
     thread::scope(|scope| {
         let grown = Arc::new(Barrier::new(THREADS));
         let ready = Arc::new(Barrier::new(THREADS + 1));
@@ -90,7 +105,7 @@ fn measure(iters: u64, pool: BufferPool) -> Duration {
             let finish = Arc::clone(&finish);
             let teardown = Arc::clone(&teardown);
             scope.spawn(move || {
-                let mut state = State::new(pool, &grown);
+                let mut state = State::new(pool, &grown, batch);
                 ready.wait();
                 launch.wait();
 
@@ -115,12 +130,18 @@ fn measure(iters: u64, pool: BufferPool) -> Duration {
     })
 }
 
-fn build_pool() -> BufferPool {
+fn build_pool(tls_cache_enabled: bool, cache: usize) -> BufferPool {
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(0)
         .with_size_class_range(NZUsize!(SIZE), NZUsize!(SIZE), NZU32!(CAPACITY))
-        .with_parallelism(NZUsize!(PARALLELISM))
-        .with_thread_cache_disabled();
+        .with_parallelism(NZUsize!(PARALLELISM));
+
+    let cfg = if tls_cache_enabled {
+        cfg.with_prefill(true)
+            .with_max_thread_cache_capacity(NZUsize!(cache))
+    } else {
+        cfg.with_thread_cache_disabled()
+    };
 
     start_pool(cfg)
 }

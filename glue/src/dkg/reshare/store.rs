@@ -36,7 +36,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Storage as RuntimeStorage, buffer::paged::CacheRef,
+    BufferPooler, Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
 use commonware_storage::journal::{
     self,
@@ -202,8 +202,10 @@ where
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
+            // Replay rebuilds the epoch caches in memory, so journal pages need
+            // not remain in the OS page cache.
             let mut replay = events
-                .replay(0, 0, READ_BUFFER)
+                .replay(0, 0, READ_BUFFER, ReadOptions::DONT_CACHE)
                 .await
                 .expect("failed to replay reshare events");
 
