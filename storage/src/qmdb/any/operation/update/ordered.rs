@@ -44,7 +44,7 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = K;
 
-    /// An ordered delete must rewrite the deleted key's predecessor via a snapshot-bucket scan
+    /// An ordered delete must rewrite the deleted key's predecessor via an index-bucket scan
     /// the resolved location cannot skip, so its deletes gain nothing from staging.
     const STAGES_DELETES: bool = false;
 

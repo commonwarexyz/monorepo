@@ -72,7 +72,7 @@ pub mod partitioned {
     use commonware_runtime::Spawner;
     use commonware_utils::Array;
 
-    /// A key-value QMDB with a partitioned snapshot index.
+    /// A key-value QMDB with a partitioned key index.
     ///
     /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
     /// the number of prefix bytes used for partitioning:
@@ -138,7 +138,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            SnapshotBuild as _,
+            IndexBuild as _,
             any::{
                 test::{
                     colliding_digest, fixed_db_config, fixed_db_config_partitioned,
@@ -146,10 +146,12 @@ pub(crate) mod test {
                 },
                 unordered::{Update, fixed::Operation},
             },
+            sync::{Request, Source as _},
             verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
@@ -634,7 +636,7 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
+    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the index
     /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical
     /// root and key-value state.
     #[test_traced("WARN")]
@@ -646,8 +648,8 @@ pub(crate) mod test {
             let db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
 
             // Track the expected key-value state alongside the applied ops. The `any` root is a
-            // pure function of the immutable log, so only a state check can catch a snapshot
-            // rebuilt into the wrong index.
+            // pure function of the immutable log, so only a state check can catch an index
+            // rebuilt into the wrong shape.
             let ops = create_test_ops(10_000);
             let mut expected = HashMap::new();
             for op in &ops {
@@ -668,7 +670,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen with the cache disabled, with a tiny multi-entry cache that evicts throughout
-            // replay, and with a large cache. All rebuild the snapshot from the same immutable log,
+            // replay, and with a large cache. All rebuild the index from the same immutable log,
             // so every root and key-value result must match the pre-drop state.
             for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
                 let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
@@ -857,7 +859,7 @@ pub(crate) mod test {
 
     /// A replay failure during a parallel build must join every worker before surfacing the
     /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    /// partition-range allocation (the [crate::qmdb::IndexBuild] cleanup invariant).
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -883,7 +885,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
-            // against a fresh index, mirroring init's parallel snapshot build.
+            // against a fresh index, mirroring init's parallel index build.
             let cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
@@ -906,7 +908,7 @@ pub(crate) mod test {
             // workers never read the log themselves.
             context.storage_fault_config().write().read_rate = Some(Probability!(1.0));
             let result = index
-                .build_snapshot(
+                .build_index(
                     context.child("build"),
                     floor,
                     &log,
@@ -1022,7 +1024,7 @@ pub(crate) mod test {
                 OneCap,
             );
             let result = index
-                .build_snapshot(
+                .build_index(
                     context.child("build"),
                     floor,
                     &log,
@@ -1067,7 +1069,7 @@ pub(crate) mod test {
                         OneCap,
                     );
                 let result = index
-                    .build_snapshot(
+                    .build_index(
                         context
                             .child("build")
                             .with_attribute("concurrency", concurrency),
@@ -1154,7 +1156,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = create_test_db(ctx.child("db")).await;
 
-            // Seed 2000 keys and commit so they live in the committed snapshot.
+            // Seed 2000 keys and commit so they live in the committed index.
             let mut seed = db.new_batch();
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -1501,7 +1503,7 @@ pub(crate) mod test {
             .unwrap();
         let expected_root = c.root();
 
-        // Applying C directly also applies B. The snapshot location must be rebased from
+        // Applying C directly also applies B. The index location must be rebased from
         // the original DB location to A's now-committed update.
         let (db, _) = db.apply_batch(c).await.unwrap();
         assert_eq!(db.root(), expected_root);
@@ -1532,7 +1534,7 @@ pub(crate) mod test {
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.snapshot.get(&k);
+        let iter = db.index.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 
@@ -1716,6 +1718,143 @@ pub(crate) mod test {
                 db.historical_proof(db.bounds().end + 1, Location::new(6), NZU64!(10))
                     .await,
                 Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot stays byte-stable and verifiable against its captured root while the live
+    /// database rewrites its keys, commits, and prunes past it, evidence that it carries
+    /// neither the keyed index nor the activity bitmap.
+    #[test]
+    fn test_any_fixed_db_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let ops = create_test_ops(20);
+            let mut db = apply_ops(db, ops.clone()).await;
+            let root = db.root();
+            let op_count = db.bounds().end;
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+            assert_eq!(snapshot.size(), op_count);
+
+            let (proof, proof_ops) =
+                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                    .await
+                    .unwrap();
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &proof_ops,
+                &root,
+            ));
+
+            // Update every captured key (rewriting index entries and retroactively flipping
+            // activity bits), commit, and prune the live database past the snapshot.
+            let mut rng = TestRng::new(7);
+            let updates: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    Operation::Update(Update(key, _)) => {
+                        Some(Operation::Update(Update(*key, Digest::random(&mut rng))))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!updates.is_empty());
+            db = apply_ops(db, updates).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert_ne!(db.root(), root);
+            assert!(db.bounds().start > Location::new(0));
+
+            // The snapshot still serves the identical proof, verifiable against the captured
+            // root, including for operations the live database has since pruned.
+            let (proof2, proof_ops2) =
+                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+                    .await
+                    .unwrap();
+            assert_eq!(proof.encode(), proof2.encode());
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof2,
+                Location::new(0),
+                &proof_ops2,
+                &root,
+            ));
+
+            // Anything at or above the frozen size is rejected.
+            assert!(
+                crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1))
+                    .await
+                    .is_err()
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Snapshot serving is byte-identical to live serving at the captured generation, for both
+    /// request arms, and stays identical after the live database advances and prunes past it.
+    #[test]
+    fn test_any_fixed_snapshot_serves_like_live_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let mut db = apply_ops(db, create_test_ops(20)).await;
+            let op_count = db.bounds().end;
+
+            let ops_request = Request::Operations {
+                size: op_count,
+                start: Location::new(3),
+                max_ops: NZU64!(5),
+            };
+            let boundary_request = Request::Boundary {
+                size: op_count,
+                start: Location::new(3),
+            };
+
+            let (live_ops, _) = db.serve(ops_request).await.unwrap();
+            let (live_boundary, _) = db.serve(boundary_request).await.unwrap();
+
+            let snapshot;
+            (db, snapshot) = db.snapshot().await.unwrap();
+
+            let (snap_ops, _) = snapshot.serve(ops_request).await.unwrap();
+            let (snap_boundary, _) = snapshot.serve(boundary_request).await.unwrap();
+            assert_eq!(snap_ops.encode(), live_ops.encode());
+            assert_eq!(snap_boundary.encode(), live_boundary.encode());
+
+            // Advance and prune the live database past the snapshot, then confirm the
+            // snapshot's output is byte-identical to its pre-mutation output.
+            db = apply_ops(db, create_test_ops(30)).await;
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start > Location::new(3));
+
+            let (snap_ops2, _) = snapshot.serve(ops_request).await.unwrap();
+            let (snap_boundary2, _) = snapshot.serve(boundary_request).await.unwrap();
+            assert_eq!(snap_ops2.encode(), snap_ops.encode());
+            assert_eq!(snap_boundary2.encode(), snap_boundary.encode());
+
+            // Requests above the frozen size are rejected.
+            let above = Request::Operations {
+                size: op_count + 1,
+                start: Location::new(0),
+                max_ops: NZU64!(1),
+            };
+            assert!(matches!(
+                snapshot.serve(above).await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
             ));
 
             db.destroy().await.unwrap();

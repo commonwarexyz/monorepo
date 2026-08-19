@@ -102,7 +102,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_concurrency: <I as crate::qmdb::IndexBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
@@ -112,7 +112,7 @@ where
     F: Graftable,
     E: Context + Spawner,
     U: Update,
-    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<T> + crate::qmdb::IndexBuild<F>,
     H: Hasher,
     T: Translator,
     J: Mutable<Item = Operation<F, U>> + 'static,
@@ -151,10 +151,10 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let snapshot_context = context.child("any_snapshot");
+    let index_context = context.child("index");
     let any_metrics = AnyMetrics::new(context.child("any"));
     let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         Some(bitmap),

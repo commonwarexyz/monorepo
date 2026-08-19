@@ -782,7 +782,7 @@ where
                 assert_eq!(
                     H::lookup(&synced_db, key).await,
                     None,
-                    "key from before floor should not be in synced snapshot"
+                    "key from before floor should not be in synced index"
                 );
             }
         }

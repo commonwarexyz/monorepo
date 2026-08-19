@@ -31,7 +31,7 @@ where
 {
     let first_leaf = batch.leaves();
     let ancestors = batch.retain_ancestors();
-    let mem = merkle.snapshot();
+    let mem = merkle.mem();
     let strategy = merkle.strategy().clone();
     strategy
         .spawn(move |strategy| {

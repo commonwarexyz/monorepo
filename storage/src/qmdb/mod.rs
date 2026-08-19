@@ -59,10 +59,11 @@ use crate::{
     },
     journal::{
         Error as JournalError,
+        authenticated::Authenticated,
         contiguous::{Contiguous, Mutable},
     },
     merkle::{
-        Bagging, Family, Location,
+        Bagging, Family, Location, Proof,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::{Floored, Operation},
@@ -76,7 +77,10 @@ use commonware_utils::{
     cache::Clock,
     channel::mpsc,
 };
-use core::{num::NonZeroUsize, ops::Range};
+use core::{
+    num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
+};
 use futures::{StreamExt as _, future::join_all, pin_mut};
 use std::sync::Arc;
 use thiserror::Error;
@@ -84,7 +88,7 @@ use thiserror::Error;
 pub mod any;
 pub mod batch_chain;
 pub(crate) mod bitmap;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
@@ -166,6 +170,11 @@ where
 }
 
 /// Compute the inactive peak count for a historical operation count.
+///
+/// # Errors
+///
+/// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` exceeds the operations
+/// `reader` holds.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,
@@ -174,12 +183,35 @@ where
     F: Family,
     R: Contiguous<Item: Floored<F>>,
 {
+    if *op_count > reader.bounds().end {
+        return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+    }
     if op_count == Location::new(0) {
         return Ok(0);
     }
 
     let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
     Ok(F::inactive_peaks(op_count, floor))
+}
+
+/// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
+/// operations.
+pub(crate) async fn historical_proof<F, C, M, H>(
+    log: &Authenticated<C, M, H>,
+    op_count: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Floored<F>>,
+    M: crate::merkle::storage::Storage<Family = F, Digest = H::Digest>,
+    H: Hasher,
+{
+    let inactive_peaks = inactive_peaks_at::<F, _>(&log.journal, op_count).await?;
+    Ok(log
+        .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+        .await?)
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -203,7 +235,7 @@ pub enum Error<F: Family> {
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
-    /// The requested key was not found in the snapshot.
+    /// The requested key was not found in the index.
     #[error("key not found")]
     KeyNotFound,
 
@@ -263,7 +295,7 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
+/// Builds the database's key index by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
@@ -272,10 +304,10 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
 /// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
 /// `(location -> key)` cache that lets collision resolution resolve candidates from memory
 /// instead of re-reading the log; `None` disables it.
-pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
+pub(super) async fn build_index_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
-    snapshot: &mut I,
+    index: &mut I,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
@@ -303,14 +335,14 @@ where
         let (loc, op) = result?;
         if let Some(key) = op.key() {
             if op.is_delete() {
-                let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
+                let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
                 callback(false, old_loc);
                 if old_loc.is_some() {
                     active_keys -= 1;
                 }
             } else if op.is_update() {
                 let new_loc = crate::merkle::Location::new(loc);
-                let old_loc = update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
+                let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
                     active_keys += 1;
@@ -329,10 +361,10 @@ where
     Ok(active_keys)
 }
 
-/// Delete `key` from the snapshot if it exists, using a stable log reader, and return the
+/// Delete `key` from the index if it exists, using a stable log reader, and return the
 /// previously associated location.
 async fn delete_key<F, I, R>(
-    snapshot: &mut I,
+    index: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
@@ -343,8 +375,8 @@ where
     R: Contiguous,
     R::Item: Operation<F>,
 {
-    // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut(key) else {
+    // If the translated key is in the index, get a cursor to look for the key.
+    let Some(cursor) = index.get_mut(key) else {
         return Ok(None);
     };
     delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
@@ -352,7 +384,7 @@ where
 
 /// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
 /// it was present among the cursor's conflicts. When supplied, the matched location is removed
-/// from `cache` with the snapshot deletion.
+/// from `cache` with the index deletion.
 async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
@@ -371,7 +403,7 @@ where
         return Ok(None);
     };
 
-    // Cache entries mirror current snapshot locations, so invalidate the matched location with
+    // Cache entries mirror current index locations, so invalidate the matched location with
     // the authoritative deletion.
     cursor.delete();
     if let Some(cache) = cache {
@@ -381,9 +413,9 @@ where
     Ok(Some(loc))
 }
 
-/// Update `key` in the snapshot using a stable log reader, returning its old location if present.
+/// Update `key` in the index using a stable log reader, returning its old location if present.
 async fn update_key<F, I, R>(
-    snapshot: &mut I,
+    index: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
@@ -395,9 +427,9 @@ where
     R: Contiguous,
     R::Item: Operation<F>,
 {
-    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+    // If the translated key is not in the index, insert the new location. Otherwise, get a
     // cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+    let Some(cursor) = index.get_mut_or_insert(key, new_loc) else {
         return Ok(None);
     };
     update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
@@ -406,7 +438,7 @@ where
 /// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
 /// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
 /// is inserted at the cursor. When supplied, the matched old location is removed from `cache` with
-/// the snapshot update.
+/// the index update.
 async fn update_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
@@ -424,7 +456,7 @@ where
     if let Some(loc) =
         find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     {
-        // Removing the superseded cache entry with the snapshot update lets the caller reuse its
+        // Removing the superseded cache entry with the index update lets the caller reuse its
         // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
@@ -434,7 +466,7 @@ where
         return Ok(Some(loc));
     }
 
-    // The key wasn't in the snapshot, so add it to the cursor.
+    // The key wasn't in the index, so add it to the cursor.
     cursor.insert(new_loc);
 
     Ok(None)
@@ -477,23 +509,23 @@ where
     Ok(None)
 }
 
-/// Number of operations the snapshot replay batches per worker-channel send during a parallel build.
-const SNAPSHOT_ROUTE_BATCH: usize = 4096;
+/// Number of operations the index replay batches per worker-channel send during a parallel build.
+const INDEX_ROUTE_BATCH: usize = 4096;
 
 /// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
 /// the replay from running arbitrarily far ahead of a slow worker.
-const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
+const INDEX_CHANNEL_DEPTH: usize = 4;
 
-/// A batch of keyed operations routed to a snapshot-build worker: each entry is the op's key, its
+/// A batch of keyed operations routed to an index-build worker. Each entry is the op's key, its
 /// location, and whether it is a delete.
 type RoutedBatch<K> = Vec<(K, u64, bool)>;
 
-/// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
+/// Build one parallel-init worker's partial index by applying the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Sets the bits of the range's active locations in the
 /// shared `active` bitmap (indexed over `activity`, the replayed region) and returns the populated
 /// worker index along with the range's active-key count.
-async fn build_snapshot_worker<F, C, R>(
+async fn build_index_worker<F, C, R>(
     log: Arc<C>,
     mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
     mut index: R,
@@ -540,13 +572,13 @@ where
     Ok((index, active_keys))
 }
 
-/// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
+/// Build an index serially on the calling task via [build_index_from_log], collecting each
 /// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [SnapshotBuild::build_snapshot]).
-async fn build_snapshot_serial<F, C, I>(
+/// activity bitmap (see [IndexBuild::build_index]).
+async fn build_index_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
-    snapshot: &mut I,
+    index: &mut I,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
@@ -559,10 +591,10 @@ where
     // supersedes. The state after the last op is each location's final status.
     let mut activity = BitMap::new();
     let floor = *inactivity_floor_loc;
-    let active_keys = build_snapshot_from_log(
+    let active_keys = build_index_from_log(
         inactivity_floor_loc,
         reader,
-        snapshot,
+        index,
         init_buffer,
         cache_size,
         |is_active, old_loc| {
@@ -576,11 +608,11 @@ where
     Ok((active_keys, activity))
 }
 
-/// Build a snapshot by splitting the log replay across parallel workers, each owning a contiguous
+/// Build an index by splitting the log replay across parallel workers, each owning a contiguous
 /// range of the index's partitions (see [Partitioned]). Returns the number of active keys and
-/// the activity bitmap (see [SnapshotBuild::build_snapshot]).
-async fn build_snapshot_parallel<F, E, C, I>(
-    snapshot: &mut I,
+/// the activity bitmap (see [IndexBuild::build_index]).
+async fn build_index_parallel<F, E, C, I>(
+    index: &mut I,
     context: E,
     inactivity_floor_loc: Location<F>,
     log: &Arc<C>,
@@ -594,19 +626,13 @@ where
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
 {
-    let count = snapshot.partition_count();
+    let count = index.partition_count();
     let workers = (init_concurrency.get() - 1).min(count);
 
     // No workers: build on this task.
     if workers == 0 {
-        return build_snapshot_serial(
-            inactivity_floor_loc,
-            &**log,
-            snapshot,
-            init_buffer,
-            cache_size,
-        )
-        .await;
+        return build_index_serial(inactivity_floor_loc, &**log, index, init_buffer, cache_size)
+            .await;
     }
 
     let floor = *inactivity_floor_loc;
@@ -626,7 +652,7 @@ where
     let mut senders = Vec::with_capacity(workers);
     let mut handles = Vec::with_capacity(workers);
     for w in 0..workers {
-        let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
+        let (tx, rx) = mpsc::channel(INDEX_CHANNEL_DEPTH);
         senders.push(tx);
         let log = log.clone();
 
@@ -634,14 +660,14 @@ where
         // only that many slots, so per-worker memory is the range, not the full partition set.
         let lo = w * range_size;
         let range_len = range_size.min(count - lo);
-        let worker_index = snapshot.new_range(lo, range_len);
+        let worker_index = index.new_range(lo, range_len);
         let active = active.clone();
         let handle = context
-            .child("snapshot_worker")
+            .child("index_worker")
             .with_attribute("worker", w)
             .dedicated()
             .spawn(move |_| {
-                build_snapshot_worker::<F, C, I::Range>(
+                build_index_worker::<F, C, I::Range>(
                     log,
                     rx,
                     worker_index,
@@ -664,7 +690,7 @@ where
             .await?;
         pin_mut!(stream);
         let mut batches: Vec<RoutedBatch<_>> = (0..workers)
-            .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
+            .map(|_| Vec::with_capacity(INDEX_ROUTE_BATCH))
             .collect();
 
         // A closed channel means a worker terminated early (e.g. returned an `Error<F>`
@@ -677,9 +703,9 @@ where
             let Some(key) = op.into_key() else { continue };
             let w = I::partition_of(key.as_ref()) / range_size;
             batches[w].push((key, loc, is_delete));
-            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+            if batches[w].len() >= INDEX_ROUTE_BATCH {
                 let batch =
-                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(INDEX_ROUTE_BATCH));
                 if senders[w].send(batch).await.is_err() {
                     return Ok(());
                 }
@@ -703,11 +729,11 @@ where
     let joined = join_all(handles).await;
     routing_result?;
 
-    // Install each worker's partition range into the snapshot and fold its active-key count in.
+    // Install each worker's partition range into the index and fold its active-key count in.
     let mut total_items = 0;
     for handle in joined {
         let (worker_index, worker_keys) = handle??;
-        snapshot.install_range(worker_index);
+        index.install_range(worker_index);
         total_items += worker_keys;
     }
 
@@ -727,7 +753,7 @@ where
     Ok((total_items, active))
 }
 
-/// Builds a database's snapshot index from the operations log.
+/// Builds a database's key index from the operations log.
 ///
 /// Generic over the `Index` type so each index controls how it builds: serially with the default
 /// method body, or split across parallel workers with an override.
@@ -735,8 +761,8 @@ where
 /// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
 /// drop every clone of the shared log before returning) are enforced by the implementations
 /// rather than the public contract.
-pub trait SnapshotBuild<F: Family>:
-    sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
+pub trait IndexBuild<F: Family>:
+    sealed::IndexBuildSealed + Index<Value = Location<F>> + Sized + 'static
 {
     /// The concurrency configuration the build consumes. Index types that always build serially
     /// declare `()`, so a setting they cannot use is unrepresentable.
@@ -751,7 +777,7 @@ pub trait SnapshotBuild<F: Family>:
     // In-crate callers await this future at concrete index types, so the flexibility an explicit
     // `Send` bound on the returned future would add is unused.
     #[allow(async_fn_in_trait)]
-    async fn build_snapshot<E, C>(
+    async fn build_index<E, C>(
         &mut self,
         _context: E,
         inactivity_floor_loc: Location<F>,
@@ -764,39 +790,39 @@ pub trait SnapshotBuild<F: Family>:
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        build_index_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
     }
 }
 
 mod sealed {
     use crate::translator::Translator;
 
-    pub trait SnapshotBuildSealed {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
+    pub trait IndexBuildSealed {}
+    impl<T: Translator, V: Send + Sync> IndexBuildSealed for crate::index::unordered::Index<T, V> {}
+    impl<T: Translator, V: Send + Sync> IndexBuildSealed for crate::index::ordered::Index<T, V> {}
+    impl<T: Translator, V: Send + Sync, const P: usize> IndexBuildSealed
         for crate::index::partitioned::unordered::Index<T, V, P>
     {
     }
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
+    impl<T: Translator, V: Send + Sync, const P: usize> IndexBuildSealed
         for crate::index::partitioned::ordered::Index<T, V, P>
     {
     }
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
+impl<F: Family, T: Translator> IndexBuild<F> for crate::index::unordered::Index<T, Location<F>> {
     type Concurrency = ();
 }
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
+impl<F: Family, T: Translator> IndexBuild<F> for crate::index::ordered::Index<T, Location<F>> {
     type Concurrency = ();
 }
 
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
 
-    async fn build_snapshot<E, C>(
+    async fn build_index<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -809,7 +835,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_parallel(
+        build_index_parallel(
             self,
             context,
             inactivity_floor_loc,
@@ -822,12 +848,12 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     }
 }
 
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
 
-    async fn build_snapshot<E, C>(
+    async fn build_index<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -840,7 +866,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_parallel(
+        build_index_parallel(
             self,
             context,
             inactivity_floor_loc,
@@ -853,19 +879,19 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     }
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+/// For the given `key` which is known to exist in the index with location `old_loc`, update
 /// its location to `new_loc`.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
     new_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"
@@ -873,18 +899,18 @@ fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
     cursor.update(new_loc);
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
-/// it from the snapshot.
+/// For the given `key` which is known to exist in the index with location `old_loc`, delete
+/// it from the index.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"
@@ -899,7 +925,7 @@ pub(crate) struct FloorHelper<
     I: Index<Value = Location<F>>,
     C: Mutable<Item: Operation<F>>,
 > {
-    pub snapshot: &'a mut I,
+    pub index: &'a mut I,
     pub log: C,
 }
 
@@ -921,13 +947,13 @@ where
             return Ok((self, false)); // operations without keys cannot be active
         };
 
-        // If we find a snapshot entry corresponding to the operation, we know it's active.
+        // If we find an index entry corresponding to the operation, we know it's active.
         let active = {
-            let Some(mut cursor) = self.snapshot.get_mut(key) else {
+            let Some(mut cursor) = self.index.get_mut(key) else {
                 return Ok((self, false));
             };
             if cursor.find(|&loc| loc == old_loc) {
-                // Update the operation's snapshot location to point to tip.
+                // Update the operation's index location to point to tip.
                 cursor.update(Location::<F>::new(self.log.bounds().end));
                 true
             } else {

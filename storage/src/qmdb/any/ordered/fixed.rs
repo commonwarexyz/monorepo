@@ -80,7 +80,7 @@ pub mod partitioned {
     use commonware_runtime::Spawner;
     use commonware_utils::Array;
 
-    /// An ordered key-value QMDB with a partitioned snapshot index.
+    /// An ordered key-value QMDB with a partitioned key index.
     ///
     /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
     /// the number of prefix bytes used for partitioning:
@@ -145,7 +145,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            SnapshotBuild as _,
+            IndexBuild as _,
             any::{
                 ordered::{
                     Update,
@@ -300,7 +300,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = create_test_db(ctx.child("db")).await;
 
-            // Seed 500 keys and commit so they live in the committed snapshot. TwoCap makes
+            // Seed 500 keys and commit so they live in the committed index. TwoCap makes
             // translated-bucket collisions common, stressing the sibling-read paths.
             let mut seed = db.new_batch();
             for i in 0..500u64 {
@@ -404,7 +404,7 @@ pub(crate) mod test {
     /// A batch's cached read resolutions (location plus old next key) must stay valid when an
     /// ancestor is committed and dropped between the read and merkleize. Keys resolved through
     /// an uncommitted ancestor's diff cache nothing, so the merkleize-time re-resolution picks
-    /// up the post-commit location and linkage. Keys resolved through the committed snapshot
+    /// up the post-commit location and linkage. Keys resolved through the committed index
     /// cache their location and next key, which the intervening commit cannot change (applying
     /// an ancestor only relocates or relinks keys present in that ancestor's diff).
     #[test_traced("WARN")]
@@ -508,7 +508,7 @@ pub(crate) mod test {
                 .unwrap();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
             let key2 = FixedBytes::<2>::new([1u8, 3u8]);
-            // Create some keys that will not be added to the snapshot.
+            // Create some keys that will not be added to the index.
             let early_key = FixedBytes::<2>::new([0u8, 2u8]);
             let late_key = FixedBytes::<2>::new([3u8, 0u8]);
             let middle_key = FixedBytes::<2>::new([1u8, 2u8]);
@@ -745,7 +745,7 @@ pub(crate) mod test {
 
     /// A replay failure during a parallel build must join every worker before surfacing the
     /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    /// partition-range allocation (the [crate::qmdb::IndexBuild] cleanup invariant).
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -770,7 +770,7 @@ pub(crate) mod test {
             drop(db);
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
-            // against a fresh index, mirroring init's parallel snapshot build.
+            // against a fresh index, mirroring init's parallel index build.
             let cfg = fixed_db_config_partitioned::<OneCap>("parallel_replay_fail", &context);
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
@@ -792,7 +792,7 @@ pub(crate) mod test {
             // workers never read the log themselves.
             context.storage_fault_config().write().read_rate = Some(Probability!(1.0));
             let result = index
-                .build_snapshot(
+                .build_index(
                     context.child("build"),
                     floor,
                     &log,
@@ -835,7 +835,7 @@ pub(crate) mod test {
                         OneCap,
                     );
                 let result = index
-                    .build_snapshot(
+                    .build_index(
                         context
                             .child("build")
                             .with_attribute("concurrency", concurrency),
@@ -863,7 +863,7 @@ pub(crate) mod test {
             type BitmapDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
-            /// Rebuild the snapshot from the persisted log serially and with workers, assert the
+            /// Rebuild the index from the persisted log serially and with workers, assert the
             /// `(active_keys, bitmap)` results match, and return the bitmap.
             async fn assert_builds_match(
                 context: &deterministic::Context,
@@ -899,7 +899,7 @@ pub(crate) mod test {
                             OneCap,
                         );
                     let result = index
-                        .build_snapshot(
+                        .build_index(
                             context
                                 .child("build")
                                 .with_attribute("label", label)
@@ -1055,20 +1055,20 @@ pub(crate) mod test {
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
             }
 
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             // Test that apply_batch + sync w/ pruning will raise the activity floor.
             let db = db.sync().await.unwrap();
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
             db.sync().await.unwrap();
             let db = open_db(context.child("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.snapshot.items(), 857);
+            assert_eq!(db.index.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
@@ -2065,7 +2065,7 @@ pub(crate) mod test {
 
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
-        let iter = db.snapshot.get(&k);
+        let iter = db.index.get(&k);
         assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 

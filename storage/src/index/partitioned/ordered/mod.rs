@@ -403,7 +403,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
-/// parallel snapshot-build worker (created by [Index::new_range], folded back into a full index by
+/// parallel index-build worker (created by [Index::new_range], folded back into a full index by
 /// [Index::install_range]). It exposes only the cursor operations, which map a key's global
 /// partition index to the worker's local slot. The other [Unordered] operations index partitions
 /// globally and are deliberately unavailable, so they cannot be miscalled on a worker.
@@ -1100,7 +1100,7 @@ mod tests {
 
     /// A worker's value walk must visit every value it holds exactly once, whichever
     /// representation each partition uses (inline sorted arrays or the spilled side-table),
-    /// since the snapshot build derives the activity bitmap and active-key counts from it.
+    /// since the index build derives the activity bitmap and active-key counts from it.
     #[test_traced]
     fn test_range_for_each_value_visits_all_values_once() {
         deterministic::Runner::default().start(|context| async move {

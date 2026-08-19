@@ -277,6 +277,14 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_variable_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_snapshot(ctx, open::<mmr::Family>).await;
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_variable_prune() {
         let executor = deterministic::Runner::default();
@@ -631,6 +639,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             test::test_immutable_proof_verify(ctx, open::<mmb::Family>).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_variable_snapshot_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_snapshot(ctx, open::<mmb::Family>).await;
         });
     }
 

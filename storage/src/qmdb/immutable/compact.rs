@@ -33,15 +33,12 @@ use crate::{
         self, Error,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds, Commitment, OnChain},
-        compact::{
-            batch as compact_batch,
-            witness::{self, VerifiedWitness},
-        },
+        compact::{Snapshot, batch as compact_batch, witness},
         operation::Key,
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
-use commonware_codec::{Encode, EncodeShared, Read};
+use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -71,7 +68,7 @@ where
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
-    witness: witness::Store<E, F, H::Digest>,
+    witness: witness::Store<E, F, Operation<F, K, V>, H::Digest>,
     _key: PhantomData<K>,
 }
 
@@ -303,12 +300,6 @@ where
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    fn encode_commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Vec<u8> {
-        Operation::<F, K, V>::Commit(metadata, inactivity_floor_loc)
-            .encode()
-            .to_vec()
-    }
-
     /// Build a compact db from state fetched by the sync engine.
     ///
     /// The witness lives only in memory until the first [`Self::commit`], [`Self::sync`], or
@@ -322,21 +313,18 @@ where
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: Operation<F, K, V>,
     ) -> Result<Self, Error<F>> {
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = &last_commit_op else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
-        witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+        let (last_commit_metadata, inactivity_floor_loc) =
+            (last_commit_metadata.clone(), *inactivity_floor_loc);
 
-        let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
         let merkle =
             compact_merkle::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
-        let hasher = qmdb::hasher::<H>();
-        merkle.append_leaf(&hasher, &op_bytes)?;
-        let imported = witness::build_witness::<F, H, S>(&merkle, inactivity_floor_loc, op_bytes)?;
-        merkle.prune_to_frontier();
+        let imported = witness::import_tip::<F, H, S, _>(&merkle, last_commit_op)?;
 
-        let witness = witness::Store::from_import(journal, imported);
-        let root = witness.with(|w| w.root);
+        let store = witness::Store::from_import(journal, imported);
+        let root = store.tip().root();
         Ok(Self {
             merkle,
             root,
@@ -344,7 +332,7 @@ where
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
-            witness,
+            witness: store,
             _key: PhantomData,
         })
     }
@@ -367,20 +355,20 @@ where
         // Bootstrap: append an initial Commit(None, 0) on first open.
         let journal: witness::Journal<E, F, H::Digest> =
             variable::Journal::init(witness_context, witness_config).await?;
-        let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, K, V>>(
+        let store = witness::init::<E, F, H, S, Operation<F, K, V>>(
             journal,
             &mut merkle,
             &commit_codec_config,
-            Operation::<F, K, V>::Commit(None, Location::new(0))
-                .encode()
-                .to_vec(),
+            Operation::<F, K, V>::Commit(None, Location::new(0)),
         )
         .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) =
+            store.tip().op().clone()
+        else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = witness.with(|w| w.size()) - 1;
-        let root = witness.with(|w| w.root);
+        let last_commit_loc = store.tip().size() - 1;
+        let root = store.tip().root();
 
         Ok(Self {
             merkle,
@@ -389,7 +377,7 @@ where
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
-            witness,
+            witness: store,
             _key: PhantomData,
         })
     }
@@ -431,7 +419,7 @@ where
     /// called. A target published by [`Self::start_sync`] is proven durable only when its
     /// handle completes.
     pub fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.witness.with(VerifiedWitness::target)
+        self.witness.tip().target()
     }
 
     /// The [`Commitment`] for the database's current state.
@@ -519,15 +507,9 @@ where
         skip_all
     )]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let last_commit_metadata = self.last_commit_metadata.clone();
-        let inactivity_floor_loc = self.inactivity_floor_loc;
+        let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
         let handle;
-        (self.witness, handle) = self
-            .witness
-            .start_sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
-                Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
-            })
-            .await?;
+        (self.witness, handle) = self.witness.start_sync::<H, S>(&self.merkle, op).await?;
         Ok((self, handle))
     }
 
@@ -535,14 +517,8 @@ where
     /// reopen may need to replay the witness journal's tail to recover.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        let last_commit_metadata = self.last_commit_metadata.clone();
-        let inactivity_floor_loc = self.inactivity_floor_loc;
-        self.witness = self
-            .witness
-            .commit::<H, S>(&self.merkle, inactivity_floor_loc, || {
-                Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
-            })
-            .await?;
+        let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
+        self.witness = self.witness.commit::<H, S>(&self.merkle, op).await?;
         Ok(self)
     }
 
@@ -550,14 +526,8 @@ where
     /// minimize recovery work on reopen.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        let last_commit_metadata = self.last_commit_metadata.clone();
-        let inactivity_floor_loc = self.inactivity_floor_loc;
-        self.witness = self
-            .witness
-            .sync::<H, S>(&self.merkle, inactivity_floor_loc, || {
-                Self::encode_commit_op(last_commit_metadata, inactivity_floor_loc)
-            })
-            .await?;
+        let op = Operation::Commit(self.last_commit_metadata.clone(), self.inactivity_floor_loc);
+        self.witness = self.witness.sync::<H, S>(&self.merkle, op).await?;
         Ok(self)
     }
 
@@ -577,25 +547,26 @@ where
         // Fast path: already at `target` with no uncommitted state. Wait for any pipelined sync
         // to prove the tip durable before returning.
         if self.size() == target
-            && self.witness.with(|w| w.size()) == target
+            && self.witness.tip().size() == target
             && !self.witness.import_pending()
         {
             self.witness.wait_for_sync().await?;
             return Ok(self);
         }
 
-        let last_commit_op;
-        (self.witness, last_commit_op) = self
+        self.witness = self
             .witness
-            .rewind::<H, S, Operation<F, K, V>>(&self.merkle, target, &self.commit_codec_config)
+            .rewind::<H, S>(&self.merkle, target, &self.commit_codec_config)
             .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) =
+            self.witness.tip().op().clone()
+        else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
         self.last_commit_loc = target - 1;
-        self.root = self.witness.with(|w| w.root);
+        self.root = self.witness.tip().root();
         Ok(self)
     }
 
@@ -620,6 +591,12 @@ where
         self.witness.destroy().await?;
         Ok(())
     }
+
+    /// Capture an owned immutable [Snapshot] of the database's latest commit
+    /// (applied-but-uncommitted state is not captured).
+    pub fn snapshot(&self) -> Snapshot<F, Operation<F, K, V>, H::Digest> {
+        Arc::clone(self.witness.tip())
+    }
 }
 
 impl<F, E, K, V, H, C, S> Source for Db<F, E, K, V, H, C, S>
@@ -642,11 +619,7 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
-        Ok((
-            self.witness
-                .compact_state(&self.commit_codec_config, request)?,
-            None,
-        ))
+        self.witness.tip().serve(request).await
     }
 }
 
@@ -657,6 +630,7 @@ mod tests {
         merkle::mmr,
         qmdb::{any::value::FixedEncoding, compact::witness},
     };
+    use commonware_codec::Encode;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -2101,6 +2075,103 @@ mod tests {
                 Err(Error::FloorBeyondSize(floor, commit))
                     if floor == Location::new(3) && commit == Location::new(2)
             ));
+        });
+    }
+    /// A snapshot keeps serving its captured commit, byte-identical to the live serve at
+    /// capture, while the source advances past it, and refuses sizes it never captured.
+    #[test_traced("INFO")]
+    fn test_compact_snapshot_frozen_at_capture() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-snapshot").await;
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(10u8))
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+
+            let captured = db.target();
+            let boundary_for = |size: Location<mmr::Family>| Request::Boundary {
+                size,
+                start: size - 1,
+            };
+            let (live, _) = db.serve(boundary_for(captured.size)).await.unwrap();
+
+            let snapshot = db.snapshot();
+            assert_eq!(snapshot.target(), captured);
+            assert_eq!(snapshot.root(), db.root());
+            let (served, _) = snapshot.serve(boundary_for(captured.size)).await.unwrap();
+            assert_eq!(served.encode(), live.encode());
+
+            // Advance the live database to a new durable commit.
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(20u8))
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+            let advanced = db.target();
+            assert_ne!(advanced, captured);
+
+            // The snapshot still serves the captured commit and refuses the advanced size.
+            // The live database has moved on to its new tip.
+            let (served2, _) = snapshot.serve(boundary_for(captured.size)).await.unwrap();
+            assert_eq!(served2.encode(), served.encode());
+            assert!(matches!(
+                snapshot.serve(boundary_for(advanced.size)).await,
+                Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
+            ));
+            assert!(matches!(
+                db.serve(boundary_for(captured.size)).await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot captures the latest commit, not applied-but-uncommitted state.
+    #[test_traced]
+    fn test_snapshot_lags_applied_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-snapshot-lag").await;
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(10u8))
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(batch).unwrap();
+            let db = db.commit().await.unwrap();
+            let committed = db.target();
+            let boundary_for = |size: Location<mmr::Family>| Request::Boundary {
+                size,
+                start: size - 1,
+            };
+
+            // Apply a batch without committing, so the db's applied state moves past the tip.
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(20u8))
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(batch).unwrap();
+            assert!(db.size() > committed.size);
+
+            let snapshot = db.snapshot();
+            assert_eq!(snapshot.target(), committed);
+            assert!(snapshot.serve(boundary_for(committed.size)).await.is_ok());
+            assert!(matches!(
+                snapshot.serve(boundary_for(db.size())).await,
+                Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
+            ));
+
+            db.destroy().await.unwrap();
         });
     }
 }
