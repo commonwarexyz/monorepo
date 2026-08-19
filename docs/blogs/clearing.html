@@ -125,14 +125,13 @@ O’Grady</a></div>
         epoch accepted shares one close, so the delay spans many
         payments but, at these sizes, little money per account.</p>
         <p><strong>Bajillion</strong> is an account-level clearing
-        protocol built for both goals. It makes the account the unit of
-        settlement while keeping payments many-to-many: any registered
-        account can pay any other without pre-funded pairwise state. The
-        operator accepts payments throughout an epoch.</p>
-        <p>At close, each changed account contributes one row committing
-        its exact opening and closing state. Repeated payments over the
-        same accounts share those rows even when the pairings
-        differ.</p>
+        protocol built for both goals. Its payments are many-to-many:
+        any registered account can pay any other without pre-funded
+        pairwise state. The operator accepts payments throughout an
+        epoch. At close, each changed account contributes one row
+        committing its exact opening and closing state. Repeated
+        payments over the same accounts share those rows even when the
+        pairings differ.</p>
         <p>The operator still verifies and durably records every
         payment. Users rely on it for online payment service and signed
         receipts, not for custody. The settlement chain holds the
@@ -141,22 +140,23 @@ O’Grady</a></div>
         payments reuse the same accounts. This is the shape of agent
         traffic, where the same principals pay the same services
         millions of times.</p>
-        <p>That choice creates the hard parts. The close must prove
-        exact account changes without replaying a public payment log,
+        <p>Never publishing those payments creates the hard parts: the
+        close must prove exact account changes without replaying them,
         and a privately delivered receipt must still constrain
         settlement. Trust in the operator lasts only from acceptance to
         admission: the close is validated before admission, and one
-        contradicting receipt is enough to stop it.</p>
-        <p>Users need a recovery path if the operator disappears, and
-        closing one epoch cannot stop payments in the next.</p>
-        <p>Both goals hit their lower bounds. A preconfirmation cannot
-        arrive in less than one round trip to the party that serializes
-        the payer’s spending, and this one takes exactly that round
-        trip. A settlement recoverable from public data cannot make less
-        than the changed state available. This close carries that state,
-        plus terminal signed pairs and a sparse frontier, so its size is
-        unchanged when one payment becomes a bajillion, provided the
-        changed accounts and components stay fixed.</p>
+        contradicting receipt is enough to stop it. Users need a
+        recovery path if the operator disappears, and closing one epoch
+        cannot stop payments in the next.</p>
+        <p>Both goals press against their lower bounds. A
+        preconfirmation cannot arrive in less than one round trip to the
+        party that serializes the payer’s spending, and this one takes
+        exactly that round trip. A settlement recoverable from public
+        data cannot make less than the changed state available. This
+        close carries that state, plus terminal signed pairs and a
+        sparse frontier, so its size is unchanged when one payment
+        becomes a bajillion, provided the changed accounts and
+        components stay fixed.</p>
         <p>The mechanism is simple: signatures, Merkle openings, and one
         challenge window. Start with one accepted payment.</p>
         <h2 id="one-signed-payment">One Signed Payment</h2>
@@ -281,13 +281,11 @@ O’Grady</a></div>
         (G_{\kappa&#39;},J_{\kappa&#39;})\text{ unchanged for every
         }\kappa&#39;\ne\kappa.
         </span></p>
-        <p>Payments assigned to different components never contend on
-        the same counter, so a hot account scales across parallel
-        workers instead of serializing on one.</p>
-        <p>A recipient still has one account balance. Components are
-        only concurrency domains feeding that balance. At close, one
-        terminal signed pair represents each component, no matter how
-        many payments advanced it.</p>
+        <p>Payments assigned to different components never contend, so a
+        hot account scales across parallel workers. A recipient still
+        has one account balance. Components are only concurrency domains
+        feeding it. At close, one terminal signed pair represents each
+        component, no matter how many payments advanced it.</p>
         <p>In the same ledger, accounts <span
         class="math inline">(a,b,c,d)</span> open with balances <span
         class="math inline">(100,40,25,35)</span> and the epoch
@@ -337,17 +335,15 @@ O’Grady</a></div>
         length-bound <span
         class="math inline">\mathsf{ChangeRoot}</span>, which
         authenticates the compact change vector. The paired sparse
-        witness uses that vector to derive the new account-state
-        root.</p>
-        <p>The paired sparse witness reconstructs the opening and
-        closing roots together over the row positions <span
-        class="math inline">\mathcal J_e</span>. Each row supplies its
-        opening and closing leaf, while every omitted subtree
-        contributes one authenticated digest to both sides, collected as
-        the sparse frontier <span class="math inline">\Phi_e</span>.
-        Successful verification proves every omitted position unchanged
-        and every row position changed to exactly its committed close.
-        An account changes if and only if it has a row.</p>
+        witness reconstructs the opening and closing roots together over
+        the row positions <span class="math inline">\mathcal J_e</span>.
+        Each row supplies its opening and closing leaf, while every
+        omitted subtree contributes one authenticated digest to both
+        sides, collected as the sparse frontier <span
+        class="math inline">\Phi_e</span>. Successful verification
+        proves every omitted position unchanged and every row position
+        changed to exactly its committed close. An account changes if
+        and only if it has a row.</p>
         <p>The settlement chain retains a header <span
         class="math inline">\mathsf{Header}_e</span> containing the
         opening <span class="math inline">\mathsf{StateRoot}_e</span>,
@@ -427,9 +423,10 @@ O’Grady</a></div>
         total debit <span class="math inline">D_e</span>, credit <span
         class="math inline">C_e</span>, deposits <span
         class="math inline">F_e</span>, and withdrawals <span
-        class="math inline">W_e</span>. Those totals must reproduce the
-        chain-sealed boundary, respect the close caps, and conserve
-        payments:</p>
+        class="math inline">W_e</span>. The deposit total and withdrawal
+        record count must reproduce the chain-sealed boundary, each
+        withdrawal must cover at least its sealed record, and the totals
+        must respect the close caps and conserve payments:</p>
         <p><span class="math display">
         \boxed{D_e=C_e.}
         </span></p>
@@ -449,10 +446,10 @@ O’Grady</a></div>
         signer signs the same header. Each evidence piece is assigned to
         a quorum of validators who check and retain it.</p>
         <p>Quorum intersection guarantees that an honest signer checked
-        and retains each piece. At the reference parameters, with 100
-        validators, 33 tolerated faults, and quorum 67, every piece’s
-        holders share at least 34 validators with the certificate.</p>
-        <p>The honest signer may differ by piece. The identical header,
+        and retains each piece, though that signer may differ by piece.
+        At the reference parameters, with 100 validators, 33 tolerated
+        faults, and quorum 67, every piece’s holders share at least 34
+        validators with the certificate. The identical header,
         exhaustive assignment, and quorum intersection together attest
         to the complete public relation. Byte availability alone would
         not.</p>
@@ -506,21 +503,18 @@ O’Grady</a></div>
         \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
         </span></p>
         <p>If it accepts <span class="math inline">\Xi_0</span>, it must
-        accept <span class="math inline">\Xi_1</span>. The argument is
-        independent of whether <span class="math inline">\zeta</span> is
-        a quorum certificate, a zero-knowledge proof, or a TEE
-        attestation. Each can certify the exact public-validity relation
-        over selected inputs. None proves the nonexistence of an
-        additional private signature.</p>
+        accept <span class="math inline">\Xi_1</span>. Any of the three
+        modes can certify the exact public-validity relation over
+        selected inputs. None proves the nonexistence of an additional
+        private signature.</p>
         <p>That is the blind spot. A payment is its matching pair,
-        handed to the payer and forwarded to its recipient. At close,
+        handed to the payer and forwarded to its recipient, so at close
         the recipient holds every payment it received. Outside the
-        operator being checked, no other party does. No verifier can do
-        better than the recipient’s own record. Evidence of an
-        undisclosed receipt exists nowhere except in its holder’s hands,
-        and a receipt delivered to no one has injured no one who relied
-        on it. The protocol puts the completeness check where the
-        complete record already sits.</p>
+        operator being checked, no other party does, and no verifier can
+        do better than the recipient’s own record. A receipt delivered
+        to no one has injured no one who relied on it. The protocol puts
+        the completeness check where the complete record already
+        sits.</p>
         <p>The challenge window turns a preconfirmation from a promise
         into evidence. Through the inclusive deadline <span
         class="math inline">t\le\Delta_e</span>, any holder or
@@ -556,22 +550,21 @@ O’Grady</a></div>
         href="https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#e-receipt-challenges">Spec
         §E</a> gives the exact checked-arithmetic and fork
         predicates.</p>
-        <p>Each challenge is intentionally one-shot. Unlike an
-        interactive optimistic-rollup dispute game, a holder does not
-        bisect an execution trace or exchange several rounds of
-        responses. It submits the signed pair and the bounded
-        authenticated openings that expose the contradiction. The chain
-        checks fixed signature, arithmetic, and Merkle predicates in one
-        call. The protocol keeps that surface small by making the fraud
-        proof about receipts, not arbitrary execution.</p>
-        <p>The higher-tip challenge combines three sources. The
-        settlement chain provides the admitted header and its <span
+        <p>Each challenge is one-shot. There is no interactive dispute
+        game and no execution trace to bisect: the holder submits the
+        signed pair or pairs and the bounded openings that expose the
+        contradiction, and the chain checks fixed signature, arithmetic,
+        and Merkle predicates in one call. The fraud proof is about
+        receipts, not arbitrary execution, which is what keeps that
+        surface small.</p>
+        <p>The higher-tip challenge combines three sources in one
+        bounded onchain call. The settlement chain provides the admitted
+        header and its <span
         class="math inline">\mathsf{ChangeRoot}</span>. The availability
         service provides the authenticated account and component lookups
         that open <span class="math inline">b</span> and then <span
         class="math inline">\kappa_0</span>. The recipient provides the
-        signed pair it retained privately. One bounded onchain call
-        combines those lookups and that pair.</p>
+        signed pair it retained privately.</p>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{Challenge}^{\mathsf{higher}}_e=\bigl(&amp;
@@ -672,9 +665,7 @@ O’Grady</a></div>
         deposits, advances the finalized root, and decrements
         custody.</p>
         <p>The operator can stop serving payments, but it cannot
-        unilaterally spend deployment funds or veto a valid withdrawal.
-        The settlement chain carries the request through clean
-        finalization or terminal unwind.</p>
+        unilaterally spend deployment funds.</p>
         <p><a
         href="https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#f-settlement-transitions-exit-and-terminal-unwind">Spec
         §F</a> gives the complete queueing and terminal-payout
@@ -1036,33 +1027,26 @@ O’Grady</a></div>
         disclosure is exact: the pair appears in the public corpus if
         and only if it is one of those terminals. A holder challenge may
         reveal a superseded pair later. The public account deltas,
-        receipt counts, and terminal pairs still leak activity. The
-        protocol provides no anonymity, amount hiding, or privacy from
-        the operator and counterparties.</p>
+        receipt counts, and terminal pairs still leak activity, and the
+        protocol provides no anonymity or amount hiding.</p>
         <p>The reference deployment binds one asset. Supporting more
         requires separate deployments or an asset-indexed extension.</p>
         <p>No validity mode removes the availability assumptions. The
         public corpus must stay retrievable, and holders must retain
         their own evidence through the challenge window. Retained
-        receipts police the close, while recovering custody at a
-        finalized root needs only the public corpus. Enforcement begins
-        at admission, so preconfirmation holders bear operator default
-        until their epoch admits.</p>
-        <p>Users retain a unilateral path: queue a signed withdrawal,
-        prove that it is affordable at the finalized root and every
-        admitted successor, and permanently fence new work if it remains
-        unreleased at its deadline. Failure containment is coarse. A
-        proven receipt contradiction or expired withdrawal kills the
-        affected deployment, and terminal unwind needs the complete
-        authenticated survivor state. Users receive no separate
-        enforceable exit object for every payment, route, or account
-        branch.</p>
-        <p>The normal path relies on the operator’s online service,
-        while custody remains on the settlement chain. Exceptional
-        failures affect the entire deployment. In return, the close nets
-        across counterparties and follows changed account state.
-        General-purpose rollup execution and per-payment channel exits
-        are outside its scope.</p>
+        receipts police the close, while recovering custody needs only
+        publicly retained data: the corpus and the survivor state
+        preimage. Enforcement begins at admission, so preconfirmation
+        holders bear operator default until their epoch admits.</p>
+        <p>Users keep the unilateral withdrawal path, but failure
+        containment is coarse. A proven receipt contradiction or expired
+        withdrawal kills the affected deployment, and terminal unwind
+        needs the complete authenticated survivor state. Users receive
+        no separate enforceable exit object for every payment, route, or
+        account branch. In return, the close nets across counterparties
+        and follows changed account state. General-purpose rollup
+        execution and per-payment channel exits are outside its
+        scope.</p>
         <h2 id="a-bajillion-payments-one-close">A Bajillion Payments,
         One Close</h2>
         <p>The operator still performs <span
@@ -1076,13 +1060,10 @@ O’Grady</a></div>
         \quad\longrightarrow\quad
         \text{rows }A+\text{heads }H+\text{frontier }\Phi.
         </span></p>
-        <p>A close must pass complete public validation. The one-shot
-        challenge covers what no validity mode can establish: that the
-        operator’s signed receipts, disclosed or not, contain no
-        contradiction. An included call that observes an overdue queued
-        withdrawal fences new work. The admitted prefix must still
-        resolve, and terminal unwind requires the complete survivor
-        state.</p>
+        <p>A close must pass complete public validation. An included
+        call that observes an overdue queued withdrawal fences new work.
+        The admitted prefix must still resolve, and terminal unwind
+        requires the complete survivor state.</p>
         <p>For repeated activity over a fixed changed-account and
         component footprint, <span class="math inline">(A+H+\Phi)/T\to
         0</span>. Unchanged subtrees cost one frontier digest apiece no
@@ -1091,19 +1072,19 @@ O’Grady</a></div>
         changed account and represented component still contributes to
         the close. Account-level clearing compresses repetition, not
         change.</p>
-        <p>Within one operator-backed service and settlement-chain
-        custody system, and for users recovering from public data alone,
-        these are the trust model’s floors. A preconfirmation cannot
-        arrive in less than one round trip to the operator that
-        serializes spending. A close cannot quietly drop a payment: it
-        must agree with every receipt its epoch issued, or a single
-        retained pair proves the fault.</p>
-        <p>Cheap settlement bottoms out at the changed state itself. No
-        design whose users recover from public data alone can make less
-        available. This close adds only each account’s terminal pairs:
-        the outgoing pair when it sent and one per receive component. It
-        also adds the frontier that splices the change into the
-        registry.</p>
+        <p>Within one operator-backed service and chain custody, and for
+        users recovering from public data alone, these are the trust
+        model’s floors. A preconfirmation cannot arrive in less than one
+        round trip to the operator that serializes spending. A close
+        cannot quietly drop a payment: it must agree with every receipt
+        a holder retains, or a single retained pair proves the
+        fault.</p>
+        <p>Cheap settlement bottoms out at the changed state itself,
+        since no design whose users recover from public data alone can
+        make less available. This close adds only each account’s
+        terminal pairs: the outgoing pair when it sent and one per
+        receive component. It also adds the frontier that splices the
+        change into the registry.</p>
         <p>Sign every payment. Settle each changed account once.</p>
         <p>Bajillion has not yet been peer-reviewed or uploaded to
         arXiv. The complete formal specification—model, close relation,

@@ -17,17 +17,13 @@ Even if blockspace reached a billion TPS, you would not want to put these paymen
 
 Two goals follow. Agents pay arbitrary counterparties and act the moment an operator accepts a payment, which demands credible, fast preconfirmations. Settlement needs only the changed account state, which lets it stay cheap at massive scale. Public finality is delayed settlement: every payment the epoch accepted shares one close, so the delay spans many payments but, at these sizes, little money per account.
 
-**Bajillion** is an account-level clearing protocol built for both goals. It makes the account the unit of settlement while keeping payments many-to-many: any registered account can pay any other without pre-funded pairwise state. The operator accepts payments throughout an epoch.
-
-At close, each changed account contributes one row committing its exact opening and closing state. Repeated payments over the same accounts share those rows even when the pairings differ.
+**Bajillion** is an account-level clearing protocol built for both goals. Its payments are many-to-many: any registered account can pay any other without pre-funded pairwise state. The operator accepts payments throughout an epoch. At close, each changed account contributes one row committing its exact opening and closing state. Repeated payments over the same accounts share those rows even when the pairings differ.
 
 The operator still verifies and durably records every payment. Users rely on it for online payment service and signed receipts, not for custody. The settlement chain holds the deployment's assets, and no withdrawal path runs through the operator. The savings appear at public settlement, when many payments reuse the same accounts. This is the shape of agent traffic, where the same principals pay the same services millions of times.
 
-That choice creates the hard parts. The close must prove exact account changes without replaying a public payment log, and a privately delivered receipt must still constrain settlement. Trust in the operator lasts only from acceptance to admission: the close is validated before admission, and one contradicting receipt is enough to stop it.
+Never publishing those payments creates the hard parts: the close must prove exact account changes without replaying them, and a privately delivered receipt must still constrain settlement. Trust in the operator lasts only from acceptance to admission: the close is validated before admission, and one contradicting receipt is enough to stop it. Users need a recovery path if the operator disappears, and closing one epoch cannot stop payments in the next.
 
-Users need a recovery path if the operator disappears, and closing one epoch cannot stop payments in the next.
-
-Both goals hit their lower bounds. A preconfirmation cannot arrive in less than one round trip to the party that serializes the payer's spending, and this one takes exactly that round trip. A settlement recoverable from public data cannot make less than the changed state available. This close carries that state, plus terminal signed pairs and a sparse frontier, so its size is unchanged when one payment becomes a bajillion, provided the changed accounts and components stay fixed.
+Both goals press against their lower bounds. A preconfirmation cannot arrive in less than one round trip to the party that serializes the payer's spending, and this one takes exactly that round trip. A settlement recoverable from public data cannot make less than the changed state available. This close carries that state, plus terminal signed pairs and a sparse frontier, so its size is unchanged when one payment becomes a bajillion, provided the changed accounts and components stay fixed.
 
 The mechanism is simple: signatures, Merkle openings, and one challenge window. Start with one accepted payment.
 
@@ -106,9 +102,7 @@ $$
 (G_{\kappa'},J_{\kappa'})\text{ unchanged for every }\kappa'\ne\kappa.
 $$
 
-Payments assigned to different components never contend on the same counter, so a hot account scales across parallel workers instead of serializing on one.
-
-A recipient still has one account balance. Components are only concurrency domains feeding that balance. At close, one terminal signed pair represents each component, no matter how many payments advanced it.
+Payments assigned to different components never contend, so a hot account scales across parallel workers. A recipient still has one account balance. Components are only concurrency domains feeding it. At close, one terminal signed pair represents each component, no matter how many payments advanced it.
 
 In the same ledger, accounts $(a,b,c,d)$ open with balances $(100,40,25,35)$ and the epoch accepts
 
@@ -138,9 +132,7 @@ $$
 
 The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes.
 
-The $A$ rows form a length-bound $\mathsf{ChangeRoot}$, which authenticates the compact change vector. The paired sparse witness uses that vector to derive the new account-state root.
-
-The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
+The $A$ rows form a length-bound $\mathsf{ChangeRoot}$, which authenticates the compact change vector. The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
 
 The settlement chain retains a header $\mathsf{Header}_e$ containing the opening $\mathsf{StateRoot}_e$, $\mathsf{ChangeRoot}_e$, and closing $\mathsf{StateRoot}_{e+1}$, together with the quorum certificate. Admission receives the terminal changed row and its Merkle opening separately, authenticates the row against $\mathsf{ChangeRoot}_e$, checks its aggregate prefixes, and retains neither.
 
@@ -183,7 +175,7 @@ $H$ is the price of receive concurrency. More components remove online contentio
 
 A close cannot enter the pending queue until admission has checked the public data for malformation and exactness. Challenges handle a different problem: contradictions among operator-signed receipts, whether those receipts are private or part of the disclosed corpus.
 
-For sorted rows, the authenticated prefixes telescope to total debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$. Those totals must reproduce the chain-sealed boundary, respect the close caps, and conserve payments:
+For sorted rows, the authenticated prefixes telescope to total debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
 
 $$
 \boxed{D_e=C_e.}
@@ -199,9 +191,7 @@ The types matter. Deposits and withdrawals come from the chain-sealed boundary. 
 
 The reference deployment partitions the public corpus into deterministic, exhaustive account intervals. Every certificate signer signs the same header. Each evidence piece is assigned to a quorum of validators who check and retain it.
 
-Quorum intersection guarantees that an honest signer checked and retains each piece. At the reference parameters, with 100 validators, 33 tolerated faults, and quorum 67, every piece's holders share at least 34 validators with the certificate.
-
-The honest signer may differ by piece. The identical header, exhaustive assignment, and quorum intersection together attest to the complete public relation. Byte availability alone would not.
+Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. At the reference parameters, with 100 validators, 33 tolerated faults, and quorum 67, every piece's holders share at least 34 validators with the certificate. The identical header, exhaustive assignment, and quorum intersection together attest to the complete public relation. Byte availability alone would not.
 
 Admission appends the close as a pending slot without changing custody or the finalized root. Registration has already sealed the epoch's boundary and opened the next. Only an unchallenged queue front can install its root and release its withdrawals:
 
@@ -229,9 +219,9 @@ $$
 \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
 $$
 
-If it accepts $\Xi_0$, it must accept $\Xi_1$. The argument is independent of whether $\zeta$ is a quorum certificate, a zero-knowledge proof, or a TEE attestation. Each can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
+If it accepts $\Xi_0$, it must accept $\Xi_1$. Any of the three modes can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
 
-That is the blind spot. A payment is its matching pair, handed to the payer and forwarded to its recipient. At close, the recipient holds every payment it received. Outside the operator being checked, no other party does. No verifier can do better than the recipient's own record. Evidence of an undisclosed receipt exists nowhere except in its holder's hands, and a receipt delivered to no one has injured no one who relied on it. The protocol puts the completeness check where the complete record already sits.
+That is the blind spot. A payment is its matching pair, handed to the payer and forwarded to its recipient, so at close the recipient holds every payment it received. Outside the operator being checked, no other party does, and no verifier can do better than the recipient's own record. A receipt delivered to no one has injured no one who relied on it. The protocol puts the completeness check where the complete record already sits.
 
 The challenge window turns a preconfirmation from a promise into evidence. Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
 
@@ -245,9 +235,9 @@ The challenge window turns a preconfirmation from a promise into evidence. Throu
 
 [Spec §E](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#e-receipt-challenges) gives the exact checked-arithmetic and fork predicates.
 
-Each challenge is intentionally one-shot. Unlike an interactive optimistic-rollup dispute game, a holder does not bisect an execution trace or exchange several rounds of responses. It submits the signed pair and the bounded authenticated openings that expose the contradiction. The chain checks fixed signature, arithmetic, and Merkle predicates in one call. The protocol keeps that surface small by making the fraud proof about receipts, not arbitrary execution.
+Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call. The fraud proof is about receipts, not arbitrary execution, which is what keeps that surface small.
 
-The higher-tip challenge combines three sources. The settlement chain provides the admitted header and its $\mathsf{ChangeRoot}$. The availability service provides the authenticated account and component lookups that open $b$ and then $\kappa_0$. The recipient provides the signed pair it retained privately. One bounded onchain call combines those lookups and that pair.
+The higher-tip challenge combines three sources in one bounded onchain call. The settlement chain provides the admitted header and its $\mathsf{ChangeRoot}$. The availability service provides the authenticated account and component lookups that open $b$ and then $\kappa_0$. The recipient provides the signed pair it retained privately.
 
 $$
 \begin{aligned}
@@ -314,7 +304,7 @@ If the admitted pipeline extends $\mathsf{rt}_z$ through $\mathsf{rt}_\ell$, whe
 
 Queueing changes neither custody nor a state root. Clean front finalization atomically releases withdrawals, consumes deposits, advances the finalized root, and decrements custody.
 
-The operator can stop serving payments, but it cannot unilaterally spend deployment funds or veto a valid withdrawal. The settlement chain carries the request through clean finalization or terminal unwind.
+The operator can stop serving payments, but it cannot unilaterally spend deployment funds.
 
 [Spec §F](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#f-settlement-transitions-exit-and-terminal-unwind) gives the complete queueing and terminal-payout predicates.
 
@@ -529,15 +519,13 @@ That narrower relation buys compression by giving up generality. Bajillion is an
 
 Its privacy benefit is data minimization: superseded pairs can stay out of ordinary public settlement. Every payment remains known to its payer, recipient, and operator, as well as any watchtower they involve. The persistent chain state contains commitments. The retrievable public corpus reveals the exact changed-account states, each account's terminal outgoing pair when it sent, and each receive component's terminal pair.
 
-For an accepted pair in a conforming close, ordinary disclosure is exact: the pair appears in the public corpus if and only if it is one of those terminals. A holder challenge may reveal a superseded pair later. The public account deltas, receipt counts, and terminal pairs still leak activity. The protocol provides no anonymity, amount hiding, or privacy from the operator and counterparties.
+For an accepted pair in a conforming close, ordinary disclosure is exact: the pair appears in the public corpus if and only if it is one of those terminals. A holder challenge may reveal a superseded pair later. The public account deltas, receipt counts, and terminal pairs still leak activity, and the protocol provides no anonymity or amount hiding.
 
 The reference deployment binds one asset. Supporting more requires separate deployments or an asset-indexed extension.
 
-No validity mode removes the availability assumptions. The public corpus must stay retrievable, and holders must retain their own evidence through the challenge window. Retained receipts police the close, while recovering custody at a finalized root needs only the public corpus. Enforcement begins at admission, so preconfirmation holders bear operator default until their epoch admits.
+No validity mode removes the availability assumptions. The public corpus must stay retrievable, and holders must retain their own evidence through the challenge window. Retained receipts police the close, while recovering custody needs only publicly retained data: the corpus and the survivor state preimage. Enforcement begins at admission, so preconfirmation holders bear operator default until their epoch admits.
 
-Users retain a unilateral path: queue a signed withdrawal, prove that it is affordable at the finalized root and every admitted successor, and permanently fence new work if it remains unreleased at its deadline. Failure containment is coarse. A proven receipt contradiction or expired withdrawal kills the affected deployment, and terminal unwind needs the complete authenticated survivor state. Users receive no separate enforceable exit object for every payment, route, or account branch.
-
-The normal path relies on the operator's online service, while custody remains on the settlement chain. Exceptional failures affect the entire deployment. In return, the close nets across counterparties and follows changed account state. General-purpose rollup execution and per-payment channel exits are outside its scope.
+Users keep the unilateral withdrawal path, but failure containment is coarse. A proven receipt contradiction or expired withdrawal kills the affected deployment, and terminal unwind needs the complete authenticated survivor state. Users receive no separate enforceable exit object for every payment, route, or account branch. In return, the close nets across counterparties and follows changed account state. General-purpose rollup execution and per-payment channel exits are outside its scope.
 
 ## A Bajillion Payments, One Close
 
@@ -549,13 +537,13 @@ $$
 \text{rows }A+\text{heads }H+\text{frontier }\Phi.
 $$
 
-A close must pass complete public validation. The one-shot challenge covers what no validity mode can establish: that the operator's signed receipts, disclosed or not, contain no contradiction. An included call that observes an overdue queued withdrawal fences new work. The admitted prefix must still resolve, and terminal unwind requires the complete survivor state.
+A close must pass complete public validation. An included call that observes an overdue queued withdrawal fences new work. The admitted prefix must still resolve, and terminal unwind requires the complete survivor state.
 
 For repeated activity over a fixed changed-account and component footprint, $(A+H+\Phi)/T\to 0$. Unchanged subtrees cost one frontier digest apiece no matter how many accounts they hold, and receive components keep a hot recipient from becoming a shared online counter. Every changed account and represented component still contributes to the close. Account-level clearing compresses repetition, not change.
 
-Within one operator-backed service and settlement-chain custody system, and for users recovering from public data alone, these are the trust model's floors. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt its epoch issued, or a single retained pair proves the fault.
+Within one operator-backed service and chain custody, and for users recovering from public data alone, these are the trust model's floors. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault.
 
-Cheap settlement bottoms out at the changed state itself. No design whose users recover from public data alone can make less available. This close adds only each account's terminal pairs: the outgoing pair when it sent and one per receive component. It also adds the frontier that splices the change into the registry.
+Cheap settlement bottoms out at the changed state itself, since no design whose users recover from public data alone can make less available. This close adds only each account's terminal pairs: the outgoing pair when it sent and one per receive component. It also adds the frontier that splices the change into the registry.
 
 Sign every payment. Settle each changed account once.
 
