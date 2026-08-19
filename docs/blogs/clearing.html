@@ -323,69 +323,73 @@ O’Grady</a></div>
         <h2 id="one-exact-close">One Exact Close</h2>
         <p>Commit <span class="math inline">\mathbf A_e</span> under
         <span class="math inline">\mathsf{ChangeRoot}_e</span>, a Merkle
-        root that binds the exact row count and every row in order. The
-        paired sparse witness reconstructs the opening and closing roots
-        together over the row positions <span
-        class="math inline">\mathcal J_e</span>. Each row supplies its
-        opening and closing leaf, while every omitted subtree
-        contributes one authenticated digest to both sides, collected as
-        the sparse frontier <span class="math inline">\Phi_e</span>.
-        Successful verification proves every omitted position unchanged
-        and every row position changed to exactly its committed close.
-        An account changes if and only if it has a row.</p>
-        <p>The settlement chain retains a header <span
-        class="math inline">\mathsf{Header}_e</span> containing the
-        opening <span class="math inline">\mathsf{StateRoot}_e</span>,
-        <span class="math inline">\mathsf{ChangeRoot}_e</span>, and
-        closing <span
-        class="math inline">\mathsf{StateRoot}_{e+1}</span>, together
-        with the quorum certificate. Admission receives the terminal
-        changed row and its Merkle opening separately, authenticates the
-        row against <span
-        class="math inline">\mathsf{ChangeRoot}_e</span>, checks its
-        aggregate prefixes, and retains neither.</p>
+        root that binds the exact row count and every row in order:</p>
+        <p><span class="math display">
+        \mathbf A_e
+        \xrightarrow{\ \mathsf{Merkle}\ }
+        \mathsf{ChangeRoot}_e.
+        </span></p>
         <p>A <span class="math inline">\mathsf{StateRoot}</span> commits
         every field in the complete account-state vector <span
-        class="math inline">X</span>. The component vectors, remaining
-        changed rows, and paired exact-update witness stay outside the
-        chain payload as an authenticated corpus <span
+        class="math inline">X</span>. Suppose the registry holds eight
+        accounts, our four changed ones scattered among four
+        untouched:</p>
+        <p><span class="math display">
+        X^0=\bigl(X_a^0,\;X_b^0,\;\cdot,\;X_c^0,\;\cdot,\;\cdot,\;X_d^0,\;\cdot\bigr)
+        \xrightarrow{\ \mathsf{Merkle}\ }
+        \mathsf{StateRoot}_e.
+        </span></p>
+        <p>Recomputing that root from scratch would touch all eight
+        accounts, and a real registry holds a million. The paired sparse
+        witness instead collapses each untouched subtree into one digest
+        <span class="math inline">\Phi_i</span>, its Merkle root, no
+        matter how many accounts it covers. Both roots then reconstruct
+        in one pass, every changed account supplying its opening and
+        closing leaf while the shared frontier <span
+        class="math inline">\Phi_e=(\Phi_1,\Phi_2,\Phi_3)</span> fills
+        everything else:</p>
+        <p><span class="math display">
+        \begin{aligned}
+        \mathsf{StateRoot}_e&amp;\xleftarrow{\ \mathsf{Merkle}\
+        }\bigl(X_a^0,\;X_b^0,\;\Phi_1,\;X_c^0,\;\Phi_2,\;X_d^0,\;\Phi_3\bigr),\\[0.3em]
+        \mathsf{StateRoot}_{e+1}&amp;\xleftarrow{\ \mathsf{Merkle}\
+        }\bigl(X_a^1,\;X_b^1,\;\Phi_1,\;X_c^1,\;\Phi_2,\;X_d^1,\;\Phi_3\bigr).
+        \end{aligned}
+        </span></p>
+        <div class="image-caption">
+        <p>Figure 2: One witness recomputes both roots from the same
+        material. Each changed account supplies its paired leaves, <span
+        class="math inline">X^0</span> on the opening side and <span
+        class="math inline">X^1</span> on the closing side, while each
+        untouched subtree contributes one shared digest (<span
+        class="math inline">\Phi_2</span> covers two accounts at once).
+        Identical frontiers on both sides prove every omitted account
+        unchanged.</p>
+        </div>
+        <p>Successful verification proves every omitted position
+        unchanged and every row position changed to exactly its
+        committed close. An account changes if and only if it has a
+        row.</p>
+        <p>The settlement chain retains only a header:</p>
+        <p><span class="math display">
+        \mathsf{Header}_e=\bigl(\mathsf{StateRoot}_e,\;\mathsf{ChangeRoot}_e,\;\mathsf{StateRoot}_{e+1},\;D_e,\;C_e,\;F_e,\;W_e,\;\ldots\bigr).
+        </span></p>
+        <p>The totals are the terminal row’s prefix: gross debit <span
+        class="math inline">D_e</span>, credit <span
+        class="math inline">C_e</span>, deposits <span
+        class="math inline">F_e</span>, and withdrawals <span
+        class="math inline">W_e</span>, with the row, record, and head
+        counts alongside. Admission receives the terminal changed row
+        and its Merkle opening separately, authenticates the row against
+        <span class="math inline">\mathsf{ChangeRoot}_e</span>, checks
+        its aggregate prefixes, and retains neither. The component
+        vectors, remaining changed rows, and paired witness stay off the
+        chain as an authenticated corpus <span
         class="math inline">\mathcal D_e</span> that must remain
         retrievable through the challenge deadline <span
         class="math inline">\Delta_e</span>. <a
         href="https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#d-closing-an-epoch">Spec
         §D</a> tabulates the evidence lifetimes.</p>
-        <p><span class="math display">
-        \begin{aligned}
-        \mathbf Y_b
-        &amp;=\bigl((\kappa_0,20,1),(\kappa_1,4,1),(\kappa_2,6,1)\bigr),\\
-        \mathbf Y_b
-        &amp;\xrightarrow{\ \mathsf{Merkle}\ }
-        \mathsf{HeadRoot}_e(b)
-        \hookrightarrow \mathsf{Row}_b,\\
-        \mathbf A_e
-        &amp;\xrightarrow{\ \mathsf{Merkle}\ }
-        \mathsf{ChangeRoot}_e.
-        \end{aligned}
-        </span></p>
-        <p>Here <span class="math inline">\hookrightarrow</span> places
-        the head root inside <span
-        class="math inline">\mathsf{Row}_b</span>. The same row vector
-        drives the full-state update:</p>
-        <p><span class="math display">
-        \underbrace{\mathsf{StateRoot}_e}_{\mathsf{Commit}(X^0)}
-        \xrightarrow[\displaystyle
-          k\notin\mathcal J_e\Rightarrow X_k^1=X_k^0]
-        {\displaystyle \mathbf A_e,\,\Phi_e}
-        \underbrace{\mathsf{StateRoot}_{e+1}}_{\mathsf{Commit}(X^1)}.
-        </span></p>
-        <div class="image-caption">
-        <p>Figure 2: Terminal component heads feed exact changed-account
-        rows, which form <span
-        class="math inline">\mathsf{ChangeRoot}_e</span>. Those rows and
-        sparse frontier <span class="math inline">\Phi_e</span> then
-        transform the opening full-state commitment into the closing one
-        while proving every omitted position unchanged.</p>
-        </div>
         <p>Write <span class="math inline">T</span> for accepted
         payments, <span class="math inline">A</span> for changed-account
         rows, <span class="math inline">H=H_e=\sum_a h_a</span> for
@@ -408,10 +412,7 @@ O’Grady</a></div>
         operator-signed receipts, whether those receipts are private or
         part of the disclosed corpus.</p>
         <p>For sorted rows, the authenticated prefixes telescope to
-        total debit <span class="math inline">D_e</span>, credit <span
-        class="math inline">C_e</span>, deposits <span
-        class="math inline">F_e</span>, and withdrawals <span
-        class="math inline">W_e</span>. The deposit total and withdrawal
+        exactly the header’s totals. The deposit total and withdrawal
         record count must reproduce the chain-sealed boundary, each
         withdrawal must cover at least its sealed record, and the totals
         must respect the close caps and conserve payments:</p>

@@ -128,39 +128,44 @@ $$
 
 ## One Exact Close
 
-Commit $\mathbf A_e$ under $\mathsf{ChangeRoot}_e$, a Merkle root that binds the exact row count and every row in order. The paired sparse witness reconstructs the opening and closing roots together over the row positions $\mathcal J_e$. Each row supplies its opening and closing leaf, while every omitted subtree contributes one authenticated digest to both sides, collected as the sparse frontier $\Phi_e$. Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
+Commit $\mathbf A_e$ under $\mathsf{ChangeRoot}_e$, a Merkle root that binds the exact row count and every row in order:
 
-The settlement chain retains a header $\mathsf{Header}_e$ containing the opening $\mathsf{StateRoot}_e$, $\mathsf{ChangeRoot}_e$, and closing $\mathsf{StateRoot}_{e+1}$, together with the quorum certificate. Admission receives the terminal changed row and its Merkle opening separately, authenticates the row against $\mathsf{ChangeRoot}_e$, checks its aggregate prefixes, and retains neither.
+$$
+\mathbf A_e
+\xrightarrow{\ \mathsf{Merkle}\ }
+\mathsf{ChangeRoot}_e.
+$$
 
-A $\mathsf{StateRoot}$ commits every field in the complete account-state vector $X$. The component vectors, remaining changed rows, and paired exact-update witness stay outside the chain payload as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$. [Spec §D](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#d-closing-an-epoch) tabulates the evidence lifetimes.
+A $\mathsf{StateRoot}$ commits every field in the complete account-state vector $X$. Suppose the registry holds eight accounts, our four changed ones scattered among four untouched:
+
+$$
+X^0=\bigl(X_a^0,\;X_b^0,\;\cdot,\;X_c^0,\;\cdot,\;\cdot,\;X_d^0,\;\cdot\bigr)
+\xrightarrow{\ \mathsf{Merkle}\ }
+\mathsf{StateRoot}_e.
+$$
+
+Recomputing that root from scratch would touch all eight accounts, and a real registry holds a million. The paired sparse witness instead collapses each untouched subtree into one digest $\Phi_i$, its Merkle root, no matter how many accounts it covers. Both roots then reconstruct in one pass, every changed account supplying its opening and closing leaf while the shared frontier $\Phi_e=(\Phi_1,\Phi_2,\Phi_3)$ fills everything else:
 
 $$
 \begin{aligned}
-\mathbf Y_b
-&=\bigl((\kappa_0,20,1),(\kappa_1,4,1),(\kappa_2,6,1)\bigr),\\
-\mathbf Y_b
-&\xrightarrow{\ \mathsf{Merkle}\ }
-\mathsf{HeadRoot}_e(b)
-\hookrightarrow \mathsf{Row}_b,\\
-\mathbf A_e
-&\xrightarrow{\ \mathsf{Merkle}\ }
-\mathsf{ChangeRoot}_e.
+\mathsf{StateRoot}_e&\xleftarrow{\ \mathsf{Merkle}\ }\bigl(X_a^0,\;X_b^0,\;\Phi_1,\;X_c^0,\;\Phi_2,\;X_d^0,\;\Phi_3\bigr),\\[0.3em]
+\mathsf{StateRoot}_{e+1}&\xleftarrow{\ \mathsf{Merkle}\ }\bigl(X_a^1,\;X_b^1,\;\Phi_1,\;X_c^1,\;\Phi_2,\;X_d^1,\;\Phi_3\bigr).
 \end{aligned}
 $$
 
-Here $\hookrightarrow$ places the head root inside $\mathsf{Row}_b$. The same row vector drives the full-state update:
-
-$$
-\underbrace{\mathsf{StateRoot}_e}_{\mathsf{Commit}(X^0)}
-\xrightarrow[\displaystyle
-  k\notin\mathcal J_e\Rightarrow X_k^1=X_k^0]
-{\displaystyle \mathbf A_e,\,\Phi_e}
-\underbrace{\mathsf{StateRoot}_{e+1}}_{\mathsf{Commit}(X^1)}.
-$$
-
 ::: {.image-caption}
-Figure 2: Terminal component heads feed exact changed-account rows, which form $\mathsf{ChangeRoot}_e$. Those rows and sparse frontier $\Phi_e$ then transform the opening full-state commitment into the closing one while proving every omitted position unchanged.
+Figure 2: One witness recomputes both roots from the same material. Each changed account supplies its paired leaves, $X^0$ on the opening side and $X^1$ on the closing side, while each untouched subtree contributes one shared digest ($\Phi_2$ covers two accounts at once). Identical frontiers on both sides prove every omitted account unchanged.
 :::
+
+Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row.
+
+The settlement chain retains only a header:
+
+$$
+\mathsf{Header}_e=\bigl(\mathsf{StateRoot}_e,\;\mathsf{ChangeRoot}_e,\;\mathsf{StateRoot}_{e+1},\;D_e,\;C_e,\;F_e,\;W_e,\;\ldots\bigr).
+$$
+
+The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and head counts alongside. Admission receives the terminal changed row and its Merkle opening separately, authenticates the row against $\mathsf{ChangeRoot}_e$, checks its aggregate prefixes, and retains neither. The component vectors, remaining changed rows, and paired witness stay off the chain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$. [Spec §D](https://github.com/commonwarexyz/monorepo/blob/main/pipeline/bajillion/README.md#d-closing-an-epoch) tabulates the evidence lifetimes.
 
 Write $T$ for accepted payments, $A$ for changed-account rows, $H=H_e=\sum_a h_a$ for terminal receive-component heads, $\Phi=|\Phi_e|$ for sparse-frontier hashes, and $N$ for registered account positions.
 
@@ -170,7 +175,7 @@ $H$ is the price of receive concurrency. More components remove online contentio
 
 A close cannot enter the pending queue until admission has checked the public data for malformation and exactness. Challenges handle a different problem: contradictions among operator-signed receipts, whether those receipts are private or part of the disclosed corpus.
 
-For sorted rows, the authenticated prefixes telescope to total debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
+For sorted rows, the authenticated prefixes telescope to exactly the header's totals. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
 
 $$
 \boxed{D_e=C_e.}
