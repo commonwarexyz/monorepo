@@ -36,9 +36,6 @@ pub(crate) struct DiffEntry<F: Family, V> {
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
 /// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
-/// Every method that reads the committed DB first checks that the database is on this
-/// chain's own states and refuses with [`crate::qmdb::Error::StaleRead`] otherwise (see
-/// [`crate::qmdb::batch_chain`]).
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
 where
@@ -450,9 +447,8 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized, since merkleization collects their state through the
-    /// live chain. Dropping one earlier causes data loss detected at `apply_batch` time.
-    /// Once merkleized, a batch retains everything it needs on its own.
+    /// descendant of it) is merkleized. Once merkleized, a batch retains everything it
+    /// needs on its own.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
         H: Hasher<Digest = D>,

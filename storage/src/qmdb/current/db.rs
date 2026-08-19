@@ -1538,7 +1538,7 @@ mod tests {
                         .write(hot, Some(child_write))
                 };
 
-            // Path A, today's order. Merkleize while the parent is pending.
+            // Path A. Merkleize while the parent is still pending.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
             let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
@@ -1546,7 +1546,7 @@ mod tests {
             // Apply the parent.
             let (db, _) = db.apply_batch(parent.clone()).await.unwrap();
 
-            // Path B, the resume order. An identical child reads and merkleizes
+            // Path B. An identical child reads and merkleizes
             // against the post-apply database.
             let child_post = build(&parent);
             let read_post = child_post.get(&untouched, &db).await.unwrap();

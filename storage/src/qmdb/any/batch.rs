@@ -2635,9 +2635,8 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized, since merkleization collects their state through the
-    /// live chain. Dropping one earlier causes data loss detected at `apply_batch` time.
-    /// Once merkleized, a batch retains everything it needs on its own.
+    /// descendant of it) is merkleized. Once merkleized, a batch retains everything it
+    /// needs on its own.
     #[tracing::instrument(
         name = "qmdb.any.batch.new.from_batch",
         level = "debug",
@@ -3748,8 +3747,7 @@ mod tests {
     }
 
     /// A compatible child batch must read and merkleize identically whether its
-    /// ancestor is still pending or already applied. This is the property that
-    /// lets a paused verification resume against post-apply state.
+    /// ancestor is still pending or already applied.
     #[test]
     fn merkleize_after_compatible_ancestor_apply_matches() {
         let runner = deterministic::Runner::default();
@@ -3807,8 +3805,8 @@ mod tests {
                     .write(hot, Some(child_write))
             };
 
-            // Path A, today's order. The child merkleizes while its parent is
-            // pending. Capture its root and a fallback read of a key no batch in
+            // Path A. The child merkleizes while its parent is still pending.
+            // Capture its root and a fallback read of a key no batch in
             // the chain touches, which resolves from committed state.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
@@ -3818,7 +3816,7 @@ mod tests {
             // Apply the parent.
             let (db, _) = db.apply_batch(parent.clone()).await.unwrap();
 
-            // Path B, the resume order. An identical child reads and merkleizes
+            // Path B. An identical child reads and merkleizes
             // against the post-apply database.
             let child_post = build(&parent);
             let read_post = child_post.get(&untouched, &db).await.unwrap();

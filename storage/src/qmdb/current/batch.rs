@@ -312,9 +312,9 @@ where
 /// is rejected with [`Error::StaleBatch`] without mutating committed state (see
 /// [`crate::qmdb::batch_chain`]).
 ///
-/// Extending a batch after `apply_batch` has consumed it (building a child off the
-/// just-applied parent) is valid. The committed bitmap now equals the parent's post-apply
-/// state, so child reads are consistent.
+/// Building a child off a batch that `apply_batch` has consumed (the just-applied
+/// parent) is valid. The committed bitmap then equals the parent's post-apply state,
+/// so child reads are consistent.
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
@@ -798,8 +798,6 @@ where
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
 ///
-/// Callers re-mint `current_db` at the current-db type after gating on the inner db.
-/// The `&db` borrow held since entry keeps the commitment fresh, so that mint cannot fail.
 #[allow(clippy::type_complexity)]
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
@@ -1093,12 +1091,11 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// descendant of it) is merkleized.
     ///
-    /// Extending a stale parent is allowed. The child's reads, merkleization, and apply are
-    /// refused ([`Error::StaleRead`], [`Error::StaleBatch`]) while the database remains off
-    /// this chain's states.
+    /// Creating a child from a stale parent is allowed. The child's reads, merkleization,
+    /// and apply are refused ([`Error::StaleRead`], [`Error::StaleBatch`]) while the
+    /// database remains off this chain's states.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S>
     where
         H: Hasher<Digest = D>,
@@ -1161,7 +1158,7 @@ where
     ///
     /// The returned batch is rooted at the current committed prefix, but it is not a persistent
     /// snapshot across later divergent commits. If some other branch is applied afterward,
-    /// reading through it (or a child extended from it) refuses with [`Error::StaleRead`]
+    /// reading through it (or a descendant of it) refuses with [`Error::StaleRead`]
     /// and applying it is rejected with [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
         let grafted = self.grafted_snapshot();

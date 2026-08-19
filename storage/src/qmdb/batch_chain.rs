@@ -34,7 +34,7 @@ use std::{
 /// committed read through the chain.
 ///
 /// Committed-read helpers take this instead of a bare database reference, so a read path
-/// that skips the check fails to compile. It can only be minted by [`Bounds::on_chain`]
+/// that skips the check fails to compile. It is only created by [`Bounds::on_chain`]
 /// and [`Commitment::on_chain`]. Holding the wrapped reference also freezes the database
 /// for the duration of the call. Every state mutation takes the database by value, so no
 /// apply, prune, or rewind can interleave with a checked read.
