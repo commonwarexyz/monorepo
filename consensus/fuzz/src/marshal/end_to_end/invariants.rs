@@ -346,26 +346,33 @@ pub(super) fn check_certificate_backfill_retry<P: commonware_cryptography::Publi
 }
 
 /// Run block-ordering and agreement invariants.
-pub(super) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
+///
+/// `floor` is the height every honest node started from (0 for genesis-started
+/// clusters); it anchors [`check_in_order`]'s first-delivery check.
+pub(crate) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
     honest_apps: &[(usize, AuditedApplication<D, P>)],
     genesis: Sha256Digest,
+    floor: Height,
     stack: Option<&str>,
 ) {
     let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
-        check_local_blocks(*idx, app, genesis, stack);
+        check_local_blocks(*idx, app, genesis, floor, stack);
     }
     agreement(honest_apps, stack);
 }
 
 /// Run block-ordering and parent-linkage invariants for one node.
-pub(super) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
+///
+/// `floor` is the height the node started from (0 for a genesis-started node).
+pub(crate) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
     idx: usize,
     app: &AuditedApplication<D, P>,
     genesis: Sha256Digest,
+    floor: Height,
     stack: &str,
 ) {
-    check_in_order(idx, &app.delivered(), stack);
+    check_in_order(idx, &app.delivered(), floor, stack);
     check_parent_linkage(idx, &app.blocks(), genesis, stack);
 }
 
@@ -373,7 +380,7 @@ pub(super) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
 ///
 /// [`check_in_order`] runs first and guarantees that after exact duplicate
 /// deliveries are collapsed, the by-height snapshot is one contiguous chain.
-fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
+pub(crate) fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
     idx: usize,
     blocks: &AuditedBlocks<D, P>,
     genesis: Sha256Digest,
@@ -473,18 +480,31 @@ pub(super) fn check_pending_acks<B: Block>(
 
 /// Invariant: per-node in-order, gap-free delivery.
 ///
-/// Walks the arrival-ordered delivery log. Delivery starts either at the
-/// genesis floor block (height 0, surfaced on a fresh start) or at the first
-/// finalized container (height 1), then every subsequent delivery must advance
-/// by exactly one or repeat the identical `(height, digest)`. Because delivery
-/// is at-least-once, any number of exact duplicates is allowed; an out-of-order
-/// delivery, gap, or same-height fork fails the check.
-fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], stack: &str) {
+/// Walks the arrival-ordered delivery log. The first delivery must be either
+/// height 0 (the anchor block surfaced on a fresh start) or the node's floor
+/// height: a genesis-started node has floor 0, whose first finalized container
+/// is height 1, while a node started from a floor at height `H` (via
+/// `Start::Floor` or `set_floor`) delivers that anchor block at `H` first. Every
+/// subsequent delivery must advance by exactly one or repeat the identical
+/// `(height, digest)`. Because delivery is at-least-once, any number of exact
+/// duplicates is allowed; an out-of-order delivery, gap, or same-height fork
+/// fails the check.
+fn check_in_order<D: Debug + PartialEq>(
+    idx: usize,
+    delivered: &[(Height, D)],
+    floor: Height,
+    stack: &str,
+) {
+    // A genesis-started node (floor 0) accepts a first delivery at height 0 or
+    // 1; a node started above genesis at floor `H` accepts 0 or `H`. `max(1)`
+    // keeps the genesis floor's anchor at 1, so genesis nodes behave exactly as
+    // before.
+    let anchor = floor.get().max(1);
     let first = delivered.first().map_or(0, |(height, _)| height.get());
     assert!(
-        first <= 1,
-        "node{idx} first delivery at height {first} is above the genesis floor + 1; \
-         sequence={delivered:?}; stack={stack}",
+        first == 0 || first == anchor,
+        "node{idx} first delivery at height {first} is neither genesis (0) nor the floor \
+         anchor {anchor}; sequence={delivered:?}; stack={stack}",
     );
     for window in delivered.windows(2) {
         let (height_0, digest_0) = &window[0];
@@ -519,7 +539,7 @@ fn check_in_order<D: Debug + PartialEq>(idx: usize, delivered: &[(Height, D)], s
 ///
 /// This detects conflicting finalization, fork divergence, and recovery that
 /// delivers a different block at an already observed height.
-fn agreement<B: Block<Digest = Sha256Digest>>(
+pub(crate) fn agreement<B: Block<Digest = Sha256Digest>>(
     honest_apps: &[(usize, Application<B>)],
     stack: &str,
 ) {
@@ -703,6 +723,7 @@ mod tests {
                 (Height::new(1), digest(0xA)),
                 (Height::new(2), digest(0xB)),
             ],
+            Height::zero(),
             "test",
         );
     }
@@ -716,6 +737,7 @@ mod tests {
                 (Height::new(1), digest(0xA)),
                 (Height::new(1), digest(0xA)),
             ],
+            Height::zero(),
             "test",
         );
     }
@@ -726,6 +748,7 @@ mod tests {
         check_in_order(
             0,
             &[(Height::new(1), digest(0xA)), (Height::new(1), digest(0xB))],
+            Height::zero(),
             "test",
         );
     }
@@ -736,6 +759,65 @@ mod tests {
         check_in_order(
             0,
             &[(Height::new(1), digest(0xA)), (Height::new(3), digest(0xB))],
+            Height::zero(),
+            "test",
+        );
+    }
+
+    #[test]
+    fn floor_started_delivery_from_floor_is_allowed() {
+        // A node started from a floor at height 5 delivers its anchor block at
+        // height 5 first, then advances contiguously.
+        check_in_order(
+            0,
+            &[
+                (Height::new(5), digest(0xA)),
+                (Height::new(6), digest(0xB)),
+                (Height::new(7), digest(0xC)),
+            ],
+            Height::new(5),
+            "test",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "in-order delivery")]
+    fn floor_started_gap_above_floor_is_rejected() {
+        // First delivery at the floor is accepted; the jump to height 7 skips 6.
+        check_in_order(
+            0,
+            &[(Height::new(5), digest(0xA)), (Height::new(7), digest(0xB))],
+            Height::new(5),
+            "test",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "floor anchor")]
+    fn floor_started_delivery_below_floor_is_rejected() {
+        // A node with floor 5 must not deliver first below its floor.
+        check_in_order(
+            0,
+            &[(Height::new(3), digest(0xA)), (Height::new(4), digest(0xB))],
+            Height::new(5),
+            "test",
+        );
+    }
+
+    #[test]
+    fn genesis_started_delivery_is_unchanged() {
+        // Floor 0 accepts a first delivery at genesis (0) or the first finalized
+        // container (1), exactly as before the floor generalization.
+        check_in_order(
+            0,
+            &[(Height::zero(), digest(0xA)), (Height::new(1), digest(0xB))],
+            Height::zero(),
+            "test",
+        );
+        check_in_order(
+            0,
+            &[(Height::new(1), digest(0xA)), (Height::new(2), digest(0xB))],
+            Height::zero(),
             "test",
         );
     }

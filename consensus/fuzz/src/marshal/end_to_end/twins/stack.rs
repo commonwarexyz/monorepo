@@ -22,7 +22,7 @@ use commonware_consensus::{
     Automaton, CertifiableAutomaton, Relay, Reporter,
     marshal::{
         Config, Start, Update,
-        core::{Actor, Mailbox},
+        core::{Actor, Buffer, Mailbox},
         mocks::{
             application::Application,
             block::Block as MockBlock,
@@ -49,6 +49,7 @@ use commonware_p2p::{
     simulated::{Config as NetworkConfig, Network as SimulatedNetwork, Oracle},
 };
 use commonware_parallel::Sequential;
+use commonware_resolver::TargetedResolver;
 use commonware_runtime::{
     Clock, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -343,6 +344,39 @@ impl<P: Simplex> Validator<P> {
             .expect("marshal resolver must be installed before actor startup");
         actor.start(reporter, self.buffer.clone(), resolver);
     }
+
+    /// Removes the installed resolver so a caller can wrap it (for example in an
+    /// observing adapter) before starting the actor with [`Self::start_with_buffer`].
+    pub(crate) fn take_resolver(&mut self) -> MarshalResolver<P> {
+        self.resolver
+            .take()
+            .expect("marshal resolver must be installed before actor startup")
+    }
+
+    /// Starts the actor with a caller-supplied resolver (for example one wrapping
+    /// the real resolver taken via [`Self::take_resolver`]) and broadcast buffer
+    /// (for example a recording wrapper around the real buffer), so a scenario can
+    /// observe the fetches and blocks the marshal issues. The `handler::Receiver`
+    /// half of the resolver tuple must be the one the real resolver engine feeds.
+    pub(crate) fn start_with_buffer<R, Buf>(
+        &mut self,
+        reporter: impl Reporter<Activity = Update<B<P>>>,
+        resolver: (handler::Receiver<Sha256Digest>, R),
+        buffer: Buf,
+    ) where
+        R: TargetedResolver<
+                Key = handler::Key<Sha256Digest>,
+                Subscriber = handler::Annotation,
+                PublicKey = PublicKeyOf<P>,
+            >,
+        Buf: Buffer<Standard<B<P>>, PublicKey = PublicKeyOf<P>>,
+    {
+        let actor = self
+            .actor
+            .take()
+            .expect("marshal actor must be started exactly once");
+        actor.start(reporter, buffer, resolver);
+    }
 }
 
 pub(crate) fn genesis_block<P: Simplex>(leader: PublicKeyOf<P>) -> B<P> {
@@ -392,12 +426,18 @@ pub(crate) async fn setup_network_links<P: Simplex>(
     }
 }
 
+/// `resolver` overrides the marshal backfill resolver: `None` registers the
+/// backfill channel and builds the standard P2P resolver here; `Some` uses a
+/// caller-built pair (the caller has already registered the backfill channel,
+/// and the wedge does not apply to it).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_validator<P: Simplex>(
     context: deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    genesis: B<P>,
+    start: Start<SchemeOf<P>, Sha256Digest, B<P>>,
+    resolver: Option<MarshalResolver<P>>,
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
 ) -> Validator<P> {
@@ -411,7 +451,7 @@ pub(crate) async fn setup_validator<P: Simplex>(
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-        start: Start::Genesis(genesis),
+        start,
         mailbox_size: NZUsize!(100),
         view_retention: ViewDelta::new(10),
         max_repair: NZUsize!(10),
@@ -426,30 +466,36 @@ pub(crate) async fn setup_validator<P: Simplex>(
         strategy: Sequential,
     };
     let control = oracle.control(validator.clone());
-    let (backfill_sender, backfill_receiver) = control.register(1, TEST_QUOTA).await.unwrap();
-    let backfill = (
-        backfill_sender,
-        WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
-            backfill_receiver,
-            wedge.clone(),
-            WedgeChannel::MarshalBackfill,
-        ),
-    );
-    let resolver = resolver::init(
-        context.child("resolver"),
-        resolver::Config {
-            public_key: validator.clone(),
-            peer_provider: oracle.manager(),
-            blocker: oracle.control(validator.clone()),
-            mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        },
-        backfill,
-    );
+    let resolver = match resolver {
+        Some(resolver) => resolver,
+        None => {
+            let (backfill_sender, backfill_receiver) =
+                control.register(1, TEST_QUOTA).await.unwrap();
+            let backfill = (
+                backfill_sender,
+                WedgeReceiver::<SchemeOf<P>, Sha256Digest, B<P>, _>::new(
+                    backfill_receiver,
+                    wedge.clone(),
+                    WedgeChannel::MarshalBackfill,
+                ),
+            );
+            resolver::init(
+                context.child("resolver"),
+                resolver::Config {
+                    public_key: validator.clone(),
+                    peer_provider: oracle.manager(),
+                    blocker: oracle.control(validator.clone()),
+                    mailbox_size: config.mailbox_size,
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+                backfill,
+            )
+        }
+    };
 
     let (broadcast_engine, buffer) = buffered::Engine::new(
         context.child("broadcast"),
@@ -605,6 +651,59 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
     A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
     R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {
+    start_engine_with_floor::<P, EC, A, R>(
+        context,
+        oracle,
+        validator,
+        scheme,
+        elector,
+        automaton,
+        relay,
+        mailbox,
+        Floor::Genesis(genesis),
+        partition,
+        forwarding,
+        vote,
+        certificate,
+        resolver,
+    );
+}
+
+/// Like [`start_engine`], but starts the Simplex engine from an explicit floor.
+///
+/// A [`Floor::Finalized`] floor lets a cluster begin consensus above a
+/// prefabricated finalization instead of genesis, so a scripted marshal prefix
+/// can drive nodes to an interesting state before the engine takes over.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
+    context: deterministic::Context,
+    oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+    validator: PublicKeyOf<P>,
+    scheme: SchemeOf<P>,
+    elector: EC,
+    automaton: A,
+    relay: R,
+    mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
+    floor: Floor<SchemeOf<P>, Sha256Digest>,
+    partition: String,
+    forwarding: commonware_consensus::simplex::ForwardingPolicy,
+    vote: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver: (
+        impl Sender<PublicKey = PublicKeyOf<P>>,
+        impl Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+) where
+    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
+    R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
+{
     let engine = Engine::new(
         context.child("engine"),
         config::Config {
@@ -617,7 +716,7 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
             partition,
             mailbox_size: NZUsize!(1024),
             epoch: Epoch::zero(),
-            floor: Floor::Genesis(genesis),
+            floor,
             leader_timeout: LEADER_TIMEOUT,
             certification_timeout: CERTIFICATION_TIMEOUT,
             timeout_retry: Duration::from_secs(10),

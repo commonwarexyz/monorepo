@@ -20,6 +20,8 @@ pub mod network;
 pub mod ordered_broadcast;
 #[cfg(feature = "mocks")]
 pub mod ordered_broadcast_certificate_mock;
+#[cfg(feature = "mocks")]
+pub mod scenarios;
 pub mod simplex;
 pub(crate) mod simplex_audit;
 #[cfg(feature = "mocks")]

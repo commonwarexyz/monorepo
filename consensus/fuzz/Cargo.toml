@@ -51,6 +51,20 @@ tracing-subscriber.workspace = true
 proptest.workspace = true
 
 [[bin]]
+name = "marshal_scenario_standard_deferred_cert_mock"
+path = "fuzz_targets/marshal_scenario_standard_deferred_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_scenario_standard_inline_cert_mock"
+path = "fuzz_targets/marshal_scenario_standard_inline_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_elector"
 path = "fuzz_targets/simplex_elector.rs"
 test = false

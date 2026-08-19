@@ -398,7 +398,7 @@ where
         }
 
         // Optionally send mutated vote
-        if self.context.random_bool(0.5) {
+        if self.strategy.emit_byte_corruption() && self.context.random_bool(0.5) {
             let mutated = self.mutate_bytes(&msg);
             let _ = sender.send(Recipients::All, mutated, true);
         }
@@ -479,7 +479,7 @@ where
         }
 
         // Optionally send mutated certificate
-        if self.context.random_bool(0.5) {
+        if self.strategy.emit_byte_corruption() && self.context.random_bool(0.5) {
             let cert = self
                 .strategy
                 .mutate_certificate_bytes(self.context.as_mut(), &msg);
@@ -492,7 +492,7 @@ where
             return;
         }
         // Optionally send malformed resolver data
-        if self.context.random_bool(0.5) {
+        if self.strategy.emit_byte_corruption() && self.context.random_bool(0.5) {
             let mutated = self
                 .strategy
                 .mutate_resolver_bytes(self.context.as_mut(), &msg);
