@@ -2478,6 +2478,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-allocator",
  "commonware-bench",
  "commonware-codec",
  "commonware-conformance",
