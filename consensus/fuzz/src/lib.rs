@@ -57,7 +57,7 @@ use commonware_consensus::{
         mocks::{application, relay, reporter, twins},
         types::{Activity, Certificate, Context as SimplexContext, Vote},
     },
-    types::{Delta, Epoch, TermLength, View},
+    types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     PublicKey as CryptoPublicKey, Sha256, certificate::Verifier, sha256::Digest as Sha256Digest,
@@ -179,6 +179,12 @@ impl Configuration {
     /// A valid configuration is required for the protocol to make progress in periods of synchrony (liveness).
     pub fn is_valid(&self) -> bool {
         self.faults <= bounds::max_faults(self.n) && self.n == self.faults + self.correct
+    }
+
+    /// Returns true when every quorum intersection contains an honest
+    /// participant, so certificate-derived safety invariants are meaningful.
+    pub fn can_finalize(&self) -> bool {
+        self.faults <= bounds::max_faults(self.n)
     }
 }
 
@@ -460,6 +466,10 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub term_length: TermLength,
+    /// Sampled but not yet handed to engines (see `PINNED_OPTIMISTIC_VIEWS`).
+    pub optimistic_views: ViewDelta,
+    /// Sampled but not yet handed to engines (see `PINNED_OPTIMISTIC_VIEWS`).
+    pub heterogeneous_optimism: bool,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -522,6 +532,9 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=5)?));
+        let optimistic_views =
+            ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
+        let heterogeneous_optimism = u.arbitrary()?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -596,6 +609,8 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             term_length,
+            optimistic_views,
+            heterogeneous_optimism,
             strategy,
             messaging_faults: Vec::new(),
             mailbox_size,
@@ -646,6 +661,24 @@ struct RunAudit {
     reporter_states: BTreeMap<String, types::ReporterReplicaStateData>,
     happens_before: Option<happens_before::Summary>,
 }
+
+/// Largest fuzzed optimistic-view value: the domain `[0, term_length + 2]`
+/// covers 0 (optimistic validation disabled), the term-length boundary, and
+/// values beyond the term length, which production accepts but caps.
+fn max_optimistic_views(term_length: TermLength) -> u64 {
+    term_length.get() + 2
+}
+
+/// Optimistic lookahead wired into engines and reference electors.
+///
+/// Pinned to zero: the entry-evidence invariants (contiguous certificate
+/// progression, certified notarization parents, per-vote entry evidence)
+/// assume non-optimistic view entry, and a run truncated inside an optimistic
+/// issuance window would trip them without a real violation. The fuzzed
+/// [`FuzzInput::optimistic_views`] and [`FuzzInput::heterogeneous_optimism`]
+/// dimensions stay in the input format but are not handed to engines until
+/// those invariants understand optimism.
+pub(crate) const PINNED_OPTIMISTIC_VIEWS: ViewDelta = ViewDelta::zero();
 
 pub(crate) type NetworkChannels<P> = (
     (
@@ -1811,7 +1844,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         participants,
         scheme,
         validator,
-        P::elector(term_length),
+        P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
         relay,
         leader_timeout,
         certification_timeout,
@@ -2376,7 +2409,7 @@ fn run_standard_once<P: simplex::Simplex>(
                     &participants,
                     schemes[i].clone(),
                     validator.clone(),
-                    P::elector(term_length),
+                    P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -2457,7 +2490,7 @@ fn run_standard_once<P: simplex::Simplex>(
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(
                 config.faults as usize,
-                P::elector(term_length),
+                P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
                 Epoch::new(EPOCH),
                 term_length,
                 &reporter_only,
@@ -2478,8 +2511,8 @@ fn run_standard_once<P: simplex::Simplex>(
                 reporter_states: reporter_states.unwrap_or_default(),
                 happens_before: hb_summary,
             });
-            let states = invariants::extract(reporter_only);
-            invariants::check::<P>(term_length, states);
+            let states = invariants::extract(reporter_only, config.n as usize);
+            invariants::check::<P>(config, term_length, states);
             audit
         } else {
             None
@@ -2576,7 +2609,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     &participants,
                     schemes[i].clone(),
                     validator,
-                    P::elector(term_length),
+                    P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -2635,7 +2668,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     &participants,
                     schemes[i].clone(),
                     validator.clone(),
-                    P::elector(term_length),
+                    P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -2654,7 +2687,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     &participants,
                     schemes[i].clone(),
                     validator.clone(),
-                    P::elector(term_length),
+                    P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
                     relay.clone(),
                     Duration::from_secs(1),
                     Duration::from_secs(2),
@@ -2745,12 +2778,12 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         };
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
-            P::elector(term_length),
+            P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
             Epoch::new(EPOCH),
             term_length,
             &summary_reporters,
         );
-        invariants::check::<P>(term_length, reporter_only.as_slice());
+        invariants::check::<P>(config, term_length, reporter_only.as_slice());
         if let Some(index) = omitted_reporter {
             // The finalizer wait excludes the victim, so a recovery whose
             // trigger is already in its log can still be in flight between
@@ -2928,13 +2961,13 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(
                 config.faults as usize,
-                P::elector(term_length),
+                P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
                 Epoch::new(EPOCH),
                 term_length,
                 &reporter_only,
             );
-            let states = invariants::extract(reporter_only);
-            invariants::check::<P>(term_length, states);
+            let states = invariants::extract(reporter_only, config.n as usize);
+            invariants::check::<P>(config, term_length, states);
         }
     });
 }
@@ -3210,7 +3243,11 @@ pub(crate) async fn run_twins_with_backend<P, B>(
     );
     let compromised = case.compromised.iter().copied().collect::<HashSet<_>>();
     let topology = TwinsTopology {
-        elector: twins::Elector::new(P::elector(term_length), &case.scenario, participants.len()),
+        elector: twins::Elector::new(
+            P::elector(term_length, PINNED_OPTIMISTIC_VIEWS),
+            &case.scenario,
+            participants.len(),
+        ),
         scenario: case.scenario,
         compromised,
         term_length,
@@ -3932,9 +3969,13 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                 honest_reporters.len(),
                 "every correct Twins reporter must record in audit mode"
             );
-            invariants::check::<P>(topology.term_length, recordings.as_slice());
+            invariants::check::<P>(config, topology.term_length, recordings.as_slice());
         } else {
-            invariants::check::<P>(topology.term_length, invariants::extract(honest_summaries));
+            invariants::check::<P>(
+                config,
+                topology.term_length,
+                invariants::extract(honest_summaries, config.n as usize),
+            );
         }
     }
 }
@@ -4564,6 +4605,8 @@ mod tests {
             raw_bytes: 0u64.to_be_bytes().to_vec(),
             required_containers: MIN_REQUIRED_CONTAINERS,
             term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
+            heterogeneous_optimism: false,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

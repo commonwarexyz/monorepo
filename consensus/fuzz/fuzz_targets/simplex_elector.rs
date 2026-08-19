@@ -6,7 +6,7 @@ use commonware_consensus::{
         elector::{self, Elector, Random, RoundRobin},
         scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
     },
-    types::{Round, TermLength, View},
+    types::{Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     Sha256, Signer,
@@ -72,17 +72,22 @@ fuzz_target!(|input: FuzzInput| {
         FuzzElector::RoundRobin(term_length) => {
             let elector = match term_length.get() {
                 1 => RoundRobin::<Sha256>::default(),
-                _ => {
-                    RoundRobin::<Sha256>::default().with_term(*term_length, Duration::from_secs(12))
-                }
+                _ => RoundRobin::<Sha256>::default().with_term(
+                    *term_length,
+                    Duration::from_secs(12),
+                    ViewDelta::new(0),
+                ),
             };
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }
         FuzzElector::RoundRobinShuffled(seed, term_length) => {
             let elector = match term_length.get() {
                 1 => RoundRobin::<Sha256>::shuffled(seed),
-                _ => RoundRobin::<Sha256>::shuffled(seed)
-                    .with_term(*term_length, Duration::from_secs(12)),
+                _ => RoundRobin::<Sha256>::shuffled(seed).with_term(
+                    *term_length,
+                    Duration::from_secs(12),
+                    ViewDelta::new(0),
+                ),
             };
             fuzz::<ed25519::Scheme, _>(&input, elector, None);
         }

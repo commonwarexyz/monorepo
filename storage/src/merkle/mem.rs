@@ -169,10 +169,18 @@ impl<F: Family, D: Digest> Mem<F, D> {
         Location::try_from(self.size()).expect("invalid merkle size")
     }
 
+    /// Return the leaf location pruning has been performed up to, or 0 if never pruned.
+    ///
+    /// Nodes below this location are dropped except for those pinned for root computation and
+    /// proof generation, which [`Self::get_node`] still returns.
+    pub fn pruning_boundary(&self) -> Location<F> {
+        Location::try_from(self.pruning_boundary).expect("valid pruning_boundary")
+    }
+
     /// Returns `[start, end)` where `start` is the oldest retained leaf and `end` is the total
     /// leaf count.
     pub fn bounds(&self) -> Range<Location<F>> {
-        Location::try_from(self.pruning_boundary).expect("valid pruning_boundary")..self.leaves()
+        self.pruning_boundary()..self.leaves()
     }
 
     /// Return a new iterator over the peaks.
@@ -470,7 +478,6 @@ impl<F: Family, D: Digest> Mem<F, D> {
 impl<F: Family, D: Digest> Readable for Mem<F, D> {
     type Family = F;
     type Digest = D;
-    type Error = Error<F>;
 
     fn size(&self) -> Position<F> {
         self.size()
@@ -478,10 +485,6 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         self.get_node(pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        Location::try_from(self.pruning_boundary).expect("valid pruning_boundary")
     }
 }
 

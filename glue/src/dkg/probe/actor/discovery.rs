@@ -2,6 +2,7 @@ use super::service::Service;
 use crate::{
     dkg::{
         ReshareBlock,
+        network::Manager,
         probe::{ActorArtifact, Artifact, mailbox::Message, wire},
         types::{EpochInfo, Participants, Payload},
     },
@@ -18,7 +19,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Manager, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
@@ -68,7 +69,10 @@ where
 pub(super) struct Discovery<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -80,8 +84,13 @@ where
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) manager: M,
     pub(super) bootstrap_participants: Participants<S::PublicKey>,
+    pub(super) bootstrap_directory: <V::ApplicationBlock as ReshareBlock>::Directory,
     pub(super) verifier: S,
-    pub(super) genesis: EpochInfo<<V::ApplicationBlock as ReshareBlock>::Variant, S::PublicKey>,
+    pub(super) genesis: EpochInfo<
+        <V::ApplicationBlock as ReshareBlock>::Variant,
+        S::PublicKey,
+        <V::ApplicationBlock as ReshareBlock>::Directory,
+    >,
     pub(super) strategy: T,
     pub(super) blocker: B,
     pub(super) epocher: FixedEpocher,
@@ -96,7 +105,10 @@ where
 impl<E, M, S, V, T, B> Discovery<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    M: Manager<PublicKey = S::PublicKey>,
+    M: Manager<
+            PublicKey = S::PublicKey,
+            Directory = <V::ApplicationBlock as ReshareBlock>::Directory,
+        >,
     S: Scheme<V::Commitment>,
     V: Variant,
     V::ApplicationBlock: ReshareBlock,
@@ -141,8 +153,19 @@ where
                 return;
             } => match message {
                 Message::Subscribe { response } => {
-                    if self.subscribe(response, &mut boundary_sender) {
-                        deadline = self.context.current() + self.retry_timeout.get();
+                    match self.subscribe(response, &mut boundary_sender) {
+                        Ok(true) => {
+                            deadline = self.context.current() + self.retry_timeout.get();
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(
+                                epoch = %self.sample.minimum_epoch(),
+                                %error,
+                                "failed to activate bootstrap peer set, shutting down",
+                            );
+                            return;
+                        }
                     }
                 }
                 Message::Attach { marshal: attached } => {
@@ -186,10 +209,10 @@ where
         &mut self,
         response: oneshot::Sender<ActorArtifact<S, V>>,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) -> bool {
+    ) -> Result<bool, M::Error> {
         if let Some(artifact) = &self.artifact {
             response.send_lossy(artifact.clone());
-            return false;
+            return Ok(false);
         }
         let solicit = self.subscribers.is_empty() && self.sample.floor().is_none();
         self.subscribers.push(response);
@@ -201,13 +224,14 @@ where
             // deferred until discovery actually solicits: a node that never
             // bootstraps must not claim an ID above the epochs its
             // orchestrator still enters.
-            let _ = self.manager.track(
-                self.sample.minimum_epoch().get(),
+            self.manager.track(
+                self.sample.minimum_epoch(),
                 self.bootstrap_participants.tracked_peers(),
-            );
+                &self.bootstrap_directory,
+            )?;
             self.request_latest(boundary_sender);
         }
-        solicit
+        Ok(solicit)
     }
 
     /// Clears collected replies and solicits the configured committee's latest

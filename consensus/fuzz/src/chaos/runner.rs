@@ -233,7 +233,10 @@ async fn restart_durable<P: Simplex>(
         participants,
         scheme,
         validator,
-        P::elector(P::effective_term_length(input.term_length)),
+        P::elector(
+            P::effective_term_length(input.term_length),
+            crate::PINNED_OPTIMISTIC_VIEWS,
+        ),
         relay.clone(),
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -323,7 +326,9 @@ fn check_safety<P: Simplex>(
     // Audit-history invariants plus the basic replica-state suite over the
     // lossless per-node event logs. The logs live in the retained reporters,
     // so they hold at every step boundary, including while a node is down.
-    invariants::check::<P>(term_length, reporters);
+    // The chaos runner pins `input.configuration = N4F0C4` before spawning,
+    // so the safety suite always judges that configuration.
+    invariants::check::<P>(crate::N4F0C4, term_length, reporters);
 
     // Summary-map checks over the inner mock reporters. `summaries` also
     // asserts each log's append order and generation monotonicity.
@@ -341,7 +346,7 @@ fn check_safety<P: Simplex>(
     invariants::check_no_invalid_reports(&summaries);
     invariants::check_vote_invariants(
         0,
-        P::elector(term_length),
+        P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS),
         Epoch::new(crate::EPOCH),
         term_length,
         &summaries,
@@ -470,7 +475,7 @@ where
                 &participants,
                 schemes[i].clone(),
                 validator,
-                P::elector(term_length),
+                P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -685,6 +690,8 @@ mod tests {
             degraded_network: false,
             configuration: N4F0C4,
             term_length: TermLength::ONE,
+            optimistic_views: commonware_consensus::types::ViewDelta::zero(),
+            heterogeneous_optimism: false,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),

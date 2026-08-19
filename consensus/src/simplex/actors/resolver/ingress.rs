@@ -33,7 +33,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// Whether certification succeeded.
         success: bool,
     },
-    /// Fetch proposal ancestry from the leader that claimed it.
+    /// Fetch missing proposal ancestry.
     Resolve {
         /// The span carried with this message.
         span: Span,
@@ -43,8 +43,8 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         view: View,
         /// The certificate that is needed.
         kind: Kind,
-        /// Proposal leader to query.
-        target: S::PublicKey,
+        /// Preferred peer, or `None` to use ordinary resolver peer selection.
+        target: Option<S::PublicKey>,
     },
 }
 
@@ -231,8 +231,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Request proposal ancestry from its leader.
-    pub(crate) fn resolve(&mut self, proposal: View, view: View, kind: Kind, target: S::PublicKey) {
+    /// Requests missing proposal ancestry, preferring `target` when provided.
+    pub(crate) fn resolve(
+        &mut self,
+        proposal: View,
+        view: View,
+        kind: Kind,
+        target: Option<S::PublicKey>,
+    ) {
         let _ = self.sender.enqueue(MailboxMessage::Resolve {
             span: info_span!(
                 "simplex.resolver.mailbox.resolve",
@@ -458,7 +464,7 @@ mod tests {
             proposal,
             view,
             kind,
-            target: participants[0].clone(),
+            target: Some(participants[0].clone()),
         }
     }
 

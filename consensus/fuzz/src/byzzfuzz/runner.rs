@@ -352,7 +352,10 @@ where
                 &participants,
                 schemes[i].clone(),
                 validator,
-                P::elector(P::effective_term_length(input.term_length)),
+                P::elector(
+                    P::effective_term_length(input.term_length),
+                    crate::PINNED_OPTIMISTIC_VIEWS,
+                ),
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -600,7 +603,7 @@ where
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
         invariants::check_vote_invariants_with_byzantine(
             &byzantine,
-            P::elector(term_length),
+            P::elector(term_length, crate::PINNED_OPTIMISTIC_VIEWS),
             Epoch::new(EPOCH),
             term_length,
             &reporters,
@@ -615,8 +618,8 @@ where
             .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))
             .collect();
 
-        let states = invariants::extract(correct_reporters);
-        invariants::check::<P>(term_length, states);
+        let states = invariants::extract(correct_reporters, config.n as usize);
+        invariants::check::<P>(config, term_length, states);
     });
 }
 
@@ -637,6 +640,8 @@ mod tests {
             raw_bytes,
             required_containers: 2,
             term_length: TermLength::ONE,
+            optimistic_views: commonware_consensus::types::ViewDelta::zero(),
+            heterogeneous_optimism: false,
             degraded_network: false,
             configuration: N4F0C4,
             partition: Partition::Connected,

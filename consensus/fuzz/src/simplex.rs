@@ -10,7 +10,7 @@ use commonware_consensus::{
             secp256r1,
         },
     },
-    types::{Participant, Round, TermLength, View},
+    types::{Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     PublicKey, Sha256,
@@ -22,24 +22,27 @@ use commonware_cryptography::{
 use commonware_runtime::deterministic;
 use std::time::Duration;
 
-/// Returns a round-robin elector config for the fuzzed term length.
-pub(crate) fn round_robin(term_length: TermLength) -> RoundRobin {
+/// Returns a round-robin elector config for the fuzzed term length and
+/// optimistic lookahead (ignored for single-view terms, where it is a no-op).
+pub(crate) fn round_robin(term_length: TermLength, optimistic_views: ViewDelta) -> RoundRobin {
     if term_length.get() == 1 {
         RoundRobin::default()
     } else {
-        RoundRobin::default().with_term(term_length, Duration::from_secs(12))
+        RoundRobin::default().with_term(term_length, Duration::from_secs(12), optimistic_views)
     }
 }
 
 #[derive(Clone)]
 pub struct ByzantineFirstLeaderRoundRobin {
     term_length: TermLength,
+    optimistic_views: ViewDelta,
 }
 
 impl Default for ByzantineFirstLeaderRoundRobin {
     fn default() -> Self {
         Self {
             term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
         }
     }
 }
@@ -54,7 +57,7 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for ByzantineFirstLeaderRoundRobi
 
     fn build(self, participants: &commonware_utils::ordered::Set<S::PublicKey>) -> Self::Elector {
         Self::Elector {
-            fallback: round_robin(self.term_length).build(participants),
+            fallback: round_robin(self.term_length, self.optimistic_views).build(participants),
         }
     }
 }
@@ -75,12 +78,14 @@ impl<S: Scheme<Sha256Digest>> Elector<S> for ByzantineFirstLeaderElector<S> {
 #[derive(Clone)]
 pub struct CustomRoundRobinShuffled {
     term_length: TermLength,
+    optimistic_views: ViewDelta,
 }
 
 impl Default for CustomRoundRobinShuffled {
     fn default() -> Self {
         Self {
             term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
         }
     }
 }
@@ -94,7 +99,11 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for CustomRoundRobinShuffled {
         let config = if self.term_length.get() == 1 {
             config
         } else {
-            config.with_term(self.term_length, Duration::from_secs(12))
+            config.with_term(
+                self.term_length,
+                Duration::from_secs(12),
+                self.optimistic_views,
+            )
         };
         config.build(participants)
     }
@@ -125,7 +134,7 @@ where
 {
     type Scheme: Scheme<Sha256Digest>;
     type Elector: ElectorConfig<Self::Scheme>;
-    fn elector(term_length: TermLength) -> Self::Elector;
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector;
 
     /// Term length actually enforced by [`Self::elector`].
     ///
@@ -160,8 +169,8 @@ impl Simplex for SimplexEd25519 {
     type Scheme = ed25519::Scheme;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -184,8 +193,8 @@ impl Simplex for SimplexId {
 
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -213,8 +222,8 @@ impl Simplex for SimplexCertificateMock {
 
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -243,8 +252,11 @@ impl Simplex for SimplexCertificateMockByzantineFirstLeader {
 
     type Elector = ByzantineFirstLeaderRoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        ByzantineFirstLeaderRoundRobin { term_length }
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        ByzantineFirstLeaderRoundRobin {
+            term_length,
+            optimistic_views,
+        }
     }
 
     fn setup(
@@ -270,8 +282,11 @@ impl Simplex for SimplexEd25519CustomRoundRobin {
     type Scheme = ed25519::Scheme;
     type Elector = CustomRoundRobinShuffled;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        CustomRoundRobinShuffled { term_length }
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        CustomRoundRobinShuffled {
+            term_length,
+            optimistic_views,
+        }
     }
 
     fn setup(
@@ -293,8 +308,8 @@ impl Simplex for SimplexBls12381MultisigMinPk {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -316,8 +331,8 @@ impl Simplex for SimplexBls12381MultisigMinSig {
     type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -339,8 +354,8 @@ impl Simplex for SimplexBls12381MinPk {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -362,7 +377,7 @@ impl Simplex for SimplexBls12381MinPkCustomRandom {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = CustomRandomSelected;
 
-    fn elector(_term_length: TermLength) -> Self::Elector {
+    fn elector(_term_length: TermLength, _optimistic_views: ViewDelta) -> Self::Elector {
         CustomRandomSelected
     }
 
@@ -389,7 +404,7 @@ impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = Random;
 
-    fn elector(_term_length: TermLength) -> Self::Elector {
+    fn elector(_term_length: TermLength, _optimistic_views: ViewDelta) -> Self::Elector {
         Random
     }
 
@@ -416,8 +431,8 @@ impl Simplex for SimplexSecp256r1 {
     type Scheme = secp256r1::Scheme<Ed25519PublicKey>;
     type Elector = RoundRobin;
 
-    fn elector(term_length: TermLength) -> Self::Elector {
-        round_robin(term_length)
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
     }
 
     fn setup(
@@ -443,7 +458,7 @@ mod tests {
     };
     use commonware_consensus::{
         simplex::{ForwardingPolicy, mocks::application::Certifier},
-        types::{Epoch, Round, TermLength},
+        types::{Epoch, Round, TermLength, ViewDelta},
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::{NZU32, TryCollect, ordered::Set};
@@ -501,7 +516,11 @@ mod tests {
             .expect("public keys are unique");
         let term_length = TermLength::new(NZU32!(2));
         let elector: ByzantineFirstLeaderElector<id_mock::Scheme> =
-            ByzantineFirstLeaderRoundRobin { term_length }.build(&participants);
+            ByzantineFirstLeaderRoundRobin {
+                term_length,
+                optimistic_views: ViewDelta::zero(),
+            }
+            .build(&participants);
 
         assert_eq!(
             elector
@@ -530,6 +549,8 @@ mod tests {
             configuration: N4F1C3,
             required_containers: containers,
             term_length,
+            optimistic_views: ViewDelta::new(term_length.get()),
+            heterogeneous_optimism: true,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
@@ -578,6 +599,18 @@ mod tests {
             SEED,
             TEST_CONTAINERS,
             TermLength::ONE,
+        ));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_ed25519_stable_leader_connected() {
+        // Multi-view terms exercise the stable-leader path, unlike the
+        // TermLength::ONE tests above.
+        fuzz::<SimplexEd25519, Standard, CodeCoverage>(test_input(
+            SEED,
+            TEST_CONTAINERS,
+            TermLength::new(NZU32!(5)),
         ));
     }
 

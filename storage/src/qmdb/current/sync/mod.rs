@@ -27,7 +27,7 @@
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
+    index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable, fixed, variable},
@@ -62,7 +62,7 @@ use crate::{
             },
         },
         metrics::Metrics as AnyMetrics,
-        operation::{Committable, Key},
+        operation::Key,
         sync::{Database, DatabaseConfig as Config, FeedbackTx, Request, Response},
     },
     translator::Translator,
@@ -111,13 +111,13 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
 where
     F: Graftable,
     E: Context + Spawner,
-    U: Update + Send + Sync + 'static,
+    U: Update,
     I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
     T: Translator,
     J: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Codec + Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     // Build authenticated log.
     let merkle = Merkle::<F, _, _, S>::init_sync(
@@ -353,17 +353,17 @@ impl_current_sync_database!(
 
 /// A `current` database serves proofs from the `any` database it wraps. The sync engine
 /// operates on the ops root, which is `any`'s root.
-impl<F, E, U, C, I, H, const N: usize, S> crate::qmdb::sync::Source
+impl<F, E, C, I, H, U, const N: usize, S> crate::qmdb::sync::Source
     for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context,
-    U: Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<F, U>> + Send + Sync,
-    I: crate::index::Unordered<Value = Location<F>> + Send + Sync,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
-    Operation<F, U>: Codec + Send,
+    Operation<F, U>: Codec,
 {
     type Family = F;
     type Digest = H::Digest;
