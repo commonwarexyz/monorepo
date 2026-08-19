@@ -46,7 +46,7 @@ $$
 
 An **account** is a public-key identity registered with one deployment. An account may act as payer, recipient, or both.
 
-The **operator** is a single logical server. It serves online payments, maintains mutable execution state, signs receipts, and constructs each epoch close. The protocol trusts the operator for custody and service during normal operation and for nothing at settlement.
+The **operator** is a single logical server. It serves online payments, maintains mutable execution state, signs receipts, and constructs each epoch close. The protocol trusts the operator for online service during normal operation and for nothing at settlement. Custody stays on the settlement chain (Section B.3), and no withdrawal path runs through the operator (Section F.2).
 
 The **settlement chain** is an append-only state machine trusted for safety and liveness. It is authoritative for the account registry, custody, epoch boundaries, committed roots, deadlines, and transition order. It exposes a monotone authenticated time $t$, and it executes each included call atomically: a call either performs its complete effect or leaves state unchanged. Every transition of Section F is permissionless: any party that supplies the required inputs may invoke it. The chain's own consensus is outside this model.
 
