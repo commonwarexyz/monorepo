@@ -13,9 +13,11 @@ katex: true
 
 \$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet you'll need to make millions of them over the coming years.
 
-If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching an arbitrary counterparty means opening a new channel or negotiating with existing channels to let you route through them (without risking to grief via forced closure or taking too much of their liquidity). A payment rollup can compress what settles, but proof cost scales per payment and its preconfirmations are not binding and contestable.
+If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching an arbitrary counterparty means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). A payment rollup can compress what settles, but proof cost scales per payment and its preconfirmations are neither binding nor contestable.
 
-Bajillion is a simple, optimistic clearing protocol that does just enough to be useful. It supports many-to-many payments and settles them efficiently to any chain that can store a few kilobyte commitment. It offers payment preconfirmations as fast as browsing the web and serve as succinct proof for holding the system honest. If all breaks down or an account is censored, both senders and recipients can force recovery of their funds with one onchain challenge. No fancy cryptography or SNARK/STARK required.
+**Bajillion** is a simple, optimistic clearing protocol that does just enough to be useful. It supports many-to-many payments and settles them on any chain that can process a few-kilobyte commitment. Its preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. No SNARKs and no fancy cryptography: just signatures, Merkle openings, and one-shot challenges.
+
+Settlement cost follows the accounts that change, not the payments that move them. Make one payment or a bajillion: the close stays the same size. 
 
 ## One Signed Payment
 
