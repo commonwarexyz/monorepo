@@ -35,6 +35,7 @@ zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
 commonware-bench.workspace = true
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["test-utils"] }
@@ -118,6 +119,12 @@ required-features = ["test-traits"]
 name = "scale"
 harness = false
 path = "src/qmdb/benches/scale.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "trace_replay"
+harness = false
+path = "src/qmdb/benches/trace_replay.rs"
 required-features = ["test-traits"]
 
 [[bench]]
