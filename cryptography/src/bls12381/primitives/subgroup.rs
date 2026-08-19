@@ -807,7 +807,7 @@ mod tests {
     fn measure_accumulator() {
         use std::time::Instant;
         let mut rng = test_rng();
-        for n in [1000usize, 6000] {
+        for n in [1000usize, 6000, 100_000] {
             let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
             let affine = G1::batch_to_affine(&points);
             let mut ids = vec![0u8; n];
@@ -838,7 +838,7 @@ mod tests {
         let threads = available_parallelism().unwrap();
         let rayon = Rayon::new(threads).unwrap();
         println!("threads = {threads}");
-        for n in [200usize, 1000, 6000] {
+        for n in [200usize, 1000, 6000, 100_000] {
             let mut rng = test_rng();
             let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
             println!("n={n} plan={:?}", plan(n, combinations_for_security(128)));
@@ -851,6 +851,132 @@ mod tests {
             let start = Instant::now();
             assert!(batch_in_g1(&points, 128, &rayon, &mut test_rng()));
             println!("n={n} batch_parallel  = {:?}", start.elapsed());
+        }
+    }
+
+    /// Compare the shipping scheme (C) against the two alternatives from
+    /// `cryptography/BATCHED_SUBGROUP.md`, all on the same accumulation engine:
+    /// A is one combination per round (m = 1, 81 rounds); B is random bucketing
+    /// with every bucket sum exact-checked (shared-inversion steelman). Run with:
+    /// `cargo test -p commonware-cryptography --release --features bls12381 \
+    ///   subgroup::tests::measure_strategies -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn measure_strategies() {
+        use blst::blst_p1_affine_in_g1;
+        use commonware_parallel::Rayon;
+        use std::{thread::available_parallelism, time::Instant};
+
+        /// Strategy A/C with a forced width and round count.
+        fn forced(
+            points: &[G1],
+            m: u32,
+            rounds: usize,
+            strategy: &impl Strategy,
+            rng: &mut impl CryptoRng,
+        ) -> bool {
+            let affine = G1::batch_to_affine(points);
+            let mut trits = Trits::new(rng);
+            let id_sets: Vec<Vec<u8>> = (0..rounds)
+                .map(|_| (0..points.len()).map(|_| trits.bucket(m)).collect())
+                .collect();
+            strategy
+                .map_collect_vec_with_multiplier(id_sets.iter(), points.len(), |ids| {
+                    round_in_g1(&affine, ids, m)
+                })
+                .into_iter()
+                .all(|in_subgroup| in_subgroup)
+        }
+
+        /// Strategy B: `num_buckets` a power of two, every bucket sum checked.
+        fn bucketed(
+            points: &[G1],
+            num_buckets: usize,
+            rounds: usize,
+            strategy: &impl Strategy,
+            rng: &mut impl CryptoRng,
+        ) -> bool {
+            let affine = G1::batch_to_affine(points);
+            let mask = (num_buckets - 1) as u8;
+            let id_sets: Vec<Vec<u8>> = (0..rounds)
+                .map(|_| {
+                    let mut ids = vec![0u8; points.len()];
+                    rng.fill_bytes(&mut ids);
+                    for id in &mut ids {
+                        *id &= mask;
+                    }
+                    ids
+                })
+                .collect();
+            strategy
+                .map_collect_vec_with_multiplier(id_sets.iter(), points.len(), |ids| {
+                    sum_buckets(&affine, ids, num_buckets).iter().all(|sum| {
+                        // SAFETY: sum is a valid blst_p1_affine.
+                        affine_is_inf(sum) || unsafe { blst_p1_affine_in_g1(sum) }
+                    })
+                })
+                .into_iter()
+                .all(|in_subgroup| in_subgroup)
+        }
+
+        let threads = available_parallelism().unwrap();
+        let rayon = Rayon::new(threads).unwrap();
+        println!("threads = {threads}");
+        for n in [1000usize, 6000, 100_000] {
+            let mut rng = test_rng();
+            let points: Vec<G1> = (0..n).map(|_| in_subgroup_point(&mut rng)).collect();
+            let start = Instant::now();
+            assert!(points.iter().all(G1::in_subgroup));
+            println!("n={n} per_point serial = {:?}", start.elapsed());
+            // A: one combination per round, 81 rounds.
+            let start = Instant::now();
+            assert!(forced(&points, 1, 81, &Sequential, &mut test_rng()));
+            println!("n={n} A m=1 r=81   serial = {:?}", start.elapsed());
+            let start = Instant::now();
+            assert!(forced(&points, 1, 81, &rayon, &mut test_rng()));
+            println!("n={n} A m=1 r=81 parallel = {:?}", start.elapsed());
+            // B: buckets with per-bucket checks, rounds = ceil(128 / log2 B).
+            for (num_buckets, rounds) in [(16usize, 32usize), (64, 22), (256, 16)] {
+                let start = Instant::now();
+                assert!(bucketed(
+                    &points,
+                    num_buckets,
+                    rounds,
+                    &Sequential,
+                    &mut test_rng()
+                ));
+                println!(
+                    "n={n} B B={num_buckets:>3} r={rounds}   serial = {:?}",
+                    start.elapsed()
+                );
+                let start = Instant::now();
+                assert!(bucketed(
+                    &points,
+                    num_buckets,
+                    rounds,
+                    &rayon,
+                    &mut test_rng()
+                ));
+                println!(
+                    "n={n} B B={num_buckets:>3} r={rounds} parallel = {:?}",
+                    start.elapsed()
+                );
+            }
+            // C: the shipping scheme.
+            let start = Instant::now();
+            assert!(batch_in_g1(&points, 128, &Sequential, &mut test_rng()));
+            println!(
+                "n={n} C plan={:?} serial = {:?}",
+                plan(n, 81),
+                start.elapsed()
+            );
+            let start = Instant::now();
+            assert!(batch_in_g1(&points, 128, &rayon, &mut test_rng()));
+            println!(
+                "n={n} C plan={:?} parallel = {:?}",
+                plan(n, 81),
+                start.elapsed()
+            );
         }
     }
 }

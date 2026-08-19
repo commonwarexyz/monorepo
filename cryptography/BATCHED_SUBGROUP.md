@@ -128,11 +128,64 @@ routing the per-point fallback through the parallel strategy; C's 0.31 ms at
 n=100 comes from that routing, not from batching.
 
 Isolated accumulator throughput: 146–178 ns/point, flat across 27–243 buckets
-(confirming accumulation cost is independent of bucket count).
+and n up to 100 000 (confirming accumulation cost is independent of bucket
+count, with no cache cliff at large n).
+
+Same-engine strategy comparison (`measure_strategies` harness, single-shot; A
+and B are emulated on the shipped accumulation engine so the comparison
+isolates the strategy — blst's MSM engine runs A's passes ~15% faster):
+
+| n       | per-point | A (81 passes)   | B (best of 16/64/256) | C (shipping)          |
+|---------|-----------|-----------------|-----------------------|-----------------------|
+| 1 000   | 21.4 ms   | 15.5 / 2.38 ms  | 15.9 / 2.40 (B=16)    | **6.6 / 1.13 ms**     |
+| 6 000   | 126.5 ms  | 74.9 / 8.86 ms  | 40.1 / 4.49 (B=16)    | **22.4 / 3.62 ms**    |
+| 100 000 | 2 126 ms  | 1 249 / 138 ms  | 353 / 47.8 (B=256)    | **298 / 49.6 ms**     |
+
+(serial / parallel per cell.) C wins serially at every size — 7.1× over
+per-point and 4.2× over A at n=100 000 (42.8× parallel). One caveat: at
+n=100 000 parallel, B=256 ties C within noise. B's optimal bucket count grows
+with n, and C's width cap (`m ≤ 5`, u8 bucket ids) binds there — the model puts
+m=6 (u16 ids, 729 buckets) ~13% ahead at that size, a possible follow-up.
 
 External reference: zexe's own batched check (Strategy B with shared
 inversions, arkworks field arithmetic, pre-2021 `[r]P` per-bucket check)
 measured on this machine at n=8192: 207 ms naive → 30.7 ms batched parallel.
+
+## Related work
+
+The current state of the art in the literature is Koshelev–El Housni–Fotiadis,
+"Batch subgroup membership testing on pairing-friendly curves"
+([eprint 2025/1311](https://eprint.iacr.org/2025/1311), gnark-crypto-based Go
+implementation). Their construction is a two-step procedure: a per-point
+Tate-pairing/power-residue prefilter removes the small-torsion components
+(3- and 11-torsion on BLS12-381), after which the smallest remaining cofactor
+prime is 10177 and a few rounds of a 13-bit-coefficient RLC (one full MSM per
+round) reach the target. Points of comparison, from the paper itself:
+
+- They state the same barrier (soundness of one combination ≤ `1/p` for the
+  smallest cofactor prime `p`, i.e. 1/3 on BLS12-381) and the same multi-round
+  escape (`n = ⌈µ/log₂ m⌉` rounds of small coefficients), but their cost model
+  charges **one full MSM per round**, which is why they judge the multi-round
+  route impractical and reach for the prefilter instead.
+- **On BLS12-381 their end-to-end method is slower than naive per-point
+  checking on valid inputs** (their words: the first-stage Tate/residue checks
+  dominate; Step 2 alone would be 9.6–47× but is unsound without Step 1). Their
+  remedy is generating new curves (BLS12-376, a new BLS12-377) where the
+  prefilter shrinks — gaining 1.1–1.5× end-to-end, single-threaded, at a
+  2⁻⁶⁰ target (vs 2⁻¹²⁸ here).
+- Their multi-round variant (old BLS12-377, 60 rounds of `{0,1}` coefficients)
+  uses running-sum mixed additions; they name affine additions with
+  Montgomery batch inversion as *future work*. The cross-round vector-bucketing
+  used here — one accumulation pass serving all `m` combinations — does not
+  appear in the paper.
+
+Strategy C therefore fills exactly the gap their cost model assumes away: it
+makes the no-prefilter multi-combination route cost `⌈81/m⌉` passes instead of
+81 MSMs, which is what turns batch SMT on **unmodified BLS12-381** from "slower
+than naive" (their result) into 3.2–7.4× serial / 18–43× parallel (ours, at a
+stronger 2⁻¹²⁸ target). Their binary-coefficient variant also shows how C
+extends to even-cofactor curves (e.g. BLS12-377): use `{0,1}` coefficient
+vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
 
 ## Status
 
