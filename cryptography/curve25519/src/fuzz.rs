@@ -7,6 +7,8 @@ use arbitrary::{Arbitrary, Unstructured};
 pub enum Plan {
     /// Exercise the field and group arithmetic implementation.
     Curve(crate::curve::test::Plan),
+    /// Exercise invariants through the crate's public API.
+    Test(crate::test::fuzz::Plan),
 }
 
 impl Plan {
@@ -14,6 +16,7 @@ impl Plan {
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         match self {
             Self::Curve(plan) => plan.run(u),
+            Self::Test(plan) => plan.run(u),
         }
     }
 }

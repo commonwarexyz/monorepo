@@ -12,6 +12,24 @@ use rand_core::CryptoRng;
 pub(super) use scalar::Scalar;
 use sha2::{Digest, Sha512};
 
+/// The exact byte encoding used to identify an Ed25519 verifying key.
+///
+/// Batch verification hashes and groups keys by this encoding, then decompresses each distinct
+/// key in its point-processing phase.
+#[derive(Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct VerifyingKeyBytes([u8; 32]);
+
+impl VerifyingKeyBytes {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Computes `SHA-512(parts[0] || parts[1] || ...)`, the Ed25519 challenge hash `H(R || A || M)`.
 fn sha512(parts: &[&[u8]]) -> [u8; 64] {
     let mut hasher = Sha512::new();
@@ -63,7 +81,7 @@ fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
 /// a signer reused across the batch contributes one MSM term instead of one per signature, and
 /// operating on raw `[u8; 32]` keys (rather than decompressed points) means a repeated `A` is
 /// only ever decompressed once, not once per occurrence.
-fn group_ranges(sorted: &[([u8; 32], u32)]) -> Vec<(u32, u32)> {
+fn group_ranges(sorted: &[(VerifyingKeyBytes, u32)]) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     let mut start = 0;
     for i in 1..=sorted.len() {
@@ -100,8 +118,8 @@ struct ScalarBlock {
 /// same principle). This phase touches no curve points: it is uniform per signature regardless
 /// of how the batch's signers are distributed.
 fn scalar_phase(
-    items: &[(&[u8; 32], &Signature, &[u8])],
-    order: &[([u8; 32], u32)],
+    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    order: &[(VerifyingKeyBytes, u32)],
     seed: &[u8; 32],
     strategy: &impl Strategy,
 ) -> Option<(Vec<ScalarBlock>, Scalar)> {
@@ -122,7 +140,7 @@ fn scalar_phase(
                 valid = false;
                 continue;
             };
-            let digest = sha512(&[&sig.r, a_bytes, msg]);
+            let digest = sha512(&[&sig.r, a_bytes.as_bytes(), msg]);
             let h = Scalar::from_bytes_mod_order_wide(&digest);
             zh[j] = z.mul_mod_l(&h);
             zr[j] = z;
@@ -252,7 +270,7 @@ where
 fn verify_batch_inner<B: Backend>(
     backend: B,
     rng: &mut impl CryptoRng,
-    items: &[(&[u8; 32], &Signature, &[u8])],
+    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
     strategy: &impl Strategy,
 ) -> bool {
     let n = items.len();
@@ -275,7 +293,7 @@ fn verify_batch_inner<B: Backend>(
     // Including the original index in the sort key makes the order (and therefore the
     // position-derived coefficients) a deterministic function of the input, independent of the
     // sort algorithm.
-    let mut order: Vec<([u8; 32], u32)> = items
+    let mut order: Vec<(VerifyingKeyBytes, u32)> = items
         .iter()
         .enumerate()
         .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
@@ -317,7 +335,7 @@ fn verify_batch_inner<B: Backend>(
             resolve_r(i)
         } else {
             let group = groups[i - n];
-            (order[group.0 as usize].0, group_scalar(group))
+            (*order[group.0 as usize].0.as_bytes(), group_scalar(group))
         }
     };
     let Some(terms) = decompress_phase(backend, n + groups.len(), resolve, width, strategy) else {
@@ -331,7 +349,7 @@ fn verify_batch_inner<B: Backend>(
 
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
-    items: &'a [(&'b [u8; 32], &'b Signature, &'b [u8])],
+    items: &'a [(&'b VerifyingKeyBytes, &'b Signature, &'b [u8])],
     strategy: &'a S,
 }
 
@@ -345,7 +363,7 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
 
 fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
     rng: &mut R,
-    items: &[(&'a [u8; 32], &'a Signature, &'a [u8])],
+    items: &[(&'a VerifyingKeyBytes, &'a Signature, &'a [u8])],
     strategy: &S,
 ) -> bool {
     with_backend(VerifyBatchCall {
@@ -363,7 +381,7 @@ fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
 /// deduplicated `A` encodings join `R`'s per-signature encodings in the same decompression pass.
 pub(super) fn verify_batch_bytes<'a>(
     rng: &mut impl CryptoRng,
-    items: impl IntoIterator<Item = (&'a [u8; 32], &'a Signature, &'a [u8])>,
+    items: impl IntoIterator<Item = (&'a VerifyingKeyBytes, &'a Signature, &'a [u8])>,
     strategy: &impl Strategy,
 ) -> bool {
     let items: Vec<_> = items.into_iter().collect();
@@ -373,20 +391,21 @@ pub(super) fn verify_batch_bytes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrary::Unstructured;
+    use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::FuzzRng;
     use ed25519_consensus::SigningKey as RefSigningKey;
-    use rand_core::Rng;
 
     #[test]
     fn group_ranges_groups_adjacent_equal_keys() {
         let sorted = vec![
-            ([1u8; 32], 4),
-            ([1u8; 32], 0),
-            ([2u8; 32], 3),
-            ([3u8; 32], 1),
-            ([3u8; 32], 2),
-            ([3u8; 32], 5),
+            (VerifyingKeyBytes::new([1u8; 32]), 4),
+            (VerifyingKeyBytes::new([1u8; 32]), 0),
+            (VerifyingKeyBytes::new([2u8; 32]), 3),
+            (VerifyingKeyBytes::new([3u8; 32]), 1),
+            (VerifyingKeyBytes::new([3u8; 32]), 2),
+            (VerifyingKeyBytes::new([3u8; 32]), 5),
         ];
         assert_eq!(group_ranges(&sorted), vec![(0, 2), (2, 3), (3, 6)]);
     }
@@ -395,7 +414,10 @@ mod tests {
     fn group_ranges_handles_empty_and_no_duplicates() {
         assert!(group_ranges(&[]).is_empty());
 
-        let sorted = vec![([1u8; 32], 0), ([2u8; 32], 1)];
+        let sorted = vec![
+            (VerifyingKeyBytes::new([1u8; 32]), 0),
+            (VerifyingKeyBytes::new([2u8; 32]), 1),
+        ];
         assert_eq!(group_ranges(&sorted), vec![(0, 1), (1, 2)]);
     }
 
@@ -417,107 +439,7 @@ mod tests {
         );
     }
 
-    /// Generates `n` valid `(verifying key bytes, signature, message)` triples, signed by
-    /// independent keys over independent messages using the `ed25519-consensus` reference
-    /// implementation.
-    fn valid_batch(n: usize) -> Vec<([u8; 32], Signature, Vec<u8>)> {
-        let mut rng = test_rng();
-        (0..n)
-            .map(|i| {
-                let mut seed = [0u8; 32];
-                rng.fill_bytes(&mut seed);
-                let signing_key = RefSigningKey::from(seed);
-                let verifying_key = signing_key.verification_key().to_bytes();
-
-                let message = format!("message {i}").into_bytes();
-                let signature = signing_key.sign(&message);
-                let signature = Signature::from_bytes(signature.to_bytes());
-
-                (verifying_key, signature, message)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn verify_batch_bytes_accepts_valid_batch() {
-        let mut rng = test_rng();
-        for n in [0, 1, 2, 5, 64] {
-            let batch = valid_batch(n);
-            let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-            assert!(verify_batch_bytes(&mut rng, items, &Sequential));
-        }
-    }
-
-    #[test]
-    fn verify_batch_bytes_rejects_one_corrupted_signature() {
-        let mut rng = test_rng();
-        let mut batch = valid_batch(16);
-        batch[9].1.s[0] ^= 1;
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        assert!(!verify_batch_bytes(&mut rng, items, &Sequential));
-    }
-
-    #[test]
-    fn verify_batch_bytes_rejects_wrong_message() {
-        let mut rng = test_rng();
-        let mut batch = valid_batch(16);
-        batch[3].2 = b"a different message".to_vec();
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        assert!(!verify_batch_bytes(&mut rng, items, &Sequential));
-    }
-
-    #[test]
-    fn verify_batch_bytes_rejects_invalid_key_encoding() {
-        // `y = 2` has no corresponding curve point, so decompression must fail and reject the
-        // batch.
-        let mut rng = test_rng();
-        let batch = valid_batch(4);
-        let mut invalid = [0u8; 32];
-        invalid[0] = 2;
-        let items = batch
-            .iter()
-            .enumerate()
-            .map(|(i, (vk, sig, msg))| (if i == 2 { &invalid } else { vk }, sig, msg.as_slice()));
-        assert!(!verify_batch_bytes(&mut rng, items, &Sequential));
-    }
-
-    /// Generates `n` valid signatures from a single signer over `n` independent messages, the
-    /// workload key coalescing (see [`group_ranges`]) targets.
-    fn repeated_signer_batch(n: usize) -> Vec<([u8; 32], Signature, Vec<u8>)> {
-        let mut rng = test_rng();
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
-        let signing_key = RefSigningKey::from(seed);
-        let verifying_key = signing_key.verification_key().to_bytes();
-
-        (0..n)
-            .map(|i| {
-                let message = format!("message {i}").into_bytes();
-                let signature = signing_key.sign(&message);
-                let signature = Signature::from_bytes(signature.to_bytes());
-                (verifying_key, signature, message)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn verify_batch_bytes_accepts_repeated_signer() {
-        let mut rng = test_rng();
-        for n in [1, 2, 5, 16, 64] {
-            let batch = repeated_signer_batch(n);
-            let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-            assert!(verify_batch_bytes(&mut rng, items, &Sequential));
-        }
-    }
-
-    #[test]
-    fn verify_batch_bytes_rejects_one_corrupted_signature_from_repeated_signer() {
-        let mut rng = test_rng();
-        let mut batch = repeated_signer_batch(16);
-        batch[9].1.s[0] ^= 1;
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        assert!(!verify_batch_bytes(&mut rng, items, &Sequential));
-    }
+    type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);
 
     /// A batch of both independent signers and a repeated signer, spanning multiple scalar-phase
     /// chunks and decompression chunks, verified under `Manual` -- which disables the adaptive
@@ -526,37 +448,38 @@ mod tests {
     /// small. Every other test in this module uses `Sequential`, so these are the only ones
     /// exercising real concurrent execution of the sort, the scalar phase, the fused
     /// decompression pass, and the tile-parallel MSM end to end.
-    fn mixed_batch_with_repeats(n: usize) -> Vec<([u8; 32], Signature, Vec<u8>)> {
-        let mut rng = test_rng();
-        let mut seed = [0u8; 32];
-        rng.fill_bytes(&mut seed);
+    fn mixed_batch_with_repeats(
+        u: &mut Unstructured<'_>,
+        n: usize,
+    ) -> arbitrary::Result<Vec<BatchItem>> {
+        let seed: [u8; 32] = u.arbitrary()?;
         let repeated_signer = RefSigningKey::from(seed);
         let repeated_key = repeated_signer.verification_key().to_bytes();
 
         (0..n)
             .map(|i| {
-                let message = format!("message {i}").into_bytes();
+                let message = u.arbitrary::<[u8; 32]>()?.to_vec();
                 // Every third signature reuses `repeated_signer`, exercising `A`-term coalescing
                 // alongside the independent-signer common case.
-                if i % 3 == 0 {
+                let item = if i % 3 == 0 {
                     let signature = repeated_signer.sign(&message);
                     (
-                        repeated_key,
+                        VerifyingKeyBytes::new(repeated_key),
                         Signature::from_bytes(signature.to_bytes()),
                         message,
                     )
                 } else {
-                    let mut seed = [0u8; 32];
-                    rng.fill_bytes(&mut seed);
+                    let seed: [u8; 32] = u.arbitrary()?;
                     let signing_key = RefSigningKey::from(seed);
                     let verifying_key = signing_key.verification_key().to_bytes();
                     let signature = signing_key.sign(&message);
                     (
-                        verifying_key,
+                        VerifyingKeyBytes::new(verifying_key),
                         Signature::from_bytes(signature.to_bytes()),
                         message,
                     )
-                }
+                };
+                Ok(item)
             })
             .collect()
     }
@@ -566,24 +489,20 @@ mod tests {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
             .unwrap()
             .manual();
-        let mut rng = test_rng();
-        let batch = mixed_batch_with_repeats(600);
-
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        assert!(verify_batch_bytes(&mut rng, items, &strategy));
-    }
-
-    #[test]
-    fn verify_batch_bytes_rejects_corrupted_signature_under_real_parallelism() {
-        let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-            .unwrap()
-            .manual();
-        let mut rng = test_rng();
-        let mut batch = mixed_batch_with_repeats(600);
-        batch[400].1.s[0] ^= 1;
-
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        assert!(!verify_batch_bytes(&mut rng, items, &strategy));
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(4)
+            .test(|u| {
+                let rng_seed: [u8; 32] = u.arbitrary()?;
+                let batch = mixed_batch_with_repeats(u, 600)?;
+                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                assert!(verify_batch_bytes(
+                    &mut FuzzRng::new(rng_seed.to_vec()),
+                    items,
+                    &strategy,
+                ));
+                Ok(())
+            });
     }
 
     /// Batch verification's execution is a deterministic function of `(items, seed)` (see
@@ -595,16 +514,25 @@ mod tests {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
             .unwrap()
             .manual();
-        let mut batch = mixed_batch_with_repeats(300);
-        batch[123].1.s[0] ^= 1;
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(4)
+            .test(|u| {
+                let rng_seed: [u8; 32] = u.arbitrary()?;
+                let mut batch = mixed_batch_with_repeats(u, 300)?;
+                batch[123].1.s[0] ^= 1;
 
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        let serial = verify_batch_bytes(&mut test_rng(), items, &Sequential);
+                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                let serial =
+                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), items, &Sequential);
 
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        let parallel = verify_batch_bytes(&mut test_rng(), items, &strategy);
+                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                let parallel =
+                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), items, &strategy);
 
-        assert!(!serial);
-        assert_eq!(serial, parallel);
+                assert!(!serial);
+                assert_eq!(serial, parallel);
+                Ok(())
+            });
     }
 }

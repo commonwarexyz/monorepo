@@ -90,7 +90,7 @@ impl SigningKey {
             .to_extended()
             .scalar_mul_secret(&scalar_le_bytes);
         let verifying_key = VerifyingKey {
-            bytes: point.to_bytes(),
+            bytes: core::VerifyingKeyBytes::new(point.to_bytes()),
             point: Some(point),
         };
 
@@ -100,6 +100,37 @@ impl SigningKey {
             scalar: *scalar,
             verifying_key,
         }
+    }
+
+    fn sign_message(&self, msg: &[u8]) -> Signature {
+        let nonce_digest: Zeroizing<[u8; 64]> = Zeroizing::new(
+            sha2::Sha512::new()
+                .chain(self.prefix.as_slice())
+                .chain(msg)
+                .finalize_fixed()
+                .into(),
+        );
+        let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
+        let nonce_bytes = Zeroizing::new(nonce.to_bytes());
+        let r_bytes = GAffine::BASEPOINT
+            .to_extended()
+            .scalar_mul_secret(&nonce_bytes)
+            .to_bytes();
+
+        let challenge_digest: [u8; 64] = sha2::Sha512::new()
+            .chain(r_bytes)
+            .chain(self.verifying_key.bytes.as_bytes())
+            .chain(msg)
+            .finalize_fixed()
+            .into();
+        let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
+        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
+        let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
+
+        let mut bytes = [0u8; 64];
+        bytes[..32].copy_from_slice(&r_bytes);
+        bytes[32..].copy_from_slice(&s_bytes);
+        Signature { bytes }
     }
 }
 
@@ -157,35 +188,13 @@ impl SigningKey {
     /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let msg = union_unique(namespace, msg);
+        self.sign_message(&msg)
+    }
 
-        let nonce_digest: Zeroizing<[u8; 64]> = Zeroizing::new(
-            sha2::Sha512::new()
-                .chain(self.prefix.as_slice())
-                .chain(&msg)
-                .finalize_fixed()
-                .into(),
-        );
-        let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
-        let nonce_bytes = Zeroizing::new(nonce.to_bytes());
-        let r_bytes = GAffine::BASEPOINT
-            .to_extended()
-            .scalar_mul_secret(&nonce_bytes)
-            .to_bytes();
-
-        let challenge_digest: [u8; 64] = sha2::Sha512::new()
-            .chain(r_bytes)
-            .chain(self.verifying_key.bytes)
-            .chain(&msg)
-            .finalize_fixed()
-            .into();
-        let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
-        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
-        let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
-
-        let mut bytes = [0u8; 64];
-        bytes[..32].copy_from_slice(&r_bytes);
-        bytes[32..].copy_from_slice(&s_bytes);
-        Signature { bytes }
+    /// Signs an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn sign_raw(&self, msg: &[u8]) -> Signature {
+        self.sign_message(msg)
     }
 }
 
@@ -196,7 +205,7 @@ pub struct VerifyingKey {
     ///
     /// When deserializing, we just have the bytes, deferring parsing of them until
     /// signature verification, so that we can more efficiently parse them in batch.
-    bytes: [u8; 32],
+    bytes: core::VerifyingKeyBytes,
     /// If available, the point associated with these bytes.
     point: Option<G>,
 }
@@ -229,25 +238,25 @@ impl Hash for VerifyingKey {
 
 impl Debug for VerifyingKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(&self.bytes))
+        write!(f, "{}", Hex(self.bytes.as_bytes()))
     }
 }
 
 impl Display for VerifyingKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(&self.bytes))
+        write!(f, "{}", Hex(self.bytes.as_bytes()))
     }
 }
 
 impl AsRef<[u8]> for VerifyingKey {
     fn as_ref(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_bytes()
     }
 }
 
 impl Write for VerifyingKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.write(buf);
+        self.bytes.as_bytes().write(buf);
     }
 }
 
@@ -260,7 +269,7 @@ impl Read for VerifyingKey {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
+            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
             point: None,
         })
     }
@@ -270,18 +279,14 @@ impl Read for VerifyingKey {
 impl arbitrary::Arbitrary<'_> for VerifyingKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            bytes: u.arbitrary()?,
+            bytes: core::VerifyingKeyBytes::new(u.arbitrary()?),
             point: None,
         })
     }
 }
 
-// Public methods.
 impl VerifyingKey {
-    /// Verifies `sig` over the namespaced message, per the [module's validation
-    /// criteria](self).
-    #[must_use]
-    pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+    fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
         let r_bytes: [u8; 32] = sig.bytes[..32].try_into().expect("signature is 64 bytes");
         let s_bytes: [u8; 32] = sig.bytes[32..].try_into().expect("signature is 64 bytes");
         let Some(s) = Scalar::from_canonical_bytes(&s_bytes) else {
@@ -293,18 +298,17 @@ impl VerifyingKey {
         let a = match self.point {
             Some(point) => point,
             None => {
-                let Some(point) = GAffine::decompress(&self.bytes) else {
+                let Some(point) = GAffine::decompress(self.bytes.as_bytes()) else {
                     return false;
                 };
                 point.to_extended()
             }
         };
 
-        let msg = union_unique(namespace, msg);
         let digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
-            .chain(self.bytes)
-            .chain(&msg)
+            .chain(self.bytes.as_bytes())
+            .chain(msg)
             .finalize_fixed()
             .into();
         let k = Scalar::from_bytes_mod_order_wide(&digest);
@@ -314,6 +318,23 @@ impl VerifyingKey {
         sb.add(ka.add_mixed(r).negate())
             .mul_by_cofactor()
             .is_identity()
+    }
+}
+
+// Public methods.
+impl VerifyingKey {
+    /// Verifies `sig` over the namespaced message, per the [module's validation
+    /// criteria](self).
+    #[must_use]
+    pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+        let msg = union_unique(namespace, msg);
+        self.verify_message(&msg, sig)
+    }
+
+    /// Verifies an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn verify_raw(&self, msg: &[u8], sig: &Signature) -> bool {
+        self.verify_message(msg, sig)
     }
 }
 
@@ -370,9 +391,19 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
+/// Inputs retained for batch verification.
+///
+/// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
+/// an individual-verification cache and is not part of the queued state.
+struct BatchItem {
+    message: Vec<u8>,
+    public_key: core::VerifyingKeyBytes,
+    signature: core::Signature,
+}
+
 /// A batch verification context.
 pub struct BatchVerifier {
-    items: Vec<(Vec<u8>, VerifyingKey, core::Signature)>,
+    items: Vec<BatchItem>,
 }
 
 impl BatchVerifier {
@@ -391,11 +422,11 @@ impl BatchVerifier {
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
-        self.items.push((
-            union_unique(namespace, message),
-            public_key.clone(),
-            core::Signature::from_bytes(signature.bytes),
-        ));
+        self.items.push(BatchItem {
+            message: union_unique(namespace, message),
+            public_key: public_key.bytes,
+            signature: core::Signature::from_bytes(signature.bytes),
+        });
     }
 
     /// Check all the signatures in the batch.
@@ -406,66 +437,38 @@ impl BatchVerifier {
     /// `rng` collide, an event of negligible probability (about `2^-128`).
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
-        let items = self.items.iter().map(|(message, public_key, signature)| {
-            (&public_key.bytes, signature, message.as_slice())
-        });
+        let items = self
+            .items
+            .iter()
+            .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
         core::verify_batch_bytes(rng, items, strategy)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchVerifier, Signature, SigningKey, VerifyingKey};
-    use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, union_unique};
-    use ed25519_consensus::{
-        Signature as RefSignature, SigningKey as RefSigningKey, VerificationKey as RefVerifyingKey,
-    };
-    use rand_core::Rng;
-
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
-    const WRONG_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST_WRONG";
+    use super::{BatchItem, SigningKey};
 
     #[test]
-    fn sign_matches_reference_implementation() {
-        let mut rng = test_rng();
-        for i in 0..16 {
-            let mut seed = [0u8; 32];
-            rng.fill_bytes(&mut seed);
-            let signing_key = SigningKey::from_seed(seed);
-            let reference_key = RefSigningKey::from(seed);
-            let message = format!("message {i}").into_bytes();
-
-            let verifying_key = signing_key.verifying_key();
-            assert_eq!(
-                verifying_key.as_ref(),
-                reference_key.verification_key().to_bytes()
-            );
-
-            let signature = signing_key.sign(NAMESPACE, &message);
-            let reference_signature = reference_key.sign(&union_unique(NAMESPACE, &message));
-            assert_eq!(signature.bytes, reference_signature.to_bytes());
-            assert!(verifying_key.verify(NAMESPACE, &message, &signature));
-            assert!(!verifying_key.verify(WRONG_NAMESPACE, &message, &signature));
-        }
+    fn batch_items_do_not_retain_decoded_key_cache() {
+        assert_eq!(
+            core::mem::size_of::<BatchItem>(),
+            core::mem::size_of::<(Vec<u8>, [u8; 32], super::core::Signature)>(),
+        );
     }
 
     #[test]
-    fn batch_verifier_accepts_own_signatures() {
-        let mut rng = test_rng();
-        let mut verifier = BatchVerifier::new(16);
-        for i in 0..16 {
-            let signing_key = SigningKey::random(&mut rng);
-            let message = format!("message {i}").into_bytes();
-            verifier.add(
-                NAMESPACE,
-                &message,
-                &signing_key.verifying_key(),
-                &signing_key.sign(NAMESPACE, &message),
-            );
-        }
-        assert!(verifier.verify(&mut rng, &Sequential));
+    fn signature_is_bound_to_namespace() {
+        const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
+        const WRONG_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST_WRONG";
+
+        let signing_key = SigningKey::from_seed([42; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let message = b"message";
+        let signature = signing_key.sign(NAMESPACE, message);
+
+        assert!(verifying_key.verify(NAMESPACE, message, &signature));
+        assert!(!verifying_key.verify(WRONG_NAMESPACE, message, &signature));
     }
 
     #[test]
@@ -474,53 +477,6 @@ mod tests {
 
         assert_zeroize_on_drop::<SigningKey>();
         assert!(core::mem::needs_drop::<SigningKey>());
-    }
-
-    #[test]
-    fn zip215_accepts_negative_zero_encodings() {
-        let mut positive_identity = [0u8; 32];
-        positive_identity[0] = 1;
-        positive_identity[31] = 0x80;
-
-        let mut negative_identity = [0xff; 32];
-        negative_identity[0] = 0xec;
-
-        let mut non_canonical_positive_identity = [0xff; 32];
-        non_canonical_positive_identity[0] = 0xee;
-
-        let encodings = [
-            positive_identity,
-            negative_identity,
-            non_canonical_positive_identity,
-        ];
-        let message = b"negative-zero encoding";
-        let namespaced_message = union_unique(NAMESPACE, message);
-        let mut rng = test_rng();
-        let mut batch = BatchVerifier::new(encodings.len());
-
-        for encoding in encodings {
-            let verifying_key = VerifyingKey {
-                bytes: encoding,
-                point: None,
-            };
-            let mut signature_bytes = [0u8; 64];
-            signature_bytes[..32].copy_from_slice(&encoding);
-            let signature = Signature {
-                bytes: signature_bytes,
-            };
-
-            let reference_key = RefVerifyingKey::try_from(encoding).unwrap();
-            let reference_signature = RefSignature::from(signature_bytes);
-            assert!(
-                reference_key
-                    .verify(&reference_signature, &namespaced_message)
-                    .is_ok()
-            );
-            assert!(verifying_key.verify(NAMESPACE, message, &signature));
-            batch.add(NAMESPACE, message, &verifying_key, &signature);
-        }
-
-        assert!(batch.verify(&mut rng, &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]
