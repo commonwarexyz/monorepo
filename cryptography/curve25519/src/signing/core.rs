@@ -12,6 +12,24 @@ use rand_core::CryptoRng;
 pub(super) use scalar::Scalar;
 use sha2::{Digest, Sha512};
 
+/// The exact byte encoding used to identify an Ed25519 verifying key.
+///
+/// Batch verification hashes and groups keys by this encoding, then decompresses each distinct
+/// key in its point-processing phase.
+#[derive(Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub(super) struct VerifyingKeyBytes([u8; 32]);
+
+impl VerifyingKeyBytes {
+    pub(super) const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(super) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Computes `SHA-512(parts[0] || parts[1] || ...)`, the Ed25519 challenge hash `H(R || A || M)`.
 fn sha512(parts: &[&[u8]]) -> [u8; 64] {
     let mut hasher = Sha512::new();
@@ -63,7 +81,7 @@ fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
 /// a signer reused across the batch contributes one MSM term instead of one per signature, and
 /// operating on raw `[u8; 32]` keys (rather than decompressed points) means a repeated `A` is
 /// only ever decompressed once, not once per occurrence.
-fn group_ranges(sorted: &[([u8; 32], u32)]) -> Vec<(u32, u32)> {
+fn group_ranges(sorted: &[(VerifyingKeyBytes, u32)]) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     let mut start = 0;
     for i in 1..=sorted.len() {
@@ -100,8 +118,8 @@ struct ScalarBlock {
 /// same principle). This phase touches no curve points: it is uniform per signature regardless
 /// of how the batch's signers are distributed.
 fn scalar_phase(
-    items: &[(&[u8; 32], &Signature, &[u8])],
-    order: &[([u8; 32], u32)],
+    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    order: &[(VerifyingKeyBytes, u32)],
     seed: &[u8; 32],
     strategy: &impl Strategy,
 ) -> Option<(Vec<ScalarBlock>, Scalar)> {
@@ -122,7 +140,7 @@ fn scalar_phase(
                 valid = false;
                 continue;
             };
-            let digest = sha512(&[&sig.r, a_bytes, msg]);
+            let digest = sha512(&[&sig.r, a_bytes.as_bytes(), msg]);
             let h = Scalar::from_bytes_mod_order_wide(&digest);
             zh[j] = z.mul_mod_l(&h);
             zr[j] = z;
@@ -252,7 +270,7 @@ where
 fn verify_batch_inner<B: Backend>(
     backend: B,
     rng: &mut impl CryptoRng,
-    items: &[(&[u8; 32], &Signature, &[u8])],
+    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
     strategy: &impl Strategy,
 ) -> bool {
     let n = items.len();
@@ -275,7 +293,7 @@ fn verify_batch_inner<B: Backend>(
     // Including the original index in the sort key makes the order (and therefore the
     // position-derived coefficients) a deterministic function of the input, independent of the
     // sort algorithm.
-    let mut order: Vec<([u8; 32], u32)> = items
+    let mut order: Vec<(VerifyingKeyBytes, u32)> = items
         .iter()
         .enumerate()
         .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
@@ -317,7 +335,7 @@ fn verify_batch_inner<B: Backend>(
             resolve_r(i)
         } else {
             let group = groups[i - n];
-            (order[group.0 as usize].0, group_scalar(group))
+            (*order[group.0 as usize].0.as_bytes(), group_scalar(group))
         }
     };
     let Some(terms) = decompress_phase(backend, n + groups.len(), resolve, width, strategy) else {
@@ -331,7 +349,7 @@ fn verify_batch_inner<B: Backend>(
 
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
-    items: &'a [(&'b [u8; 32], &'b Signature, &'b [u8])],
+    items: &'a [(&'b VerifyingKeyBytes, &'b Signature, &'b [u8])],
     strategy: &'a S,
 }
 
@@ -345,7 +363,7 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
 
 fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
     rng: &mut R,
-    items: &[(&'a [u8; 32], &'a Signature, &'a [u8])],
+    items: &[(&'a VerifyingKeyBytes, &'a Signature, &'a [u8])],
     strategy: &S,
 ) -> bool {
     with_backend(VerifyBatchCall {
@@ -363,7 +381,7 @@ fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
 /// deduplicated `A` encodings join `R`'s per-signature encodings in the same decompression pass.
 pub(super) fn verify_batch_bytes<'a>(
     rng: &mut impl CryptoRng,
-    items: impl IntoIterator<Item = (&'a [u8; 32], &'a Signature, &'a [u8])>,
+    items: impl IntoIterator<Item = (&'a VerifyingKeyBytes, &'a Signature, &'a [u8])>,
     strategy: &impl Strategy,
 ) -> bool {
     let items: Vec<_> = items.into_iter().collect();
@@ -382,12 +400,12 @@ mod tests {
     #[test]
     fn group_ranges_groups_adjacent_equal_keys() {
         let sorted = vec![
-            ([1u8; 32], 4),
-            ([1u8; 32], 0),
-            ([2u8; 32], 3),
-            ([3u8; 32], 1),
-            ([3u8; 32], 2),
-            ([3u8; 32], 5),
+            (VerifyingKeyBytes::new([1u8; 32]), 4),
+            (VerifyingKeyBytes::new([1u8; 32]), 0),
+            (VerifyingKeyBytes::new([2u8; 32]), 3),
+            (VerifyingKeyBytes::new([3u8; 32]), 1),
+            (VerifyingKeyBytes::new([3u8; 32]), 2),
+            (VerifyingKeyBytes::new([3u8; 32]), 5),
         ];
         assert_eq!(group_ranges(&sorted), vec![(0, 2), (2, 3), (3, 6)]);
     }
@@ -396,7 +414,10 @@ mod tests {
     fn group_ranges_handles_empty_and_no_duplicates() {
         assert!(group_ranges(&[]).is_empty());
 
-        let sorted = vec![([1u8; 32], 0), ([2u8; 32], 1)];
+        let sorted = vec![
+            (VerifyingKeyBytes::new([1u8; 32]), 0),
+            (VerifyingKeyBytes::new([2u8; 32]), 1),
+        ];
         assert_eq!(group_ranges(&sorted), vec![(0, 1), (1, 2)]);
     }
 
@@ -418,7 +439,7 @@ mod tests {
         );
     }
 
-    type BatchItem = ([u8; 32], Signature, Vec<u8>);
+    type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);
 
     /// A batch of both independent signers and a repeated signer, spanning multiple scalar-phase
     /// chunks and decompression chunks, verified under `Manual` -- which disables the adaptive
@@ -443,7 +464,7 @@ mod tests {
                 let item = if i % 3 == 0 {
                     let signature = repeated_signer.sign(&message);
                     (
-                        repeated_key,
+                        VerifyingKeyBytes::new(repeated_key),
                         Signature::from_bytes(signature.to_bytes()),
                         message,
                     )
@@ -453,7 +474,7 @@ mod tests {
                     let verifying_key = signing_key.verification_key().to_bytes();
                     let signature = signing_key.sign(&message);
                     (
-                        verifying_key,
+                        VerifyingKeyBytes::new(verifying_key),
                         Signature::from_bytes(signature.to_bytes()),
                         message,
                     )

@@ -24,6 +24,9 @@ impl Backend {
     }
 
     /// Runs an entire computation with AVX-512F and AVX-512 IFMA enabled.
+    ///
+    /// Enabling the target features around the whole computation lets backend operations inline
+    /// without crossing a target-feature boundary for every operation.
     #[target_feature(enable = "avx512f,avx512ifma")]
     pub(super) fn call<F: WithBackend>(self, f: F) -> F::Output {
         f.call(self)

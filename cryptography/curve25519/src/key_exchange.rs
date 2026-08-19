@@ -21,6 +21,7 @@ use crate::curve::{F, montgomery};
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_math::algebra::Random;
+use subtle::ConstantTimeEq;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// The u-coordinate of the X25519 base point.
@@ -70,11 +71,7 @@ impl SecretKey {
     /// the result to a value everybody can compute. An honestly generated public key fails
     /// with negligible probability, so a failure means the other party misbehaved.
     pub fn exchange(self, other: &PublicKey) -> Option<SharedSecret> {
-        let bytes = Zeroizing::new(montgomery::x25519(&self.bytes, &other.bytes));
-        if *bytes == [0; 32] {
-            return None;
-        }
-        Some(SharedSecret { bytes: *bytes })
+        SharedSecret::from_x25519(montgomery::x25519(&self.bytes, &other.bytes))
     }
 }
 
@@ -136,6 +133,9 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 
 /// The secret both parties derive from a key exchange.
 ///
+/// Values are only constructed from contributory exchanges; X25519's all-zero output is
+/// rejected.
+///
 /// The bytes are a curve point coordinate, not a uniformly random string: feed them into a
 /// key-derivation function bound to the protocol context rather than using them directly as
 /// a cipher key. The bytes are zeroized when the shared secret is dropped.
@@ -145,6 +145,17 @@ pub struct SharedSecret {
 }
 
 impl SharedSecret {
+    fn from_x25519(bytes: [u8; 32]) -> Option<Self> {
+        let bytes = Zeroizing::new(bytes);
+
+        // X25519 exposes only whether the result is all zero. Compare every byte before branching
+        // on that public classification.
+        if bool::from(bytes.ct_eq(&[0; 32])) {
+            return None;
+        }
+        Some(Self { bytes: *bytes })
+    }
+
     /// The raw bytes of the shared secret.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
