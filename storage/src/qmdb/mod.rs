@@ -226,6 +226,18 @@ pub enum Error<F: Family> {
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
+    /// A committed read through a batch found the database at a state the batch's chain
+    /// does not account for, because a batch from a different fork was applied or the
+    /// database was rewound off the chain.
+    ///
+    /// Where [`Error::StaleBatch`] rejects applying such a batch, this refuses reading
+    /// through it, since the answer would mix two forks. The refusal depends only on the
+    /// current state. If the database returns to one of the chain's states (by rewind),
+    /// reads work again. Otherwise the caller should fork a new batch from the current
+    /// state.
+    #[error("stale read: current database state is not one the batch chain accounts for")]
+    StaleRead,
+
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]
     FloorRegressed(Location<F>, Location<F>),

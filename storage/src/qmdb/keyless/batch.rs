@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        batch_chain::{self, Bounds, Commitment, OnChain},
     },
 };
 use commonware_codec::EncodeShared;
@@ -23,6 +23,9 @@ type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
+/// Every method that reads the committed DB first checks that the database is on this
+/// chain's own states and refuses with [`crate::qmdb::Error::StaleRead`] otherwise (see
+/// [`crate::qmdb::batch_chain`]).
 pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
 where
     F: Family,
@@ -45,7 +48,9 @@ where
 }
 
 /// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [`UnmerkleizedBatch`].
+/// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
+/// [`crate::qmdb::Error::StaleRead`] once a batch from a different fork is applied
+/// (see [`crate::qmdb::batch_chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -76,11 +81,11 @@ where
     }
 }
 
-/// Read a single operation from the parent chain at the given location.
+/// Read the operation at `loc` from the chain's retained items.
 ///
-/// Returns `None` if the location cannot be found in the live parent chain (e.g. the
-/// owning ancestor was committed and freed). Callers should fall through to the committed
-/// DB in that case.
+/// The batch's journal retains its own items plus every ancestor's, so the lookup
+/// stays exact even after the ancestor batches themselves are dropped. Returns
+/// `None` below the retained range, where the committed DB answers.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
@@ -88,20 +93,19 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
 where
     Operation<F, V>: EncodeShared,
 {
-    // Each batch's items span [size - items.len(), size). We compute the range from the
-    // journal (strong Arcs, always intact) rather than from the QMDB-layer Weak parent
-    // (which may be dead).
-    let self_end = batch.journal_batch.size();
-    let self_base = self_end - batch.journal_batch.items().len() as u64;
-    if loc >= self_base && loc < self_end {
-        return Some(batch.journal_batch.items()[(loc - self_base) as usize].clone());
-    }
-    for ancestor in batch.ancestors() {
-        let end = ancestor.journal_batch.size();
-        let base = end - ancestor.journal_batch.items().len() as u64;
-        if loc >= base && loc < end {
-            return Some(ancestor.journal_batch.items()[(loc - base) as usize].clone());
+    let journal = &batch.journal_batch;
+    let mut start = journal.ancestor_base_leaves;
+    for items in &journal.ancestor_items {
+        let end = start + items.len() as u64;
+        if loc >= start && loc < end {
+            return Some(items[(loc - start) as usize].clone());
         }
+        start = end;
+    }
+    let end = journal.size();
+    debug_assert_eq!(start, end - journal.items().len() as u64);
+    if loc >= start && loc < end {
+        return Some(journal.items()[(loc - start) as usize].clone());
     }
     None
 }
@@ -144,6 +148,23 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// Check that the live database is on this chain's own states before a committed read
+    /// (see [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    fn on_chain<'a, E, C>(
+        &self,
+        db: &'a Keyless<F, E, V, C, H, S>,
+    ) -> Result<OnChain<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+    {
+        self.parent.as_ref().map_or_else(
+            || self.base.on_chain(db, db.commitment()),
+            |parent| parent.bounds.on_chain(db, db.commitment()),
+        )
+    }
+
     /// Append a value.
     pub fn append(mut self, value: V::Value) -> Self {
         self.appends.push(value);
@@ -162,6 +183,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.on_chain(db)?;
         let loc_val = *loc;
 
         // Check this batch's pending appends.
@@ -200,6 +222,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.on_chain(db)?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -257,16 +280,18 @@ where
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
+    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, V, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.on_chain(db)?;
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -300,7 +325,7 @@ where
             |batch| batch.commitment(),
         );
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
@@ -310,7 +335,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -339,6 +364,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let loc_val = *loc;
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
@@ -367,6 +393,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -406,8 +433,9 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// descendant) is merkleized, since merkleization collects their state through the
+    /// live chain. Dropping one earlier causes data loss detected at `apply_batch` time.
+    /// Once merkleized, a batch retains everything it needs on its own.
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,
