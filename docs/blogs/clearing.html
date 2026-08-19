@@ -116,15 +116,15 @@ O’Grady</a></div>
         account for signed payments omitted from the batch (more on this
         later).</p>
         <p><strong>Bajillion</strong> is an optimistic clearing protocol
-        for many-to-many payments at massive scale. It efficiently
-        settles them on any chain that can process a few-kilobyte
-        commitment. Its preconfirmations arrive as fast as browsing the
-        web and double as the evidence that holds the system honest.
+        for many-to-many payments at massive scale. At each settlement,
+        all of that activity becomes a few-kilobyte commitment that most
+        chains can process. Preconfirmations arrive as fast as browsing
+        the web and double as the evidence that holds the system honest.
         Payments flow through a non-custodial operator selected by the
         sender: if the operator disappears or censors an account,
         senders and recipients alike can force recovery through the
-        settlement chain alone. The protocol requires only signatures
-        and Merkle openings.</p>
+        settlement chain alone. And the protocol requires only
+        signatures and Merkle openings.</p>
         <p>Settlement cost depends on the accounts and receive
         components touched, not the number of payments between them. For
         a fixed set of both, make one payment or a bajillion: the close
