@@ -3821,7 +3821,7 @@ pub(super) mod test {
 
         // Reopen. `init_from_journal` rebuilds the index by replaying from
         // the floor (= commit_loc). The only op at/above the floor is the commit, which
-        // contributes no keys — so the rebuilt index is empty.
+        // contributes no keys -- so the rebuilt index is empty.
         let db = open_db(context.child("reopened")).await;
         assert_eq!(db.last_commit_loc, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
