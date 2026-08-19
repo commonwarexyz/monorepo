@@ -76,13 +76,9 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
 Figure 1: The payer sends one request and receives one signed response. The operator verifies, commits, and signs locally, adding no network round trip. The commit moves $a$ from 100 to 80 and advances $b$'s component $\kappa_0$ from $(0,0)$ to $(20,1)$ before $R$ exists. Once $R$ returns, $a$ sends the same matching $(S,R)$ directly to $b$ as transferable evidence, and the operator, holding the same pair, could deliver it to $b$ one hop sooner.
 :::
 
-Because the operator commits state before signing, every accepted debit is already counted in the payer's live balance. A recipient can spend incoming credit only after importing the authenticated component tip that contains it. A delayed import may understate spendable balance, but it cannot overstate it.
+## Optimizing for Hot Accounts 
 
-Compression comes from cumulative totals. The close carries each payer's final debit and, for each receive component, its final credit and receipt count. Intermediate payments can be omitted.
-
-## One Exact Close
-
-A single incoming counter would serialize every payment to a popular recipient. Instead, the operator shards each recipient's incoming payments across epoch-local receive components, identified by $(\mathcal A_e,b,\kappa)$. A payment of $x$ assigned to component $\kappa$ advances only that component's running credit and receipt count:
+A single incoming counter would serialize every payment to a popular recipient. Instead, the operator shards each recipient's incoming payments across a configurable number of receive components, identified by $(\mathcal A_e,b,\kappa)$. A payment of $x$ assigned to component $\kappa$ advances only that component's running credit and receipt count:
 
 $$
 (G_\kappa,J_\kappa)\longrightarrow(G_\kappa+x,J_\kappa+1),
@@ -90,7 +86,7 @@ $$
 (G_{\kappa'},J_{\kappa'})\text{ unchanged for every }\kappa'\ne\kappa.
 $$
 
-Payments assigned to different components never contend, so a hot account scales across parallel workers. A recipient still has one account balance. Components are only concurrency domains feeding it. At close, one terminal signed pair represents each component, no matter how many payments advanced it.
+Payments assigned to different components never contend, so a hot account scales \~linearly across parallel workers. At close, one terminal signed pair represents each component, no matter how many payments advanced it (and the sum of all components is the recipient's credit).
 
 In the same ledger, accounts $(a,b,c,d)$ open with balances $(100,40,25,35)$ and the epoch accepts
 

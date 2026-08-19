@@ -232,21 +232,12 @@ O’Grady</a></div>
         operator, holding the same pair, could deliver it to <span
         class="math inline">b</span> one hop sooner.</p>
         </div>
-        <p>Because the operator commits state before signing, every
-        accepted debit is already counted in the payer’s live balance. A
-        recipient can spend incoming credit only after importing the
-        authenticated component tip that contains it. A delayed import
-        may understate spendable balance, but it cannot overstate
-        it.</p>
-        <p>Compression comes from cumulative totals. The close carries
-        each payer’s final debit and, for each receive component, its
-        final credit and receipt count. Intermediate payments can be
-        omitted.</p>
-        <h2 id="one-exact-close">One Exact Close</h2>
+        <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
+        Accounts</h2>
         <p>A single incoming counter would serialize every payment to a
         popular recipient. Instead, the operator shards each recipient’s
-        incoming payments across epoch-local receive components,
-        identified by <span class="math inline">(\mathcal
+        incoming payments across a configurable number of receive
+        components, identified by <span class="math inline">(\mathcal
         A_e,b,\kappa)</span>. A payment of <span
         class="math inline">x</span> assigned to component <span
         class="math inline">\kappa</span> advances only that component’s
@@ -258,10 +249,11 @@ O’Grady</a></div>
         }\kappa&#39;\ne\kappa.
         </span></p>
         <p>Payments assigned to different components never contend, so a
-        hot account scales across parallel workers. A recipient still
-        has one account balance. Components are only concurrency domains
-        feeding it. At close, one terminal signed pair represents each
-        component, no matter how many payments advanced it.</p>
+        hot account scales ~linearly across parallel workers. A
+        recipient still has one account balance. Components are only
+        concurrency domains feeding it. At close, one terminal signed
+        pair represents each component, no matter how many payments
+        advanced it.</p>
         <p>In the same ledger, accounts <span
         class="math inline">(a,b,c,d)</span> open with balances <span
         class="math inline">(100,40,25,35)</span> and the epoch
