@@ -4,14 +4,13 @@
 //! runtime with the mock certificate scheme and a marshal stack; the victim's
 //! resolver is built so the prefix can inject scripted backfill deliveries.
 //! The prefix replays a deterministic program extracted from a
-//! standard-marshal test, driving the honest core to the source state
-//! (a certified missing candidate resolved through an armed round-bound
-//! fetch). The fuzzing phase seeds the fabricated notarization into every
-//! honest engine's voter journal, starts the engines from the genesis floor so
-//! startup replay recovers and re-certifies it, either honestly (`N4F0C4`) or
-//! with node 0 replaced by a full-channel adversary (`N4F1C3`), heals the
-//! network at a GST boundary, and checks recovery liveness, block safety, and
-//! the scenario's expectations.
+//! standard-marshal test, driving the honest core to the source state. The
+//! fuzzing phase seeds any handoff notarizations into every honest engine's
+//! voter journal so startup replay recovers and re-certifies them, starts the
+//! engines from the handoff floor, either honestly (`N4F0C4`) or with node 0
+//! replaced by a full-channel adversary (`N4F1C3`), heals the network at a
+//! GST boundary, and checks recovery liveness, block safety, and the
+//! scenario's expectations.
 
 mod adversary;
 mod elector;

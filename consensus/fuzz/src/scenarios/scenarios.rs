@@ -1,4 +1,4 @@
-//! Faithful copy of one standard-marshal test prefix.
+//! Faithful copies of standard-marshal test prefixes.
 //!
 //! [`StandardCertifyMissingCandidateFetchesByRound`] reproduces
 //! `test_standard_certify_missing_candidate_fetches_by_round`
@@ -22,6 +22,15 @@
 //!   exactly; nothing else above the floor is fabricated.
 //!
 //! The first attackable live view is view 2 over the recovered source block.
+//!
+//! [`StandardCertifyFirstBlockFetchesGenesisParent`] reproduces
+//! `test_standard_certify_first_block_fetches_genesis_parent`
+//! (consensus/src/marshal/standard/mod.rs:2341) through its handoff point: the
+//! victim persists the height-1 candidate as verified, then the real wrapper
+//! `verify` and `certify` both succeed against the genesis parent with no
+//! fetch. The prefix fabricates no certificate and the source leaves nothing
+//! to recover, so the engines start bare from the genesis floor and the first
+//! attackable live view is view 1 over genesis.
 
 use super::{
     environment::{
@@ -63,8 +72,13 @@ where
     M::Wrapper: Clone,
 {
     match kind {
-        ScenarioKind::MissingCandidate => {
+        ScenarioKind::StandardCertifyMissingCandidateFetchesByRound => {
             StandardCertifyMissingCandidateFetchesByRound
+                .drive(harness)
+                .await
+        }
+        ScenarioKind::StandardCertifyFirstBlockFetchesGenesisParent => {
+            StandardCertifyFirstBlockFetchesGenesisParent
                 .drive(harness)
                 .await
         }
@@ -174,6 +188,111 @@ impl Scenario for StandardCertifyMissingCandidateFetchesByRound {
             // The victim is the sole holder of the fetched candidate: every
             // other honest marshal must lack it, so replayed certification
             // finds it missing and fetches it over the live network.
+            expected_nodes: vec![
+                NodeExpectation::new(Node::A).lacks(digest),
+                NodeExpectation::new(Node::B).holds(digest),
+                NodeExpectation::new(Node::C).lacks(digest),
+                NodeExpectation::new(Node::D).lacks(digest),
+            ],
+            expectation: Expectation::genesis_rooted(),
+        }
+    }
+}
+
+/// Source: consensus/src/marshal/standard/mod.rs::test_standard_certify_first_block_fetches_genesis_parent
+///
+/// Handoff: after `verified` persisted the height-1 candidate and the real
+/// wrapper `verify` then `certify` both returned true against the genesis
+/// parent, having issued no fetch of any kind and registered no local wait.
+/// The source iterates both wrapper kinds in one test body; per R2 the
+/// variant is fixed per fuzz target, so each target runs this prefix under
+/// its own variant.
+///
+/// Node mapping (the node-addressing divergence S6 permits): the same uniform
+/// permutation as [`StandardCertifyMissingCandidateFetchesByRound`], source
+/// participant `i` -> {0: B, 1: C, 2: D, 3: A}. The source's
+/// `me = participants[0]` maps wholly to [`Node::B`]: the marshal actor under
+/// test, its scheme provider, and the candidate block's leader.
+///
+/// Composition soundness (I5): the prefix fabricates no certificate and the
+/// source leaves nothing for an engine to recover, so the ledger and journal
+/// are empty, the engines start bare from the genesis floor, and the attack
+/// anchor is the first live view above it (view 1, height 1, over genesis).
+/// The certified candidate is invisible to the engines: no certificate
+/// references it, so nothing the live run notarizes, finalizes, or delivers
+/// at view 1 can conflict with a prefix artifact. On the victim it remains a
+/// same-round verified sibling of the live view-1 candidate, a state the
+/// marshal tolerates by design (source
+/// `test_standard_certify_persists_equivocated_block`).
+pub(crate) struct StandardCertifyFirstBlockFetchesGenesisParent;
+
+impl Scenario for StandardCertifyFirstBlockFetchesGenesisParent {
+    async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
+        &self,
+        harness: &mut FuzzScenarioStandardHarness<P, M>,
+    ) -> ScenarioHandoff<P>
+    where
+        M::Wrapper: Clone,
+    {
+        harness.begin("test_standard_certify_first_block_fetches_genesis_parent");
+        // The first block: a height-1 block at view 1 on genesis, led by the
+        // source's `me` (Node::B under the participant permutation), built as
+        // in the source.
+        let genesis_digest = harness.genesis().digest();
+        let round_one = round(1);
+        let block_context = harness.context(round_one, Node::B, View::zero(), genesis_digest);
+        let block =
+            B::<P>::new::<Sha256>(block_context.clone(), genesis_digest, Height::new(1), 100);
+        let digest = block.digest();
+        harness.verified(Node::B, 1, &block).await;
+
+        // The source sleeps 10ms between `verified` and `verify`; the
+        // deterministic mailbox barrier is the harness equivalent (an S6
+        // plumbing divergence).
+        let _ = harness.barrier(Node::B).await;
+
+        let verify = harness.wrapper_verify(Node::B, block_context, digest).await;
+        assert!(
+            harness.await_wrapper(verify, "first-block verify").await,
+            "height-1 block should verify with genesis as parent"
+        );
+        let certify = harness.wrapper_certify(Node::B, round_one, digest).await;
+        assert!(
+            harness.await_wrapper(certify, "first-block certify").await,
+            "height-1 block should certify with genesis as parent"
+        );
+        // S3 handoff checks: the locally present candidate and its genesis
+        // parent resolve without a targeted fetch or a local wait (the empty
+        // handoff multisets below cover the backfill fetches).
+        assert!(
+            harness.targeted_is_empty(Node::B),
+            "genesis-parent certification must not issue targeted fetches"
+        );
+        assert_eq!(
+            harness.buffer_subscription_count(Node::B),
+            0,
+            "genesis-parent certification must not register a local wait"
+        );
+
+        ScenarioHandoff {
+            engine_floor: Floor::Genesis(genesis_digest),
+            engine_journal: Vec::new(),
+            attack_anchor: attack_above::<P>(harness.genesis()),
+            reference_chain: Vec::new(),
+            node_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, Vec::new()),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            node_active_fetches: vec![
+                (Node::A, Vec::new()),
+                (Node::B, Vec::new()),
+                (Node::C, Vec::new()),
+                (Node::D, Vec::new()),
+            ],
+            // Only the victim holds the certified candidate at handoff, as in
+            // the source (a single validator with no peers holding anything).
             expected_nodes: vec![
                 NodeExpectation::new(Node::A).lacks(digest),
                 NodeExpectation::new(Node::B).holds(digest),

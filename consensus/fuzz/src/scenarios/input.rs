@@ -34,7 +34,12 @@ pub enum ScenarioKind {
     /// `test_standard_certify_missing_candidate_fetches_by_round`, composed
     /// with the engines through certification recovery from a seeded voter
     /// journal (see `scenarios.rs`).
-    MissingCandidate,
+    StandardCertifyMissingCandidateFetchesByRound,
+    /// `test_standard_certify_first_block_fetches_genesis_parent`: the
+    /// verified height-1 candidate certifies against the genesis parent with
+    /// no fetch, and the engines start bare from the genesis floor
+    /// (see `scenarios.rs`).
+    StandardCertifyFirstBlockFetchesGenesisParent,
 }
 
 /// How the byzantine leader disseminates its attack-view block on channels 2 + 3.

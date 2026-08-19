@@ -667,5 +667,12 @@ mod tests {
         };
     }
 
-    scenario_smoke!(missing_candidate, MissingCandidate);
+    scenario_smoke!(
+        missing_candidate,
+        StandardCertifyMissingCandidateFetchesByRound
+    );
+    scenario_smoke!(
+        first_block_genesis_parent,
+        StandardCertifyFirstBlockFetchesGenesisParent
+    );
 }
