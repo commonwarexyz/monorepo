@@ -257,7 +257,9 @@ where
             upstream,
             response,
         });
-        receiver.await.ok().flatten()
+        receiver
+            .await
+            .expect("stateful actor dropped during propose")
     }
 
     async fn verify(
