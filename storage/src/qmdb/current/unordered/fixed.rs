@@ -56,7 +56,7 @@ impl<
 }
 
 pub mod partitioned {
-    //! A partitioned variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned key index.
     //!
     //! See [crate::qmdb::any::unordered::fixed::partitioned] for details on partitioned indices and
     //! when to use them.

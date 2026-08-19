@@ -1585,11 +1585,11 @@ pub(crate) mod test {
             drop(b);
 
             // Apply only the tip. This is !skip_ancestors (db hasn't changed).
-            // Before the fix, a's and b's index diffs would be silently lost.
+            // Applying c must carry a's and b's index diffs.
             let (db, _) = db.apply_batch(c).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // All three keys must be in the snapshot.
+            // All three keys must be in the index.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
             assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
             assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);

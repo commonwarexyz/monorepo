@@ -5174,7 +5174,7 @@ mod tests {
 
             // Build the child while the parent is still pending. The child
             // mutates the parent-updated key plus the colliding sibling that
-            // still resolves through the committed snapshot. Without the
+            // still resolves through the committed index. Without the
             // ancestor-diff location guard, the stale index entry for key_a
             // can consume key_a's mutation before the actual ancestor location.
             let pending_child = parent

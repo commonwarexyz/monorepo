@@ -776,7 +776,7 @@ where
             }
         }
 
-        // Keys from the first batch (before the floor) should NOT be in the snapshot.
+        // Keys from the first batch (before the floor) should NOT be in the index.
         for op in &early_ops {
             if let Some((key, _)) = H::op_kv(op) {
                 assert_eq!(
