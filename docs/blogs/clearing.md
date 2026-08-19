@@ -353,11 +353,11 @@ Successor boundary operations and shard moves must preserve the same rule: the l
 
 Rollover changes only live serving state. The ordinary close still produces the canonical rows, state root, and public corpus, which go through the same validity and admission checks. A challenge against the predecessor invalidates its admitted descendants.
 
-## A Million Payments in the Close
+## The Close Never Grows with Payments
 
 The asymptotics say what stops growing. A controlled benchmark shows what still costs time.
 
-Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000$ accepted payments, 512 credited accounts, 256 deterministic pieces, a 100-validator committee with quorum 67, and an eight-thread worker pool. Every changed account sends. The same 512 accounts receive in every profile, evenly spaced among the accounts that change. The matrix independently varies $A$, the number of changed accounts, and $h$, the number of component heads on each credited account.
+Each profile below fixes $N=1{,}000{,}000$ registered accounts, 512 credited accounts, 256 deterministic pieces, a 100-validator committee with quorum 67, and an eight-thread worker pool. Every changed account sends. The same 512 accounts receive in every profile, evenly spaced among the accounts that change. The matrix independently varies $A$, the number of changed accounts, and $h$, the number of component heads on each credited account. No payment count appears because none is needed: rows and heads carry fixed-width cumulative totals, so every size in the table is the same for any $T$.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -386,17 +386,17 @@ Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000
     </tr>
     <tr>
       <td style="padding-left:20px;">build roots</td>
-      <td style="text-align:right;">1.36 ms</td>
-      <td style="text-align:right;">57.5 ms</td>
-      <td style="text-align:right;">323 ms</td>
-      <td style="text-align:right;">446 ms</td>
+      <td style="text-align:right;">1.28 ms</td>
+      <td style="text-align:right;">54.1 ms</td>
+      <td style="text-align:right;">330 ms</td>
+      <td style="text-align:right;">403 ms</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">build piece proofs</td>
-      <td style="text-align:right;">1.13 ms</td>
-      <td style="text-align:right;">39.3 ms</td>
-      <td style="text-align:right;">366 ms</td>
-      <td style="text-align:right;">423 ms</td>
+      <td style="text-align:right;">1.25 ms</td>
+      <td style="text-align:right;">41.2 ms</td>
+      <td style="text-align:right;">351 ms</td>
+      <td style="text-align:right;">406 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
     <tr>
@@ -408,10 +408,10 @@ Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000
     </tr>
     <tr>
       <td style="padding-left:20px;">check and sign</td>
-      <td style="text-align:right;">2.12 ms</td>
-      <td style="text-align:right;">212 ms</td>
-      <td style="text-align:right;">1.05 s</td>
-      <td style="text-align:right;">1.20 s</td>
+      <td style="text-align:right;">2.53 ms</td>
+      <td style="text-align:right;">204 ms</td>
+      <td style="text-align:right;">0.99 s</td>
+      <td style="text-align:right;">1.27 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Chain</th></tr>
     <tr>
@@ -423,10 +423,10 @@ Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000
     </tr>
     <tr>
       <td style="padding-left:20px;">check admission</td>
-      <td style="text-align:right;"><strong>0.211 ms</strong></td>
-      <td style="text-align:right;"><strong>0.220 ms</strong></td>
-      <td style="text-align:right;"><strong>0.219 ms</strong></td>
-      <td style="text-align:right;"><strong>0.239 ms</strong></td>
+      <td style="text-align:right;"><strong>0.275 ms</strong></td>
+      <td style="text-align:right;"><strong>0.258 ms</strong></td>
+      <td style="text-align:right;"><strong>0.262 ms</strong></td>
+      <td style="text-align:right;"><strong>0.260 ms</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">challenge payload</td>
@@ -437,9 +437,9 @@ Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000
     </tr>
     <tr>
       <td style="padding-left:20px;">check challenge</td>
-      <td style="text-align:right;"><strong>0.124 ms</strong></td>
-      <td style="text-align:right;"><strong>0.130 ms</strong></td>
-      <td style="text-align:right;"><strong>0.133 ms</strong></td>
+      <td style="text-align:right;"><strong>0.127 ms</strong></td>
+      <td style="text-align:right;"><strong>0.126 ms</strong></td>
+      <td style="text-align:right;"><strong>0.125 ms</strong></td>
       <td style="text-align:right;"><strong>0.126 ms</strong></td>
     </tr>
   </tbody>
@@ -448,16 +448,24 @@ Each profile below fixes $N=1{,}000{,}000$ registered accounts, $T=1{,}000{,}000
 ```
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency and 95 percent confidence intervals for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 heads per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 heads per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
 ```
 
 ::: {.image-caption}
-Benchmark chart: These are four measured profiles, not an interpolation. Points are arithmetic means, whiskers are 95% confidence intervals, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the heads on each credited account from $h=1$ to $h=512$.
+Benchmark chart: These are four measured profiles, not an interpolation. Points are arithmetic means, and each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the heads on each credited account from $h=1$ to $h=512$.
 :::
 
-Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated component leaves and signatures behind each credited row. Neither disappears behind the phrase “one row per account.” All four profiles register the same million accounts, yet at $A=1{,}024$ the validator's assignment is 1.39 MB: distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments. The chain payload remains nearly flat because it carries the header, quorum certificate, and terminal prefix opening—not the rows or component leaves. This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge rows submit one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
+Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated component leaves and signatures behind each credited row. Neither disappears behind the phrase “one row per account.” All four profiles register the same million accounts, yet at $A=1{,}024$ the validator's assignment is 1.39 MB: distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments. The corpus is a constant of the footprint, so accepted payments only divide it: ten million spread the sparse profile's 2.07 MB to about 0.2 bytes of public settlement each, and a billion would leave 0.002. The chain payload remains nearly flat because it carries the header, quorum certificate, and terminal prefix opening—not the rows or component leaves. This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge rows submit one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
 
-The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution. Canonical encoding for hashing and signature verification remains included. Corpus bytes count each of the 256 pieces once, before replication to its 67 holders, the validator rows report the busiest of the 100 assignments with its share of the public corpus in parentheses, and the challenge rows target a mid-registry credited account's mid-set component.
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Log-log plot of public corpus bytes per accepted payment against payments accepted in the epoch, from one million to one billion payments, with four lines for the four table profiles. With 1,024 changed accounts, one head per credited account falls from about 2 bytes per payment to 0.002, and 512 heads from 117 to 0.12. With one million changed accounts the two head counts nearly coincide, falling from about 649 and 764 bytes to 0.65 and 0.76. Each line is its profile's constant corpus divided by the payment count.">
+```
+
+::: {.image-caption}
+Bytes-per-payment chart: fixed-width rows keep each profile's corpus constant in $T$, so each line is that profile's corpus from the table over the payment count and falls exactly as $1/T$. The two $A=1{,}000{,}000$ lines nearly coincide because heads move that corpus by only $1.2\times$, while at $A=1{,}024$ they separate it by $57\times$.
+:::
+
+The timers cover warm, in-memory close construction and validation on an 18-core Apple M5 Pro with 64 GiB, with the shared worker pool capped at eight threads. They exclude payment acceptance, networking, durable storage, key and registry construction, and custody execution. Canonical encoding for hashing and signature verification remains included. Corpus bytes count each of the 256 pieces once, before replication to its 67 holders, the validator rows report the busiest of the 100 assignments with its share of the public corpus in parentheses, and the challenge rows target a mid-registry credited account's mid-set component. The timers ran under a ten-million-payment build of each fixture. The sizes hold for any payment count: re-building each fixture at payment counts from ten thousand (one million where all accounts change) up to ten million reproduced every size in the table, with the corpus and chain payloads identical to the byte.
 
 ## The Account-Level Trade
 

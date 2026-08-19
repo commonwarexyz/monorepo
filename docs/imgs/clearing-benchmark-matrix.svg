@@ -15,11 +15,10 @@
     .blue-text { fill: #2424d4; }
     .green-text { fill: #2f7d3d; }
     .series { stroke-width: 3; }
-    .whisker { stroke-width: 1.5; }
   </style>
 
   <text class="title" x="34" y="39">What moves the close?</text>
-  <text class="subtitle" x="34" y="67">N = T = 1,000,000 • 512 credited accounts • 256 pieces • 8 worker threads • busiest of 100 validator assignments</text>
+  <text class="subtitle" x="34" y="67">N = 1,000,000 • 512 credited accounts • 256 pieces • 8 threads • busiest of 100 validator assignments</text>
 
   <line class="blue series" x1="916" y1="38" x2="956" y2="38"/>
   <circle cx="936" cy="38" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
@@ -44,24 +43,16 @@
   <text class="axis" x="95" y="375" text-anchor="end">0</text>
   <text class="axis-strong" x="160" y="402" text-anchor="middle">h = 1</text>
   <text class="axis-strong" x="340" y="402" text-anchor="middle">h = 512</text>
-  <path class="blue series" d="M160 369.40 L340 344.69"/>
-  <path class="green series" d="M160 227.97 L340 173.88"/>
-  <g class="blue whisker">
-    <path d="M160 369.39 V369.41 M154 369.39 H166 M154 369.41 H166"/>
-    <path d="M340 344.47 V344.91 M334 344.47 H346 M334 344.91 H346"/>
-  </g>
-  <g class="green whisker">
-    <path d="M160 227.17 V228.70 M154 227.17 H166 M154 228.70 H166"/>
-    <path d="M340 168.09 V179.14 M334 168.09 H346 M334 179.14 H346"/>
-  </g>
-  <circle cx="160" cy="369.40" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="340" cy="344.69" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="155" y="222.97" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="335" y="168.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="172" y="357">1.36</text>
-  <text class="value blue-text" x="350" y="333">57.5</text>
-  <text class="value green-text" x="172" y="216">323</text>
-  <text class="value green-text" x="350" y="162">446</text>
+  <path class="blue series" d="M160 369.44 L340 346.18"/>
+  <path class="green series" d="M160 224.98 L340 192.80"/>
+  <circle cx="160" cy="369.44" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="340" cy="346.18" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="155" y="219.98" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="335" y="187.80" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="172" y="357">1.28</text>
+  <text class="value blue-text" x="350" y="334">54.1</text>
+  <text class="value green-text" x="172" y="213">330</text>
+  <text class="value green-text" x="350" y="181">403</text>
 
   <!-- All-piece proof construction. -->
   <rect class="frame" x="460" y="90" width="400" height="360" rx="3"/>
@@ -79,24 +70,16 @@
   <text class="axis" x="525" y="375" text-anchor="end">0</text>
   <text class="axis-strong" x="590" y="402" text-anchor="middle">h = 1</text>
   <text class="axis-strong" x="770" y="402" text-anchor="middle">h = 512</text>
-  <path class="blue series" d="M590 369.50 L770 352.73"/>
-  <path class="green series" d="M590 208.84 L770 183.98"/>
-  <g class="blue whisker">
-    <path d="M590 369.50 V369.50 M584 369.50 H596 M584 369.50 H596"/>
-    <path d="M770 352.62 V352.84 M764 352.62 H776 M764 352.84 H776"/>
-  </g>
-  <g class="green whisker">
-    <path d="M590 207.10 V210.65 M584 207.10 H596 M584 210.65 H596"/>
-    <path d="M770 181.56 V186.58 M764 181.56 H776 M764 186.58 H776"/>
-  </g>
-  <circle cx="590" cy="369.50" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="770" cy="352.73" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="585" y="203.84" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="765" y="178.98" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="602" y="357">1.13</text>
-  <text class="value blue-text" x="780" y="341">39.3</text>
-  <text class="value green-text" x="602" y="197">366</text>
-  <text class="value green-text" x="780" y="172">423</text>
+  <path class="blue series" d="M590 369.45 L770 351.85"/>
+  <path class="green series" d="M590 215.71 L770 191.17"/>
+  <circle cx="590" cy="369.45" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="770" cy="351.85" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="585" y="210.71" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="765" y="186.17" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="602" y="357">1.25</text>
+  <text class="value blue-text" x="780" y="340">41.2</text>
+  <text class="value green-text" x="602" y="204">351</text>
+  <text class="value green-text" x="780" y="179">406</text>
 
   <!-- Maximum-load validator. -->
   <rect class="frame" x="890" y="90" width="400" height="360" rx="3"/>
@@ -114,22 +97,14 @@
   <text class="axis" x="955" y="375" text-anchor="end">0</text>
   <text class="axis-strong" x="1020" y="402" text-anchor="middle">h = 1</text>
   <text class="axis-strong" x="1200" y="402" text-anchor="middle">h = 512</text>
-  <path class="blue series" d="M1020 369.67 L1200 336.62"/>
-  <path class="green series" d="M1020 204.55 L1200 180.82"/>
-  <g class="blue whisker">
-    <path d="M1020 369.66 V369.67 M1014 369.66 H1026 M1014 369.67 H1026"/>
-    <path d="M1200 336.39 V336.88 M1194 336.39 H1206 M1194 336.88 H1206"/>
-  </g>
-  <g class="green whisker">
-    <path d="M1020 198.59 V208.42 M1014 198.59 H1026 M1014 208.42 H1026"/>
-    <path d="M1200 179.66 V181.98 M1194 179.66 H1206 M1194 181.98 H1206"/>
-  </g>
-  <circle cx="1020" cy="369.67" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="1200" cy="336.62" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <rect x="1015" y="199.55" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <rect x="1195" y="175.82" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="1032" y="357">2.12</text>
-  <text class="value blue-text" x="1210" y="325">212</text>
-  <text class="value green-text" x="1032" y="192">1,053</text>
-  <text class="value green-text" x="1210" y="169">1,204</text>
+  <path class="blue series" d="M1020 369.60 L1200 337.97"/>
+  <path class="green series" d="M1020 214.48 L1200 169.95"/>
+  <circle cx="1020" cy="369.60" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="1200" cy="337.97" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="1015" y="209.48" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="1195" y="164.95" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="1032" y="358">2.53</text>
+  <text class="value blue-text" x="1210" y="326">204</text>
+  <text class="value green-text" x="1032" y="202">990</text>
+  <text class="value green-text" x="1210" y="157">1,273</text>
 </svg>

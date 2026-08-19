@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 470">
+  <rect width="1320" height="470" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 26px; font-weight: 700; fill: #111; }
+    .subtitle { font-size: 17px; fill: #666; }
+    .panel-title { font-size: 20px; font-weight: 700; fill: #111; text-anchor: middle; }
+    .axis { font-size: 15px; fill: #666; }
+    .axis-strong { font-size: 16px; font-weight: 700; fill: #111; }
+    .value { font-size: 15px; font-weight: 700; paint-order: stroke; stroke: #fff; stroke-width: 4px; stroke-linejoin: round; }
+    .grid { stroke: #dedede; stroke-width: 1; }
+    .frame { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .blue { stroke: #2424d4; fill: none; }
+    .green { stroke: #2f7d3d; fill: none; }
+    .blue-text { fill: #2424d4; }
+    .green-text { fill: #2f7d3d; }
+    .series { stroke-width: 3; }
+    .dashed { stroke-dasharray: 8 6; }
+  </style>
+
+  <text class="title" x="34" y="39">What does each payment cost the public?</text>
+  <text class="subtitle" x="34" y="67">N = 1,000,000 • the table's corpus ÷ T • log scales</text>
+
+  <line class="blue series" x1="752" y1="26" x2="792" y2="26"/>
+  <circle cx="772" cy="26" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <text class="axis-strong blue-text" x="802" y="31">A = 1,024 • h = 1</text>
+  <line class="green series" x1="1014" y1="26" x2="1054" y2="26"/>
+  <rect x="1029" y="21" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="axis-strong green-text" x="1064" y="31">A = 1,000,000 • h = 1</text>
+  <line class="blue series dashed" x1="752" y1="50" x2="792" y2="50"/>
+  <text class="axis-strong blue-text" x="802" y="55">A = 1,024 • h = 512</text>
+  <line class="green series dashed" x1="1014" y1="50" x2="1054" y2="50"/>
+  <text class="axis-strong green-text" x="1064" y="55">A = 1,000,000 • h = 512</text>
+
+  <rect class="frame" x="30" y="90" width="1260" height="360" rx="3"/>
+  <text class="panel-title" x="660" y="122">Public corpus per payment</text>
+  <text class="axis" x="95" y="138" text-anchor="end">bytes</text>
+  <line class="grid" x1="105" y1="150" x2="1255" y2="150"/>
+  <line class="grid" x1="105" y1="186.67" x2="1255" y2="186.67"/>
+  <line class="grid" x1="105" y1="223.33" x2="1255" y2="223.33"/>
+  <line class="grid" x1="105" y1="260" x2="1255" y2="260"/>
+  <line class="grid" x1="105" y1="296.67" x2="1255" y2="296.67"/>
+  <line class="grid" x1="105" y1="333.33" x2="1255" y2="333.33"/>
+  <line class="grid" x1="105" y1="370" x2="1255" y2="370"/>
+  <line class="grid" x1="170" y1="150" x2="170" y2="370"/>
+  <line class="grid" x1="520" y1="150" x2="520" y2="370"/>
+  <line class="grid" x1="870" y1="150" x2="870" y2="370"/>
+  <line class="grid" x1="1220" y1="150" x2="1220" y2="370"/>
+  <text class="axis" x="95" y="155" text-anchor="end">1,000</text>
+  <text class="axis" x="95" y="192" text-anchor="end">100</text>
+  <text class="axis" x="95" y="228" text-anchor="end">10</text>
+  <text class="axis" x="95" y="265" text-anchor="end">1</text>
+  <text class="axis" x="95" y="302" text-anchor="end">0.1</text>
+  <text class="axis" x="95" y="338" text-anchor="end">0.01</text>
+  <text class="axis" x="95" y="375" text-anchor="end">0.001</text>
+  <text class="axis-strong" x="170" y="402" text-anchor="middle">1M</text>
+  <text class="axis-strong" x="520" y="402" text-anchor="middle">10M</text>
+  <text class="axis-strong" x="870" y="402" text-anchor="middle">100M</text>
+  <text class="axis-strong" x="1220" y="402" text-anchor="middle">1B</text>
+  <text class="axis" x="660" y="428" text-anchor="middle">payments accepted in the epoch (T)</text>
+
+  <path class="green series" d="M170 156.88 L1220 266.88"/>
+  <path class="green series dashed" d="M170 154.28 L1220 264.28"/>
+  <path class="blue series" d="M170 248.43 L1220 358.43"/>
+  <path class="blue series dashed" d="M170 184.14 L1220 294.14"/>
+  <circle cx="170" cy="248.43" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="520" cy="285.10" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="870" cy="321.76" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="1220" cy="358.43" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <rect x="165" y="151.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="515" y="188.55" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="865" y="225.21" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <rect x="1215" y="261.88" width="10" height="10" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value green-text" x="182" y="143">764</text>
+  <text class="value green-text" x="182" y="175">649</text>
+  <text class="value blue-text" x="182" y="205">117</text>
+  <text class="value blue-text" x="182" y="236">2.07</text>
+  <text class="value green-text" x="1208" y="255" text-anchor="end">0.76</text>
+  <text class="value green-text" x="1208" y="283" text-anchor="end">0.65</text>
+  <text class="value blue-text" x="1208" y="312" text-anchor="end">0.12</text>
+  <text class="value blue-text" x="1208" y="347" text-anchor="end">0.002</text>
+</svg>

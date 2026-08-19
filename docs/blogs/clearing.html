@@ -740,21 +740,23 @@ O’Grady</a></div>
         corpus, which go through the same validity and admission checks.
         A challenge against the predecessor invalidates its admitted
         descendants.</p>
-        <h2 id="a-million-payments-in-the-close">A Million Payments in
-        the Close</h2>
+        <h2 id="the-close-never-grows-with-payments">The Close Never
+        Grows with Payments</h2>
         <p>The asymptotics say what stops growing. A controlled
         benchmark shows what still costs time.</p>
         <p>Each profile below fixes <span
         class="math inline">N=1{,}000{,}000</span> registered accounts,
-        <span class="math inline">T=1{,}000{,}000</span> accepted
-        payments, 512 credited accounts, 256 deterministic pieces, a
-        100-validator committee with quorum 67, and an eight-thread
-        worker pool. Every changed account sends. The same 512 accounts
-        receive in every profile, evenly spaced among the accounts that
-        change. The matrix independently varies <span
-        class="math inline">A</span>, the number of changed accounts,
-        and <span class="math inline">h</span>, the number of component
-        heads on each credited account.</p>
+        512 credited accounts, 256 deterministic pieces, a 100-validator
+        committee with quorum 67, and an eight-thread worker pool. Every
+        changed account sends. The same 512 accounts receive in every
+        profile, evenly spaced among the accounts that change. The
+        matrix independently varies <span class="math inline">A</span>,
+        the number of changed accounts, and <span
+        class="math inline">h</span>, the number of component heads on
+        each credited account. No payment count appears because none is
+        needed: rows and heads carry fixed-width cumulative totals, so
+        every size in the table is the same for any <span
+        class="math inline">T</span>.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -781,17 +783,17 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">build roots</td>
-              <td style="text-align:right;">1.36 ms</td>
-              <td style="text-align:right;">57.5 ms</td>
-              <td style="text-align:right;">323 ms</td>
-              <td style="text-align:right;">446 ms</td>
+              <td style="text-align:right;">1.28 ms</td>
+              <td style="text-align:right;">54.1 ms</td>
+              <td style="text-align:right;">330 ms</td>
+              <td style="text-align:right;">403 ms</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">build piece proofs</td>
-              <td style="text-align:right;">1.13 ms</td>
-              <td style="text-align:right;">39.3 ms</td>
-              <td style="text-align:right;">366 ms</td>
-              <td style="text-align:right;">423 ms</td>
+              <td style="text-align:right;">1.25 ms</td>
+              <td style="text-align:right;">41.2 ms</td>
+              <td style="text-align:right;">351 ms</td>
+              <td style="text-align:right;">406 ms</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
             <tr>
@@ -803,10 +805,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check and sign</td>
-              <td style="text-align:right;">2.12 ms</td>
-              <td style="text-align:right;">212 ms</td>
-              <td style="text-align:right;">1.05 s</td>
-              <td style="text-align:right;">1.20 s</td>
+              <td style="text-align:right;">2.53 ms</td>
+              <td style="text-align:right;">204 ms</td>
+              <td style="text-align:right;">0.99 s</td>
+              <td style="text-align:right;">1.27 s</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Chain</th></tr>
             <tr>
@@ -818,10 +820,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check admission</td>
-              <td style="text-align:right;"><strong>0.211 ms</strong></td>
-              <td style="text-align:right;"><strong>0.220 ms</strong></td>
-              <td style="text-align:right;"><strong>0.219 ms</strong></td>
-              <td style="text-align:right;"><strong>0.239 ms</strong></td>
+              <td style="text-align:right;"><strong>0.275 ms</strong></td>
+              <td style="text-align:right;"><strong>0.258 ms</strong></td>
+              <td style="text-align:right;"><strong>0.262 ms</strong></td>
+              <td style="text-align:right;"><strong>0.260 ms</strong></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">challenge payload</td>
@@ -832,23 +834,23 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check challenge</td>
-              <td style="text-align:right;"><strong>0.124 ms</strong></td>
-              <td style="text-align:right;"><strong>0.130 ms</strong></td>
-              <td style="text-align:right;"><strong>0.133 ms</strong></td>
+              <td style="text-align:right;"><strong>0.127 ms</strong></td>
+              <td style="text-align:right;"><strong>0.126 ms</strong></td>
+              <td style="text-align:right;"><strong>0.125 ms</strong></td>
               <td style="text-align:right;"><strong>0.126 ms</strong></td>
             </tr>
           </tbody>
         </table>
         </div>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency and 95 percent confidence intervals for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 heads per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show arithmetic-mean latency for the operator's root build, the operator's piece-proof build, and the validator's check-and-sign on the busiest of the 100 assignments. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 heads per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
         <div class="image-caption">
         <p>Benchmark chart: These are four measured profiles, not an
-        interpolation. Points are arithmetic means, whiskers are 95%
-        confidence intervals, and each panel has its own millisecond
-        scale. Blue holds <span class="math inline">A=1{,}024</span> and
-        green holds <span class="math inline">A=1{,}000{,}000</span>
-        while the horizontal axis changes the heads on each credited
-        account from <span class="math inline">h=1</span> to <span
+        interpolation. Points are arithmetic means, and each panel has
+        its own millisecond scale. Blue holds <span
+        class="math inline">A=1{,}024</span> and green holds <span
+        class="math inline">A=1{,}000{,}000</span> while the horizontal
+        axis changes the heads on each credited account from <span
+        class="math inline">h=1</span> to <span
         class="math inline">h=512</span>.</p>
         </div>
         <p>Increasing <span class="math inline">A</span> makes the state
@@ -860,14 +862,29 @@ O’Grady</a></div>
         class="math inline">A=1{,}024</span> the validator’s assignment
         is 1.39 MB: distribution follows the changed rows and the shared
         frontier, not the registry, so it is sublinear in registered
-        accounts as well as in payments. The chain payload remains
-        nearly flat because it carries the header, quorum certificate,
-        and terminal prefix opening—not the rows or component leaves.
-        This fixture queues no withdrawals and no full closes, whose
-        re-check and row openings would otherwise add to it. The
-        challenge rows submit one proven higher-tip challenge: its
-        payload grows only with the two lookup depths, and its check
+        accounts as well as in payments. The corpus is a constant of the
+        footprint, so accepted payments only divide it: ten million
+        spread the sparse profile’s 2.07 MB to about 0.2 bytes of public
+        settlement each, and a billion would leave 0.002. The chain
+        payload remains nearly flat because it carries the header,
+        quorum certificate, and terminal prefix opening—not the rows or
+        component leaves. This fixture queues no withdrawals and no full
+        closes, whose re-check and row openings would otherwise add to
+        it. The challenge rows submit one proven higher-tip challenge:
+        its payload grows only with the two lookup depths, and its check
         verifies two signatures and two openings.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Log-log plot of public corpus bytes per accepted payment against payments accepted in the epoch, from one million to one billion payments, with four lines for the four table profiles. With 1,024 changed accounts, one head per credited account falls from about 2 bytes per payment to 0.002, and 512 heads from 117 to 0.12. With one million changed accounts the two head counts nearly coincide, falling from about 649 and 764 bytes to 0.65 and 0.76. Each line is its profile's constant corpus divided by the payment count.">
+        <div class="image-caption">
+        <p>Bytes-per-payment chart: fixed-width rows keep each profile’s
+        corpus constant in <span class="math inline">T</span>, so each
+        line is that profile’s corpus from the table over the payment
+        count and falls exactly as <span class="math inline">1/T</span>.
+        The two <span class="math inline">A=1{,}000{,}000</span> lines
+        nearly coincide because heads move that corpus by only <span
+        class="math inline">1.2\times</span>, while at <span
+        class="math inline">A=1{,}024</span> they separate it by <span
+        class="math inline">57\times</span>.</p>
+        </div>
         <p>The timers cover warm, in-memory close construction and
         validation on an 18-core Apple M5 Pro with 64 GiB, with the
         shared worker pool capped at eight threads. They exclude payment
@@ -878,7 +895,12 @@ O’Grady</a></div>
         its 67 holders, the validator rows report the busiest of the 100
         assignments with its share of the public corpus in parentheses,
         and the challenge rows target a mid-registry credited account’s
-        mid-set component.</p>
+        mid-set component. The timers ran under a ten-million-payment
+        build of each fixture. The sizes hold for any payment count:
+        re-building each fixture at payment counts from ten thousand
+        (one million where all accounts change) up to ten million
+        reproduced every size in the table, with the corpus and chain
+        payloads identical to the byte.</p>
         <h2 id="the-account-level-trade">The Account-Level Trade</h2>
         <p>Payment channels attack the same economic problem with a
         different settlement boundary. A bilateral channel compresses
