@@ -168,6 +168,7 @@ io-uring = "0.7.13"
 libc = "0.2.186"
 libfuzzer-sys = "0.4.13"
 loom = "0.7.2"
+mimalloc = "0.1"
 num-bigint = { version = "0.4.8", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
