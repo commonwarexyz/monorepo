@@ -2,7 +2,7 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. Keyed batch reads lease the database through the batch's
+//! deletions. Keyed batch reads access the database through the batch's
 //! [`Reader`] because the immutable proof snapshot carries no keyed
 //! index.
 

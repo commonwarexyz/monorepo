@@ -2,7 +2,7 @@
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by
-//! [`Location`] rather than by key. Positional batch reads lease the
+//! [`Location`] rather than by key. Positional batch reads access the
 //! database through the batch's [`Reader`].
 
 use crate::stateful::db::{

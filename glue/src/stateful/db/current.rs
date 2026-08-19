@@ -2,7 +2,7 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to applied state. The wrapper types here hold a [`Reader`]
-//! to their database and lease it for each such call, so a batch stays usable
+//! to their database and take read access through it for each such call, so a batch stays usable
 //! across applies of compatible batches and never delays a mutation by more
 //! than one storage call.
 

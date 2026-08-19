@@ -23,7 +23,7 @@
 //! mutation is uniquely permitted. Batches hold a [`Reader`], which is freely
 //! cloned and grants a [`ReadGuard`] covering exactly one storage call.
 //!
-//! Because a lease never spans application code, a mutation waits at most one
+//! Because a read guard never spans application code, a mutation waits at most one
 //! storage call to start, and work holding a reader is never cancelled, so it
 //! pauses at its next read and resumes once the mutation completes. A mutation
 //! that is interrupted leaves the cell poisoned, which is reachable only while
@@ -32,7 +32,7 @@
 //! Two invariants keep this sound. A batch handed to [`ManagedDb::finalize`]
 //! must not read through its own reader, because that call runs while the write
 //! side is held. And a [`Writer`] should outlive the readers from the same
-//! cell. Dropping the writer closes the cell, and later leases park instead of
+//! cell. Dropping the writer closes the cell, and later reads park instead of
 //! answering from a database that can never advance. The set holds the
 //! [`Writer`], and every reader lives in a batch the set outlives.
 //!
@@ -185,7 +185,7 @@ pub trait Merkleized: Clone + Sized + Send + Sync {
 /// batches back to storage, deferring each batch's flush to a returned handle.
 ///
 /// Batches carry a [`Reader`] to their database. Reads acquire a short
-/// lease per call and fall back from pending batch state to applied state.
+/// guard per call and fall back from pending batch state to applied state.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
 /// work across runtimes that satisfy the bounds.
@@ -238,7 +238,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Create a new unmerkleized batch rooted at the database's applied
     /// state.
     ///
-    /// The batch keeps `reader` and leases the database through it on every
+    /// The batch keeps `reader` and takes read access through it on every
     /// read, so it stays valid across applies of compatible batches.
     fn new_batch(reader: Reader<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
@@ -386,7 +386,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// One [`Reader`] per database, shaped like [`Self::Unmerkleized`].
     ///
     /// Readers are cloned into batches, and hooks that read applied state
-    /// directly acquire leases through them.
+    /// directly acquire read guards through them.
     type Readers: Clone + Send + Sync + 'static;
 
     /// One [`ManagedDb::Snapshot`] per database, shaped like [`Self::Unmerkleized`].
